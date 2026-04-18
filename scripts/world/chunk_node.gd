@@ -89,3 +89,16 @@ func _populate_test_data() -> void:
 	for x in range(3, 6):
 		for z in range(12, 15):
 			chunk.set_block(x, 6, z, Blocks.PLANKS)
+	# Demo pillars right in front of spawn so cube structure is obvious
+	chunk.set_block(3, 6, 1, Blocks.STONE)
+	chunk.set_block(3, 7, 1, Blocks.STONE)
+	chunk.set_block(2, 6, 0, Blocks.COBBLESTONE)
+	chunk.set_block(2, 7, 0, Blocks.COBBLESTONE)
+	chunk.set_block(2, 8, 0, Blocks.COBBLESTONE)
+	chunk.set_block(5, 6, 0, Blocks.LOG)
+	chunk.set_block(5, 7, 0, Blocks.LOG)
+	# Carve a 2-deep pit at (1, *, 1) to expose dirt/stone layers vertically
+	chunk.set_block(1, 5, 1, Blocks.AIR)
+	chunk.set_block(1, 4, 1, Blocks.AIR)
+	chunk.set_block(0, 5, 1, Blocks.AIR)
+	chunk.set_block(0, 5, 0, Blocks.AIR)
