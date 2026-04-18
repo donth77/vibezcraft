@@ -9,6 +9,7 @@ const PITCH_LIMIT_DEG: float = 89.0
 
 @export var sneak_toggle: bool = false  # false = hold to sneak, true = press to toggle
 
+var inventory: Inventory
 var _is_sneaking: bool = false
 
 @onready var _camera: Camera3D = $Camera3D
@@ -16,6 +17,10 @@ var _is_sneaking: bool = false
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	inventory = Inventory.new()
+	var hotbar: Control = get_node_or_null("Crosshair/Hotbar")
+	if hotbar != null:
+		hotbar.bind(inventory)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -23,6 +28,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		_apply_mouse_motion(event)
 	elif event.is_action_pressed("pause"):
 		_toggle_mouse_capture()
+	else:
+		for i in range(9):
+			if event.is_action_pressed("hotbar_%d" % (i + 1)):
+				inventory.select(i)
+				return
 
 
 func _physics_process(delta: float) -> void:
@@ -49,7 +59,7 @@ func _physics_process(delta: float) -> void:
 
 	# Recover if we fall through the world
 	if global_position.y < -20.0:
-		global_position = Vector3(3.5, 10.0, 3.5)
+		global_position = Vector3(8, 100.0, 8)
 		velocity = Vector3.ZERO
 
 

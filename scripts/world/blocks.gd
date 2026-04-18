@@ -13,10 +13,28 @@ const LOG := 6
 const PLANKS := 7
 const LEAVES := 8
 const SAND := 9
+const BRICK := 10
+const OBSIDIAN := 11
 
 
 static func is_opaque(id: int) -> bool:
 	return id != AIR
+
+
+# Alpha-faithful drop table. Returns the item ID dropped when the block is
+# broken with bare hands or appropriate tool. AIR means "no drop".
+# Bedrock is unbreakable in survival, but if it ever is broken: no drop.
+static func drops(id: int) -> int:
+	match id:
+		STONE:
+			return COBBLESTONE
+		GRASS:
+			return DIRT
+		LEAVES:
+			return AIR  # Alpha leaves dropped 0 or 1 sapling — no saplings yet
+		BEDROCK:
+			return AIR
+	return id
 
 
 static func name_of(id: int) -> String:

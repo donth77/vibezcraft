@@ -13,7 +13,6 @@ var chunk: Chunk
 var _mesh_instance: MeshInstance3D
 var _static_body: StaticBody3D
 var _collision_shape: CollisionShape3D
-var _material: ShaderMaterial
 
 
 func _ready() -> void:
@@ -23,7 +22,6 @@ func _ready() -> void:
 	add_child(_static_body)
 	_collision_shape = CollisionShape3D.new()
 	_static_body.add_child(_collision_shape)
-	_material = _create_material()
 	chunk = chunk_data if chunk_data != null else Chunk.new()
 	if not precomputed_mesh_data.is_empty():
 		_apply_mesh_data(precomputed_mesh_data)
@@ -57,13 +55,6 @@ func _apply_mesh_data(data: Dictionary) -> void:
 	arrays[Mesh.ARRAY_INDEX] = data.indices
 	var array_mesh := ArrayMesh.new()
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	array_mesh.surface_set_material(0, _material)
+	array_mesh.surface_set_material(0, BlockAtlas.material())
 	_mesh_instance.mesh = array_mesh
 	_collision_shape.shape = array_mesh.create_trimesh_shape()
-
-
-func _create_material() -> ShaderMaterial:
-	var mat := ShaderMaterial.new()
-	mat.shader = load("res://shaders/chunk.gdshader") as Shader
-	mat.set_shader_parameter("atlas_texture", BlockAtlas.texture())
-	return mat

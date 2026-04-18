@@ -54,6 +54,19 @@ func _update_chunk_set() -> void:
 		_chunks.erase(coord)
 	# Drop queued chunks that are no longer needed
 	_spawn_queue = _spawn_queue.filter(func(c: Vector2i) -> bool: return needed.has(c))
+	# Drop completed worker results for chunks no longer needed, so evicted
+	# mesh data doesn't linger in the queue (materialize consumes one per frame).
+	# Leaves `_pending` alone — a worker may still be running and will write
+	# to `_ready_results` after the sweep; the distance check in
+	# `_materialize_one_ready_chunk` drops those.
+	_result_mutex.lock()
+	var stale_results: Array = []
+	for coord: Vector2i in _ready_results:
+		if not needed.has(coord):
+			stale_results.append(coord)
+	for coord: Vector2i in stale_results:
+		_ready_results.erase(coord)
+	_result_mutex.unlock()
 
 
 # Hand queued chunks off to worker threads, capping in-flight work.
@@ -138,3 +151,16 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
+
+
+# World-coord block read. Returns AIR if the chunk isn't loaded.
+func get_world_block(world_pos: Vector3i) -> int:
+	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
+	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
+	var coord := Vector2i(chunk_x, chunk_z)
+	if not _chunks.has(coord):
+		return Blocks.AIR
+	var local_x: int = world_pos.x - chunk_x * Chunk.SIZE_X
+	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
+	var chunk_node: Node3D = _chunks[coord]
+	return chunk_node.chunk.get_block(local_x, world_pos.y, local_z)

@@ -46,3 +46,29 @@ func test_neighboring_chunks_have_continuous_terrain() -> void:
 	var h_at_15 := Worldgen.surface_height(15, 8)
 	var h_at_16 := Worldgen.surface_height(16, 8)
 	assert_almost_eq(float(h_at_15), float(h_at_16), 3.0, "adjacent worldgen heights are close")
+
+
+func test_bedrock_band_is_chaotic_but_deterministic() -> void:
+	var c1 := Worldgen.generate_chunk(0, 0)
+	var c2 := Worldgen.generate_chunk(0, 0)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(1, 4):
+				assert_eq(c1.get_block(x, y, z), c2.get_block(x, y, z))
+
+
+func test_bedrock_band_has_a_mix_of_bedrock_and_stone() -> void:
+	# Across one chunk's bedrock band (16*16*3 = 768 cells), expect both kinds.
+	var c := Worldgen.generate_chunk(0, 0)
+	var bedrock_count := 0
+	var stone_count := 0
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(1, 4):
+				match c.get_block(x, y, z):
+					Blocks.BEDROCK:
+						bedrock_count += 1
+					Blocks.STONE:
+						stone_count += 1
+	assert_gt(bedrock_count, 50, "plenty of bedrock in band")
+	assert_gt(stone_count, 50, "plenty of stone in band too")

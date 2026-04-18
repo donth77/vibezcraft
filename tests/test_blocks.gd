@@ -29,3 +29,13 @@ func test_log_uses_end_grain_on_top_and_bottom() -> void:
 func test_uniform_block_returns_same_for_all_faces() -> void:
 	for face: String in ["top", "bottom", "side"]:
 		assert_eq(Blocks.get_face_texture(Blocks.STONE, face), "stone")
+
+
+func test_drops_alpha_faithful() -> void:
+	assert_eq(Blocks.drops(Blocks.STONE), Blocks.COBBLESTONE, "stone → cobblestone")
+	assert_eq(Blocks.drops(Blocks.GRASS), Blocks.DIRT, "grass → dirt")
+	assert_eq(Blocks.drops(Blocks.LEAVES), Blocks.AIR, "leaves → no drop (no saplings yet)")
+	assert_eq(Blocks.drops(Blocks.BEDROCK), Blocks.AIR, "bedrock → no drop")
+	assert_eq(Blocks.drops(Blocks.DIRT), Blocks.DIRT, "dirt → dirt")
+	assert_eq(Blocks.drops(Blocks.SAND), Blocks.SAND, "sand → sand")
+	assert_eq(Blocks.drops(Blocks.LOG), Blocks.LOG, "log → log")

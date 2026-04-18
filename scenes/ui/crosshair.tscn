@@ -1,4 +1,6 @@
-[gd_scene format=3]
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 
 [node name="Crosshair" type="CanvasLayer"]
 
@@ -19,18 +21,4 @@ theme_override_font_sizes/font_size = 22
 modulate = Color(1, 1, 1, 0.85)
 mouse_filter = 2
 
-[node name="SelectedLabel" type="Label" parent="."]
-anchors_preset = 7
-anchor_left = 0.5
-anchor_top = 1.0
-anchor_right = 0.5
-anchor_bottom = 1.0
-offset_left = -150.0
-offset_top = -40.0
-offset_right = 150.0
-offset_bottom = -10.0
-text = "Selected: stone"
-horizontal_alignment = 1
-modulate = Color(1, 1, 1, 0.85)
-mouse_filter = 2
-theme_override_font_sizes/font_size = 16
+[node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]

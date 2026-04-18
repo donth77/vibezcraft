@@ -23,6 +23,7 @@ const _LAYOUT := {
 
 static var _texture: ImageTexture
 static var _uv_rects: Dictionary = {}
+static var _material: ShaderMaterial
 
 
 static func build() -> void:
@@ -73,6 +74,17 @@ static func uv_rect(tex_name: String) -> Rect2:
 	return _uv_rects.get(tex_name, Rect2(0, 0, 0, 0))
 
 
+# Single ShaderMaterial shared across every chunk. Called from the main thread
+# only (chunk_node._ready); materials are RefCounted so sharing is safe.
+static func material() -> ShaderMaterial:
+	if _material == null:
+		_material = ShaderMaterial.new()
+		_material.shader = load("res://shaders/chunk.gdshader") as Shader
+		_material.set_shader_parameter("atlas_texture", texture())
+	return _material
+
+
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
+	_material = null
