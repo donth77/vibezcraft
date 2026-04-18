@@ -16,4 +16,19 @@ text = "+"
 horizontal_alignment = 1
 vertical_alignment = 1
 theme_override_font_sizes/font_size = 22
-modulate = Color(1, 1, 1, 0.8)
+modulate = Color(1, 1, 1, 0.85)
+
+[node name="SelectedLabel" type="Label" parent="."]
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -150.0
+offset_top = -40.0
+offset_right = 150.0
+offset_bottom = -10.0
+text = "Selected: stone"
+horizontal_alignment = 1
+modulate = Color(1, 1, 1, 0.85)
+theme_override_font_sizes/font_size = 16

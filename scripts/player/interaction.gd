@@ -21,6 +21,11 @@ const _HOTBAR_BLOCKS: Array = [
 @export var selected_block_id: int = Blocks.STONE
 
 @onready var _camera: Camera3D = get_parent().get_node("Camera3D")
+@onready var _selected_label: Label = get_parent().get_node_or_null("Crosshair/SelectedLabel")
+
+
+func _ready() -> void:
+	_refresh_selected_label()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -28,10 +33,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		_try_break()
 	elif event.is_action_pressed("interact_place"):
 		_try_place()
-	# Hotbar 1-9 → cycle through placeable block IDs
 	for i in range(1, 10):
 		if event.is_action_pressed("hotbar_%d" % i):
 			selected_block_id = _hotbar_block(i)
+			_refresh_selected_label()
+
+
+func _refresh_selected_label() -> void:
+	if _selected_label != null:
+		_selected_label.text = "Selected: " + Blocks.name_of(selected_block_id)
 
 
 func _try_break() -> void:
