@@ -8,7 +8,7 @@ background_mode = 1
 background_color = Color(0.5, 0.7, 0.9, 1)
 ambient_light_source = 2
 ambient_light_color = Color(1, 1, 1, 1)
-ambient_light_energy = 0.18
+ambient_light_energy = 0.45
 
 [node name="Main" type="Node3D"]
 
@@ -17,7 +17,7 @@ environment = SubResource("Env_main")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 30, 0)
-light_energy = 1.2
+light_energy = 1.5
 shadow_enabled = true
 
 [node name="Chunk" parent="." instance=ExtResource("2_chunk")]

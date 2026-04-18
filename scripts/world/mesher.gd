@@ -67,7 +67,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 
 
 static func _emit_block_faces(
-	_chunk: Chunk,
+	chunk: Chunk,
 	x: int,
 	y: int,
 	z: int,
@@ -77,12 +77,16 @@ static func _emit_block_faces(
 	uvs: PackedVector2Array,
 	indices: PackedInt32Array
 ) -> void:
-	# All 6 faces are emitted unconditionally so every opaque block has a
-	# complete cube in the mesh. Adjacent opaque-opaque boundaries get two
-	# coplanar faces with opposite normals; cull_back in the shader keeps
-	# only the camera-facing one, so no z-fighting.
 	var origin := Vector3(x, y, z)
 	for face_idx in range(6):
+		# CPU-side neighbor culling: skip faces between two adjacent opaque
+		# blocks (the face is physically hidden by the neighbor anyway). The
+		# render-side cull_back then trims the back-facing half of every
+		# remaining face. Combined: ~3 visible faces per surface cube.
+		var no: Vector3i = _FACE_NEIGHBOR[face_idx]
+		var neighbor_id := chunk.get_block(x + no.x, y + no.y, z + no.z)
+		if Blocks.is_opaque(neighbor_id):
+			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
 		var face_name: String = _FACE_NAMES[face_idx]
@@ -92,10 +96,13 @@ static func _emit_block_faces(
 		for v: Vector3 in face_verts:
 			verts.append(origin + v)
 			norms.append(normal)
-		uvs.append(Vector2(rect.position.x, rect.position.y))
+		# V is flipped so the top of each cube face samples the top of the
+		# texture — keeps grass_side's green strip on top, dirt on bottom.
 		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		uvs.append(Vector2(rect.position.x, rect.position.y))
 		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		# Reversed winding so cull_back keeps the outward-facing side in Godot 4.
 		indices.append_array(
-			[base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)
