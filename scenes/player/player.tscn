@@ -1,6 +1,8 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="Script" path="res://scripts/player/player.gd" id="1_player"]
+[ext_resource type="Script" path="res://scripts/player/interaction.gd" id="2_interact"]
+[ext_resource type="PackedScene" path="res://scenes/ui/crosshair.tscn" id="3_crosshair"]
 
 [sub_resource type="CapsuleShape3D" id="Capsule_player"]
 radius = 0.3
@@ -15,3 +17,8 @@ shape = SubResource("Capsule_player")
 [node name="Camera3D" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.7, 0)
 fov = 70.0
+
+[node name="Interaction" type="Node" parent="."]
+script = ExtResource("2_interact")
+
+[node name="Crosshair" parent="." instance=ExtResource("3_crosshair")]

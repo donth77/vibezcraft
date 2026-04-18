@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/player/player.tscn" id="1_player"]
-[ext_resource type="PackedScene" path="res://scenes/world/test_platform.tscn" id="2_platform"]
+[ext_resource type="PackedScene" path="res://scenes/world/chunk.tscn" id="2_chunk"]
 
 [sub_resource type="Environment" id="Env_main"]
 background_mode = 1
@@ -16,10 +16,10 @@ ambient_light_energy = 0.4
 environment = SubResource("Env_main")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 10, 0)
+transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 30, 0)
 shadow_enabled = true
 
-[node name="Platform" parent="." instance=ExtResource("2_platform")]
+[node name="Chunk" parent="." instance=ExtResource("2_chunk")]
 
 [node name="Player" parent="." instance=ExtResource("1_player")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 8)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 12, 8)

@@ -20,9 +20,9 @@ func test_player_scene_instantiates_as_character_body() -> void:
 	inst.queue_free()
 
 
-func test_test_platform_scene_instantiates() -> void:
-	var packed: PackedScene = load("res://scenes/world/test_platform.tscn") as PackedScene
-	assert_not_null(packed, "test_platform.tscn loads")
+func test_chunk_scene_instantiates() -> void:
+	var packed: PackedScene = load("res://scenes/world/chunk.tscn") as PackedScene
+	assert_not_null(packed, "chunk.tscn loads")
 	var inst: Node = packed.instantiate()
-	assert_not_null(inst, "platform instantiates")
+	assert_not_null(inst, "chunk instantiates")
 	inst.queue_free()
