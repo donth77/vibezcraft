@@ -55,10 +55,9 @@ From PLANNING.md §6, with user-confirmed answers:
 README.md                    # links to PLANNING.md + this file
 project.godot                # Godot project config (Vulkan Forward+, 1280x720, physics 60Hz)
 icon.svg                     # placeholder app icon
-main.tscn                    # root scene
+main.tscn                    # root scene with Camera + Light + spinning cube
 scripts/game.gd              # autoload — empty skeleton
 scripts/dev/cube_spinner.gd  # temp; deleted in Phase 1
-assets/textures/_test_grass.png  # 16x16 placeholder texture
 addons/gut/                  # GUT testing framework
 tests/test_smoke.gd          # one passing test
 scripts/.gdlintrc            # lint config
@@ -70,10 +69,13 @@ scripts/.gdlintrc            # lint config
 - Runs `godot --headless --check-only` (catches parse errors)
 
 ### 2.4 Acceptance criteria
-- [ ] `godot --headless --check-only` exits 0
-- [ ] `godot --headless --path . -s addons/gut/gut_cmdln.gd -gdir=tests/` runs and passes 1 test
-- [ ] Press F5 in editor → textured cube visible, spinning
-- [ ] `git commit` succeeds (hooks pass)
+- [x] `godot --headless --path .` opens, runs autoload, exits clean
+- [x] `godot --headless -s addons/gut/gut_cmdln.gd -gdir=res://tests/ -gexit` — 3/3 tests pass
+- [x] `gdformat --check scripts/ tests/` — clean
+- [x] `gdlint scripts/ tests/` — clean
+- [x] `git commit` succeeds (pre-commit hook runs format + lint)
+- [ ] **You verify:** open in Godot editor, press F5 → spinning green cube on screen
+  - Note: cube is solid green (not textured). Real textures arrive in Phase 2 with the first block set.
 
 ### 2.5 Commit
 `feat: phase 0 — Godot 4 project scaffold with GUT and lint hooks`

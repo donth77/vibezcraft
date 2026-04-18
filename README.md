@@ -3,8 +3,8 @@
 A from-scratch, AI-assisted clone of Minecraft Java Edition Alpha (2010), built in Godot 4 + GDScript.
 
 ## Docs
-- [`PLANNING.md`](./PLANNING.md) — vision, stack rationale, Alpha mechanics reference
-- [`implementationplan.md`](./implementationplan.md) — phase-by-phase execution plan
+- [`.claude/PLANNING.md`](./.claude/PLANNING.md) — vision, stack rationale, Alpha mechanics reference
+- [`.claude/implementationplan.md`](./.claude/implementationplan.md) — phase-by-phase execution plan
 
 ## Run
 
