@@ -45,6 +45,8 @@ const _DIG_SOUNDS: Dictionary = {
 	],
 }
 
+const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
+
 var _players: Array = []
 var _next_player: int = 0
 var _stream_cache: Dictionary = {}
@@ -70,6 +72,20 @@ func play_place(block_id: int) -> void:
 	if mat == "":
 		return
 	_play_random(mat, 0.85)
+
+
+# Item pickup "pop" — vanilla MC's random/pop.ogg
+func play_pickup() -> void:
+	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
+	if stream == null:
+		stream = load(_PICKUP_SOUND) as AudioStream
+		_stream_cache[_PICKUP_SOUND] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	# Pitch jitter for variety
+	player.pitch_scale = 1.0 + randf_range(-0.15, 0.15)
+	player.play()
 
 
 func _play_random(material: String, base_pitch: float) -> void:

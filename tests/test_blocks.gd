@@ -31,6 +31,15 @@ func test_uniform_block_returns_same_for_all_faces() -> void:
 		assert_eq(Blocks.get_face_texture(Blocks.STONE, face), "stone")
 
 
+func test_break_time_bare_hand() -> void:
+	assert_eq(Blocks.break_time_bare_hand(Blocks.BEDROCK), -1.0, "bedrock unbreakable")
+	assert_eq(Blocks.break_time_bare_hand(Blocks.DIRT), 0.75, "dirt fast bare-hand")
+	assert_gt(
+		Blocks.break_time_bare_hand(Blocks.STONE), 5.0, "stone painfully slow without pickaxe"
+	)
+	assert_gt(Blocks.break_time_bare_hand(Blocks.OBSIDIAN), 100.0, "obsidian extreme")
+
+
 func test_drops_alpha_faithful() -> void:
 	assert_eq(Blocks.drops(Blocks.STONE), Blocks.COBBLESTONE, "stone → cobblestone")
 	assert_eq(Blocks.drops(Blocks.GRASS), Blocks.DIRT, "grass → dirt")

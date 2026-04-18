@@ -22,3 +22,17 @@ modulate = Color(1, 1, 1, 0.85)
 mouse_filter = 2
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
+
+[node name="DebugLabel" type="Label" parent="."]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -180.0
+offset_top = 12.0
+offset_right = -12.0
+offset_bottom = 36.0
+text = ""
+horizontal_alignment = 2
+modulate = Color(1, 0.7, 0.2, 0.95)
+theme_override_font_sizes/font_size = 16
+mouse_filter = 2

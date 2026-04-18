@@ -21,6 +21,29 @@ static func is_opaque(id: int) -> bool:
 	return id != AIR
 
 
+# Bare-hand break time in seconds (Alpha hardness × 1.5 baseline).
+# A return of -1.0 means unbreakable (bedrock).
+static func break_time_bare_hand(id: int) -> float:
+	match id:
+		BEDROCK:
+			return -1.0
+		LEAVES:
+			return 0.3
+		DIRT, SAND:
+			return 0.75
+		GRASS:
+			return 0.9
+		LOG:
+			return 3.0
+		PLANKS:
+			return 3.0
+		STONE, COBBLESTONE, BRICK:
+			return 7.5  # painfully slow without a pickaxe — Alpha-faithful
+		OBSIDIAN:
+			return 250.0  # only diamond pickaxe is practical
+	return 1.5
+
+
 # Alpha-faithful drop table. Returns the item ID dropped when the block is
 # broken with bare hands or appropriate tool. AIR means "no drop".
 # Bedrock is unbreakable in survival, but if it ever is broken: no drop.
