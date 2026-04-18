@@ -10,7 +10,6 @@ const PITCH_LIMIT_DEG: float = 89.0
 @export var sneak_toggle: bool = false  # false = hold to sneak, true = press to toggle
 
 var _is_sneaking: bool = false
-var _debug_frame: int = 0
 
 @onready var _camera: Camera3D = $Camera3D
 
@@ -52,22 +51,6 @@ func _physics_process(delta: float) -> void:
 	if global_position.y < -20.0:
 		global_position = Vector3(3.5, 10.0, 3.5)
 		velocity = Vector3.ZERO
-
-	# Diagnostics — print once a second
-	_debug_frame += 1
-	if _debug_frame % 60 == 0:
-		print(
-			(
-				"[Player] pos=%s floor=%s vel.y=%.2f input=%s actions_registered=%s"
-				% [
-					global_position,
-					is_on_floor(),
-					velocity.y,
-					input_dir,
-					InputMap.has_action("move_forward"),
-				]
-			)
-		)
 
 
 func _apply_mouse_motion(event: InputEventMouseMotion) -> void:
