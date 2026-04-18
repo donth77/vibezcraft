@@ -9,18 +9,18 @@ var chunk: Chunk
 
 var _mesh_instance: MeshInstance3D
 var _static_body: StaticBody3D
-var _collision_shape: CollisionShape3D
 var _material: ShaderMaterial
+var _box_shape: BoxShape3D
 
 
 func _ready() -> void:
 	chunk = Chunk.new()
+	_box_shape = BoxShape3D.new()
+	_box_shape.size = Vector3.ONE
 	_mesh_instance = MeshInstance3D.new()
 	add_child(_mesh_instance)
 	_static_body = StaticBody3D.new()
 	add_child(_static_body)
-	_collision_shape = CollisionShape3D.new()
-	_static_body.add_child(_collision_shape)
 	_material = _create_material()
 	if auto_populate_test_data:
 		_populate_test_data()
@@ -34,10 +34,14 @@ func _process(_delta: float) -> void:
 
 
 func _rebuild_mesh() -> void:
+	_rebuild_render_mesh()
+	_rebuild_collision_boxes()
+
+
+func _rebuild_render_mesh() -> void:
 	var data := Mesher.mesh_chunk(chunk)
 	if data.vertices.is_empty():
 		_mesh_instance.mesh = null
-		_collision_shape.shape = null
 		return
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -49,7 +53,24 @@ func _rebuild_mesh() -> void:
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	array_mesh.surface_set_material(0, _material)
 	_mesh_instance.mesh = array_mesh
-	_collision_shape.shape = array_mesh.create_trimesh_shape()
+
+
+# One BoxShape3D per opaque block. Slow on edit (~1500 nodes for a full chunk)
+# but bulletproof — every block is a convex shape, so depenetration always
+# finds the shortest exit direction. Will replace with a smarter approach in
+# Phase 3 once we have many chunks.
+func _rebuild_collision_boxes() -> void:
+	for child in _static_body.get_children():
+		child.queue_free()
+	for y in range(Chunk.SIZE_Y):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				if not Blocks.is_opaque(chunk.get_block(x, y, z)):
+					continue
+				var col := CollisionShape3D.new()
+				col.shape = _box_shape
+				col.position = Vector3(x + 0.5, y + 0.5, z + 0.5)
+				_static_body.add_child(col)
 
 
 func _create_material() -> ShaderMaterial:
