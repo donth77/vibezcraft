@@ -1,0 +1,19 @@
+max-line-length: 120
+function-arguments-number: 6
+max-public-methods: 20
+class-definitions-order:
+  - tools
+  - classnames
+  - extends
+  - docstrings
+  - signals
+  - enums
+  - consts
+  - exports
+  - pubvars
+  - prvvars
+  - onreadypubvars
+  - onreadyprvvars
+  - others
+  - publicmethods
+  - privatemethods

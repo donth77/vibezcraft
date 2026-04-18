@@ -1,0 +1,28 @@
+# Godot 4
+.godot/
+*.translation
+
+# macOS
+.DS_Store
+
+# Editor swap files
+*.swp
+*.swo
+*~
+
+# Build output
+exports/
+*.app/
+*.exe
+*.x86_64
+*.dmg
+*.zip
+
+# Local env / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# GUT runtime artifacts
+.gut_editor_config.json
+.gut_editor_shortcuts.cfg
