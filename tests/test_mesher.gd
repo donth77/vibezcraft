@@ -23,21 +23,21 @@ func test_isolated_block_produces_six_faces() -> void:
 	assert_eq(data.uvs.size(), 24)
 
 
-func test_two_adjacent_blocks_cull_shared_face() -> void:
+func test_two_adjacent_blocks_each_emit_full_cubes() -> void:
 	var chunk := Chunk.new()
 	chunk.set_block(5, 5, 5, Blocks.STONE)
 	chunk.set_block(6, 5, 5, Blocks.STONE)
 	var data := Mesher.mesh_chunk(chunk)
-	# 12 faces total - 2 shared faces culled = 10 faces × 4 verts = 40
-	assert_eq(data.vertices.size(), 40)
-	assert_eq(data.indices.size(), 60)
+	# No culling: 2 blocks × 6 faces × 4 verts = 48
+	assert_eq(data.vertices.size(), 48)
+	assert_eq(data.indices.size(), 72)
 
 
-func test_stack_of_three_culls_internal_faces() -> void:
+func test_stack_of_three_emits_full_cubes() -> void:
 	var chunk := Chunk.new()
 	chunk.set_block(0, 5, 0, Blocks.STONE)
 	chunk.set_block(0, 6, 0, Blocks.STONE)
 	chunk.set_block(0, 7, 0, Blocks.STONE)
 	var data := Mesher.mesh_chunk(chunk)
-	# 18 faces total - 4 shared faces culled = 14 faces × 4 verts = 56
-	assert_eq(data.vertices.size(), 56)
+	# No culling: 3 blocks × 6 faces × 4 verts = 72
+	assert_eq(data.vertices.size(), 72)

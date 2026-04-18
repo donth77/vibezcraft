@@ -67,7 +67,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 
 
 static func _emit_block_faces(
-	chunk: Chunk,
+	_chunk: Chunk,
 	x: int,
 	y: int,
 	z: int,
@@ -77,12 +77,12 @@ static func _emit_block_faces(
 	uvs: PackedVector2Array,
 	indices: PackedInt32Array
 ) -> void:
+	# All 6 faces are emitted unconditionally so every opaque block has a
+	# complete cube in the mesh. Adjacent opaque-opaque boundaries get two
+	# coplanar faces with opposite normals; cull_back in the shader keeps
+	# only the camera-facing one, so no z-fighting.
 	var origin := Vector3(x, y, z)
 	for face_idx in range(6):
-		var no: Vector3i = _FACE_NEIGHBOR[face_idx]
-		var neighbor_id := chunk.get_block(x + no.x, y + no.y, z + no.z)
-		if Blocks.is_opaque(neighbor_id):
-			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
 		var face_name: String = _FACE_NAMES[face_idx]
@@ -92,7 +92,6 @@ static func _emit_block_faces(
 		for v: Vector3 in face_verts:
 			verts.append(origin + v)
 			norms.append(normal)
-		# Map 4 face corners to UV rect corners (0,0)→(1,0)→(1,1)→(0,1)
 		uvs.append(Vector2(rect.position.x, rect.position.y))
 		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
 		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
