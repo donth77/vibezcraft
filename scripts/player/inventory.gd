@@ -58,3 +58,14 @@ func consume_one_selected() -> bool:
 	s.remove(1)
 	changed.emit()
 	return true
+
+
+# Empties the selected slot. Returns the count that was removed.
+func consume_selected_stack() -> int:
+	var s: ItemStack = selected()
+	if s.is_empty():
+		return 0
+	var n: int = s.count
+	s.remove(n)
+	changed.emit()
+	return n

@@ -15,10 +15,15 @@ static func register_defaults() -> void:
 	_add_key("pause", KEY_ESCAPE)
 	_add_mouse("interact_break", MOUSE_BUTTON_LEFT)
 	_add_mouse("interact_place", MOUSE_BUTTON_RIGHT)
+	# Q drops one item; Ctrl/Cmd+Q drops the whole stack (modifier checked in code).
+	_add_key("drop_selected", KEY_Q)
 	for i in range(9):
 		_add_key("hotbar_%d" % (i + 1), KEY_1 + i)
 	# Backtick toggles the global debug mode; sub-shortcuts only work when on.
 	_add_key("debug_toggle", KEY_QUOTELEFT)
+	# F5 cycles 1st/3rd-person perspective (vanilla MC binding). V as alt
+	# (in case the user remapped F5 elsewhere on macOS).
+	_add_keys("toggle_perspective", [KEY_F5, KEY_V])
 	# Debug toggles — F1/F2 are media keys on Mac by default; bind G/H as alts.
 	_add_keys("debug_creative", [KEY_F1, KEY_G])
 	_add_keys("debug_fill_hotbar", [KEY_F2, KEY_H])

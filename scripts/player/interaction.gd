@@ -60,7 +60,9 @@ func _update_highlight(hit: Dictionary) -> void:
 
 func _update_mining(hit: Dictionary, delta: float) -> void:
 	var holding: bool = Input.is_action_pressed("interact_break")
-	if not holding or hit.is_empty() or _chunk_manager == null:
+	var swinging: bool = holding and not hit.is_empty() and _chunk_manager != null
+	_set_player_mining(swinging)
+	if not swinging:
 		_reset_mining()
 		return
 	var target: Vector3i = hit.block_pos
@@ -122,15 +124,11 @@ func _complete_break(target: Vector3i) -> void:
 
 
 func _spawn_dropped_item(block_pos: Vector3i, dropped_id: int) -> void:
-	var script: GDScript = load("res://scripts/world/dropped_item.gd") as GDScript
-	if script == null:
-		push_error("[Interaction] dropped_item.gd not found")
-		return
-	var item: Node = script.new()
+	var item := DroppedItem.new()
 	var spawn_pos := Vector3(block_pos) + Vector3(0.5, 0.5, 0.5)
 	_chunk_manager.add_child(item)
-	(item as Node3D).global_position = spawn_pos
-	item.call("setup", dropped_id)
+	item.global_position = spawn_pos
+	item.setup(dropped_id)
 
 
 func _creative_break(target: Vector3i) -> void:
@@ -177,6 +175,12 @@ func _try_place() -> void:
 	_chunk_manager.set_world_block(place, stack.item_id)
 	SFX.play_place(stack.item_id)
 	inventory.consume_one_selected()
+
+
+func _set_player_mining(active: bool) -> void:
+	var player: Node = get_parent()
+	if "is_mining" in player:
+		player.set("is_mining", active)
 
 
 func _player_inventory() -> Inventory:
