@@ -31,9 +31,9 @@ void fragment() {
 		b = 0.65;
 	}
 
-	// Per-block edge darkening — gives every cube a visible boundary even
-	// on flat surfaces of identical blocks (where adjacent faces are culled).
-	// Project world position onto the face plane and darken near integer edges.
+	// HARD per-block edge — draws an almost-black 1-pixel-ish line at every
+	// integer world boundary on the face plane. Makes every cube visibly
+	// distinct even on flat fields of identical blocks.
 	vec2 face_uv;
 	if (abs(v_normal.y) > 0.9) {
 		face_uv = vec2(v_world_pos.x, v_world_pos.z);
@@ -44,7 +44,9 @@ void fragment() {
 	}
 	vec2 fp = fract(face_uv);
 	float edge_dist = min(min(fp.x, 1.0 - fp.x), min(fp.y, 1.0 - fp.y));
-	float edge_factor = smoothstep(0.0, 0.06, edge_dist);
+	// Hard threshold: 0.04 of the face on every side is darkened to 25% brightness
+	float edge_factor = step(0.04, edge_dist);
+	float edge_mult = mix(0.25, 1.0, edge_factor);
 
-	ALBEDO = c.rgb * b * mix(0.55, 1.0, edge_factor);
+	ALBEDO = c.rgb * b * edge_mult;
 }
