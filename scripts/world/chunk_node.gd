@@ -1,30 +1,35 @@
 extends Node3D
 
-# Node3D wrapper around a Chunk: builds and updates the visual mesh + collision
-# whenever the underlying Chunk's `dirty` flag is set.
+# Node3D wrapper around a Chunk: builds and updates the visual mesh +
+# collision whenever the underlying Chunk's `dirty` flag is set.
+# Block data is supplied externally — set `chunk_data` before adding to
+# the tree, and _ready will build the mesh.
 
-@export var auto_populate_test_data: bool = false
+var chunk_data: Chunk  # set by ChunkManager pre-add_child
+var precomputed_mesh_data: Dictionary  # optional pre-built mesh arrays from worker
 
 var chunk: Chunk
 
 var _mesh_instance: MeshInstance3D
 var _static_body: StaticBody3D
+var _collision_shape: CollisionShape3D
 var _material: ShaderMaterial
-var _box_shape: BoxShape3D
 
 
 func _ready() -> void:
-	chunk = Chunk.new()
-	_box_shape = BoxShape3D.new()
-	_box_shape.size = Vector3.ONE
 	_mesh_instance = MeshInstance3D.new()
 	add_child(_mesh_instance)
 	_static_body = StaticBody3D.new()
 	add_child(_static_body)
+	_collision_shape = CollisionShape3D.new()
+	_static_body.add_child(_collision_shape)
 	_material = _create_material()
-	if auto_populate_test_data:
-		_populate_test_data()
-	_rebuild_mesh()
+	chunk = chunk_data if chunk_data != null else Chunk.new()
+	if not precomputed_mesh_data.is_empty():
+		_apply_mesh_data(precomputed_mesh_data)
+		chunk.dirty = false
+	else:
+		_rebuild_mesh()
 
 
 func _process(_delta: float) -> void:
@@ -33,15 +38,16 @@ func _process(_delta: float) -> void:
 		chunk.dirty = false
 
 
+# Re-mesh on the main thread. Used when a player edit dirties the chunk —
+# infrequent enough that a worker dispatch isn't worth the bookkeeping.
 func _rebuild_mesh() -> void:
-	_rebuild_render_mesh()
-	_rebuild_collision_boxes()
+	_apply_mesh_data(Mesher.mesh_chunk(chunk))
 
 
-func _rebuild_render_mesh() -> void:
-	var data := Mesher.mesh_chunk(chunk)
+func _apply_mesh_data(data: Dictionary) -> void:
 	if data.vertices.is_empty():
 		_mesh_instance.mesh = null
+		_collision_shape.shape = null
 		return
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -53,24 +59,7 @@ func _rebuild_render_mesh() -> void:
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	array_mesh.surface_set_material(0, _material)
 	_mesh_instance.mesh = array_mesh
-
-
-# One BoxShape3D per opaque block. Slow on edit (~1500 nodes for a full chunk)
-# but bulletproof — every block is a convex shape, so depenetration always
-# finds the shortest exit direction. Will replace with a smarter approach in
-# Phase 3 once we have many chunks.
-func _rebuild_collision_boxes() -> void:
-	for child in _static_body.get_children():
-		child.queue_free()
-	for y in range(Chunk.SIZE_Y):
-		for z in range(Chunk.SIZE_Z):
-			for x in range(Chunk.SIZE_X):
-				if not Blocks.is_opaque(chunk.get_block(x, y, z)):
-					continue
-				var col := CollisionShape3D.new()
-				col.shape = _box_shape
-				col.position = Vector3(x + 0.5, y + 0.5, z + 0.5)
-				_static_body.add_child(col)
+	_collision_shape.shape = array_mesh.create_trimesh_shape()
 
 
 func _create_material() -> ShaderMaterial:
@@ -78,48 +67,3 @@ func _create_material() -> ShaderMaterial:
 	mat.shader = load("res://shaders/chunk.gdshader") as Shader
 	mat.set_shader_parameter("atlas_texture", BlockAtlas.texture())
 	return mat
-
-
-func _populate_test_data() -> void:
-	# Stratified terrain: bedrock / stone / dirt / grass
-	for x in range(Chunk.SIZE_X):
-		for z in range(Chunk.SIZE_Z):
-			chunk.set_block(x, 0, z, Blocks.BEDROCK)
-			for y in range(1, 4):
-				chunk.set_block(x, y, z, Blocks.STONE)
-			chunk.set_block(x, 4, z, Blocks.DIRT)
-			chunk.set_block(x, 5, z, Blocks.GRASS)
-	# Sand patch
-	for x in range(0, 4):
-		for z in range(0, 4):
-			chunk.set_block(x, 5, z, Blocks.SAND)
-	# Tree at (8, 6+, 8)
-	for h in range(4):
-		chunk.set_block(8, 6 + h, 8, Blocks.LOG)
-	for x in range(7, 10):
-		for z in range(7, 10):
-			for y in range(8, 10):
-				if not (x == 8 and z == 8 and y == 8):
-					if chunk.get_block(x, y, z) == Blocks.AIR:
-						chunk.set_block(x, y, z, Blocks.LEAVES)
-	# Cobblestone wall
-	for y in range(6, 9):
-		for z in range(4, 8):
-			chunk.set_block(12, y, z, Blocks.COBBLESTONE)
-	# Plank platform
-	for x in range(3, 6):
-		for z in range(12, 15):
-			chunk.set_block(x, 6, z, Blocks.PLANKS)
-	# Demo pillars right in front of spawn so cube structure is obvious
-	chunk.set_block(3, 6, 1, Blocks.STONE)
-	chunk.set_block(3, 7, 1, Blocks.STONE)
-	chunk.set_block(2, 6, 0, Blocks.COBBLESTONE)
-	chunk.set_block(2, 7, 0, Blocks.COBBLESTONE)
-	chunk.set_block(2, 8, 0, Blocks.COBBLESTONE)
-	chunk.set_block(5, 6, 0, Blocks.LOG)
-	chunk.set_block(5, 7, 0, Blocks.LOG)
-	# Carve a 2-deep pit at (1, *, 1) to expose dirt/stone layers vertically
-	chunk.set_block(1, 5, 1, Blocks.AIR)
-	chunk.set_block(1, 4, 1, Blocks.AIR)
-	chunk.set_block(0, 5, 1, Blocks.AIR)
-	chunk.set_block(0, 5, 0, Blocks.AIR)

@@ -10,6 +10,11 @@ const TOTAL_BLOCKS := SIZE_X * SIZE_Y * SIZE_Z
 
 var blocks: PackedByteArray
 var dirty: bool = true
+# Highest Y at which a non-AIR block exists. Lets the mesher skip the empty
+# upper layers entirely. Monotonically increases — a player breaking the
+# topmost block won't shrink it, but the cost of meshing 1 extra layer is
+# negligible.
+var max_y: int = 0
 
 
 func _init() -> void:
@@ -32,4 +37,6 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
 		return
 	blocks[index(x, y, z)] = id
+	if id != Blocks.AIR and y > max_y:
+		max_y = y
 	dirty = true

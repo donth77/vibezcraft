@@ -22,6 +22,7 @@ const _HOTBAR_BLOCKS: Array = [
 
 @onready var _camera: Camera3D = get_parent().get_node("Camera3D")
 @onready var _selected_label: Label = get_parent().get_node_or_null("Crosshair/SelectedLabel")
+@onready var _chunk_manager: Node3D = get_tree().root.get_node_or_null("Main/ChunkManager")
 
 
 func _ready() -> void:
@@ -46,30 +47,23 @@ func _refresh_selected_label() -> void:
 
 func _try_break() -> void:
 	var hit := _raycast()
-	if hit.is_empty():
+	if hit.is_empty() or _chunk_manager == null:
 		return
-	var chunk_node: Node3D = hit.collider.get_parent()
-	if not chunk_node.has_method("_rebuild_mesh"):
-		return
-	var bp: Vector3i = hit.block_pos
-	chunk_node.chunk.set_block(bp.x, bp.y, bp.z, Blocks.AIR)
+	_chunk_manager.set_world_block(hit.block_pos, Blocks.AIR)
 
 
 func _try_place() -> void:
 	var hit := _raycast()
-	if hit.is_empty():
-		return
-	var chunk_node: Node3D = hit.collider.get_parent()
-	if not chunk_node.has_method("_rebuild_mesh"):
+	if hit.is_empty() or _chunk_manager == null:
 		return
 	var place: Vector3i = hit.block_pos + hit.normal_i
-	# Don't place inside the player's own bounds
+	# Don't place inside the player's own bounding cells
 	var player: Node3D = get_parent()
-	var player_pos := player.global_position
-	var player_block := Vector3i(floor(player_pos.x), floor(player_pos.y), floor(player_pos.z))
+	var pp := player.global_position
+	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
 	if place == player_block or place == player_block + Vector3i(0, 1, 0):
 		return
-	chunk_node.chunk.set_block(place.x, place.y, place.z, selected_block_id)
+	_chunk_manager.set_world_block(place, selected_block_id)
 
 
 func _raycast() -> Dictionary:

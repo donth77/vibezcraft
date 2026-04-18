@@ -1,0 +1,9 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/world/chunk_manager.gd" id="1_mgr"]
+[ext_resource type="PackedScene" path="res://scenes/world/chunk.tscn" id="2_chunk"]
+
+[node name="ChunkManager" type="Node3D"]
+script = ExtResource("1_mgr")
+chunk_scene = ExtResource("2_chunk")
+render_distance = 3

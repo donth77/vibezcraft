@@ -50,7 +50,10 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
 
-	for y in range(Chunk.SIZE_Y):
+	# Skip empty layers above the highest filled block — saves ~60% of
+	# iterations on a typical worldgen chunk peaking at y~44 of 128.
+	var top: int = mini(chunk.max_y + 1, Chunk.SIZE_Y - 1)
+	for y in range(top + 1):
 		for z in range(Chunk.SIZE_Z):
 			for x in range(Chunk.SIZE_X):
 				var id := chunk.get_block(x, y, z)

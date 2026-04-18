@@ -4,4 +4,3 @@
 
 [node name="Chunk" type="Node3D"]
 script = ExtResource("1_chunk")
-auto_populate_test_data = true
