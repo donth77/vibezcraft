@@ -17,6 +17,11 @@ void fragment() {
 	if (c.a < 0.05) {
 		discard;
 	}
-	ALBEDO = c.rgb;
-	ALPHA = c.a;
+	// Texture's crack pixels are dark grey (~61/255), not black. Force pure
+	// black so the cracks read as solid black lines over the block — vanilla
+	// look. Use 1−luminance so the darker the source pixel, the more opaque
+	// the rendered crack (preserves stage-progression intensity).
+	float luminance = (c.r + c.g + c.b) / 3.0;
+	ALBEDO = vec3(0.0);
+	ALPHA = (1.0 - luminance) * c.a;
 }

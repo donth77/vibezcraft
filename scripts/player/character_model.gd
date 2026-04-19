@@ -10,6 +10,12 @@ const SKIN_PATH: String = "res://assets/textures/entities/packs/pixel_perfection
 const ARM_SIZE: Vector3 = Vector3(0.25, 0.75, 0.25)
 const LEG_SIZE: Vector3 = Vector3(0.25, 0.75, 0.25)
 
+# First-person arm — forearm-sized box that samples ONLY the bottom 4
+# pixels of the right-arm region (the hand itself). Stretching the hand
+# pixels across the whole box guarantees we never pick up sleeve color,
+# while still respecting whatever skin tone is in the loaded skin texture.
+const FP_ARM_SIZE: Vector3 = Vector3(0.28, 0.6, 0.28)
+
 # UV rects per face in normalized [0,1] space, ordered:
 #   [+Y top, -Y bottom, +X right, -X left, +Z back, -Z front]
 # These map a standard 64x64 MC skin layout onto each body-part box.
@@ -37,6 +43,15 @@ const _ARM_R_UVS: Array[Rect2] = [
 	Rect2(0.8125, 0.3125, 0.0625, 0.1875),
 	Rect2(0.6875, 0.3125, 0.0625, 0.1875),
 ]
+
+# FP arm UVs — the full right-arm region (same as _ARM_R_UVS). Passed to
+# _build_textured_box with flip_v_sides=true so the clothing end of the
+# texture lands on the BOTTOM of the box (hand-tip end of the FP arm) and
+# the skin end lands on the TOP (wrist end). This is the mirror image of
+# the natural mapping — we do it because the FP camera frames the arm
+# such that the hand-tip end is toward the viewer and the shoulder is
+# off-screen at the "top" of the mesh.
+const _FP_ARM_R_UVS: Array[Rect2] = _ARM_R_UVS
 const _ARM_L_UVS: Array[Rect2] = [
 	Rect2(0.5625, 0.75, 0.0625, 0.0625),
 	Rect2(0.625, 0.75, 0.0625, 0.0625),
@@ -137,11 +152,22 @@ func is_mining_visually() -> bool:
 
 # Builds a standalone right-arm MeshInstance3D using the same skin and UV
 # mapping. Used by the player to render the first-person hand attached to
-# the camera.
+# the camera. Overrides the material with a no-depth-test variant so the
+# hand always draws on top of world geometry — vanilla MC behavior;
+# without this the hand visibly clips into nearby blocks.
 func build_fp_arm() -> MeshInstance3D:
 	if _skin_mat == null:
 		_skin_mat = _build_skin_material()
-	return _build_textured_box(ARM_SIZE, _ARM_R_UVS)
+	var arm: MeshInstance3D = _build_textured_box(FP_ARM_SIZE, _FP_ARM_R_UVS, true)
+	# Use the body skin texture so the hand picks up whatever skin tone +
+	# pixel detail the loaded skin defines. UNSHADED + no_depth_test so the
+	# arm draws on top of world geometry like vanilla MC's FP arm.
+	var fp_mat: StandardMaterial3D = _skin_mat.duplicate() as StandardMaterial3D
+	fp_mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	fp_mat.no_depth_test = true
+	fp_mat.render_priority = 100
+	arm.material_override = fp_mat
+	return arm
 
 
 func _build_skin_material() -> StandardMaterial3D:
@@ -195,7 +221,9 @@ func _make_skinned_limb(joint_pos: Vector3, size: Vector3, uvs: Array[Rect2]) ->
 
 # 6-face textured box with per-face UV rects sampling from the skin atlas.
 # Same winding convention as our chunk mesher (CW front for Godot cull_back).
-func _build_textured_box(size: Vector3, uv_rects: Array[Rect2]) -> MeshInstance3D:
+func _build_textured_box(
+	size: Vector3, uv_rects: Array[Rect2], flip_v_sides: bool = false
+) -> MeshInstance3D:
 	var hx: float = size.x * 0.5
 	var hy: float = size.y * 0.5
 	var hz: float = size.z * 0.5
@@ -260,10 +288,17 @@ func _build_textured_box(size: Vector3, uv_rects: Array[Rect2]) -> MeshInstance3
 		for i: int in range(4):
 			verts.append(face[i])
 			norms.append(face[4])
-		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		# Side faces (idx 2-5) get an optional V-flip so box-top lands on
+		# the BOTTOM of the UV rect and vice versa. Top/bottom caps (0/1)
+		# don't have a meaningful "vertical" axis on the box, so they're
+		# never flipped.
+		var flip: bool = flip_v_sides and face_idx >= 2
+		var v_lo: float = rect.position.y + (0.0 if flip else rect.size.y)
+		var v_hi: float = rect.position.y + (rect.size.y if flip else 0.0)
+		uvs.append(Vector2(rect.position.x, v_lo))
+		uvs.append(Vector2(rect.position.x, v_hi))
+		uvs.append(Vector2(rect.position.x + rect.size.x, v_hi))
+		uvs.append(Vector2(rect.position.x + rect.size.x, v_lo))
 		indices.append_array(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)

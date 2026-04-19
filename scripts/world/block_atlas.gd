@@ -6,7 +6,7 @@ extends RefCounted
 # 16×16 / 32×32 / any-square packs all work without code changes. Active
 # pack is configured in the Game autoload.
 
-const GRID_SIZE := 4  # 4x4 = 16 slots; we use 11
+const GRID_SIZE := 8  # 8x8 = 64 slots; plenty of room for new blocks
 const PACK_BASE := "res://assets/textures/blocks/packs/"
 const DEFAULT_PACK := "pixellab"
 
@@ -22,12 +22,20 @@ const _LAYOUT := {
 	"log_side": 8,
 	"planks": 9,
 	"leaves": 10,
+	"coal_ore": 11,
+	"iron_ore": 12,
+	"gold_ore": 13,
+	"diamond_ore": 14,
+	"crafting_table_top": 15,
+	"crafting_table_side": 16,
+	"crafting_table_front": 17,
 }
 
 static var active_pack: String = DEFAULT_PACK
 static var _texture: ImageTexture
 static var _uv_rects: Dictionary = {}
 static var _material: ShaderMaterial
+static var _overlay_material: ShaderMaterial  # depth-test-disabled variant for FP held items
 static var _slot_size: int = 32  # auto-detected on build()
 
 
@@ -102,7 +110,19 @@ static func material() -> ShaderMaterial:
 	return _material
 
 
+# Variant of material() with depth_test_disabled — for first-person held
+# items that must always draw on top of world geometry. Same atlas + shading.
+static func overlay_material() -> ShaderMaterial:
+	if _overlay_material == null:
+		_overlay_material = ShaderMaterial.new()
+		_overlay_material.shader = load("res://shaders/chunk_overlay.gdshader") as Shader
+		_overlay_material.set_shader_parameter("atlas_texture", texture())
+		_overlay_material.render_priority = 100
+	return _overlay_material
+
+
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
 	_material = null
+	_overlay_material = null

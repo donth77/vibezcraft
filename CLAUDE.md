@@ -14,48 +14,77 @@ Canonical planning docs:
 
 ## Current state
 
-**Phase 3 shipped:** infinite world with threaded chunk loading, 2D Perlin worldgen, naive face-culled meshing, shared-material atlas rendering, per-block edge outlines via shader, pluggable texture packs.
+**Phase 5 shipped:** crafting & tools.
 
-Next: Phase 4 (inventory & hotbar) per `implementationplan.md`.
+- **Worldgen:** 2D Perlin heightmap, stratified bedrock/stone/dirt/grass, oak trees, ore veins (coal/iron/gold/diamond) via a deterministic port of vanilla `WorldGenMinable` (ellipsoid-along-line fill). Each chunk runs 4 decoration passes (own + 3 SW neighbors) to recover vanilla's +8,+8 spillover without cross-chunk writes. Per-chunk ore yields land in [100%, 140%] of vanilla Alpha empirical numbers — see `test_ore_density_matches_vanilla_alpha`.
+- **Blocks:** stone-family + ores + crafting table (IDs 0–16). Hardness, harvest-level, preferred-tool-type, break-time math all vanilla Alpha.
+- **Items & tools:** 11 non-block items (sticks, pickaxes/axes/shovels × wood/stone/iron/diamond, raw materials). Tool speed + tier gating on drops, durability tracked.
+- **Crafting:** recipe registry (shaped + shapeless) loaded from `data/recipes.json` on boot. Live-updated craft result in `Inventory` (2×2 grid at slots 40–43). Crafting table block opens a 3×3 screen.
+- **Inventory UI:** 45-slot model (9 hotbar + 27 main + 4 armor + 4 craft grid + 1 result). Screens: full inventory, crafting table, pause menu, hotbar. Pre-baked 3D isometric block icons via offscreen SubViewport (one-time cost at boot).
+- **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for first/third-person held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation.
+- **Audio:** footstep cadence tied to horizontal movement (grass/cloth variants, 1.6-block interval).
+- **Dev tools:** `tool_tuner.gd` (runtime FP/TP held-item pose sliders), `debug_stats.gd` (FPS / chunk load overlay), `MC_CLONE_RESOLUTION` env override.
+
+Earlier phases: Phase 3 (infinite world with threaded chunk loading, shared-material atlas rendering, pluggable texture packs), Phase 4 (base inventory, hotbar, audio scaffolding, hold-to-break, dropped items, Steve player model).
+
+Next: Phase 6 (day/night cycle, lighting propagation, mobs) per `implementationplan.md`.
 
 ## Layout
 
 ```
 scripts/
-  game.gd                     # autoload — warms BlockAtlas + Worldgen on main thread
+  game.gd                     # autoload — warms BlockAtlas + Worldgen + Recipes on main thread
   input_actions.gd            # InputMap setup
   world/
-    blocks.gd                 # block IDs, break times, drop table, face textures
+    blocks.gd                 # block IDs, hardness, tool gating, drop table, face textures
+    items.gd                  # item IDs (100+), tool data (speed / harvest_level / durability)
     chunk.gd                  # pure block-data container (PackedByteArray, 16×128×16)
     chunk_node.gd             # Node3D wrapper: builds mesh + trimesh collision
     chunk_manager.gd          # streams chunks around player via WorkerThreadPool
     mesher.gd                 # face-culled mesher → ArrayMesh arrays
-    worldgen.gd               # FastNoiseLite 2D Perlin heightmap
+    worldgen.gd               # heightmap + ore veins (vanilla ellipsoid) + oak trees
     block_atlas.gd            # packs per-block PNGs into one atlas, owns shared ShaderMaterial
+    sprite_extruder.gd        # 2D item sprite → voxelized 3D mesh for held tools
+  crafting/
+    recipes.gd                # registry: loads data/recipes.json, matches shaped + shapeless
   player/                     # player.gd, interaction.gd, inventory.gd, item_stack.gd, character_model.gd
-  ui/                         # hotbar_ui.gd, item_icons.gd
+  ui/                         # hotbar_ui, inventory_screen, crafting_table_screen, pause_menu,
+                              #  debug_stats, tool_tuner, item_icons, block_icon_renderer,
+                              #  character_preview
   dev/                        # pre-commit.sh, install-hooks.sh
-scenes/                       # chunk.tscn, chunk_manager.tscn, player, ui, entities
-shaders/chunk.gdshader        # cull_back, per-face Notch shading, atlas sampling
+scenes/                       # chunk, chunk_manager, player, ui, entities
+shaders/
+  chunk.gdshader              # cull_back, per-face Notch shading, atlas sampling
+  chunk_overlay.gdshader      # held-block variant (depth_test_disabled, draws on top)
+  crack.gdshader              # block-break progress overlay
+  held_item.gdshader          # first-person extruded tool material
+  held_item_world.gdshader    # third-person extruded tool material
+data/recipes.json             # 2×2 / 3×3 crafting recipes (shaped + shapeless)
 tests/                        # GUT tests (test_*.gd)
-assets/textures/blocks/
-  packs/{pack_name}/          # active pack's 11 PNGs (stone, dirt, grass_top, …)
-  raw/                        # legacy originals; packs/ is the source of truth
+assets/
+  textures/blocks/packs/{pack}/   # active pack's PNGs (stone, dirt, grass_top, ores, crafting_table, …)
+  textures/gui/                   # inventory, crafting_table, widgets, pause_menu, armor slot placeholders
+  textures/items/                 # sticks, tools (extruded at runtime)
+  audio/sfx/step/                 # footstep variants (grass, cloth)
+  fonts/Minecraft.otf             # UI font
+performance_plan.md           # measurement-first perf roadmap (instrumentation + milestones)
 ```
 
 ## Architecture invariants
 
-**Classes vs autoloads.** Only `Game` (scripts/game.gd) is an autoload. `Blocks`, `Chunk`, `Mesher`, `Worldgen`, `BlockAtlas` are `class_name` statics / `RefCounted` — call directly (`BlockAtlas.texture()`), no `get_node`.
+**Classes vs autoloads.** Only `Game` (scripts/game.gd) is an autoload. `Blocks`, `Items`, `Chunk`, `Mesher`, `Worldgen`, `BlockAtlas`, `Recipes`, `SpriteExtruder`, `BlockIconRenderer` are `class_name` statics / `RefCounted` — call directly (`BlockAtlas.texture()`), no `get_node`.
 
-**Threading contract.** `WorkerThreadPool` runs `_compute_chunk_data` (worldgen + meshing). The main thread owns: GPU mesh upload, scene-tree manipulation, `_pending` dict. `_ready_results` is the hand-off, guarded by `_result_mutex`. `Game._ready` warms `BlockAtlas.build()` and `Worldgen.surface_height(0,0)` on the main thread so workers never hit lazy-init races — preserve this.
+**Threading contract.** `WorkerThreadPool` runs `_compute_chunk_data` (worldgen + meshing). The main thread owns: GPU mesh upload, scene-tree manipulation, `_pending` dict. `_ready_results` is the hand-off, guarded by `_result_mutex`. `Game._ready` warms `BlockAtlas.build()`, `Worldgen.surface_height(0,0)`, `Recipes.ensure_loaded()`, and `BlockIconRenderer.setup/render_all()` on the main thread so workers never hit lazy-init races — preserve this.
 
 **Shared `ShaderMaterial`.** One material instance for all chunks, owned by `BlockAtlas._material`. Don't create per-chunk materials. If you need per-chunk shader parameters, push them into vertex attributes, not new materials.
 
 **Chunk dims are fixed.** `SIZE_X=16`, `SIZE_Y=128`, `SIZE_Z=16`. Y-major indexing (`y * SIZE_X * SIZE_Z + z * SIZE_X + x`). Changing these breaks save format, mesher, tests.
 
-**Block IDs are stable.** `scripts/world/blocks.gd` IDs are uint8; append new IDs to the end, never renumber — they're persisted in `Chunk.blocks` (`PackedByteArray`).
+**Block IDs are stable.** `scripts/world/blocks.gd` IDs are uint8 in the range 0–99; append new IDs to the end, never renumber — they're persisted in `Chunk.blocks` (`PackedByteArray`). Item IDs start at 100 (`scripts/world/items.gd`) to keep the two spaces disjoint; `Items.id_from_name()` resolves unified name → id for recipe JSON.
 
-**Deterministic worldgen.** `Worldgen.generate_chunk(x, z)` is pure on `(WORLD_SEED, x, z)`. Don't introduce time/RNG dependencies — chunk reload must reproduce identical terrain.
+**Deterministic worldgen.** `Worldgen.generate_chunk(x, z)` is pure on `(WORLD_SEED, x, z)`. Don't introduce time/RNG dependencies — chunk reload must reproduce identical terrain. Ore veins use hash-derived pseudo-random floats (`_float01`) rather than `RandomNumberGenerator`, to keep the algorithm deterministic *and* chunk-isolated.
+
+**Ore vein reconstruction.** Vanilla `WorldGenMinable` centers each vein at world `(i+8, j, k+8)`, so each chunk's pass writes into a 2×2 NE square. For deterministic chunk-isolated gen, `Worldgen._scatter_ores` runs 4 decoration passes (own + 3 SW neighbors) and clips writes to the target chunk's bounds — this covers every vein that should land in the chunk without any cross-chunk side effects. Don't collapse it back to a single-pass loop: you lose ~50% of ore that vanilla places via spillover.
 
 **Mesher emits all 6 faces per block, with neighbor culling inside a chunk only.** Chunk boundaries emit outward faces unconditionally (known limitation — see `optimizations.md` §2). Don't "fix" this without also handling neighbor-load re-meshing.
 
@@ -101,8 +130,11 @@ Read `optimizations.md` first — the high-leverage wins are already documented 
 - **`Chunk.get_block` returns `AIR` for OOB.** Mesher relies on this for the "emit face at world edge" behavior; don't change it to panic.
 - **`max_y` is monotonic.** Breaking the topmost block doesn't decrease it. Acceptable cost: 1 extra layer of meshing iteration.
 - **`create_trimesh_shape()` is main-thread and ~10–100 ms.** Rare today (player edits only); becomes a spike once dynamic blocks land — see `optimizations.md` §4.
-- **Texture pack cell size auto-detects** from the first loaded PNG in `packs/{active}/`. All 11 textures in a pack must be the same square size, or they're resized nearest-neighbor.
+- **Texture pack cell size auto-detects** from the first loaded PNG in `packs/{active}/`. All textures in a pack (stone, dirt, grass × top/side, cobble, log × top/side, planks, leaves, sand, the 4 ores, crafting_table × top/front/side) must be the same square size, or they're resized nearest-neighbor.
 - **Env-var precedence** for pack selection: shell `MC_CLONE_TEXTURE_PACK` > `.env` file > `@export texture_pack` on Game autoload.
+- **`MC_CLONE_RESOLUTION=WxH`** overrides the window size at boot (e.g. `MC_CLONE_RESOLUTION=2560x1440`). Useful on high-DPI displays where the default 1920×1080 looks tiny.
+- **Recipe JSON is authoritative** for the crafting surface — edit `data/recipes.json`, not `recipes.gd`. Pattern strings preserve whitespace; `" S "` means "empty, stick, empty" in a 3-wide row. Names resolve through `Items.id_from_name()` (blocks + items unified).
+- **Item IDs are stable too.** Like block IDs, items in `scripts/world/items.gd` are uint8 (100+); append, never renumber. They're referenced by recipe JSON and persisted in `ItemStack`.
 
 ## Don'ts
 

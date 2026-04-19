@@ -40,3 +40,17 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 	if id != Blocks.AIR and y > max_y:
 		max_y = y
 	dirty = true
+
+
+# Trusted-coord variants for worldgen / mesher inner loops. Callers guarantee
+# 0 <= x,z < SIZE_X/Z and 0 <= y < SIZE_Y. Skips ~6 bounds conditionals per
+# call, which is meaningful in the ~18k calls/chunk surface pass.
+func get_block_unchecked(x: int, y: int, z: int) -> int:
+	return blocks[index(x, y, z)]
+
+
+func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
+	blocks[index(x, y, z)] = id
+	if id != Blocks.AIR and y > max_y:
+		max_y = y
+	dirty = true

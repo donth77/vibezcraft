@@ -1,6 +1,9 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
+[ext_resource type="Script" path="res://scripts/ui/inventory_screen.gd" id="2_inv"]
+[ext_resource type="Script" path="res://scripts/ui/crafting_table_screen.gd" id="3_table"]
+[ext_resource type="Script" path="res://scripts/ui/pause_menu.gd" id="4_pause"]
 
 [node name="Crosshair" type="CanvasLayer"]
 
@@ -23,16 +26,34 @@ mouse_filter = 2
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
 
+[node name="InventoryScreen" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("2_inv")
+
+[node name="CraftingTableScreen" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("3_table")
+
+[node name="PauseMenu" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("4_pause")
+
 [node name="DebugLabel" type="Label" parent="."]
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -180.0
+offset_left = -300.0
 offset_top = 12.0
 offset_right = -12.0
-offset_bottom = 36.0
+offset_bottom = 52.0
 text = ""
 horizontal_alignment = 2
 modulate = Color(1, 0.7, 0.2, 0.95)
-theme_override_font_sizes/font_size = 16
+theme_override_font_sizes/font_size = 28
 mouse_filter = 2

@@ -9,12 +9,28 @@ extends Node3D
 @export var player_path: NodePath = ^"../Player"
 @export var max_concurrent_jobs: int = 4
 
+# Cumulative count of chunks fully materialized this session — never
+# decremented when chunks unload. Read by the debug stats panel.
+var chunks_generated_total: int = 0
+
 var _player: Node3D
 var _chunks: Dictionary = {}  # Vector2i → Node3D (ChunkNode)
 var _pending: Dictionary = {}  # Vector2i → true (currently being computed)
 var _spawn_queue: Array = []  # Vector2i FIFO of chunks to enqueue for workers
 var _result_mutex := Mutex.new()
 var _ready_results: Dictionary = {}  # Vector2i → {chunk, mesh} (set by workers)
+# Player-edited chunks live here even after they're unloaded from the
+# scene. On reload we restore from this cache instead of re-running
+# worldgen, so towers / mined blocks / placed blocks survive walking out
+# of render distance and back. In-memory only for now — disk save is a
+# later phase. Coord → Chunk (RefCounted, just the block PackedByteArray).
+#
+# Memory cost: each entry holds one Chunk = 16×128×16 = 32 KB block array.
+# 100 edited chunks ≈ 3 MB; 1000 ≈ 32 MB. Fine for typical play.
+# A diff-based representation (only store changed blocks vs worldgen) would
+# cut this to ~500 bytes per typical edited chunk but requires re-running
+# worldgen on restore — deferred until memory becomes a measurable issue.
+var _modified_chunks: Dictionary = {}
 
 
 func _ready() -> void:
@@ -36,6 +52,9 @@ func _process(_delta: float) -> void:
 
 
 # Decide which chunks should be loaded; enqueue missing ones, unload extras.
+# Chunks the player has previously edited are restored synchronously from
+# `_modified_chunks` instead of being re-generated, so towers / mines /
+# any block edits survive walking out of render distance and back.
 func _update_chunk_set() -> void:
 	var pc := _player_chunk_coord()
 	var needed: Dictionary = {}
@@ -43,7 +62,11 @@ func _update_chunk_set() -> void:
 		for dz in range(-render_distance, render_distance + 1):
 			var coord := Vector2i(pc.x + dx, pc.y + dz)
 			needed[coord] = true
-			if not _chunks.has(coord) and not _pending.has(coord) and not _spawn_queue.has(coord):
+			if _chunks.has(coord) or _pending.has(coord) or _spawn_queue.has(coord):
+				continue
+			if _modified_chunks.has(coord):
+				_restore_modified_chunk(coord)
+			else:
 				_spawn_queue.append(coord)
 	var to_remove: Array = []
 	for coord: Vector2i in _chunks:
@@ -123,11 +146,22 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	node.set("precomputed_mesh_data", data.mesh)
 	add_child(node)
 	_chunks[coord] = node
+	chunks_generated_total += 1
 
 
 # Synchronous fallback used at startup so the player has terrain to land on.
 func _spawn_chunk_sync(coord: Vector2i) -> void:
 	var chunk := Worldgen.generate_chunk(coord.x, coord.y)
+	var mesh_data := Mesher.mesh_chunk(chunk)
+	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
+
+
+# Synchronous restore for a chunk the player previously edited. We already
+# have the block data in `_modified_chunks`; just re-mesh and re-add to
+# the scene. Re-meshing is on the main thread (small hitch acceptable since
+# this only fires when re-entering a previously-explored area).
+func _restore_modified_chunk(coord: Vector2i) -> void:
+	var chunk: Chunk = _modified_chunks[coord]
 	var mesh_data := Mesher.mesh_chunk(chunk)
 	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
 
@@ -141,6 +175,7 @@ func _player_chunk_coord() -> Vector2i:
 
 # World-coord block edit. Looks up the right chunk, converts to local coords,
 # applies. Silently no-ops if the target is outside the currently loaded area.
+# Marks the chunk as "modified" so it's preserved across unload/reload.
 func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
 	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
@@ -151,6 +186,9 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
+	# The Chunk RefCounted holds the block PackedByteArray; storing a
+	# reference here keeps it alive after the ChunkNode is freed on unload.
+	_modified_chunks[coord] = chunk_node.chunk
 
 
 # World-coord block read. Returns AIR if the chunk isn't loaded.

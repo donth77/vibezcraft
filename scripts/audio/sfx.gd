@@ -47,6 +47,47 @@ const _DIG_SOUNDS: Dictionary = {
 
 const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
 
+# Step sounds — sourced from a1.2.6 newsound/step/. Played as the player
+# walks, picked from the variants by material. Quieter than dig sounds.
+const _STEP_VOLUME_DB: float = -8.0  # ~vanilla volume relative to dig
+const _STEP_SOUNDS: Dictionary = {
+	"grass":
+	[
+		"res://assets/audio/sfx/step/grass1.ogg",
+		"res://assets/audio/sfx/step/grass2.ogg",
+		"res://assets/audio/sfx/step/grass3.ogg",
+		"res://assets/audio/sfx/step/grass4.ogg",
+	],
+	"stone":
+	[
+		"res://assets/audio/sfx/step/stone1.ogg",
+		"res://assets/audio/sfx/step/stone2.ogg",
+		"res://assets/audio/sfx/step/stone3.ogg",
+		"res://assets/audio/sfx/step/stone4.ogg",
+	],
+	"wood":
+	[
+		"res://assets/audio/sfx/step/wood1.ogg",
+		"res://assets/audio/sfx/step/wood2.ogg",
+		"res://assets/audio/sfx/step/wood3.ogg",
+		"res://assets/audio/sfx/step/wood4.ogg",
+	],
+	"sand":
+	[
+		"res://assets/audio/sfx/step/sand1.ogg",
+		"res://assets/audio/sfx/step/sand2.ogg",
+		"res://assets/audio/sfx/step/sand3.ogg",
+		"res://assets/audio/sfx/step/sand4.ogg",
+	],
+	"cloth":
+	[
+		"res://assets/audio/sfx/step/cloth1.ogg",
+		"res://assets/audio/sfx/step/cloth2.ogg",
+		"res://assets/audio/sfx/step/cloth3.ogg",
+		"res://assets/audio/sfx/step/cloth4.ogg",
+	],
+}
+
 var _players: Array = []
 var _next_player: int = 0
 var _stream_cache: Dictionary = {}
@@ -74,6 +115,25 @@ func play_place(block_id: int) -> void:
 	_play_random(mat, 0.85)
 
 
+# Footstep — picks a random variant for the block's material.
+func play_step(block_id: int) -> void:
+	var mat := _step_material_for(block_id)
+	if mat == "":
+		return
+	var paths: Array = _STEP_SOUNDS[mat]
+	var path: String = paths[randi() % paths.size()]
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = _STEP_VOLUME_DB
+	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.play()
+
+
 # Item pickup "pop" — vanilla MC's random/pop.ogg
 func play_pickup() -> void:
 	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
@@ -83,6 +143,7 @@ func play_pickup() -> void:
 	var player: AudioStreamPlayer = _players[_next_player]
 	_next_player = (_next_player + 1) % POOL_SIZE
 	player.stream = stream
+	player.volume_db = 0.0
 	# Pitch jitter for variety
 	player.pitch_scale = 1.0 + randf_range(-0.15, 0.15)
 	player.play()
@@ -98,6 +159,9 @@ func _play_random(material: String, base_pitch: float) -> void:
 	var player: AudioStreamPlayer = _players[_next_player]
 	_next_player = (_next_player + 1) % POOL_SIZE
 	player.stream = stream
+	# Reset volume in case the player was last used by play_step (which uses
+	# a quieter volume_db). Pool reuse means we have to set it every time.
+	player.volume_db = 0.0
 	player.pitch_scale = base_pitch + randf_range(-PITCH_JITTER, PITCH_JITTER)
 	player.play()
 
@@ -110,6 +174,14 @@ func _material_for(block_id: int) -> String:
 			return "grass"
 		Blocks.SAND:
 			return "sand"
-		Blocks.LOG, Blocks.PLANKS:
+		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE:
 			return "wood"
 	return ""
+
+
+# Step-sound material — diverges from dig: leaves use the soft "cloth"
+# variant, not grass-rustle (vanilla MC behavior).
+func _step_material_for(block_id: int) -> String:
+	if block_id == Blocks.LEAVES:
+		return "cloth"
+	return _material_for(block_id)

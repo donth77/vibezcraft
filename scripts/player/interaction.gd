@@ -40,14 +40,29 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	if not _world_input_active():
+		# Inventory or other modal UI is up — drop any in-progress mining and
+		# stop highlighting so the player isn't accidentally breaking a block
+		# while clicking around the inventory.
+		_set_player_mining(false)
+		_reset_mining()
+		_highlight.visible = false
+		return
 	var hit := _raycast()
 	_update_highlight(hit)
 	_update_mining(hit, delta)
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if not _world_input_active():
+		return
 	if event.is_action_pressed("interact_place"):
 		_try_place()
+
+
+func _world_input_active() -> bool:
+	# Mouse-captured == playing the game; visible == a UI screen owns input.
+	return Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 
 
 func _update_highlight(hit: Dictionary) -> void:
@@ -101,7 +116,21 @@ func _start_mining(target: Vector3i) -> void:
 	_mining_progress = 0.0
 	_last_dig_sound_ms = 0
 	var id: int = _chunk_manager.get_world_block(target)
-	_mining_total_time = Blocks.break_time_bare_hand(id)
+	_mining_total_time = Blocks.break_time(id, _held_tool_id())
+
+
+# Returns the currently-selected tool item id (or AIR if no tool/empty).
+# Used for break-time + drop calculations.
+func _held_tool_id() -> int:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return Blocks.AIR
+	var stack: ItemStack = inv.selected()
+	if stack == null or stack.is_empty():
+		return Blocks.AIR
+	if not Items.is_tool_item(stack.item_id):
+		return Blocks.AIR
+	return stack.item_id
 
 
 func _reset_mining() -> void:
@@ -117,8 +146,9 @@ func _complete_break(target: Vector3i) -> void:
 		return
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
-	# Spawn a physics-driven dropped item that the player walks over to pick up
-	var dropped_id: int = Blocks.drops(broken_id)
+	# Drop is gated by tool tier — bare hand on stone yields nothing,
+	# wrong-tier pick on iron ore yields nothing, etc.
+	var dropped_id: int = Blocks.drop_with_tool(broken_id, _held_tool_id())
 	if dropped_id != Blocks.AIR:
 		_spawn_dropped_item(target, dropped_id)
 
@@ -157,24 +187,50 @@ func _try_place() -> void:
 	var hit := _raycast()
 	if hit.is_empty() or _chunk_manager == null:
 		return
-	var inventory: Inventory = _player_inventory()
-	if inventory == null:
+	# RMB on a placed crafting table opens its 3x3 craft screen instead of
+	# placing whatever the player is holding. Vanilla MC behavior.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	if hit_id == Blocks.CRAFTING_TABLE:
+		_open_crafting_table()
+		_last_place_ms = now
 		return
-	var stack: ItemStack = inventory.selected()
+	if _place_block_from_held(hit):
+		_last_place_ms = now
+
+
+func _open_crafting_table() -> void:
+	var table: Control = (
+		get_tree().root.get_node_or_null("Main/Player/Crosshair/CraftingTableScreen") as Control
+	)
+	if table != null and table.has_method("toggle"):
+		table.toggle()
+
+
+# Returns true if a block was actually placed (i.e., consumed an item).
+func _place_block_from_held(hit: Dictionary) -> bool:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
 	if stack.is_empty():
-		return
+		return false
+	# Only block IDs are placeable. Tools, sticks, coal etc. are non-block
+	# items (Items.* IDs >= 100) and right-clicking with one shouldn't drop
+	# a textureless mystery block into the world.
+	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
+		return false
 	var place: Vector3i = hit.block_pos + hit.normal_i
 	if _chunk_manager.get_world_block(place) != Blocks.AIR:
-		return
+		return false
 	var player: Node3D = get_parent()
 	var pp := player.global_position
 	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
 	if place == player_block or place == player_block + Vector3i(0, 1, 0):
-		return
-	_last_place_ms = now
+		return false
 	_chunk_manager.set_world_block(place, stack.item_id)
 	SFX.play_place(stack.item_id)
-	inventory.consume_one_selected()
+	inv.consume_one_selected()
+	return true
 
 
 func _set_player_mining(active: bool) -> void:
@@ -213,18 +269,101 @@ func _raycast() -> Dictionary:
 
 
 func _build_highlight() -> MeshInstance3D:
+	# Vanilla-faithful black wireframe outline. PRIMITIVE_LINES gives 1px
+	# lines on most GPUs (basically invisible), so we build each edge as a
+	# thin 3D box — controllable thickness, looks correct at any resolution.
 	var mi := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3.ONE * 1.005
-	mi.mesh = box
+	mi.mesh = _build_wireframe_cube_mesh(1.002, 0.012)
 	var mat := StandardMaterial3D.new()
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1, 1, 1, 0.10)
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.cull_mode = StandardMaterial3D.CULL_BACK
+	mat.albedo_color = Color(0, 0, 0, 1.0)
+	mat.cull_mode = StandardMaterial3D.CULL_DISABLED
 	mi.material_override = mat
 	mi.visible = false
 	return mi
+
+
+# 12-edge wireframe of a cube centered at origin. Each edge is a thin
+# rectangular box of `thickness` cross-section, so the wireframe has
+# real visible width regardless of GPU line-rasterization quirks.
+func _build_wireframe_cube_mesh(size: float, thickness: float) -> ArrayMesh:
+	var s: float = size * 0.5
+	var t: float = thickness * 0.5
+	# Each edge: [center_position, half_extents_along_each_axis]. Edges
+	# extend slightly past their endpoints (length = s + t) so adjacent
+	# edges meet flush at the cube corners.
+	var edges: Array = [
+		# Bottom face (y = -s) — 4 horizontal edges
+		[Vector3(0, -s, -s), Vector3(s + t, t, t)],
+		[Vector3(s, -s, 0), Vector3(t, t, s + t)],
+		[Vector3(0, -s, s), Vector3(s + t, t, t)],
+		[Vector3(-s, -s, 0), Vector3(t, t, s + t)],
+		# Top face (y = +s) — 4 horizontal edges
+		[Vector3(0, s, -s), Vector3(s + t, t, t)],
+		[Vector3(s, s, 0), Vector3(t, t, s + t)],
+		[Vector3(0, s, s), Vector3(s + t, t, t)],
+		[Vector3(-s, s, 0), Vector3(t, t, s + t)],
+		# 4 vertical pillars connecting the two faces
+		[Vector3(-s, 0, -s), Vector3(t, s + t, t)],
+		[Vector3(s, 0, -s), Vector3(t, s + t, t)],
+		[Vector3(-s, 0, s), Vector3(t, s + t, t)],
+		[Vector3(s, 0, s), Vector3(t, s + t, t)],
+	]
+	var verts := PackedVector3Array()
+	var indices := PackedInt32Array()
+	var face_quads: Array = [
+		[0, 1, 2, 3],  # -Z back
+		[4, 7, 6, 5],  # +Z front
+		[0, 4, 5, 1],  # -Y bottom
+		[3, 2, 6, 7],  # +Y top
+		[0, 3, 7, 4],  # -X left
+		[1, 5, 6, 2],  # +X right
+	]
+	var base: int = 0
+	for edge: Array in edges:
+		var c: Vector3 = edge[0]
+		var e: Vector3 = edge[1]
+		(
+			verts
+			. append_array(
+				PackedVector3Array(
+					[
+						c + Vector3(-e.x, -e.y, -e.z),
+						c + Vector3(e.x, -e.y, -e.z),
+						c + Vector3(e.x, e.y, -e.z),
+						c + Vector3(-e.x, e.y, -e.z),
+						c + Vector3(-e.x, -e.y, e.z),
+						c + Vector3(e.x, -e.y, e.z),
+						c + Vector3(e.x, e.y, e.z),
+						c + Vector3(-e.x, e.y, e.z),
+					]
+				)
+			)
+		)
+		for q: Array in face_quads:
+			(
+				indices
+				. append_array(
+					PackedInt32Array(
+						[
+							base + q[0],
+							base + q[1],
+							base + q[2],
+							base + q[0],
+							base + q[2],
+							base + q[3],
+						]
+					)
+				)
+			)
+		base += 8
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
 
 
 func _build_crack() -> MeshInstance3D:

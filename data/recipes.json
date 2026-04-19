@@ -1,0 +1,47 @@
+{
+  "shaped": [
+    {
+      "id": "planks_from_log",
+      "pattern": ["L"],
+      "key": {"L": "log"},
+      "result": {"id": "planks", "count": 4}
+    },
+    {
+      "id": "sticks_from_planks",
+      "pattern": ["P", "P"],
+      "key": {"P": "planks"},
+      "result": {"id": "stick", "count": 4}
+    },
+    {
+      "id": "wooden_pickaxe",
+      "pattern": ["PPP", " S ", " S "],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_pickaxe", "count": 1}
+    },
+    {
+      "id": "stone_pickaxe",
+      "pattern": ["CCC", " S ", " S "],
+      "key": {"C": "cobblestone", "S": "stick"},
+      "result": {"id": "stone_pickaxe", "count": 1}
+    },
+    {
+      "id": "wooden_shovel",
+      "pattern": ["P", "S", "S"],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_shovel", "count": 1}
+    },
+    {
+      "id": "wooden_axe",
+      "pattern": ["PP", "PS", " S"],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_axe", "count": 1}
+    },
+    {
+      "id": "crafting_table",
+      "pattern": ["PP", "PP"],
+      "key": {"P": "planks"},
+      "result": {"id": "crafting_table", "count": 1}
+    }
+  ],
+  "shapeless": []
+}

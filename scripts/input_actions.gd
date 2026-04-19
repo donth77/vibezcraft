@@ -15,8 +15,13 @@ static func register_defaults() -> void:
 	_add_key("pause", KEY_ESCAPE)
 	_add_mouse("interact_break", MOUSE_BUTTON_LEFT)
 	_add_mouse("interact_place", MOUSE_BUTTON_RIGHT)
+	# Mouse wheel cycles through the hotbar — vanilla MC binding.
+	_add_mouse("hotbar_prev", MOUSE_BUTTON_WHEEL_UP)
+	_add_mouse("hotbar_next", MOUSE_BUTTON_WHEEL_DOWN)
 	# Q drops one item; Ctrl/Cmd+Q drops the whole stack (modifier checked in code).
 	_add_key("drop_selected", KEY_Q)
+	# E toggles the inventory screen (vanilla MC binding).
+	_add_key("toggle_inventory", KEY_E)
 	for i in range(9):
 		_add_key("hotbar_%d" % (i + 1), KEY_1 + i)
 	# Backtick toggles the global debug mode; sub-shortcuts only work when on.
@@ -27,6 +32,11 @@ static func register_defaults() -> void:
 	# Debug toggles — F1/F2 are media keys on Mac by default; bind G/H as alts.
 	_add_keys("debug_creative", [KEY_F1, KEY_G])
 	_add_keys("debug_fill_hotbar", [KEY_F2, KEY_H])
+	# J = drop one of every craftable tool into the inventory (debug only).
+	_add_keys("debug_fill_tools", [KEY_F3, KEY_J])
+	# T = open the FP held-tool tuner panel (debug only). Lets you drag
+	# sliders for each rest-pose / swing axis at runtime.
+	_add_key("debug_tool_tuner", KEY_T)
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:

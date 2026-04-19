@@ -30,6 +30,34 @@ func _resolve_bool(key: String, default_val: bool) -> bool:
 	return lower in ["1", "true", "yes", "on"]
 
 
+# MC_CLONE_RESOLUTION overrides the default window size at startup.
+# Accepts "WIDTHxHEIGHT" (e.g. "2560x1440") or "fullscreen". The default in
+# project.godot is 1920x1080; set this env var to deviate without editing it.
+func _apply_resolution_override() -> void:
+	var raw: String = _resolve_str("MC_CLONE_RESOLUTION", "")
+	if raw == "":
+		return
+	if raw.to_lower() == "fullscreen":
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		print("[Game] resolution override: fullscreen")
+		return
+	var parts: PackedStringArray = raw.to_lower().split("x")
+	if parts.size() != 2:
+		push_warning("[Game] MC_CLONE_RESOLUTION must be WIDTHxHEIGHT or 'fullscreen'; got: " + raw)
+		return
+	var w: int = int(parts[0])
+	var h: int = int(parts[1])
+	if w < 320 or h < 240:
+		push_warning("[Game] MC_CLONE_RESOLUTION too small: %dx%d" % [w, h])
+		return
+	DisplayServer.window_set_size(Vector2i(w, h))
+	# Re-center on screen since changing size leaves the top-left anchored.
+	var screen_size: Vector2i = DisplayServer.screen_get_size()
+	var window_size: Vector2i = DisplayServer.window_get_size()
+	DisplayServer.window_set_position((screen_size - window_size) / 2)
+	print("[Game] resolution override: %dx%d" % [w, h])
+
+
 func _read_dotenv() -> Dictionary:
 	var path := "res://.env"
 	if not FileAccess.file_exists(path):
@@ -62,6 +90,7 @@ func _read_dotenv() -> Dictionary:
 
 func _ready() -> void:
 	InputActions.register_defaults()
+	_apply_resolution_override()
 	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", texture_pack)
 	BlockAtlas.active_pack = resolved_pack
 	BlockAtlas.build()
@@ -70,4 +99,16 @@ func _ready() -> void:
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
+	# Load crafting recipes from disk once at boot.
+	Recipes.ensure_loaded()
+	# Bake 3D-isometric block icons for the inventory. Setup is sync; the
+	# render loop is async (one frame per block) and runs in the background
+	# without awaiting — the inventory falls back to flat textures until
+	# each baked icon is ready.
+	BlockIconRenderer.setup_renderer(self)
+	BlockIconRenderer.render_all(self)
+	# Build the inventory's live avatar viewport. The inventory's TextureRect
+	# binds directly to this viewport's render texture — any change to
+	# CharacterPreview.get_model() (armor, head rotation, etc.) auto-updates.
+	CharacterPreview.setup_renderer(self)
 	print("[Game] autoload ready — Minecraft Alpha Clone")

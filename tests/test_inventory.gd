@@ -3,7 +3,8 @@ extends GutTest
 
 func test_new_inventory_is_all_empty() -> void:
 	var inv := Inventory.new()
-	assert_eq(inv.slots.size(), Inventory.HOTBAR_SIZE)
+	# Phase 5: 45 slots (9 hotbar + 27 main + 4 armor + 4 craft + 1 result).
+	assert_eq(inv.slots.size(), Inventory.TOTAL_SIZE)
 	for slot: ItemStack in inv.slots:
 		assert_true(slot.is_empty())
 
@@ -35,9 +36,13 @@ func test_add_overflows_to_next_slot_when_stack_is_full() -> void:
 
 func test_add_returns_overflow_when_inventory_is_full() -> void:
 	var inv := Inventory.new()
-	for i in range(Inventory.HOTBAR_SIZE):
-		inv.add_item(Blocks.STONE + i, ItemStack.MAX_SIZE)
-	# Now adding any new block — no room
+	# Fill every storage slot (hotbar + main, NOT armor/craft) with a different
+	# block so there's no matching stack to merge into.
+	var storage_slots: int = Inventory.HOTBAR_SIZE + Inventory.MAIN_SIZE
+	for i in range(storage_slots):
+		var stack: ItemStack = inv.slots[i]
+		stack.item_id = Blocks.STONE + (i % 5) + 1  # cycle a few block ids
+		stack.count = ItemStack.MAX_SIZE
 	var overflow: int = inv.add_item(Blocks.LEAVES, 5)
 	assert_eq(overflow, 5, "all 5 should overflow")
 
