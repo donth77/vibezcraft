@@ -7,10 +7,12 @@ extends Node3D
 const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
 
 # Per-leaf random decay delay (seconds). Approximates vanilla Alpha's
-# random-tick model — canopy visibly crumbles over a few seconds instead
-# of vanishing in one frame.
-const _LEAF_DECAY_DELAY_MIN: float = 1.0
-const _LEAF_DECAY_DELAY_MAX: float = 4.0
+# random-tick model — canopy visibly crumbles over ~10-15 s instead of
+# vanishing in one frame. Earlier 1-4 s range felt too hasty compared to
+# vanilla, which lets orphaned canopies linger for half a minute or
+# more; these values land somewhere between "snappy" and "authentic".
+const _LEAF_DECAY_DELAY_MIN: float = 3.0
+const _LEAF_DECAY_DELAY_MAX: float = 15.0
 # Cap on how many leaves we actually remove (including the BFS re-check)
 # per frame, so a simultaneous multi-tree harvest doesn't stall the main
 # thread. Entries left over stay queued for subsequent frames.
