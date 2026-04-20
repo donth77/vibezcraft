@@ -17,9 +17,11 @@ int64_t WorldgenNative::hash3(int64_t x, int64_t y, int64_t z) {
 	h = (h * 73856093LL) ^ x;
 	h = (h * 19349663LL) ^ y;
 	h = (h * 83492791LL) ^ z;
-	// absi: mirrors GDScript Worldgen._hash3's trailing absi(h). Using a
-	// ternary rather than std::abs so we match Godot's `x < 0 ? -x : x`
-	// semantics exactly on the signed-int64 edge cases.
+	// Final Knuth multiplicative mix — must match GDScript Worldgen._hash3
+	// exactly so bedrock-band placement stays identical across paths.
+	h = h * 2654435761LL;
+	// absi: mirrors the trailing absi(h). Ternary matches Godot's
+	// `x < 0 ? -x : x` semantics on signed-int64 edge cases.
 	return h < 0 ? -h : h;
 }
 

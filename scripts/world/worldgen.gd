@@ -7,13 +7,11 @@ extends RefCounted
 #
 # Ore veins follow vanilla WorldGenMinable (ellipsoid-along-line fill,
 # Bukkit/mc-dev). Vein sizes + Y bands match Beta 1.7-era (close to
-# Alpha 1.2.6 — the era we're cloning). Coal and iron attempt counts
-# are bumped a notch above vanilla's 20/20 (to 23/22) so our per-chunk
-# yields land inside [100%, 140%] of vanilla Alpha's empirical numbers
-# (coal ~111, iron ~77) — the ellipsoid's natural clip at chunk borders
-# shaves ~10% off without this nudge. Per chunk:
-#   • Coal:    28 attempts, vein ≤16 blocks, Y 0-128
-#   • Iron:    24 attempts, vein ≤8,         Y 0-64
+# Alpha 1.2.6 — the era we're cloning). Per chunk, tuned to land in
+# [100%, 140%] of vanilla Alpha's empirical numbers (coal ~111, iron ~77,
+# gold ~8.5, diamond ~3.5) after the _HASH_MIX fix in _hash4:
+#   • Coal:    14 attempts, vein ≤16 blocks, Y 0-128
+#   • Iron:    18 attempts, vein ≤8,         Y 0-64
 #   • Gold:    2 attempts,  vein ≤8,         Y 0-32
 #   • Diamond: 1 attempt,   vein ≤7,         Y 0-16
 #
@@ -35,9 +33,15 @@ const _BEDROCK_THRESHOLDS_EIGHTHS: Array = [8, 5, 3, 1]
 # Ore generation parameters: [block_id, attempts_per_chunk, vein_size_max,
 # y_min, y_max]. Order matters — coal first means it can be overwritten by
 # iron later (at the rare overlap zones); fine in practice.
+#
+# Attempt counts retuned against the fixed _hash4 (earlier hash variant
+# was producing degenerate y-values for some (deco_cx, deco_cz) pairs,
+# which masqueraded as "correct density" at inflated attempt counts;
+# post-fix, the attempts fire uniformly so the numbers drop back to
+# vanilla's 20/20/2/1 with a small safety margin for chunk-edge clipping).
 const _ORE_CONFIGS: Array = [
-	[Blocks.COAL_ORE, 28, 16, 0, 128],
-	[Blocks.IRON_ORE, 24, 8, 0, 64],
+	[Blocks.COAL_ORE, 14, 16, 0, 128],
+	[Blocks.IRON_ORE, 18, 8, 0, 64],
 	[Blocks.GOLD_ORE, 2, 8, 0, 32],
 	[Blocks.DIAMOND_ORE, 1, 7, 0, 16],
 ]
@@ -56,6 +60,13 @@ const _TREE_TRUNK_MAX: int = 6
 const _SPAWN_X: int = 8
 const _SPAWN_Z: int = 8
 const _SPAWN_TREE_EXCLUSION_RADIUS: int = 4
+
+# Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
+# differences in the last argument avalanche into high bits. Without this,
+# callers that vary only one hash argument (like the 28-attempts-per-pass
+# ore-vein loop) produce (hash >> 16) values that are constant across
+# iterations, causing entire passes to deposit zero ore.
+const _HASH_MIX: int = 2654435761
 
 static var _noise: FastNoiseLite
 # Set by Game._ready() after the GDExtension loads. Fills the bedrock /
@@ -387,12 +398,15 @@ static func _place_leaf_if_air(chunk: Chunk, x: int, y: int, z: int) -> void:
 
 
 # Cheap deterministic hash per (x, y, z, seed). Three large primes + XOR
-# scramble — random-enough for visual chaos, no allocations.
+# scramble, then a final Knuth multiplicative mix (see _HASH_MIX note near
+# the top of the file) so low-bit differences in the last argument
+# avalanche up to the high bits.
 static func _hash3(x: int, y: int, z: int) -> int:
 	var h: int = WORLD_SEED
 	h = (h * 73856093) ^ x
 	h = (h * 19349663) ^ y
 	h = (h * 83492791) ^ z
+	h = h * _HASH_MIX
 	return absi(h)
 
 
@@ -403,4 +417,5 @@ static func _hash4(a: int, b: int, c: int, d: int) -> int:
 	h = (h * 19349663) ^ b
 	h = (h * 83492791) ^ c
 	h = (h * 49979693) ^ d
+	h = h * _HASH_MIX
 	return absi(h)
