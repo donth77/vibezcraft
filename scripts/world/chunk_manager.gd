@@ -76,7 +76,7 @@ func _update_chunk_set() -> void:
 			# previously-saved edit — _dispatch_workers picks up the saved
 			# bytes and the worker uses them instead of running worldgen.
 			_spawn_queue.append(coord)
-	var to_remove: Array = []
+	var to_remove: Array[Vector2i] = []
 	for coord: Vector2i in _chunks:
 		if not needed.has(coord):
 			to_remove.append(coord)
@@ -88,15 +88,18 @@ func _update_chunk_set() -> void:
 			_dirty_loaded.erase(coord)
 		_chunks[coord].queue_free()
 		_chunks.erase(coord)
-	# Drop queued chunks that are no longer needed
-	_spawn_queue = _spawn_queue.filter(func(c: Vector2i) -> bool: return needed.has(c))
+	# Drop queued chunks that are no longer needed. In-place reverse-loop
+	# removal avoids allocating a fresh Array + Callable every frame.
+	for i in range(_spawn_queue.size() - 1, -1, -1):
+		if not needed.has(_spawn_queue[i]):
+			_spawn_queue.remove_at(i)
 	# Drop completed worker results for chunks no longer needed, so evicted
 	# mesh data doesn't linger in the queue (materialize consumes one per frame).
 	# Leaves `_pending` alone — a worker may still be running and will write
 	# to `_ready_results` after the sweep; the distance check in
 	# `_materialize_one_ready_chunk` drops those.
 	_result_mutex.lock()
-	var stale_results: Array = []
+	var stale_results: Array[Vector2i] = []
 	for coord: Vector2i in _ready_results:
 		if not needed.has(coord):
 			stale_results.append(coord)

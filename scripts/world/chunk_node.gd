@@ -31,7 +31,8 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	if chunk and chunk.dirty:
+	# `chunk` is assigned in _ready and never nulled, so no null-guard needed.
+	if chunk.dirty:
 		_rebuild_mesh()
 		chunk.dirty = false
 
