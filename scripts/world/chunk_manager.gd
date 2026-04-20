@@ -6,13 +6,16 @@ extends Node3D
 
 const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
 
-# Per-leaf random decay delay (seconds). Approximates vanilla Alpha's
-# random-tick model — canopy visibly crumbles over ~10-15 s instead of
-# vanishing in one frame. Earlier 1-4 s range felt too hasty compared to
-# vanilla, which lets orphaned canopies linger for half a minute or
-# more; these values land somewhere between "snappy" and "authentic".
-const _LEAF_DECAY_DELAY_MIN: float = 3.0
-const _LEAF_DECAY_DELAY_MAX: float = 15.0
+# Per-leaf decay delay (seconds). Vanilla Alpha ticks leaves via the
+# random-tick system (~80 random block updates per chunk per tick, so a
+# single leaf gets ticked about once per 20 s on average, with a Poisson
+# long tail). We approximate that with an exponential distribution:
+# most leaves decay within the mean, a few linger for a minute+. The
+# small MIN clamp keeps the first leaf from popping out the same frame
+# the log breaks, which reads as broken rather than "settling".
+const _LEAF_DECAY_MEAN_SEC: float = 30.0
+const _LEAF_DECAY_MIN_SEC: float = 2.0
+const _LEAF_DECAY_MAX_SEC: float = 180.0
 # Cap on how many leaves we actually remove (including the BFS re-check)
 # per frame, so a simultaneous multi-tree harvest doesn't stall the main
 # thread. Entries left over stay queued for subsequent frames.
@@ -257,12 +260,34 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	# happens lazily on unload (compressing on every edit would burn cycles
 	# the player can feel during fast mining/placement).
 	_dirty_loaded[coord] = true
+	# Gravity — when a block becomes air, settle anything gravity-affected
+	# (sand, gravel) sitting above. Single-pass column scan, no recursion.
+	if id == Blocks.AIR:
+		_settle_gravity_above(coord, local_x, world_pos.y, local_z)
 	# Leaf decay — when a log is removed, scan nearby leaves and orphan
 	# any that can no longer BFS-reach a log within LeafDecay.DECAY_RADIUS.
 	# The nested set_world_block writes only AIR over LEAVES (never LOG),
 	# so this cannot recurse indefinitely.
 	if old_id == Blocks.LOG and id != Blocks.LOG:
 		_decay_orphaned_leaves(world_pos)
+
+
+# Same as set_world_block, but rebuilds the target chunk's mesh + collision
+# on this frame rather than waiting for chunk_node._process to pick up the
+# dirty flag next frame. FallingBlock uses this on land so the just-placed
+# block is visible the same frame the entity hides — without it, the
+# entity disappears one frame before the block appears, and entities
+# above us would also render overlapping the fresh block for a frame.
+func set_world_block_immediate(world_pos: Vector3i, id: int) -> void:
+	set_world_block(world_pos, id)
+	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
+	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
+	var coord := Vector2i(chunk_x, chunk_z)
+	if not _chunks.has(coord):
+		return
+	var chunk_node: Node3D = _chunks[coord]
+	chunk_node._rebuild_mesh()
+	chunk_node.chunk.dirty = false
 
 
 # Queue orphaned leaves for gradual decay instead of removing them
@@ -274,7 +299,14 @@ func _decay_orphaned_leaves(log_world_pos: Vector3i) -> void:
 		return
 	var now: float = Time.get_ticks_msec() / 1000.0
 	for p: Vector3i in orphans:
-		var delay: float = randf_range(_LEAF_DECAY_DELAY_MIN, _LEAF_DECAY_DELAY_MAX)
+		# Exponential distribution: draw u ∈ (0, 1] and map to -mean·ln(u).
+		# Clamped so no leaf either pops instantly or hangs forever. This
+		# matches vanilla's "most decay in ~mean seconds, some linger" feel
+		# better than the uniform window we used before.
+		var u: float = maxf(randf(), 0.0001)
+		var delay: float = clampf(
+			-_LEAF_DECAY_MEAN_SEC * log(u), _LEAF_DECAY_MIN_SEC, _LEAF_DECAY_MAX_SEC
+		)
 		_decaying_leaves.append({"pos": p, "decay_at": now + delay})
 
 
@@ -302,6 +334,49 @@ func _tick_leaf_decay() -> void:
 		processed += 1
 		if processed >= _LEAF_DECAY_MAX_PER_TICK:
 			return
+
+
+# Walks the column above (local_x, from_y, local_z) inside the given
+# chunk; for each contiguous gravity block found above the air gap, clear
+# its cell and spawn a FallingBlock entity to handle the visible drop +
+# physics + landing. Mirrors vanilla BlockFalling.m() in Bukkit/mc-dev —
+# checks only that the block can fall (already true since the cell below
+# just became AIR), then defers placement to the entity. Cross-chunk
+# safe: lookups stay in this (x,z) chunk; the entity moves in world space
+# and lands wherever physics takes it.
+func _settle_gravity_above(coord: Vector2i, local_x: int, from_y: int, local_z: int) -> void:
+	var chunk: Chunk = _chunks[coord].chunk
+	var world_x: int = coord.x * Chunk.SIZE_X + local_x
+	var world_z: int = coord.y * Chunk.SIZE_Z + local_z
+	var scan_y: int = from_y + 1
+	while scan_y < Chunk.SIZE_Y:
+		var here_id: int = chunk.get_block(local_x, scan_y, local_z)
+		if here_id == Blocks.AIR:
+			scan_y += 1
+			continue
+		if not Blocks.has_gravity(here_id):
+			return  # any non-gravity solid stops the cascade upward
+		# Vanilla clears the source on the entity's first tick; same
+		# end state, simpler bookkeeping to do it now.
+		chunk.set_block(local_x, scan_y, local_z, Blocks.AIR)
+		# Force an immediate remesh of the source chunk. Without this, the
+		# chunk's own _process would pick up `dirty` next frame — but the
+		# FallingBlock entity is added to the scene *this* frame at the exact
+		# center of the just-cleared cell, so both render at the same spot
+		# for one frame and z-fight, which the user sees as a flicker at the
+		# start of the fall. Same issue for sand and gravel — same path.
+		var chunk_node: Node3D = _chunks[coord]
+		chunk_node._rebuild_mesh()
+		chunk.dirty = false
+		_spawn_falling_block(Vector3i(world_x, scan_y, world_z), here_id)
+		scan_y += 1
+
+
+func _spawn_falling_block(world_pos: Vector3i, block_id: int) -> void:
+	var fb := FallingBlock.new()
+	fb.setup(block_id)
+	add_child(fb)
+	fb.global_position = Vector3(world_pos) + Vector3(0.5, 0.5, 0.5)
 
 
 # World-coord block read. Returns AIR if the chunk isn't loaded.

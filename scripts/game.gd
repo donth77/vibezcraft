@@ -1,10 +1,14 @@
 extends Node
 
-# Active block-texture pack. Change this string to swap packs; the value
-# corresponds to a folder name under assets/textures/blocks/packs/.
-# Available: "pixellab" (our AI-generated 32x32), "programmer_art" (CC-BY 4.0
-# from github.com/deathcap/ProgrammerArt, vanilla 16x16).
-@export var texture_pack: String = "programmer_art"
+# Active texture pack. Covers blocks, per-pack item sprites (if any), and
+# Steve's skin. Value corresponds to a folder name under
+# `assets/textures/blocks/packs/` (items live in the `items/` subdir of each
+# pack, Steve in `assets/textures/entities/packs/{pack}/`). Available:
+#   • "alpha_vanilla"   — extracted from Mojang Alpha 1.2.6 (default)
+#   • "pixel_perfection" — HD community vanilla style
+#   • "pixellab"         — AI-generated 32x32
+#   • "programmer_art"   — CC-BY 4.0 from github.com/deathcap/ProgrammerArt
+@export var texture_pack: String = "alpha_vanilla"
 
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.

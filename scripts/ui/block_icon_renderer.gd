@@ -34,6 +34,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.GOLD_ORE,
 	Blocks.DIAMOND_ORE,
 	Blocks.CRAFTING_TABLE,
+	Blocks.FARMLAND,
+	Blocks.GRAVEL,
+	Blocks.FURNACE,
+	Blocks.GLASS,
+	Blocks.SAPLING,
 ]
 
 static var _viewport: SubViewport

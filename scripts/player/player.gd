@@ -1,4 +1,9 @@
+# gdlint: disable=max-file-lines
 extends CharacterBody3D
+
+signal health_changed(current: int, maximum: int)
+signal damaged(amount: int, source: String)
+signal died
 
 const WALK_SPEED: float = 4.317
 const SNEAK_SPEED: float = 1.295
@@ -7,22 +12,90 @@ const GRAVITY: float = -32.0
 const MOUSE_SENSITIVITY: float = 0.002
 const PITCH_LIMIT_DEG: float = 89.0
 
+# Vanilla MC Alpha player health — 20 half-hearts (10 full hearts on the
+# HUD). Reaches 0 → death → instant respawn (no death screen yet).
+const MAX_HEALTH: int = 20
+# Vanilla fall-damage formula: damage = max(0, fall_blocks - 3). Jumping
+# 3 blocks or less never hurts; falling 10 blocks does 7 damage, etc.
+const FALL_DAMAGE_SAFE_BLOCKS: float = 3.0
+# Vanilla EntityLivingBase.maxHurtResistantTime — 20 ticks at 20 TPS = 1.0s
+# of post-hit grace where most subsequent damage is dropped. (Vanilla
+# allows STRONGER overlapping damage to still land within this window;
+# we keep it simple and fully ignore everything for now.)
+const DAMAGE_COOLDOWN_SEC: float = 1.0
+# Vanilla Alpha health regen (pre-Beta 1.8 hunger system): heals 1 HP
+# every 4 seconds while below max and not currently dying. No food
+# gating — just a constant background heal rate.
+const HEALTH_REGEN_INTERVAL_SEC: float = 4.0
+
+# Damage types — affects whether armor reduction kicks in. Vanilla Alpha
+# armor DOES NOT reduce fall damage (DamageSource.FALL.ignoresArmor),
+# unlike mob damage which it does reduce.
+const DAMAGE_GENERIC: String = "generic"
+const DAMAGE_FALL: String = "fall"
+
 const _DEBUG_FILL_BLOCKS: Array = [
 	Blocks.STONE,
 	Blocks.COBBLESTONE,
 	Blocks.DIRT,
 	Blocks.GRASS,
 	Blocks.SAND,
+	Blocks.GRAVEL,
 	Blocks.LOG,
 	Blocks.PLANKS,
 	Blocks.LEAVES,
-	Blocks.BEDROCK,
+]
+
+# Smelting / tool-tier starter pack — ALL raw ores + fuel (for furnace
+# path) PLUS already-smelted ingots + diamond (for direct tool crafting
+# without having to smelt every time). 16 of each. Bound to KEY_K.
+const _DEBUG_FILL_SMELT: Array = [
+	Blocks.COAL_ORE,
+	Blocks.IRON_ORE,
+	Blocks.GOLD_ORE,
+	Blocks.DIAMOND_ORE,
+	Blocks.COBBLESTONE,
+	Items.COAL,
+	Items.IRON_INGOT,
+	Items.GOLD_INGOT,
+	Items.DIAMOND,
 ]
 
 # Every tool we've built. As new tools come online (stone/iron/diamond
 # pick, axe, shovel, sword), append the IDs here.
 const _DEBUG_FILL_TOOLS: Array = [
 	Items.WOODEN_PICKAXE,
+	Items.WOODEN_AXE,
+	Items.WOODEN_SHOVEL,
+	Items.WOODEN_SWORD,
+	Items.STONE_PICKAXE,
+	Items.STONE_AXE,
+	Items.STONE_SHOVEL,
+	Items.STONE_SWORD,
+	Items.IRON_PICKAXE,
+	Items.IRON_AXE,
+	Items.IRON_SHOVEL,
+	Items.IRON_SWORD,
+	Items.DIAMOND_PICKAXE,
+	Items.DIAMOND_AXE,
+	Items.DIAMOND_SHOVEL,
+	Items.DIAMOND_SWORD,
+	Items.GOLD_PICKAXE,
+	Items.GOLD_AXE,
+	Items.GOLD_SHOVEL,
+	Items.GOLD_SWORD,
+	Items.IRON_HELMET,
+	Items.IRON_CHESTPLATE,
+	Items.IRON_LEGGINGS,
+	Items.IRON_BOOTS,
+	Items.DIAMOND_HELMET,
+	Items.DIAMOND_CHESTPLATE,
+	Items.DIAMOND_LEGGINGS,
+	Items.DIAMOND_BOOTS,
+	# Hoe is Beta 1.6 — kept here as a debug-only grant. The recipe is
+	# disabled so normal players can't craft one, but devs can press J in
+	# debug mode to test the till logic.
+	Items.WOODEN_HOE,
 ]
 const _CAM_FIRST_PERSON: Vector3 = Vector3(0, 0.7, 0)
 const _CAM_THIRD_BACK: Vector3 = Vector3(0, 1.0, 3.5)
@@ -70,6 +143,27 @@ var inventory: Inventory
 var creative_mode: bool = false
 var perspective: int = PERSPECTIVE_FIRST
 var is_mining: bool = false  # set by Interaction; drives mining-swing animation
+var health: int = MAX_HEALTH
+
+# Fall tracking — _fall_peak_y is the HIGHEST Y reached during the
+# current air period. On landing we compute (peak - land_y) to get the
+# actual fall distance regardless of jumps bumping the start upward.
+var _fall_peak_y: float = 0.0
+var _was_on_floor: bool = false
+# Set true on spawn / respawn so the very first landing doesn't deal
+# fall damage. Vanilla-equivalent: EntityPlayer.fallDistance is reset
+# on respawn AND the player isn't considered "falling" until they leave
+# the ground for the first time post-spawn. Without this we'd take 37
+# damage from the initial drop at (8, 100, 8) and respawn-loop forever.
+var _fall_immune_next_landing: bool = true
+# Counts down each physics tick after a successful damage hit. While > 0,
+# `take_damage` returns early — vanilla's hurtResistantTime behavior so
+# the player can't be ground to death by mob ticks landing on the same
+# frame.
+var _damage_cooldown_remaining: float = 0.0
+# Counts up while below max HP. When >= HEALTH_REGEN_INTERVAL_SEC, +1 HP
+# and resets. Cleared on death; doesn't tick while at max.
+var _regen_accum: float = 0.0
 
 # Tunable at runtime via the FP Tool Tuner panel. These defaults are the
 # user's hand-tuned best preset (closest match to vanilla MC) — keep in
@@ -107,9 +201,9 @@ var _use_vanilla_orient_tp: bool = true
 # Third-person held-tool rest pose (parented to the arm_r node, so
 # coordinates are arm-local). Tunable from the FP Tool Tuner panel after
 # switching it to TP mode.
-var _tp_held_tool_position: Vector3 = Vector3(0, -0.75, -0.05)
+var _tp_held_tool_position: Vector3 = Vector3(0, -0.75, -0.15)
 var _tp_held_tool_rotation: Vector3 = Vector3(deg_to_rad(-20), deg_to_rad(35), 0)
-var _tp_held_tool_pixel_size: float = 0.05
+var _tp_held_tool_pixel_size: float = 0.035
 
 # "fp" or "tp" — which value set the tuner sliders read/write.
 var _tuner_mode: String = "fp"
@@ -138,6 +232,7 @@ func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	inventory = Inventory.new()
 	inventory.changed.connect(_update_held_item)
+	inventory.changed.connect(_update_armor_overlay)
 	var hotbar: Control = get_node_or_null("Crosshair/Hotbar")
 	if hotbar != null:
 		hotbar.bind(inventory)
@@ -147,6 +242,9 @@ func _ready() -> void:
 	var table_screen: Control = get_node_or_null("Crosshair/CraftingTableScreen")
 	if table_screen != null:
 		table_screen.bind(inventory)
+	var furnace_screen: Control = get_node_or_null("Crosshair/FurnaceScreen")
+	if furnace_screen != null:
+		furnace_screen.bind(inventory)
 	# Build the player character model (hidden in first person)
 	var model_script: GDScript = load("res://scripts/player/character_model.gd")
 	_character_model = model_script.new()
@@ -167,6 +265,7 @@ func _ready() -> void:
 	# it stays anchored in the lower-right corner of the view).
 	_build_fp_hand()
 	_update_held_item()  # set initial hand-vs-block visibility
+	_update_armor_overlay()
 	_apply_perspective()
 	_update_debug_label()
 
@@ -187,6 +286,25 @@ func _build_fp_hand() -> void:
 # Vanilla MC: when the selected hotbar slot has a block, show that block in
 # the lower-right of the view instead of the bare hand. Rebuilt on demand
 # whenever the held id changes; same swing/punch animation drives it.
+# Pushes the armor-slot item ids to both the world-space player model
+# AND the inventory-preview model so the preview reflects what the player
+# is actually wearing. Helmet = slot 36, chest = 37, legs = 38, feet = 39
+# (see Inventory.ARMOR_START).
+func _update_armor_overlay() -> void:
+	if inventory == null:
+		return
+	var helmet: int = inventory.slots[Inventory.ARMOR_START].item_id
+	var chest: int = inventory.slots[Inventory.ARMOR_START + 1].item_id
+	var legs: int = inventory.slots[Inventory.ARMOR_START + 2].item_id
+	var feet: int = inventory.slots[Inventory.ARMOR_START + 3].item_id
+	if _character_model != null and _character_model.has_method("update_armor"):
+		_character_model.update_armor(helmet, chest, legs, feet)
+	# Mirror to the live inventory preview (offscreen viewport).
+	var preview_model: Node3D = CharacterPreview.get_model()
+	if preview_model != null and preview_model.has_method("update_armor"):
+		preview_model.update_armor(helmet, chest, legs, feet)
+
+
 func _update_held_item() -> void:
 	if inventory == null:
 		return
@@ -219,11 +337,18 @@ func _update_held_item() -> void:
 	# TP orient is a child of TP pivot; queue_free above already disposed it.
 	_held_tool_tp_orient = null
 	if id != Blocks.AIR:
-		if Items.is_tool_item(id):
+		# Block IDs live in [1..99]; non-block items (sticks, tools, coal,
+		# ingots, diamond) start at Items.STICK = 100. Block-IDs get a 3D
+		# cube held in the hand; everything else uses the sprite-extruded
+		# mesh (vanilla MC's ItemModelGenerator path).
+		if id >= Items.STICK:
 			_build_held_tool(id)
 		else:
 			_build_held_block(id)
 	_apply_held_visibility()
+	# Mirror to the inventory preview — vanilla GuiInventory shows the
+	# currently-held stack in the avatar's right hand.
+	CharacterPreview.set_held_item(id)
 
 
 func _build_held_block(id: int) -> void:
@@ -318,15 +443,31 @@ func _build_held_tool(id: int) -> void:
 		# 50°Y / -25°Z inner sprite tilt when the toggle is on.
 		_held_tool_tp_orient = Node3D.new()
 		_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp)
+		# Axe sprites are mirror-arranged vs pickaxe (head upper-LEFT
+		# instead of upper-RIGHT), so the same orient transform points
+		# the blade back at the player's face. Flip 180° around the
+		# tool-local Y to swing the blade forward.
+		if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
+			_held_tool_tp_orient.transform.basis = (
+				_held_tool_tp_orient.transform.basis * Basis(Vector3.UP, deg_to_rad(180.0))
+			)
 		_held_tool_tp_pivot.add_child(_held_tool_tp_orient)
 
 		_held_tool_tp = MeshInstance3D.new()
 		_held_tool_tp.mesh = SpriteExtruder.build(tex)
 		var tp_ps: float = _tp_held_tool_pixel_size
-		_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
-		# Same handle-tip pivot as FP — handle bottom lands at the wrist.
-		var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-		_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+		# Non-tool loose items (coal, ingots, diamond) use a tighter scale
+		# and skip the handle-pivot offset. Applying the handle pivot to a
+		# compact item pulls it upward off the hand; centering + shrinking
+		# keeps it nestled in the fist without clipping the arm mesh.
+		if Items.is_tool_item(id):
+			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
+			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+		else:
+			var loose_ps: float = tp_ps * 0.6
+			_held_tool_tp.scale = Vector3(loose_ps, loose_ps, loose_ps)
+			_held_tool_tp.position = Vector3.ZERO
 		var tp_shader: Shader = load("res://shaders/held_item_world.gdshader") as Shader
 		var tp_mat := ShaderMaterial.new()
 		tp_mat.shader = tp_shader
@@ -621,11 +762,14 @@ func _unhandled_input(event: InputEvent) -> void:
 		# paused the world while GuiIngameMenu was up).
 		var inv_screen: Control = get_node_or_null("Crosshair/InventoryScreen")
 		var table_screen: Control = get_node_or_null("Crosshair/CraftingTableScreen")
+		var furnace_screen: Control = get_node_or_null("Crosshair/FurnaceScreen")
 		var pause_menu: Control = get_node_or_null("Crosshair/PauseMenu")
 		if inv_screen != null and inv_screen.is_open():
 			inv_screen.toggle()
 		elif table_screen != null and table_screen.is_open():
 			table_screen.toggle()
+		elif furnace_screen != null and furnace_screen.is_open():
+			furnace_screen.close()
 		elif pause_menu != null:
 			pause_menu.open()
 			get_viewport().set_input_as_handled()
@@ -644,6 +788,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_debug_fill_hotbar()
 	elif Game.debug_enabled and event.is_action_pressed("debug_fill_tools"):
 		_debug_fill_tools()
+	elif Game.debug_enabled and event.is_action_pressed("debug_fill_smelt"):
+		_debug_fill_smelt()
 	elif event.is_action_pressed("debug_tool_tuner"):
 		if _tool_tuner != null and _tool_tuner.has_method("toggle"):
 			_tool_tuner.toggle()
@@ -756,6 +902,13 @@ func _debug_fill_hotbar() -> void:
 func _debug_fill_tools() -> void:
 	for tool_id: int in _DEBUG_FILL_TOOLS:
 		inventory.add_item(tool_id, 1)
+
+
+# Smelting starter pack — 16 of each raw ore + cobblestone + coal so the
+# furnace + smelting + ingot path can be tested without spelunking.
+func _debug_fill_smelt() -> void:
+	for item_id: int in _DEBUG_FILL_SMELT:
+		inventory.add_item(item_id, 16)
 
 
 func _update_debug_label() -> void:
@@ -879,10 +1032,131 @@ func _physics_process(delta: float) -> void:
 		if _held_tool_pivot != null and _held_tool_pivot.visible:
 			_apply_tool_swing(_held_tool_pivot, _held_tool_position, _held_tool_rotation, progress)
 
+	_update_fall_tracking()
+	if _damage_cooldown_remaining > 0.0:
+		_damage_cooldown_remaining = maxf(0.0, _damage_cooldown_remaining - delta)
+	_tick_health_regen(delta)
+
+
+# Pre-Beta 1.8 health regen: +1 HP every HEALTH_REGEN_INTERVAL_SEC while
+# below max. No hunger gating; just a steady passive heal.
+func _tick_health_regen(delta: float) -> void:
+	if health <= 0 or health >= MAX_HEALTH:
+		_regen_accum = 0.0
+		return
+	_regen_accum += delta
+	if _regen_accum >= HEALTH_REGEN_INTERVAL_SEC:
+		_regen_accum -= HEALTH_REGEN_INTERVAL_SEC
+		health = mini(MAX_HEALTH, health + 1)
+		health_changed.emit(health, MAX_HEALTH)
+
 	# Recover if we fall through the world
 	if global_position.y < -20.0:
 		global_position = Vector3(8, 100.0, 8)
 		velocity = Vector3.ZERO
+
+
+# Called every physics frame. Tracks the highest Y reached while airborne
+# and applies fall damage on the tick the player lands. Mirrors vanilla
+# EntityPlayer.fall() — damage = max(0, fall_blocks - 3). Doesn't apply
+# in creative mode.
+func _update_fall_tracking() -> void:
+	var on_floor: bool = is_on_floor()
+	if not on_floor:
+		_fall_peak_y = maxf(_fall_peak_y, global_position.y)
+	elif not _was_on_floor:
+		# Just landed this tick.
+		if _fall_immune_next_landing:
+			_fall_immune_next_landing = false
+		else:
+			var fall_distance: float = _fall_peak_y - global_position.y
+			if fall_distance > FALL_DAMAGE_SAFE_BLOCKS and not creative_mode:
+				take_damage(int(floor(fall_distance - FALL_DAMAGE_SAFE_BLOCKS)), DAMAGE_FALL)
+		_fall_peak_y = global_position.y
+	else:
+		# Standing still on the floor.
+		_fall_peak_y = global_position.y
+	_was_on_floor = on_floor
+
+
+# Public damage entry point. Applies armor-reduction unless the source
+# bypasses armor (fall damage does per vanilla Alpha behavior). Emits
+# signals for UI + sound hooks; routes to respawn on 0 HP.
+func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
+	if amount <= 0 or health <= 0:
+		return
+	if _damage_cooldown_remaining > 0.0:
+		return  # vanilla hurtResistantTime — drop overlapping hits
+	var final_amount: int = amount
+	if source != DAMAGE_FALL and inventory != null:
+		# Vanilla armor formula: final = damage × (25 - total_points) / 25.
+		var total_defense: int = 0
+		for i in range(Inventory.ARMOR_SIZE):
+			var stack: ItemStack = inventory.slots[Inventory.ARMOR_START + i]
+			total_defense += Items.armor_defense(stack.item_id)
+		final_amount = int(round(float(amount) * float(25 - total_defense) / 25.0))
+		if final_amount < 1:
+			final_amount = 1  # vanilla: at least 1 damage if any made it through
+		# Vanilla EntityPlayer.damageArmor — each worn piece loses
+		# max(1, absorbed/4) durability per hit.
+		_damage_armor(amount - final_amount)
+	health = maxi(0, health - final_amount)
+	_damage_cooldown_remaining = DAMAGE_COOLDOWN_SEC
+	# Vanilla branches on source: fall damage plays fall.big/.small,
+	# generic hits play the rotating hit1/2/3. Matches EntityHuman.
+	if source == DAMAGE_FALL:
+		SFX.play_player_fall(final_amount)
+	else:
+		SFX.play_player_hit()
+	damaged.emit(final_amount, source)
+	health_changed.emit(health, MAX_HEALTH)
+	if health == 0:
+		died.emit()
+		_show_death_screen()
+
+
+func _show_death_screen() -> void:
+	# Freeze physics-level input until the player clicks Respawn.
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var screen: Control = get_node_or_null("Crosshair/DeathScreen") as Control
+	if screen != null and screen.has_method("open"):
+		screen.open()
+	else:
+		# Fallback if the scene node isn't wired yet.
+		_respawn()
+
+
+# Instant-respawn: teleport to the scene's spawn position and restore
+# health. Vanilla shows a death screen with a Respawn button; that's
+# deferred until the death-flow UI lands.
+func _respawn() -> void:
+	global_position = Vector3(8, 100.0, 8)
+	velocity = Vector3.ZERO
+	_fall_peak_y = global_position.y
+	_fall_immune_next_landing = true
+	_damage_cooldown_remaining = 0.0
+	_regen_accum = 0.0
+	health = MAX_HEALTH
+	health_changed.emit(health, MAX_HEALTH)
+
+
+# Vanilla EntityPlayer.damageArmor — distributes durability loss across
+# every worn armor piece. Per-piece loss = max(1, absorbed_dmg / 4).
+# When a piece's durability runs out, ItemStack.damage_tool() empties
+# the slot. Refreshes inventory + UI so the durability bars and the 3D
+# overlay update in lockstep.
+func _damage_armor(absorbed: int) -> void:
+	if absorbed <= 0 or inventory == null:
+		return
+	var per_piece_loss: int = maxi(1, absorbed / 4)
+	var any_changed: bool = false
+	for i in range(Inventory.ARMOR_SIZE):
+		var stack: ItemStack = inventory.slots[Inventory.ARMOR_START + i]
+		if not stack.is_empty() and stack.max_durability() > 0:
+			stack.damage_tool(per_piece_loss)
+			any_changed = true
+	if any_changed:
+		inventory.changed.emit()
 
 
 func _apply_mouse_motion(event: InputEventMouseMotion) -> void:

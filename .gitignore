@@ -32,6 +32,11 @@ exports/
 
 .claude
 
+# Third-party source material (game JARs, reference assets). Kept locally
+# so we can re-extract textures/data without re-downloading, but never
+# redistributed — their IP, not ours.
+vendor/
+
 # GDExtension native build artifacts
 bin/*.dylib
 bin/*.so

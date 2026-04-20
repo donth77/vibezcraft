@@ -58,7 +58,7 @@ func add_item(item_id: int, amount: int) -> int:
 		if remaining <= 0:
 			break
 		var slot: ItemStack = slots[i]
-		if slot.item_id == item_id and slot.count < ItemStack.MAX_SIZE:
+		if slot.item_id == item_id and slot.count < Items.max_stack_size(item_id):
 			remaining = slot.add(remaining)
 	for i in range(storage_end):
 		if remaining <= 0:
@@ -72,6 +72,31 @@ func add_item(item_id: int, amount: int) -> int:
 	return remaining
 
 
+# Returns true if the inventory has at least `amount` capacity for
+# `item_id` — i.e. add_item(item_id, amount) would succeed without
+# overflow. Mirrors vanilla EntityPlayer.canPickUpItem so DroppedItem
+# can skip the magnet pull when there's no room (otherwise items get
+# stuck orbiting the player).
+func can_accept(item_id: int, amount: int) -> bool:
+	if amount <= 0 or item_id == Blocks.AIR:
+		return true
+	var remaining: int = amount
+	var max_per_slot: int = Items.max_stack_size(item_id)
+	var storage_end: int = MAIN_START + MAIN_SIZE
+	# Pass 1 — fit into existing partial stacks of the same id.
+	for i in range(storage_end):
+		var slot: ItemStack = slots[i]
+		if slot.item_id == item_id and slot.count < max_per_slot:
+			remaining -= max_per_slot - slot.count
+			if remaining <= 0:
+				return true
+	# Pass 2 — any empty slot soaks the rest.
+	for i in range(storage_end):
+		if slots[i].is_empty():
+			return true
+	return false
+
+
 # Removes one of whatever's in the selected slot. Returns true if consumed.
 func consume_one_selected() -> bool:
 	var s: ItemStack = selected()
@@ -80,6 +105,19 @@ func consume_one_selected() -> bool:
 	s.remove(1)
 	changed.emit()
 	return true
+
+
+# Damages the selected tool by 1 use. No-op if the slot isn't a tool.
+# Returns true if the tool just broke this hit (so caller can play SFX).
+# Always emits `changed` if anything happened, so the UI redraws the
+# durability bar.
+func damage_selected_tool() -> bool:
+	var s: ItemStack = selected()
+	if s.is_empty() or s.max_durability() <= 0:
+		return false
+	var broke: bool = s.damage_tool(1)
+	changed.emit()
+	return broke
 
 
 # Empties the selected slot. Returns the count that was removed.

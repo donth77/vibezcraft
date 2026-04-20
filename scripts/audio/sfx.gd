@@ -46,6 +46,24 @@ const _DIG_SOUNDS: Dictionary = {
 }
 
 const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
+const _TOOL_BREAK_SOUND: String = "res://assets/audio/sfx/tool_break.ogg"
+# Player damage sounds — vanilla EntityHuman.getHurtSound /
+# getFallSound. hit{1,2,3} rotate randomly per hit; fallbig fires when
+# the fall damage is > 4, else fallsmall.
+const _PLAYER_HIT_SOUNDS: Array = [
+	"res://assets/audio/sfx/damage/hit1.ogg",
+	"res://assets/audio/sfx/damage/hit2.ogg",
+	"res://assets/audio/sfx/damage/hit3.ogg",
+]
+const _PLAYER_FALL_BIG: String = "res://assets/audio/sfx/damage/fallbig.ogg"
+const _PLAYER_FALL_SMALL: String = "res://assets/audio/sfx/damage/fallsmall.ogg"
+# Vanilla MC plays step.gravel for hoe tilling, soil step events, etc.
+const _GRAVEL_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/step/gravel1.ogg",
+	"res://assets/audio/sfx/step/gravel2.ogg",
+	"res://assets/audio/sfx/step/gravel3.ogg",
+	"res://assets/audio/sfx/step/gravel4.ogg",
+]
 
 # Step sounds — sourced from a1.2.6 newsound/step/. Played as the player
 # walks, picked from the variants by material. Quieter than dig sounds.
@@ -85,6 +103,13 @@ const _STEP_SOUNDS: Dictionary = {
 		"res://assets/audio/sfx/step/cloth2.ogg",
 		"res://assets/audio/sfx/step/cloth3.ogg",
 		"res://assets/audio/sfx/step/cloth4.ogg",
+	],
+	"gravel":
+	[
+		"res://assets/audio/sfx/step/gravel1.ogg",
+		"res://assets/audio/sfx/step/gravel2.ogg",
+		"res://assets/audio/sfx/step/gravel3.ogg",
+		"res://assets/audio/sfx/step/gravel4.ogg",
 	],
 }
 
@@ -134,6 +159,66 @@ func play_step(block_id: int) -> void:
 	player.play()
 
 
+# Hoe-till "thump" — vanilla MC plays step.gravel here. Pitch + volume
+# match BlockSoil.stepSound (volume×0.8, pitch averaged at 1.0).
+func play_hoe_till() -> void:
+	var path: String = _GRAVEL_STEP_SOUNDS[randi() % _GRAVEL_STEP_SOUNDS.size()]
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = -2.0
+	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.play()
+
+
+# Player "ouch" sound — vanilla EntityHuman.getHurtSound rotates three
+# variants and adds pitch jitter. Called whenever the player takes damage
+# (not specifically fall damage — that has its own louder sound below).
+func play_player_hit() -> void:
+	var path: String = _PLAYER_HIT_SOUNDS[randi() % _PLAYER_HIT_SOUNDS.size()]
+	_play_one(path, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+
+
+# Heavy-fall impact — vanilla branches on > 4 damage: fallbig for big
+# falls, fallsmall otherwise. Called INSTEAD of play_player_hit for fall
+# damage specifically.
+func play_player_fall(damage: int) -> void:
+	var path: String = _PLAYER_FALL_BIG if damage > 4 else _PLAYER_FALL_SMALL
+	_play_one(path, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+
+
+func _play_one(path: String, volume_db: float, pitch: float) -> void:
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = volume_db
+	player.pitch_scale = pitch
+	player.play()
+
+
+# Tool snap — vanilla MC's random/break.ogg, played when a tool's
+# durability hits zero and the stack is consumed.
+func play_tool_break() -> void:
+	var stream: AudioStream = _stream_cache.get(_TOOL_BREAK_SOUND)
+	if stream == null:
+		stream = load(_TOOL_BREAK_SOUND) as AudioStream
+		_stream_cache[_TOOL_BREAK_SOUND] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = 0.0
+	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.play()
+
+
 # Item pickup "pop" — vanilla MC's random/pop.ogg
 func play_pickup() -> void:
 	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
@@ -176,6 +261,8 @@ func _material_for(block_id: int) -> String:
 			return "sand"
 		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE:
 			return "wood"
+		Blocks.GRAVEL, Blocks.FARMLAND:
+			return "gravel"
 	return ""
 
 

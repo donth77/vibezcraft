@@ -20,10 +20,42 @@ const IRON_ORE := 13
 const GOLD_ORE := 14
 const DIAMOND_ORE := 15
 const CRAFTING_TABLE := 16
+# Vanilla "BlockSoil" — dirt tilled by a hoe. Drops dirt when broken.
+const FARMLAND := 17
+# Vanilla BlockGravel. Static for now (gravity / falling-block physics
+# deferred — vanilla `tickAlways()` will land with the entity-tick system).
+const GRAVEL := 18
+# Vanilla BlockFurnace + BlockBurningFurnace. Two IDs because the lit /
+# unlit state is a separate block in vanilla (toggled in-place when fuel
+# starts/stops burning). Only FURNACE is craftable; LIT_FURNACE is set by
+# the furnace tile-entity ticker.
+const FURNACE := 19
+const LIT_FURNACE := 20
+# Vanilla BlockGlass — transparent (alpha-test) block from smelting sand.
+# Treated as non-opaque so the chunk mesher culls neighbor faces against
+# it the same way it does with air.
+const GLASS := 21
+# Vanilla BlockSapling — drops from leaves at 1/20 per
+# BlockLeaves.dropNaturally. Renders as a non-cube cross-quad in vanilla;
+# we currently render as a full alpha-tested cube (proper cross-mesh
+# requires non-cube mesher path — same TODO as torches/slabs/stairs).
+const SAPLING := 22
 
 
 static func is_opaque(id: int) -> bool:
-	return id != AIR
+	# LEAVES + GLASS + SAPLING render with alpha-test (discard in
+	# chunk.gdshader); treating any as opaque would cull the stone/dirt
+	# faces behind them and the shader discard would then punch straight
+	# through to the world background. Mesher pairs this with a "same-id
+	# cull" so adjacent leaves/glass don't emit shared internal faces.
+	return id != AIR and id != LEAVES and id != GLASS and id != SAPLING
+
+
+# Vanilla BlockGravel + BlockSand inherit BlockFalling, which schedules
+# a fall-tick whenever a neighbor changes. ChunkManager calls this after
+# any block becomes AIR to settle anything sitting unsupported above.
+static func has_gravity(id: int) -> bool:
+	return id == SAND or id == GRAVEL
 
 
 # Block hardness — base for all break-time math. Vanilla MC values, in
@@ -33,16 +65,20 @@ static func hardness(id: int) -> float:
 	match id:
 		BEDROCK:
 			return -1.0  # unbreakable
-		LEAVES:
+		LEAVES, GLASS:
 			return 0.2
+		SAPLING:
+			return 0.0  # vanilla: instant break
 		DIRT, SAND:
 			return 0.5
-		GRASS:
+		GRASS, FARMLAND, GRAVEL:
 			return 0.6
 		LOG, PLANKS, CRAFTING_TABLE:
 			return 2.0
 		STONE, COBBLESTONE, BRICK:
 			return 1.5
+		FURNACE, LIT_FURNACE:
+			return 3.5
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
 			return 3.0
 		OBSIDIAN:
@@ -71,34 +107,66 @@ static func required_harvest_level(id: int) -> int:
 # 0 = any/none (no bonus from any tool). Mirrors vanilla ItemPickaxe's block list.
 static func preferred_tool_type(id: int) -> int:
 	match id:
-		STONE, COBBLESTONE, BRICK, OBSIDIAN, COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
+		STONE, COBBLESTONE, BRICK, OBSIDIAN:
+			return Items.TOOL_TYPE_PICKAXE
+		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
+			return Items.TOOL_TYPE_PICKAXE
+		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
 		LOG, PLANKS:
 			return Items.TOOL_TYPE_AXE
-		DIRT, GRASS, SAND:
+		DIRT, GRASS, SAND, FARMLAND, GRAVEL:
 			return Items.TOOL_TYPE_SHOVEL
 	return 0
 
 
 # Time (seconds) to break this block with the given tool (or AIR for bare
-# hand). Returns -1.0 for unbreakable. The tool counts as "correct" only
-# when BOTH the type matches (pickaxe for stone, axe for wood, etc.) AND
-# the harvest level meets the block's requirement (wooden pick on iron
-# ore = wrong tier → slow + no drop, even though pickaxe type matches).
+# hand). Returns -1.0 for unbreakable. Mirrors vanilla Beta's
+# `Block.getPlayerRelativeBlockHardness`:
+#   • If the block's material requires a tool and the held tool doesn't
+#     qualify, the slow branch applies: `hardness × 5` seconds.
+#   • Otherwise the fast branch: `hardness × 1.5 / strVsBlock`, where
+#     strVsBlock is the tool's speed when it's effective against this
+#     block (correct type + sufficient tier), else 1.0 (bare-hand rate).
+# "Requires a tool" = stone-class (pickaxe preferred, harvest level 0) or
+# anything with a positive harvest level (ores, obsidian). Soft blocks
+# (dirt, grass, wood, leaves, sand) all break fine bare-handed.
 static func break_time(id: int, tool_id: int) -> float:
 	var h: float = hardness(id)
 	if h < 0.0:
 		return -1.0
 	var tool_kind: int = Items.tool_type(tool_id) if tool_id != AIR else 0
 	var preferred: int = preferred_tool_type(id)
-	var type_ok: bool = preferred != 0 and tool_kind == preferred
 	var required_level: int = required_harvest_level(id)
+	var type_ok: bool = preferred != 0 and tool_kind == preferred
 	var tier_ok: bool = tool_id != AIR and Items.tool_harvest_level(tool_id) >= required_level
-	var correct: bool = type_ok and tier_ok
-	# Vanilla multiplier: 1.5 if correct, 5.0 (slow penalty) otherwise.
-	var multiplier: float = 1.5 if correct else 5.0
-	var speed: float = Items.tool_speed(tool_id) if correct else 1.0
-	return h * multiplier / speed
+	var effective: bool = type_ok and tier_ok
+	var requires_tool: bool = (
+		(preferred == Items.TOOL_TYPE_PICKAXE and required_level == 0) or required_level > 0
+	)
+	if requires_tool and not effective:
+		return h * 5.0
+	var speed: float = Items.tool_speed(tool_id) if effective else 1.0
+	return h * 1.5 / speed
+
+
+# Wraps drop_with_tool with vanilla random-drop overrides:
+#   • Leaves: 5% chance of SAPLING (BlockLeaves.dropNaturally — 1/20)
+#   • Gravel: 10% chance of FLINT instead of gravel (BlockGravel)
+# All other blocks return the deterministic drop_with_tool result.
+static func random_drop(id: int, tool_id: int) -> int:
+	if id == LEAVES:
+		# Leaves use a 1/20 sapling roll regardless of tool.
+		if randi() % 20 == 0:
+			return SAPLING
+		return AIR
+	if id == GRAVEL:
+		# 1/10 flint chance — only when broken with a shovel-or-bare-hand
+		# (vanilla); a non-shovel/non-bare break still drops gravel via
+		# drop_with_tool's normal path.
+		if randi() % 10 == 0:
+			return Items.FLINT
+	return drop_with_tool(id, tool_id)
 
 
 # Returns the item dropped when the block is broken with `tool_id`, gated
@@ -129,7 +197,7 @@ static func break_time_bare_hand(id: int) -> float:
 			return 0.3
 		DIRT, SAND:
 			return 0.75
-		GRASS:
+		GRASS, FARMLAND, GRAVEL:
 			return 0.9
 		LOG:
 			return 3.0
@@ -137,6 +205,8 @@ static func break_time_bare_hand(id: int) -> float:
 			return 3.0
 		STONE, COBBLESTONE, BRICK:
 			return 7.5  # painfully slow without a pickaxe — Alpha-faithful
+		FURNACE, LIT_FURNACE:
+			return 17.5  # 3.5 hardness × 5 (no-tool penalty)
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
 			return 15.0  # ores are tougher than stone — wood-pick takes ~2.5s
 		OBSIDIAN:
@@ -153,10 +223,14 @@ static func drops(id: int) -> int:
 	match id:
 		STONE:
 			return COBBLESTONE
-		GRASS:
+		GRASS, FARMLAND:
 			return DIRT
 		LEAVES:
 			return AIR  # Alpha leaves dropped 0 or 1 sapling — no saplings yet
+		GLASS:
+			return AIR  # vanilla: glass shatters when broken, drops nothing
+		SAPLING:
+			return SAPLING  # drops itself when broken
 		BEDROCK:
 			return AIR
 		COAL_ORE:
@@ -165,6 +239,8 @@ static func drops(id: int) -> int:
 			return Items.DIAMOND
 		IRON_ORE, GOLD_ORE:
 			return id  # iron/gold ore drops itself (smelt for ingot)
+		LIT_FURNACE:
+			return FURNACE  # vanilla: lit furnace breaks back into the unlit form
 	return id
 
 
@@ -200,6 +276,18 @@ static func name_of(id: int) -> String:
 			return "diamond_ore"
 		CRAFTING_TABLE:
 			return "crafting_table"
+		FARMLAND:
+			return "farmland"
+		GRAVEL:
+			return "gravel"
+		FURNACE:
+			return "furnace"
+		LIT_FURNACE:
+			return "lit_furnace"
+		GLASS:
+			return "glass"
+		SAPLING:
+			return "sapling"
 	return "unknown"
 
 
@@ -250,4 +338,28 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "planks"
 				_:
 					return "crafting_table_side"
+		FARMLAND:
+			match face:
+				"top":
+					return "farmland"
+				_:
+					return "dirt"
+		GRAVEL:
+			return "gravel"
+		FURNACE:
+			match face:
+				"top", "bottom":
+					return "furnace_top"
+				_:
+					return "furnace_front"
+		LIT_FURNACE:
+			match face:
+				"top", "bottom":
+					return "furnace_top"
+				_:
+					return "furnace_front_lit"
+		GLASS:
+			return "glass"
+		SAPLING:
+			return "sapling"
 	return ""

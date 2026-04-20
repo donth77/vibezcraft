@@ -48,10 +48,15 @@ func setup(
 	_pickup_delay = p_pickup_delay
 	_spawn_time = Time.get_ticks_msec() / 1000.0
 	# Mesh is a child Node3D so we can bob its local Y without fighting the
-	# root's gravity-controlled global Y. BlockMesh.get_cube_mesh caches the
-	# ArrayMesh per (block_id, size) so many items share one GPU resource.
+	# root's gravity-controlled global Y. Block IDs render as a real cube
+	# via BlockMesh; non-block items (coal, ingots, sticks, tools — id >=
+	# 100) get the voxel-extruded sprite mesh used by held items, which
+	# would otherwise show as a textureless cube.
 	_mesh = MeshInstance3D.new()
-	_mesh.mesh = BlockMesh.get_cube_mesh(p_item_id, MESH_SIZE)
+	if p_item_id >= Items.STICK:
+		_build_sprite_mesh(p_item_id)
+	else:
+		_mesh.mesh = BlockMesh.get_cube_mesh(p_item_id, MESH_SIZE)
 	add_child(_mesh)
 	_ray_query = PhysicsRayQueryParameters3D.new()
 
@@ -68,8 +73,11 @@ func _process(delta: float) -> void:
 		queue_free()
 		return
 
-	# Magnet / pickup
-	if _player != null and elapsed >= _pickup_delay:
+	# Magnet / pickup. Vanilla rule: skip the pull entirely if the player's
+	# inventory can't take this item — otherwise the item orbits the
+	# player at PICKUP_RADIUS forever (magnet pulls in, pickup fails,
+	# repeat) and looks like it's tied to them by an invisible string.
+	if _player != null and elapsed >= _pickup_delay and _player_can_accept():
 		var target: Vector3 = _player.global_position + Vector3(0, 0.4, 0)
 		var to_target: Vector3 = target - global_position
 		var dist: float = to_target.length()
@@ -122,6 +130,26 @@ func _apply_physics(delta: float) -> void:
 	global_position = new_pos
 
 
+# Build a voxel-extruded sprite mesh from the item's icon texture and
+# scale to MESH_SIZE world units (sprite is 16 native px wide → uniform
+# scale = MESH_SIZE / 16). Uses the same depth-tested item shader the
+# third-person held tool uses.
+func _build_sprite_mesh(id: int) -> void:
+	var tex: Texture2D = ItemIcons.icon_for(id)
+	if tex == null:
+		return
+	var mesh: ArrayMesh = SpriteExtruder.build(tex)
+	if mesh == null:
+		return
+	_mesh.mesh = mesh
+	var ps: float = MESH_SIZE / 16.0
+	_mesh.scale = Vector3(ps, ps, ps)
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/held_item_world.gdshader") as Shader
+	mat.set_shader_parameter("item_texture", tex)
+	_mesh.material_override = mat
+
+
 func _try_pickup(player: Node3D) -> void:
 	if not "inventory" in player:
 		return
@@ -138,3 +166,15 @@ func _try_pickup(player: Node3D) -> void:
 
 func _find_player() -> Node3D:
 	return get_tree().root.get_node_or_null("Main/Player") as Node3D
+
+
+# Returns true if the player's inventory has room for at least 1 of our
+# item. False → the magnet (and the pickup attempt) skip this frame so
+# the item just sits on the ground until something opens up.
+func _player_can_accept() -> bool:
+	if _player == null or not "inventory" in _player:
+		return false
+	var inv: Inventory = _player.get("inventory") as Inventory
+	if inv == null:
+		return false
+	return inv.can_accept(item_id, 1)

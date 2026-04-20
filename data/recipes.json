@@ -25,6 +25,168 @@
       "result": {"id": "stone_pickaxe", "count": 1}
     },
     {
+      "id": "stone_axe",
+      "pattern": ["CC", "CS", " S"],
+      "key": {"C": "cobblestone", "S": "stick"},
+      "result": {"id": "stone_axe", "count": 1}
+    },
+    {
+      "id": "stone_shovel",
+      "pattern": ["C", "S", "S"],
+      "key": {"C": "cobblestone", "S": "stick"},
+      "result": {"id": "stone_shovel", "count": 1}
+    },
+    {
+      "id": "stone_sword",
+      "pattern": ["C", "C", "S"],
+      "key": {"C": "cobblestone", "S": "stick"},
+      "result": {"id": "stone_sword", "count": 1}
+    },
+    {
+      "id": "iron_pickaxe",
+      "pattern": ["III", " S ", " S "],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "iron_pickaxe", "count": 1}
+    },
+    {
+      "id": "iron_axe",
+      "pattern": ["II", "IS", " S"],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "iron_axe", "count": 1}
+    },
+    {
+      "id": "iron_shovel",
+      "pattern": ["I", "S", "S"],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "iron_shovel", "count": 1}
+    },
+    {
+      "id": "iron_sword",
+      "pattern": ["I", "I", "S"],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "iron_sword", "count": 1}
+    },
+    {
+      "id": "diamond_pickaxe",
+      "pattern": ["DDD", " S ", " S "],
+      "key": {"D": "diamond", "S": "stick"},
+      "result": {"id": "diamond_pickaxe", "count": 1}
+    },
+    {
+      "id": "diamond_axe",
+      "pattern": ["DD", "DS", " S"],
+      "key": {"D": "diamond", "S": "stick"},
+      "result": {"id": "diamond_axe", "count": 1}
+    },
+    {
+      "id": "diamond_shovel",
+      "pattern": ["D", "S", "S"],
+      "key": {"D": "diamond", "S": "stick"},
+      "result": {"id": "diamond_shovel", "count": 1}
+    },
+    {
+      "id": "diamond_sword",
+      "pattern": ["D", "D", "S"],
+      "key": {"D": "diamond", "S": "stick"},
+      "result": {"id": "diamond_sword", "count": 1}
+    },
+    {
+      "id": "gold_pickaxe",
+      "pattern": ["GGG", " S ", " S "],
+      "key": {"G": "gold_ingot", "S": "stick"},
+      "result": {"id": "gold_pickaxe", "count": 1}
+    },
+    {
+      "id": "gold_axe",
+      "pattern": ["GG", "GS", " S"],
+      "key": {"G": "gold_ingot", "S": "stick"},
+      "result": {"id": "gold_axe", "count": 1}
+    },
+    {
+      "id": "gold_shovel",
+      "pattern": ["G", "S", "S"],
+      "key": {"G": "gold_ingot", "S": "stick"},
+      "result": {"id": "gold_shovel", "count": 1}
+    },
+    {
+      "id": "gold_sword",
+      "pattern": ["G", "G", "S"],
+      "key": {"G": "gold_ingot", "S": "stick"},
+      "result": {"id": "gold_sword", "count": 1}
+    },
+    {
+      "id": "iron_helmet",
+      "pattern": ["III", "I I"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_helmet", "count": 1}
+    },
+    {
+      "id": "iron_chestplate",
+      "pattern": ["I I", "III", "III"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_chestplate", "count": 1}
+    },
+    {
+      "id": "iron_leggings",
+      "pattern": ["III", "I I", "I I"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_leggings", "count": 1}
+    },
+    {
+      "id": "iron_boots",
+      "pattern": ["I I", "I I"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_boots", "count": 1}
+    },
+    {
+      "id": "gold_helmet",
+      "pattern": ["GGG", "G G"],
+      "key": {"G": "gold_ingot"},
+      "result": {"id": "gold_helmet", "count": 1}
+    },
+    {
+      "id": "gold_chestplate",
+      "pattern": ["G G", "GGG", "GGG"],
+      "key": {"G": "gold_ingot"},
+      "result": {"id": "gold_chestplate", "count": 1}
+    },
+    {
+      "id": "gold_leggings",
+      "pattern": ["GGG", "G G", "G G"],
+      "key": {"G": "gold_ingot"},
+      "result": {"id": "gold_leggings", "count": 1}
+    },
+    {
+      "id": "gold_boots",
+      "pattern": ["G G", "G G"],
+      "key": {"G": "gold_ingot"},
+      "result": {"id": "gold_boots", "count": 1}
+    },
+    {
+      "id": "diamond_helmet",
+      "pattern": ["DDD", "D D"],
+      "key": {"D": "diamond"},
+      "result": {"id": "diamond_helmet", "count": 1}
+    },
+    {
+      "id": "diamond_chestplate",
+      "pattern": ["D D", "DDD", "DDD"],
+      "key": {"D": "diamond"},
+      "result": {"id": "diamond_chestplate", "count": 1}
+    },
+    {
+      "id": "diamond_leggings",
+      "pattern": ["DDD", "D D", "D D"],
+      "key": {"D": "diamond"},
+      "result": {"id": "diamond_leggings", "count": 1}
+    },
+    {
+      "id": "diamond_boots",
+      "pattern": ["D D", "D D"],
+      "key": {"D": "diamond"},
+      "result": {"id": "diamond_boots", "count": 1}
+    },
+    {
       "id": "wooden_shovel",
       "pattern": ["P", "S", "S"],
       "key": {"P": "planks", "S": "stick"},
@@ -37,11 +199,32 @@
       "result": {"id": "wooden_axe", "count": 1}
     },
     {
+      "id": "wooden_sword",
+      "pattern": ["P", "P", "S"],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_sword", "count": 1}
+    },
+    {
       "id": "crafting_table",
       "pattern": ["PP", "PP"],
       "key": {"P": "planks"},
       "result": {"id": "crafting_table", "count": 1}
+    },
+    {
+      "id": "furnace",
+      "pattern": ["CCC", "C C", "CCC"],
+      "key": {"C": "cobblestone"},
+      "result": {"id": "furnace", "count": 1}
     }
   ],
-  "shapeless": []
+  "shapeless": [],
+  "_disabled": [
+    {
+      "_reason": "Beta 1.6 addition; not in Alpha 1.2.6. Move into 'shaped' to re-enable.",
+      "id": "wooden_hoe",
+      "pattern": ["PP", " S", " S"],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_hoe", "count": 1}
+    }
+  ]
 }

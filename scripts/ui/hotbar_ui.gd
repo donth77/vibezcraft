@@ -30,6 +30,7 @@ const SELECTION_PAD: int = 4 * SCALE
 var inventory: Inventory
 var _slot_icons: Array = []  # Array[TextureRect]
 var _slot_counts: Array = []  # Array[Label]
+var _slot_dur_bars: Array = []  # Array[DurabilityBar]
 var _selection_rect: TextureRect
 var _font: FontFile = load(FONT_PATH) as FontFile
 
@@ -106,6 +107,15 @@ func _build_slots() -> void:
 		add_child(count)
 		_slot_counts.append(count)
 
+		# Durability bar — pinned 1 native pixel above the slot's bottom edge.
+		var bar := DurabilityBar.new()
+		bar.scale_factor = SCALE
+		var bar_y: int = SLOT_INNER_Y0 + SLOT_INNER_PX - (2 * SCALE)
+		bar.position = Vector2(slot_x, bar_y)
+		bar.size = Vector2(SLOT_INNER_PX, SCALE)
+		add_child(bar)
+		_slot_dur_bars.append(bar)
+
 
 func _build_selection_indicator() -> void:
 	_selection_rect = TextureRect.new()
@@ -135,6 +145,7 @@ func _refresh() -> void:
 		else:
 			_slot_icons[i].texture = ItemIcons.icon_for(stack.item_id)
 			_slot_counts[i].text = str(stack.count) if stack.count > 1 else ""
+		_slot_dur_bars[i].bind(stack, SLOT_INNER_PX)
 	_position_selection_rect()
 
 

@@ -38,6 +38,13 @@ const _LAYOUT := {
 	"crafting_table_top": 15,
 	"crafting_table_side": 16,
 	"crafting_table_front": 17,
+	"farmland": 18,
+	"gravel": 19,
+	"furnace_top": 20,
+	"furnace_front": 21,
+	"furnace_front_lit": 22,
+	"glass": 23,
+	"sapling": 24,
 }
 
 static var active_pack: String = DEFAULT_PACK

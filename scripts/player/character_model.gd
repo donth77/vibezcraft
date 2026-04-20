@@ -5,7 +5,17 @@ extends Node3D
 # Proportions: head 8x8x8, body 8x12x4, limbs 4x12x4 (in MC pixels = ÷16
 # blocks). Total height ≈ 1.8 blocks = matches the player capsule.
 
-const SKIN_PATH: String = "res://assets/textures/entities/packs/pixel_perfection/steve.png"
+# Resolved per call from the active texture pack (BlockAtlas.active_pack) so
+# switching pack at boot switches the Steve skin too. A pack without a steve
+# override falls back to pixel_perfection.
+const SKIN_FALLBACK_PACK: String = "pixel_perfection"
+const ARMOR_BASE_PATH: String = "res://assets/textures/entities/armor/"
+
+# Small uniform inflation applied to each armor overlay box so it visually
+# sits on TOP of the body piece without z-fighting. Vanilla uses 0.5 /
+# 16 = 0.03125 blocks per side; we scale by overlay_scale(size) below to
+# apply the same net inflation regardless of limb size.
+const ARMOR_INFLATION: float = 0.03
 
 const ARM_SIZE: Vector3 = Vector3(0.25, 0.75, 0.25)
 const LEG_SIZE: Vector3 = Vector3(0.25, 0.75, 0.25)
@@ -44,14 +54,22 @@ const _ARM_R_UVS: Array[Rect2] = [
 	Rect2(0.6875, 0.3125, 0.0625, 0.1875),
 ]
 
-# FP arm UVs — the full right-arm region (same as _ARM_R_UVS). Passed to
-# _build_textured_box with flip_v_sides=true so the clothing end of the
-# texture lands on the BOTTOM of the box (hand-tip end of the FP arm) and
-# the skin end lands on the TOP (wrist end). This is the mirror image of
-# the natural mapping — we do it because the FP camera frames the arm
-# such that the hand-tip end is toward the viewer and the shoulder is
-# off-screen at the "top" of the mesh.
-const _FP_ARM_R_UVS: Array[Rect2] = _ARM_R_UVS
+# FP arm UVs — the right-arm region, but with the top and bottom cap rects
+# swapped. The FP arm box is oriented with its +Y end (face 0 of the UV
+# array) pointing forward toward the fingertip. Without this swap, face 0
+# samples the arm's top cap — which is sleeve pixels in any skin with a
+# colored shirt — producing a visible blue/red/whatever blob at the
+# fingertip. Swapping puts the arm's bottom cap (skin-colored hand) there
+# instead. `flip_v_sides=true` handles the side faces separately so the
+# wrist end shows sleeve and the fingertip end shows bare skin.
+const _FP_ARM_R_UVS: Array[Rect2] = [
+	_ARM_R_UVS[1],  # +Y (fingertip) → arm's bottom cap (hand)
+	_ARM_R_UVS[0],  # -Y (wrist)     → arm's top cap (sleeve)
+	_ARM_R_UVS[2],
+	_ARM_R_UVS[3],
+	_ARM_R_UVS[4],
+	_ARM_R_UVS[5],
+]
 const _ARM_L_UVS: Array[Rect2] = [
 	Rect2(0.5625, 0.75, 0.0625, 0.0625),
 	Rect2(0.625, 0.75, 0.0625, 0.0625),
@@ -77,6 +95,45 @@ const _LEG_L_UVS: Array[Rect2] = [
 	Rect2(0.3125, 0.8125, 0.0625, 0.1875),
 ]
 
+# Armor UVs — all layer textures are 64×32 (legacy Alpha-era layout, same
+# as pre-1.8 vanilla). Pixel coords match the body-skin regions since armor
+# is drawn as an inflated overlay on the corresponding body part. These
+# rects use the RIGHT-side pixel regions; the left-side limbs reuse the
+# same rects (left=mirror of right in 64×32 format — there are no
+# dedicated left-side pixels).
+const _ARMOR_HEAD_UVS: Array[Rect2] = [
+	Rect2(0.125, 0.0, 0.125, 0.25),  # +Y top: (8, 0, 8, 8)
+	Rect2(0.25, 0.0, 0.125, 0.25),  # -Y bottom: (16, 0, 8, 8)
+	Rect2(0.0, 0.25, 0.125, 0.25),  # +X right: (0, 8, 8, 8)
+	Rect2(0.25, 0.25, 0.125, 0.25),  # -X left: (16, 8, 8, 8)
+	Rect2(0.375, 0.25, 0.125, 0.25),  # +Z back: (24, 8, 8, 8)
+	Rect2(0.125, 0.25, 0.125, 0.25),  # -Z front: (8, 8, 8, 8)
+]
+const _ARMOR_BODY_UVS: Array[Rect2] = [
+	Rect2(0.3125, 0.5, 0.125, 0.125),  # top: (20, 16, 8, 4)
+	Rect2(0.4375, 0.5, 0.125, 0.125),  # bottom: (28, 16, 8, 4)
+	Rect2(0.25, 0.625, 0.0625, 0.375),  # right: (16, 20, 4, 12)
+	Rect2(0.4375, 0.625, 0.0625, 0.375),  # left: (28, 20, 4, 12)
+	Rect2(0.5, 0.625, 0.125, 0.375),  # back: (32, 20, 8, 12)
+	Rect2(0.3125, 0.625, 0.125, 0.375),  # front: (20, 20, 8, 12)
+]
+const _ARMOR_ARM_UVS: Array[Rect2] = [
+	Rect2(0.6875, 0.5, 0.0625, 0.125),  # top: (44, 16, 4, 4)
+	Rect2(0.75, 0.5, 0.0625, 0.125),  # bottom: (48, 16, 4, 4)
+	Rect2(0.625, 0.625, 0.0625, 0.375),  # right: (40, 20, 4, 12)
+	Rect2(0.75, 0.625, 0.0625, 0.375),  # left: (48, 20, 4, 12)
+	Rect2(0.8125, 0.625, 0.0625, 0.375),  # back: (52, 20, 4, 12)
+	Rect2(0.6875, 0.625, 0.0625, 0.375),  # front: (44, 20, 4, 12)
+]
+const _ARMOR_LEG_UVS: Array[Rect2] = [
+	Rect2(0.0625, 0.5, 0.0625, 0.125),  # top: (4, 16, 4, 4)
+	Rect2(0.125, 0.5, 0.0625, 0.125),  # bottom: (8, 16, 4, 4)
+	Rect2(0.0, 0.625, 0.0625, 0.375),  # right: (0, 20, 4, 12)
+	Rect2(0.125, 0.625, 0.0625, 0.375),  # left: (8, 20, 4, 12)
+	Rect2(0.1875, 0.625, 0.0625, 0.375),  # back: (12, 20, 4, 12)
+	Rect2(0.0625, 0.625, 0.0625, 0.375),  # front: (4, 20, 4, 12)
+]
+
 const WALK_SWING_DEG: float = 38.0
 # Tuned so a full stride cycle at WALK_SPEED (4.317 m/s) is ≈1.5 Hz — matches
 # vanilla MC's leg-swing rhythm. Higher values = faster jittery limbs.
@@ -95,6 +152,18 @@ var leg_l: Node3D
 var leg_r: Node3D
 
 var _skin_mat: StandardMaterial3D
+# Armor overlay meshes — parallel to the body parts. Each is a slightly-
+# inflated textured box that sits on top of its base part; set visible
+# and point material.albedo_texture at the right armor-layer to equip.
+var _armor_head: MeshInstance3D
+var _armor_body: MeshInstance3D
+var _armor_arm_l: MeshInstance3D
+var _armor_arm_r: MeshInstance3D
+var _armor_leg_l_upper: MeshInstance3D  # leggings
+var _armor_leg_r_upper: MeshInstance3D  # leggings
+var _armor_leg_l_lower: MeshInstance3D  # boots
+var _armor_leg_r_lower: MeshInstance3D  # boots
+var _armor_mat_cache: Dictionary = {}  # path -> StandardMaterial3D
 var _walk_phase: float = 0.0
 var _swing_progress: float = 0.0  # 0..1 within the current swing cycle
 var _swing_active_visual: bool = false
@@ -171,9 +240,15 @@ func build_fp_arm() -> MeshInstance3D:
 
 
 func _build_skin_material() -> StandardMaterial3D:
-	var tex: Texture2D = load(SKIN_PATH) as Texture2D
+	var pack: String = BlockAtlas.active_pack
+	var path: String = "res://assets/textures/entities/packs/%s/steve.png" % pack
+	var tex: Texture2D = load(path) as Texture2D
 	if tex == null:
-		push_error("[CharacterModel] failed to load skin: " + SKIN_PATH)
+		# Pack has no steve override — use pixel_perfection's skin.
+		path = "res://assets/textures/entities/packs/%s/steve.png" % SKIN_FALLBACK_PACK
+		tex = load(path) as Texture2D
+	if tex == null:
+		push_error("[CharacterModel] failed to load skin: " + path)
 	var mat := StandardMaterial3D.new()
 	mat.albedo_texture = tex
 	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
@@ -208,6 +283,128 @@ func _build_parts() -> void:
 	leg_r = _make_skinned_limb(Vector3(0.125, -0.15, 0), LEG_SIZE, _LEG_R_UVS)
 	leg_r.name = "LegR"
 	add_child(leg_r)
+
+	_build_armor_overlays()
+
+
+# Build hidden armor overlay boxes as children of each body part so they
+# inherit walk / swing rotations automatically. Kept hidden until
+# update_armor() is called with a non-empty stack in the relevant slot.
+func _build_armor_overlays() -> void:
+	_armor_head = _build_armor_box(head, Vector3(0.5, 0.5, 0.5), Vector3.ZERO, _ARMOR_HEAD_UVS)
+	_armor_body = _build_armor_box(body, Vector3(0.5, 0.75, 0.25), Vector3.ZERO, _ARMOR_BODY_UVS)
+	# Arm overlays parent to the same anchor node the skinned arm hangs
+	# from, positioned at the arm's center (same -size.y/2 offset).
+	var arm_offset: Vector3 = Vector3(0, -ARM_SIZE.y * 0.5, 0)
+	_armor_arm_l = _build_armor_box(arm_l, ARM_SIZE, arm_offset, _ARMOR_ARM_UVS)
+	_armor_arm_r = _build_armor_box(arm_r, ARM_SIZE, arm_offset, _ARMOR_ARM_UVS)
+	# Leggings cover the UPPER half of each leg; boots the LOWER half.
+	var leg_upper_size: Vector3 = Vector3(LEG_SIZE.x, LEG_SIZE.y * 0.5, LEG_SIZE.z)
+	var leg_lower_size: Vector3 = Vector3(LEG_SIZE.x, LEG_SIZE.y * 0.5, LEG_SIZE.z)
+	var leg_upper_offset: Vector3 = Vector3(0, -LEG_SIZE.y * 0.25, 0)
+	var leg_lower_offset: Vector3 = Vector3(0, -LEG_SIZE.y * 0.75, 0)
+	_armor_leg_l_upper = _build_armor_box(leg_l, leg_upper_size, leg_upper_offset, _ARMOR_LEG_UVS)
+	_armor_leg_r_upper = _build_armor_box(leg_r, leg_upper_size, leg_upper_offset, _ARMOR_LEG_UVS)
+	_armor_leg_l_lower = _build_armor_box(leg_l, leg_lower_size, leg_lower_offset, _ARMOR_LEG_UVS)
+	_armor_leg_r_lower = _build_armor_box(leg_r, leg_lower_size, leg_lower_offset, _ARMOR_LEG_UVS)
+
+
+# Creates one armor-overlay MeshInstance3D: box sized `size` + ARMOR_INFLATION
+# on each axis, positioned `offset` relative to its parent, UV-mapped with
+# `uvs`, and starts hidden. Visibility and material are swapped by
+# update_armor() as the player equips / unequips each slot.
+func _build_armor_box(
+	parent: Node3D, size: Vector3, offset: Vector3, uvs: Array[Rect2]
+) -> MeshInstance3D:
+	var inflated: Vector3 = Vector3(
+		size.x + ARMOR_INFLATION, size.y + ARMOR_INFLATION, size.z + ARMOR_INFLATION
+	)
+	var mi := _build_textured_box(inflated, uvs)
+	mi.position = offset
+	mi.visible = false
+	parent.add_child(mi)
+	return mi
+
+
+# Tier → layer texture path. Keys are the armor-item IDs we registered in
+# Items; values are the loaded/cached materials that render them.
+func _armor_material_for(item_id: int) -> StandardMaterial3D:
+	var path: String = _armor_texture_path_for(item_id)
+	if path == "":
+		return null
+	if _armor_mat_cache.has(path):
+		return _armor_mat_cache[path]
+	var tex: Texture2D = load(path) as Texture2D
+	if tex == null:
+		return null
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_PER_VERTEX
+	mat.cull_mode = StandardMaterial3D.CULL_BACK
+	# Alpha-cutoff so transparent pixels in the armor texture show the
+	# body skin behind them (forearms, face, etc. aren't armored).
+	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	mat.alpha_scissor_threshold = 0.5
+	_armor_mat_cache[path] = mat
+	return mat
+
+
+func _armor_texture_path_for(item_id: int) -> String:
+	# Helmet / chestplate / boots use layer_1; leggings use layer_2.
+	# Tier determined by item-id range.
+	var layer: int = 2 if _is_leggings(item_id) else 1
+	var tier: String = _armor_tier_name(item_id)
+	if tier == "":
+		return ""
+	return "%s%s_layer_%d.png" % [ARMOR_BASE_PATH, tier, layer]
+
+
+func _armor_tier_name(item_id: int) -> String:
+	if item_id >= Items.IRON_HELMET and item_id <= Items.IRON_BOOTS:
+		return "iron"
+	if item_id >= Items.GOLD_HELMET and item_id <= Items.GOLD_BOOTS:
+		return "gold"
+	if item_id >= Items.DIAMOND_HELMET and item_id <= Items.DIAMOND_BOOTS:
+		return "diamond"
+	return ""
+
+
+func _is_leggings(item_id: int) -> bool:
+	return (
+		item_id == Items.IRON_LEGGINGS
+		or item_id == Items.GOLD_LEGGINGS
+		or item_id == Items.DIAMOND_LEGGINGS
+	)
+
+
+# Public entry point — called from player.gd whenever the armor slots
+# change. Each argument is the item_id in that slot (or Blocks.AIR if
+# unequipped). Hides the overlay for empty slots; swaps material for
+# equipped pieces.
+func update_armor(helmet_id: int, chest_id: int, legs_id: int, feet_id: int) -> void:
+	_apply_armor_piece(_armor_head, helmet_id)
+	_apply_armor_piece(_armor_body, chest_id)
+	_apply_armor_piece(_armor_arm_l, chest_id)
+	_apply_armor_piece(_armor_arm_r, chest_id)
+	_apply_armor_piece(_armor_leg_l_upper, legs_id)
+	_apply_armor_piece(_armor_leg_r_upper, legs_id)
+	_apply_armor_piece(_armor_leg_l_lower, feet_id)
+	_apply_armor_piece(_armor_leg_r_lower, feet_id)
+
+
+func _apply_armor_piece(overlay: MeshInstance3D, item_id: int) -> void:
+	if overlay == null:
+		return
+	if item_id == Blocks.AIR:
+		overlay.visible = false
+		return
+	var mat: StandardMaterial3D = _armor_material_for(item_id)
+	if mat == null:
+		overlay.visible = false
+		return
+	overlay.material_override = mat
+	overlay.visible = true
 
 
 func _make_skinned_limb(joint_pos: Vector3, size: Vector3, uvs: Array[Rect2]) -> Node3D:

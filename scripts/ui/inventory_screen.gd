@@ -227,6 +227,15 @@ func _place_slot_overlay(parent: Control, slot_index: int, native_x: int, native
 	count.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(count)
 
+	# Durability bar — pinned 1 native pixel above the slot's bottom edge,
+	# inside the bezel. Refresh wires the stack in `_refresh`.
+	var bar := DurabilityBar.new()
+	bar.name = "DurabilityBar"
+	bar.scale_factor = SCALE
+	bar.position = Vector2(1 * SCALE, (1 + 16 - 2) * SCALE)
+	bar.size = Vector2(16 * SCALE, SCALE)
+	panel.add_child(bar)
+
 	while _slot_nodes.size() <= slot_index:
 		_slot_nodes.append(null)
 	_slot_nodes[slot_index] = panel
@@ -467,31 +476,40 @@ func _handle_left_click(slot_index: int) -> void:
 	if slot_index == Inventory.CRAFT_RESULT:
 		_take_craft_result()
 		return
+	# Armor slots reject items that don't match the expected armor kind.
+	# Clicking anyway is a no-op (cursor keeps its stack), matching vanilla.
+	if _is_armor_slot(slot_index) and not _cursor.is_empty():
+		var want: int = slot_index - Inventory.ARMOR_START + Items.ARMOR_SLOT_HEAD
+		if Items.armor_slot_for(_cursor.item_id) != want:
+			return
 	var slot: ItemStack = inventory.slots[slot_index]
 	if _cursor.is_empty() and slot.is_empty():
 		return
 	if _cursor.is_empty():
-		_cursor.item_id = slot.item_id
-		_cursor.count = slot.count
-		slot.item_id = Blocks.AIR
-		slot.count = 0
+		_cursor.copy_from(slot)
+		slot.clear()
 	elif slot.is_empty():
-		slot.item_id = _cursor.item_id
-		slot.count = _cursor.count
-		_cursor.item_id = Blocks.AIR
-		_cursor.count = 0
+		slot.copy_from(_cursor)
+		_cursor.clear()
 	elif slot.item_id == _cursor.item_id:
 		_cursor.count = slot.add(_cursor.count)
 		if _cursor.count == 0:
 			_cursor.item_id = Blocks.AIR
 	else:
-		var tmp_id: int = slot.item_id
-		var tmp_count: int = slot.count
-		slot.item_id = _cursor.item_id
-		slot.count = _cursor.count
-		_cursor.item_id = tmp_id
-		_cursor.count = tmp_count
+		# Full swap — needs a temp stack so the damage value doesn't get
+		# clobbered mid-swap.
+		var tmp := ItemStack.new(slot.item_id, slot.count)
+		tmp.damage = slot.damage
+		slot.copy_from(_cursor)
+		_cursor.copy_from(tmp)
 	_after_slot_change(slot_index)
+
+
+func _is_armor_slot(slot_index: int) -> bool:
+	return (
+		slot_index >= Inventory.ARMOR_START
+		and slot_index < Inventory.ARMOR_START + Inventory.ARMOR_SIZE
+	)
 
 
 func _handle_right_click(slot_index: int) -> void:
@@ -595,6 +613,7 @@ func _refresh() -> void:
 		var stack: ItemStack = inventory.slots[i]
 		var icon: TextureRect = panel.get_node("Icon")
 		var count_label: Label = panel.get_node("Count")
+		var bar: DurabilityBar = panel.get_node("DurabilityBar") as DurabilityBar
 		if stack.is_empty():
 			icon.texture = _placeholder_for_empty_slot(i)
 			# Empty placeholders render dimmer so they read as "ghost" hints.
@@ -604,6 +623,7 @@ func _refresh() -> void:
 			icon.texture = ItemIcons.icon_for(stack.item_id)
 			icon.modulate = Color(1, 1, 1, 1)
 			count_label.text = str(stack.count) if stack.count > 1 else ""
+		bar.bind(stack, 16 * SCALE)
 	_refresh_cursor_overlay()
 
 

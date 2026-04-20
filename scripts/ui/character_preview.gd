@@ -15,6 +15,7 @@ const PREVIEW_PX: int = 256
 
 static var _viewport: SubViewport
 static var _model: Node3D
+static var _held_mesh: Node3D  # preview's right-hand item (pivot root)
 
 
 func _ready() -> void:
@@ -25,6 +26,38 @@ func _ready() -> void:
 	if _viewport != null:
 		# Live ViewportTexture binding — auto-updates as the viewport renders.
 		texture = _viewport.get_texture()
+
+
+func _process(_delta: float) -> void:
+	_apply_mouse_tracking()
+
+
+# Vanilla GuiInventory.drawEntityOnScreen math. Applied directly — the
+# preview camera is at -Z looking at +Z, and Godot's right-handed view
+# basis puts world -X on the viewer's right. So a positive rotation.y
+# (forward -Z → -X) turns the model to face the viewer's right, which
+# is exactly where "mouse right" lives. No sign flip needed.
+#
+#   body yaw  = atan(dx / 40) × 20°    (max ~±31° at the edges)
+#   head yaw  = body yaw + atan(dx / 40) × 20°  (head turns ~2× body)
+#   pitch     = atan(dy / 40) × 20°     (screen-down → head looks down)
+func _apply_mouse_tracking() -> void:
+	if _model == null or not is_visible_in_tree():
+		return
+	var rect_center: Vector2 = global_position + size * 0.5
+	var mouse: Vector2 = get_global_mouse_position()
+	var dx: float = mouse.x - rect_center.x  # +ve = mouse on viewer's RIGHT
+	var dy: float = mouse.y - rect_center.y  # +ve = mouse BELOW center
+	var body_yaw_rad: float = atan(dx / 40.0) * 20.0 * PI / 180.0
+	var head_extra_yaw_rad: float = atan(dx / 40.0) * 20.0 * PI / 180.0
+	# Pitch: positive head.rotation.x tilts the face UP in Godot; mouse
+	# above center → dy negative → negate to get positive pitch.
+	var pitch_rad: float = -atan(dy / 40.0) * 20.0 * PI / 180.0
+	_model.rotation.y = body_yaw_rad
+	var head: Node3D = _model.get("head") as Node3D
+	if head != null:
+		head.rotation.y = head_extra_yaw_rad
+		head.rotation.x = pitch_rad
 
 
 # Build the offscreen viewport + character model. Call once at boot from
@@ -91,6 +124,67 @@ static func setup_renderer(parent: Node) -> void:
 # meshes to limb anchors, rotate head, drive walking animation, etc.).
 static func get_model() -> Node3D:
 	return _model
+
+
+# Sets the item shown in the preview's right hand. Mirrors the player's
+# third-person setup: pivot at the wrist with vanilla orient tilt
+# (+50° Y / -25° Z), voxel-extruded sprite mesh with the held_item_world
+# shader (per-face Notch shading + alpha cutoff), handle-pivot offset
+# for tools. AIR (or 0) hides the mesh.
+static func set_held_item(item_id: int) -> void:
+	if _model == null:
+		return
+	var arm_r: Node3D = _model.get("arm_r") as Node3D
+	if arm_r == null:
+		return
+	if _held_mesh != null:
+		_held_mesh.queue_free()
+		_held_mesh = null
+	if item_id == 0:
+		return
+	# Wrap in a pivot → orient node pair so we can reproduce the same
+	# rest-pose tilt the TP-world held tool uses in player.gd.
+	var pivot := Node3D.new()
+	pivot.position = Vector3(0, -0.75, -0.15)
+	pivot.rotation = Vector3(deg_to_rad(-20), deg_to_rad(35), 0)
+	arm_r.add_child(pivot)
+	var orient := Node3D.new()
+	var orient_basis := Basis(Vector3.UP, deg_to_rad(50.0))
+	orient_basis = orient_basis * Basis(Vector3(0, 0, 1), deg_to_rad(-25.0))
+	orient.transform.basis = orient_basis
+	pivot.add_child(orient)
+
+	var mesh := MeshInstance3D.new()
+	if item_id >= Items.STICK:
+		var tex: Texture2D = ItemIcons.icon_for(item_id)
+		if tex == null:
+			return
+		var arr_mesh: ArrayMesh = SpriteExtruder.build(tex)
+		if arr_mesh == null:
+			return
+		mesh.mesh = arr_mesh
+		var ps: float = 0.035
+		# Non-tools (coal, ingots, diamond) get tighter scale + no
+		# handle-pivot offset — same rule as player.gd TP logic.
+		if Items.is_tool_item(item_id):
+			mesh.scale = Vector3(ps, ps, ps)
+			var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+			mesh.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
+		else:
+			var loose_ps: float = ps * 0.6
+			mesh.scale = Vector3(loose_ps, loose_ps, loose_ps)
+			mesh.position = Vector3.ZERO
+		var shader: Shader = load("res://shaders/held_item_world.gdshader") as Shader
+		var mat := ShaderMaterial.new()
+		mat.shader = shader
+		mat.set_shader_parameter("item_texture", tex)
+		mat.render_priority = 50  # above body skin to avoid z-fight at the wrist
+		mesh.material_override = mat
+	else:
+		mesh.mesh = BlockMesh.get_cube_mesh(item_id, 0.3)
+	orient.add_child(mesh)
+	# Track the pivot so we can queue_free the whole subtree on next swap.
+	_held_mesh = pivot
 
 
 # Recursively walk a node tree and override every MeshInstance3D's material

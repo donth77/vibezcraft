@@ -35,6 +35,9 @@ static func register_defaults() -> void:
 	# J = drop one of every craftable tool into the inventory (debug only).
 	# F3 is reserved for the stats-panel toggle (see below), so only J here.
 	_add_key("debug_fill_tools", KEY_J)
+	# K = smelting starter pack (raw ores + cobblestone + coal). Lets devs
+	# exercise the furnace path without first finding ore deposits.
+	_add_key("debug_fill_smelt", KEY_K)
 	# F3 toggles the debug stats panel; F9 copies its contents to clipboard.
 	# These work independently of debug_toggle — the panel can show even when
 	# full debug mode is off.

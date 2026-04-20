@@ -11,6 +11,11 @@ const PLACE_COOLDOWN_MS: int = 50
 const DIG_SOUND_INTERVAL_MS: int = 300
 const NO_TARGET: Vector3i = Vector3i(-2147483648, -2147483648, -2147483648)
 const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.png"
+# Hoe + farmland are Beta 1.6 additions, not in Alpha 1.2.6. The recipe
+# is disabled so normal players can't craft a hoe, but the till logic
+# stays enabled so devs who debug-grant a hoe (J in debug mode) can still
+# exercise the full path.
+const HOE_TILL_ENABLED: bool = true
 
 var _last_place_ms: int = 0
 var _highlight: MeshInstance3D
@@ -23,6 +28,9 @@ var _mining_target: Vector3i = NO_TARGET
 var _mining_progress: float = 0.0
 var _mining_total_time: float = 0.0
 var _last_dig_sound_ms: int = 0
+# Wall-clock timestamp when the current mining session started (sec).
+# Used purely by the debug logger to compare expected vs measured break.
+var _mining_started_at: float = 0.0
 
 @onready var _camera: Camera3D = get_parent().get_node("Camera3D")
 @onready var _chunk_manager: Node3D = get_tree().root.get_node_or_null("Main/ChunkManager")
@@ -75,11 +83,21 @@ func _update_highlight(hit: Dictionary) -> void:
 
 func _update_mining(hit: Dictionary, delta: float) -> void:
 	var holding: bool = Input.is_action_pressed("interact_break")
-	var swinging: bool = holding and not hit.is_empty() and _chunk_manager != null
-	_set_player_mining(swinging)
-	if not swinging:
+	# Releasing LMB always cancels mining + the swing animation. Holding
+	# LMB but raycasting empty (chunk re-mesh frame, micro-jitter, looked
+	# away for a tick) does NOT reset — vanilla accumulates progress as
+	# long as the click is held and only re-targets when a different
+	# block is under the cursor.
+	if not holding:
+		_set_player_mining(false)
 		_reset_mining()
 		return
+	if hit.is_empty() or _chunk_manager == null:
+		# Stop the animation but PRESERVE progress so a one-frame miss
+		# during chunk re-mesh doesn't undo seconds of work.
+		_set_player_mining(false)
+		return
+	_set_player_mining(true)
 	var target: Vector3i = hit.block_pos
 	# Creative mode: instant break, ignore bedrock indestructibility, always drop
 	if _is_creative():
@@ -116,7 +134,21 @@ func _start_mining(target: Vector3i) -> void:
 	_mining_progress = 0.0
 	_last_dig_sound_ms = 0
 	var id: int = _chunk_manager.get_world_block(target)
-	_mining_total_time = Blocks.break_time(id, _held_tool_id())
+	var tool_id: int = _held_tool_id()
+	_mining_total_time = Blocks.break_time(id, tool_id)
+	_mining_started_at = Time.get_ticks_msec() / 1000.0
+	if Game.debug_enabled:
+		print(
+			(
+				"[Mine START] block=%s tool=%s expected=%.3fs (speed=%.1f)"
+				% [
+					Blocks.name_of(id),
+					Items.display_name(tool_id),
+					_mining_total_time,
+					Items.tool_speed(tool_id),
+				]
+			)
+		)
 
 
 # Returns the currently-selected tool item id (or AIR if no tool/empty).
@@ -144,13 +176,49 @@ func _complete_break(target: Vector3i) -> void:
 	var broken_id: int = _chunk_manager.get_world_block(target)
 	if broken_id == Blocks.AIR or broken_id == Blocks.BEDROCK:
 		return
+	if Game.debug_enabled:
+		var elapsed: float = Time.get_ticks_msec() / 1000.0 - _mining_started_at
+		var tool_id: int = _held_tool_id()
+		print(
+			(
+				"[Mine DONE]  block=%s tool=%s expected=%.3fs measured=%.3fs (Δ=%+.3fs)"
+				% [
+					Blocks.name_of(broken_id),
+					Items.display_name(tool_id),
+					_mining_total_time,
+					elapsed,
+					elapsed - _mining_total_time,
+				]
+			)
+		)
+	# Furnaces hold a tile-entity dict (input/fuel/output). Spit those
+	# contents out as dropped items BEFORE the block disappears, then
+	# clear the entry so the coord can be reused.
+	if broken_id == Blocks.FURNACE or broken_id == Blocks.LIT_FURNACE:
+		_drop_furnace_contents(target)
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
 	# Drop is gated by tool tier — bare hand on stone yields nothing,
 	# wrong-tier pick on iron ore yields nothing, etc.
-	var dropped_id: int = Blocks.drop_with_tool(broken_id, _held_tool_id())
+	var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
 	if dropped_id != Blocks.AIR:
 		_spawn_dropped_item(target, dropped_id)
+	# Tool durability — vanilla loses 1 use per block broken (regardless of
+	# whether the break "counted" for a drop). Snap sound on the final hit.
+	var inv: Inventory = _player_inventory()
+	if inv != null and inv.damage_selected_tool():
+		SFX.play_tool_break()
+
+
+func _drop_furnace_contents(target: Vector3i) -> void:
+	if not FurnaceManager.has_furnace(target):
+		return
+	var state: Dictionary = FurnaceManager.get_or_create(target)
+	for stack: ItemStack in [state.input, state.fuel, state.output]:
+		if not stack.is_empty():
+			for i in range(stack.count):
+				_spawn_dropped_item(target, stack.item_id)
+	FurnaceManager.forget(target)
 
 
 func _spawn_dropped_item(block_pos: Vector3i, dropped_id: int) -> void:
@@ -194,8 +262,51 @@ func _try_place() -> void:
 		_open_crafting_table()
 		_last_place_ms = now
 		return
+	if hit_id == Blocks.FURNACE or hit_id == Blocks.LIT_FURNACE:
+		_open_furnace(hit.block_pos)
+		_last_place_ms = now
+		return
+	# Hoe + dirt/grass + top face hit + air above → till to farmland.
+	# Verbatim from ItemHoe.interactWith (Bukkit/mc-dev).
+	if _try_hoe_till(hit, hit_id):
+		_last_place_ms = now
+		return
 	if _place_block_from_held(hit):
 		_last_place_ms = now
+
+
+# Returns true if a hoe-till happened (caller should then update cooldown).
+# Mirrors vanilla ItemHoe.interactWith: requires dirt/grass at hit.block_pos,
+# air directly above it, top face was clicked. On success: replace with
+# FARMLAND, damage hoe, play gravel-step sound.
+#
+# Currently enabled (HOE_TILL_ENABLED = true) because debug-mode players
+# can grant themselves a hoe via J. The recipe is disabled separately
+# (recipes.json _disabled), so normal players never reach this path.
+func _try_hoe_till(hit: Dictionary, hit_id: int) -> bool:
+	if not HOE_TILL_ENABLED:
+		return false
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	if stack.is_empty() or Items.tool_type(stack.item_id) != Items.TOOL_TYPE_HOE:
+		return false
+	# Vanilla rejects: not dirt/grass, bottom-face hit, or air-above check.
+	# Our `normal_i.y == 1` means the TOP face was hit (looking down at it).
+	var above: Vector3i = hit.block_pos + Vector3i(0, 1, 0)
+	var ok: bool = (
+		(hit_id == Blocks.DIRT or hit_id == Blocks.GRASS)
+		and hit.normal_i.y == 1
+		and _chunk_manager.get_world_block(above) == Blocks.AIR
+	)
+	if not ok:
+		return false
+	_chunk_manager.set_world_block(hit.block_pos, Blocks.FARMLAND)
+	SFX.play_hoe_till()
+	if inv.damage_selected_tool():
+		SFX.play_tool_break()
+	return true
 
 
 func _open_crafting_table() -> void:
@@ -204,6 +315,15 @@ func _open_crafting_table() -> void:
 	)
 	if table != null and table.has_method("toggle"):
 		table.toggle()
+
+
+# Right-click on a furnace block opens its smelting screen, bound to that
+# specific block position so input/fuel/output route to the correct
+# tile-entity state.
+func _open_furnace(pos: Vector3i) -> void:
+	var screen: Node = get_tree().root.get_node_or_null("Main/Player/Crosshair/FurnaceScreen")
+	if screen != null and screen.has_method("open_at"):
+		screen.open_at(pos)
 
 
 # Returns true if a block was actually placed (i.e., consumed an item).

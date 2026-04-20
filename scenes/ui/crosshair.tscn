@@ -1,9 +1,13 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 [ext_resource type="Script" path="res://scripts/ui/inventory_screen.gd" id="2_inv"]
 [ext_resource type="Script" path="res://scripts/ui/crafting_table_screen.gd" id="3_table"]
 [ext_resource type="Script" path="res://scripts/ui/pause_menu.gd" id="4_pause"]
+[ext_resource type="Script" path="res://scripts/ui/furnace_screen.gd" id="5_furnace"]
+[ext_resource type="Script" path="res://scripts/ui/hp_bar.gd" id="6_hp"]
+[ext_resource type="Script" path="res://scripts/ui/death_screen.gd" id="7_death"]
+[ext_resource type="Script" path="res://scripts/ui/damage_overlay.gd" id="8_damage"]
 
 [node name="Crosshair" type="CanvasLayer"]
 
@@ -24,7 +28,26 @@ theme_override_font_sizes/font_size = 22
 modulate = Color(1, 1, 1, 0.85)
 mouse_filter = 2
 
+[node name="DamageOverlay" type="ColorRect" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(0.8, 0.1, 0.1, 0)
+script = ExtResource("8_damage")
+
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
+
+[node name="HpBar" type="Control" parent="."]
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = -364.0
+offset_right = -44.0
+offset_top = -136.0
+offset_bottom = -100.0
+mouse_filter = 2
+script = ExtResource("6_hp")
 
 [node name="InventoryScreen" type="Control" parent="."]
 anchor_right = 1.0
@@ -38,11 +61,23 @@ anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("3_table")
 
+[node name="FurnaceScreen" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("5_furnace")
+
 [node name="PauseMenu" type="Control" parent="."]
 anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("4_pause")
+
+[node name="DeathScreen" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("7_death")
 
 [node name="DebugLabel" type="Label" parent="."]
 anchors_preset = 1
