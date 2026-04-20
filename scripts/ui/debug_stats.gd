@@ -15,6 +15,10 @@ var _perf_label: Label
 var _copy_button: Button
 var _copied_flash: float = 0.0  # seconds remaining for "Copied!" label
 var _accum: float = 0.0
+# F3 toggles this. Independent of Game.debug_enabled so the panel is
+# available on demand without flipping the broader debug mode (creative,
+# hotbar fill, etc.).
+var _panel_shown: bool = false
 
 
 func _ready() -> void:
@@ -98,8 +102,17 @@ func _on_copy_pressed() -> void:
 	_copy_button.text = "Copied!"
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("debug_stats_toggle"):
+		_panel_shown = not _panel_shown
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("debug_stats_copy") and _panel_shown:
+		_on_copy_pressed()
+		get_viewport().set_input_as_handled()
+
+
 func _process(delta: float) -> void:
-	visible = Game.debug_enabled
+	visible = _panel_shown
 	if not visible:
 		return
 	if _copied_flash > 0.0:

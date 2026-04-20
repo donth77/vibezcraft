@@ -33,7 +33,13 @@ static func register_defaults() -> void:
 	_add_keys("debug_creative", [KEY_F1, KEY_G])
 	_add_keys("debug_fill_hotbar", [KEY_F2, KEY_H])
 	# J = drop one of every craftable tool into the inventory (debug only).
-	_add_keys("debug_fill_tools", [KEY_F3, KEY_J])
+	# F3 is reserved for the stats-panel toggle (see below), so only J here.
+	_add_key("debug_fill_tools", KEY_J)
+	# F3 toggles the debug stats panel; F9 copies its contents to clipboard.
+	# These work independently of debug_toggle — the panel can show even when
+	# full debug mode is off.
+	_add_key("debug_stats_toggle", KEY_F3)
+	_add_key("debug_stats_copy", KEY_F9)
 	# T = open the FP held-tool tuner panel (debug only). Lets you drag
 	# sliders for each rest-pose / swing axis at runtime.
 	_add_key("debug_tool_tuner", KEY_T)
