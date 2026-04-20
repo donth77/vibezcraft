@@ -43,8 +43,21 @@ const _FACE_NEIGHBOR: Array = [
 
 const _FACE_NAMES: Array = ["top", "bottom", "side", "side", "side", "side"]
 
+# Maps face_idx (0..5) to BlockAtlas face_kind (0=top, 1=bottom, 2=side).
+# Kept parallel to _FACE_NAMES so the fast uv_rect_for() path produces the
+# same Rect2 as the old uv_rect(get_face_texture(id, name)) path.
+const _FACE_KIND: Array = [
+	BlockAtlas.FACE_TOP,
+	BlockAtlas.FACE_BOTTOM,
+	BlockAtlas.FACE_SIDE,
+	BlockAtlas.FACE_SIDE,
+	BlockAtlas.FACE_SIDE,
+	BlockAtlas.FACE_SIDE,
+]
+
 
 static func mesh_chunk(chunk: Chunk) -> Dictionary:
+	var probe_token := PerfProbe.begin("mesher.mesh_chunk")
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -61,6 +74,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 					continue
 				_emit_block_faces(chunk, x, y, z, id, verts, norms, uvs, indices)
 
+	PerfProbe.end("mesher.mesh_chunk", probe_token)
 	return {
 		"vertices": verts,
 		"normals": norms,
@@ -92,9 +106,7 @@ static func _emit_block_faces(
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
-		var face_name: String = _FACE_NAMES[face_idx]
-		var tex_name := Blocks.get_face_texture(id, face_name)
-		var rect := BlockAtlas.uv_rect(tex_name)
+		var rect: Rect2 = BlockAtlas.uv_rect_for(id, _FACE_KIND[face_idx])
 		var base := verts.size()
 		for v: Vector3 in face_verts:
 			verts.append(origin + v)

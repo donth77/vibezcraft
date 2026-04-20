@@ -75,6 +75,7 @@ static func surface_height(world_x: int, world_z: int) -> int:
 
 
 static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
+	var probe_token := PerfProbe.begin("worldgen.generate_chunk")
 	var chunk := Chunk.new()
 	# 1. Heightmap + stratified base (bedrock / stone / dirt / grass).
 	# Coords are trusted here (x,z < SIZE_X/Z; y ≤ h < SIZE_Y), so use the
@@ -91,6 +92,7 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# 3. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
+	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
 
 
@@ -123,9 +125,11 @@ static func _is_bedrock_at(world_x: int, y: int, world_z: int) -> bool:
 # placement to our bounds. This mirrors vanilla's population-phase overlap
 # without any cross-chunk side effects.
 static func _scatter_ores(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.ores")
 	for dcx in [-1, 0]:
 		for dcz in [-1, 0]:
 			_decorate_ores(chunk, chunk_x, chunk_z, chunk_x + dcx, chunk_z + dcz)
+	PerfProbe.end("worldgen.ores", probe_token)
 
 
 static func _decorate_ores(
@@ -242,6 +246,7 @@ static func _float01(seed_hash: int, salt: int) -> float:
 
 
 static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.trees")
 	# Distinct salt so tree count doesn't collide with any tree's own hash.
 	var count_hash: int = _hash4(chunk_x, chunk_z, 999983, 0)
 	var span: int = _TREES_PER_CHUNK_MAX - _TREES_PER_CHUNK_MIN + 1
@@ -277,6 +282,7 @@ static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 		# Pass a combined hash to _place_oak for canopy-corner randomization.
 		var t_hash: int = _hash4(chunk_x, chunk_z, t, 4)
 		_place_oak(chunk, lx, ground_y + 1, lz, trunk_height, t_hash)
+	PerfProbe.end("worldgen.trees", probe_token)
 
 
 # Beta-faithful oak (matches WorldGenTrees from mc-dev / Bukkit). The

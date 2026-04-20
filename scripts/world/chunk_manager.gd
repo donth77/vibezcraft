@@ -4,6 +4,8 @@ extends Node3D
 # WorkerThreadPool; the main thread only handles the GPU mesh upload (which
 # must stay on the main thread) and scene-tree manipulation.
 
+const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
+
 @export var render_distance: int = 3
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
@@ -22,15 +24,19 @@ var _ready_results: Dictionary = {}  # Vector2i → {chunk, mesh} (set by worker
 # Player-edited chunks live here even after they're unloaded from the
 # scene. On reload we restore from this cache instead of re-running
 # worldgen, so towers / mined blocks / placed blocks survive walking out
-# of render distance and back. In-memory only for now — disk save is a
-# later phase. Coord → Chunk (RefCounted, just the block PackedByteArray).
+# of render distance and back. In-memory only — disk save is a later phase.
 #
-# Memory cost: each entry holds one Chunk = 16×128×16 = 32 KB block array.
-# 100 edited chunks ≈ 3 MB; 1000 ≈ 32 MB. Fine for typical play.
-# A diff-based representation (only store changed blocks vs worldgen) would
-# cut this to ~500 bytes per typical edited chunk but requires re-running
-# worldgen on restore — deferred until memory becomes a measurable issue.
-var _modified_chunks: Dictionary = {}
+# Storage shape: coord → { bytes: PackedByteArray (FastLZ-compressed
+# 32 KB block array), max_y: int }. Above-ground edited chunks are mostly
+# air which compresses ~50:1, so a typical edited chunk costs ~600 bytes
+# instead of 32 KB. Compression runs only on UNLOAD (not per edit) so the
+# cost stays out of the hot path. Decompression happens on dispatch
+# (~1 ms, main thread) and the resulting Chunk is handed to the worker
+# for re-meshing — no main-thread mesh hitch on re-entry.
+var _saved_chunks: Dictionary = {}
+# Loaded chunks that have been edited and need to be compressed-and-saved
+# when they unload. Presence-set; values unused.
+var _dirty_loaded: Dictionary = {}
 
 
 func _ready() -> void:
@@ -46,14 +52,16 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if _player == null:
 		return
+	var probe_token := PerfProbe.begin("chunk_mgr.tick")
 	_update_chunk_set()
 	_dispatch_workers()
 	_materialize_one_ready_chunk()
+	PerfProbe.end("chunk_mgr.tick", probe_token)
 
 
 # Decide which chunks should be loaded; enqueue missing ones, unload extras.
-# Chunks the player has previously edited are restored synchronously from
-# `_modified_chunks` instead of being re-generated, so towers / mines /
+# Chunks the player has previously edited get re-loaded from `_saved_chunks`
+# via the same worker path — no synchronous mesh hitch — so towers / mines /
 # any block edits survive walking out of render distance and back.
 func _update_chunk_set() -> void:
 	var pc := _player_chunk_coord()
@@ -64,15 +72,20 @@ func _update_chunk_set() -> void:
 			needed[coord] = true
 			if _chunks.has(coord) or _pending.has(coord) or _spawn_queue.has(coord):
 				continue
-			if _modified_chunks.has(coord):
-				_restore_modified_chunk(coord)
-			else:
-				_spawn_queue.append(coord)
+			# Same enqueue path whether the chunk is fresh worldgen or a
+			# previously-saved edit — _dispatch_workers picks up the saved
+			# bytes and the worker uses them instead of running worldgen.
+			_spawn_queue.append(coord)
 	var to_remove: Array = []
 	for coord: Vector2i in _chunks:
 		if not needed.has(coord):
 			to_remove.append(coord)
 	for coord: Vector2i in to_remove:
+		# If the chunk was edited while loaded, compress and persist its
+		# blocks before freeing the ChunkNode.
+		if _dirty_loaded.has(coord):
+			_persist_chunk(coord, _chunks[coord].chunk)
+			_dirty_loaded.erase(coord)
 		_chunks[coord].queue_free()
 		_chunks.erase(coord)
 	# Drop queued chunks that are no longer needed
@@ -92,24 +105,33 @@ func _update_chunk_set() -> void:
 	_result_mutex.unlock()
 
 
-# Hand queued chunks off to worker threads, capping in-flight work.
+# Hand queued chunks off to worker threads, capping in-flight work. If the
+# chunk has saved player edits, we decompress on the main thread (~1 ms,
+# infrequent) and pass the restored Chunk to the worker — saves the worker
+# from running worldgen and keeps `_saved_chunks` access main-thread-only.
 func _dispatch_workers() -> void:
 	while not _spawn_queue.is_empty() and _pending.size() < max_concurrent_jobs:
 		var coord: Vector2i = _spawn_queue.pop_front()
 		if _chunks.has(coord) or _pending.has(coord):
 			continue
 		_pending[coord] = true
-		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord))
+		var saved_chunk: Chunk = _restore_saved_chunk(coord)  # null if not saved
+		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_chunk))
 
 
-# Worker-thread function — runs off the main thread. Generates worldgen
-# blocks + builds mesh arrays; stores results behind a mutex.
-func _compute_chunk_data(coord: Vector2i) -> void:
-	var chunk := Worldgen.generate_chunk(coord.x, coord.y)
+# Worker-thread function — runs off the main thread. Uses the supplied
+# saved chunk if present (player-edited reload); otherwise runs worldgen.
+# Either way, builds the mesh arrays and stores the result behind a mutex.
+func _compute_chunk_data(coord: Vector2i, saved_chunk: Chunk) -> void:
+	var probe_token := PerfProbe.begin("chunk_mgr.worker_total")
+	var chunk: Chunk = (
+		saved_chunk if saved_chunk != null else Worldgen.generate_chunk(coord.x, coord.y)
+	)
 	var mesh_data := Mesher.mesh_chunk(chunk)
 	_result_mutex.lock()
-	_ready_results[coord] = {"chunk": chunk, "mesh": mesh_data}
+	_ready_results[coord] = {"chunk": chunk, "mesh": mesh_data, "from_save": saved_chunk != null}
 	_result_mutex.unlock()
+	PerfProbe.end("chunk_mgr.worker_total", probe_token)
 
 
 # Main thread: pick at most one completed chunk per frame and finish it
@@ -140,6 +162,7 @@ func _materialize_one_ready_chunk() -> void:
 
 
 func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
+	var probe_token := PerfProbe.begin("chunk_mgr.materialize")
 	var node: Node3D = chunk_scene.instantiate()
 	node.position = Vector3(coord.x * Chunk.SIZE_X, 0, coord.y * Chunk.SIZE_Z)
 	node.set("chunk_data", data.chunk)
@@ -147,6 +170,11 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	add_child(node)
 	_chunks[coord] = node
 	chunks_generated_total += 1
+	# A chunk that came from `_saved_chunks` is already player-edited;
+	# mark it so any further edits (or just the next unload) re-persist.
+	if data.get("from_save", false):
+		_dirty_loaded[coord] = true
+	PerfProbe.end("chunk_mgr.materialize", probe_token)
 
 
 # Synchronous fallback used at startup so the player has terrain to land on.
@@ -156,14 +184,29 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
 
 
-# Synchronous restore for a chunk the player previously edited. We already
-# have the block data in `_modified_chunks`; just re-mesh and re-add to
-# the scene. Re-meshing is on the main thread (small hitch acceptable since
-# this only fires when re-entering a previously-explored area).
-func _restore_modified_chunk(coord: Vector2i) -> void:
-	var chunk: Chunk = _modified_chunks[coord]
-	var mesh_data := Mesher.mesh_chunk(chunk)
-	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
+# Compress a chunk's blocks and stash them in `_saved_chunks`. Called only
+# when an edited chunk is about to be unloaded, so the per-edit hot path
+# never pays for compression.
+func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
+	_saved_chunks[coord] = {
+		"bytes": chunk.blocks.compress(_COMPRESS_MODE),
+		"max_y": chunk.max_y,
+	}
+
+
+# Decompress a previously-saved chunk back into a Chunk RefCounted, ready
+# to hand off to a worker for re-meshing. Returns null if the coord has
+# no saved data. We pop it from `_saved_chunks` because the chunk will
+# be live in `_chunks` again — re-persistence happens on next unload.
+func _restore_saved_chunk(coord: Vector2i) -> Chunk:
+	if not _saved_chunks.has(coord):
+		return null
+	var entry: Dictionary = _saved_chunks[coord]
+	_saved_chunks.erase(coord)
+	var c := Chunk.new()
+	c.blocks = (entry.bytes as PackedByteArray).decompress(Chunk.TOTAL_BLOCKS, _COMPRESS_MODE)
+	c.max_y = entry.max_y
+	return c
 
 
 func _player_chunk_coord() -> Vector2i:
@@ -186,9 +229,10 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
-	# The Chunk RefCounted holds the block PackedByteArray; storing a
-	# reference here keeps it alive after the ChunkNode is freed on unload.
-	_modified_chunks[coord] = chunk_node.chunk
+	# Just mark the coord as needing persistence; actual compression
+	# happens lazily on unload (compressing on every edit would burn cycles
+	# the player can feel during fast mining/placement).
+	_dirty_loaded[coord] = true
 
 
 # World-coord block read. Returns AIR if the chunk isn't loaded.

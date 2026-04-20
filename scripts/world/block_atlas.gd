@@ -10,6 +10,15 @@ const GRID_SIZE := 8  # 8x8 = 64 slots; plenty of room for new blocks
 const PACK_BASE := "res://assets/textures/blocks/packs/"
 const DEFAULT_PACK := "pixellab"
 
+# Face kinds for the precomputed UV lookup. Mapped from mesher's face_idx
+# (0-5) via Mesher._FACE_KIND so the fast indexed path and the old string
+# path resolve to the same atlas rect.
+const FACE_TOP: int = 0
+const FACE_BOTTOM: int = 1
+const FACE_SIDE: int = 2
+
+const _MAX_BLOCK_IDS: int = 256
+
 const _LAYOUT := {
 	"stone": 0,
 	"cobblestone": 1,
@@ -34,6 +43,10 @@ const _LAYOUT := {
 static var active_pack: String = DEFAULT_PACK
 static var _texture: ImageTexture
 static var _uv_rects: Dictionary = {}
+# Precomputed face-UV lookup indexed by (block_id * 3 + face_kind).
+# Populated in build(); read-only afterwards so workers (mesher) can read
+# lock-free. Saves a string match + dict lookup per face.
+static var _block_face_uvs: Array[Rect2] = []
 static var _material: ShaderMaterial
 static var _overlay_material: ShaderMaterial  # depth-test-disabled variant for FP held items
 static var _slot_size: int = 32  # auto-detected on build()
@@ -75,6 +88,20 @@ static func build() -> void:
 		)
 		_uv_rects[tex_name] = Rect2(col * slot_uv, row * slot_uv, slot_uv, slot_uv)
 	_texture = ImageTexture.create_from_image(atlas_image)
+	_build_block_face_uvs()
+
+
+# Walks every possible block id × {top, bottom, side} and resolves it
+# through Blocks.get_face_texture → _uv_rects. Runs once at build(); the
+# resulting array is read-only so mesher workers can index it directly.
+static func _build_block_face_uvs() -> void:
+	_block_face_uvs.resize(_MAX_BLOCK_IDS * 3)
+	var face_names: Array[String] = ["top", "bottom", "side"]
+	var default_rect := Rect2(0, 0, 0, 0)
+	for bid in range(_MAX_BLOCK_IDS):
+		for fk in range(3):
+			var tex_name: String = Blocks.get_face_texture(bid, face_names[fk])
+			_block_face_uvs[bid * 3 + fk] = _uv_rects.get(tex_name, default_rect)
 
 
 # Tries each layout texture in turn and returns the first one that loads,
@@ -98,6 +125,15 @@ static func uv_rect(tex_name: String) -> Rect2:
 	if _uv_rects.is_empty():
 		build()
 	return _uv_rects.get(tex_name, Rect2(0, 0, 0, 0))
+
+
+# Fast per-face UV lookup for the mesher inner loop. Returns the same
+# Rect2 as uv_rect(Blocks.get_face_texture(block_id, face_name)), but as
+# a single array index — no string match, no dict lookup.
+static func uv_rect_for(block_id: int, face_kind: int) -> Rect2:
+	if _block_face_uvs.is_empty():
+		build()
+	return _block_face_uvs[block_id * 3 + face_kind]
 
 
 # Single ShaderMaterial shared across every chunk. Called from the main thread
@@ -124,5 +160,6 @@ static func overlay_material() -> ShaderMaterial:
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
+	_block_face_uvs = []
 	_material = null
 	_overlay_material = null

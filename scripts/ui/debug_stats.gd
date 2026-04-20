@@ -76,13 +76,17 @@ func _format_stats() -> String:
 		var loaded: int = chunks_dict.size() if chunks_dict != null else 0
 		var pending: int = pending_dict.size() if pending_dict != null else 0
 		var total: int = int(_chunk_manager.get("chunks_generated_total"))
-		var modified_dict: Dictionary = _chunk_manager.get("_modified_chunks")
-		var saved: int = modified_dict.size() if modified_dict != null else 0
-		# Each chunk is 16 × 128 × 16 = 32768 blocks (air included). Saved
-		# chunks each cost ~32 KB of memory (block PackedByteArray).
+		var saved_dict: Dictionary = _chunk_manager.get("_saved_chunks")
+		var saved: int = saved_dict.size() if saved_dict != null else 0
+		# Sum the actual compressed byte sizes — gives a real measurement
+		# instead of the worst-case 32 KB per chunk number.
+		var saved_bytes: int = 0
+		if saved_dict != null:
+			for k in saved_dict:
+				saved_bytes += (saved_dict[k].bytes as PackedByteArray).size()
 		lines.append("Chunks: %d (+%d pending)" % [loaded, pending])
 		lines.append("Generated: %d total" % total)
-		lines.append("Saved: %d (%.1f MB)" % [saved, float(saved * 32768) / 1048576.0])
+		lines.append("Saved: %d (%.1f KB)" % [saved, float(saved_bytes) / 1024.0])
 		lines.append("Blocks: %s" % _humanize(loaded * 32768))
 	if _player != null:
 		var p: Vector3 = _player.global_position

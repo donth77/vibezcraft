@@ -43,9 +43,11 @@ func _rebuild_mesh() -> void:
 
 
 func _apply_mesh_data(data: Dictionary) -> void:
+	var probe_token := PerfProbe.begin("chunk_node.apply")
 	if data.vertices.is_empty():
 		_mesh_instance.mesh = null
 		_collision_shape.shape = null
+		PerfProbe.end("chunk_node.apply", probe_token)
 		return
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -58,3 +60,4 @@ func _apply_mesh_data(data: Dictionary) -> void:
 	array_mesh.surface_set_material(0, BlockAtlas.material())
 	_mesh_instance.mesh = array_mesh
 	_collision_shape.shape = array_mesh.create_trimesh_shape()
+	PerfProbe.end("chunk_node.apply", probe_token)
