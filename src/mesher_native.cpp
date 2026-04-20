@@ -110,10 +110,15 @@ Dictionary MesherNative::mesh_chunk_data(
 						const int nidx = ny * SIZE_X * SIZE_Z + nz * SIZE_X + nx;
 						neighbor_id = blocks_ptr[nidx];
 					}
-					// Blocks.is_opaque(id) is `id != AIR` today. Inline to
-					// avoid a GDScript callback per face; if the rule ever
-					// grows more complex, the parity test will catch it.
-					if (neighbor_id != AIR) {
+					// Mirror Mesher._emit_block_faces:
+					//   hide = (is_opaque(neighbor) && neighbor != LEAVES) || neighbor == id
+					// LEAVES use alpha-test transparency in the shader, so the
+					// faces BEHIND them must stay emitted. Same-id neighbors
+					// still cull (canopy interiors stay cheap).
+					const bool neighbor_opaque = (neighbor_id != AIR);
+					const bool neighbor_hides_face =
+							(neighbor_opaque && neighbor_id != LEAVES) || (neighbor_id == id);
+					if (neighbor_hides_face) {
 						continue;
 					}
 

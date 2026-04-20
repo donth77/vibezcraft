@@ -134,13 +134,23 @@ static func _emit_block_faces(
 ) -> void:
 	var origin := Vector3(x, y, z)
 	for face_idx in range(6):
-		# CPU-side neighbor culling: skip faces between two adjacent opaque
-		# blocks (the face is physically hidden by the neighbor anyway). The
-		# render-side cull_back then trims the back-facing half of every
-		# remaining face. Combined: ~3 visible faces per surface cube.
+		# CPU-side neighbor culling: skip the face between two adjacent
+		# blocks whenever the neighbor fully hides it. Two exceptions:
+		#   * LEAVES render with alpha-test (discard in chunk.gdshader),
+		#     so a face behind a leaf must still be emitted — otherwise
+		#     the shader discard punches a hole straight through to the
+		#     world background. LEAVES are therefore not treated as
+		#     opaque for culling purposes.
+		#   * But two adjacent LEAVES blocks still cull each other (same-
+		#     id cull), so canopy interiors don't explode in face count.
+		# The render-side cull_back then trims the back-facing half of
+		# every remaining face.
 		var no: Vector3i = _FACE_NEIGHBOR[face_idx]
 		var neighbor_id := chunk.get_block(x + no.x, y + no.y, z + no.z)
-		if Blocks.is_opaque(neighbor_id):
+		var neighbor_hides_face: bool = (
+			(Blocks.is_opaque(neighbor_id) and neighbor_id != Blocks.LEAVES) or neighbor_id == id
+		)
+		if neighbor_hides_face:
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]

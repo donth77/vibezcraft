@@ -25,6 +25,16 @@ const _NEIGHBORS: Array[Vector3i] = [
 ]
 
 
+# Re-checks a single leaf position to see if it is still orphaned. Used
+# by ChunkManager's decay queue at the moment each queued leaf's timer
+# expires, so that if the player placed a new log during the grace
+# period the leaf stays instead of decaying.
+static func is_orphan(get_block: Callable, pos: Vector3i) -> bool:
+	if get_block.call(pos) != Blocks.LEAVES:
+		return false
+	return not _reaches_log(get_block, pos)
+
+
 # Returns world positions of leaves that cannot reach any LOG within
 # DECAY_RADIUS BFS steps through LEAVES. Intended to be called right after
 # the log at `center` has already been removed from the world — the

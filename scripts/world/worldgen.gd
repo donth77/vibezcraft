@@ -40,6 +40,13 @@ const _BEDROCK_THRESHOLDS_EIGHTHS: Array = [8, 5, 3, 1]
 # post-fix, the attempts fire uniformly so the numbers drop back to
 # vanilla's 20/20/2/1 with a small safety margin for chunk-edge clipping).
 const _ORE_CONFIGS: Array = [
+	# Dirt + gravel deposits use the SAME WorldGenMinable algorithm as ores
+	# in vanilla BiomeDecorator (just replacing stone). Vein size 32, dirt
+	# at 20 attempts/chunk and gravel at 10 attempts/chunk — verbatim from
+	# Bukkit/mc-dev. Listed FIRST so a later ore vein can overwrite a
+	# dirt/gravel cell at overlap (matches vanilla decoration order).
+	[Blocks.DIRT, 20, 32, 0, 128],
+	[Blocks.GRAVEL, 10, 32, 0, 128],
 	[Blocks.COAL_ORE, 14, 16, 0, 128],
 	[Blocks.IRON_ORE, 18, 8, 0, 64],
 	[Blocks.GOLD_ORE, 2, 8, 0, 32],

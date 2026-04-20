@@ -6,6 +6,16 @@ extends Node3D
 
 const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
 
+# Per-leaf random decay delay (seconds). Approximates vanilla Alpha's
+# random-tick model — canopy visibly crumbles over a few seconds instead
+# of vanishing in one frame.
+const _LEAF_DECAY_DELAY_MIN: float = 1.0
+const _LEAF_DECAY_DELAY_MAX: float = 4.0
+# Cap on how many leaves we actually remove (including the BFS re-check)
+# per frame, so a simultaneous multi-tree harvest doesn't stall the main
+# thread. Entries left over stay queued for subsequent frames.
+const _LEAF_DECAY_MAX_PER_TICK: int = 16
+
 @export var render_distance: int = 3
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
@@ -37,6 +47,13 @@ var _saved_chunks: Dictionary = {}
 # Loaded chunks that have been edited and need to be compressed-and-saved
 # when they unload. Presence-set; values unused.
 var _dirty_loaded: Dictionary = {}
+# Orphaned leaves awaiting gradual decay. Entries: { pos: Vector3i,
+# decay_at: float (seconds since boot) }. Alpha's random-tick model is
+# approximated with a randomized per-leaf delay so the canopy visibly
+# crumbles over a few seconds instead of vanishing in one frame. Each
+# entry is re-checked at its decay tick — if a log was placed during the
+# grace window, the leaf stays.
+var _decaying_leaves: Array = []
 
 
 func _ready() -> void:
@@ -56,6 +73,7 @@ func _process(_delta: float) -> void:
 	_update_chunk_set()
 	_dispatch_workers()
 	_materialize_one_ready_chunk()
+	_tick_leaf_decay()
 	PerfProbe.end("chunk_mgr.tick", probe_token)
 
 
@@ -245,10 +263,43 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 		_decay_orphaned_leaves(world_pos)
 
 
+# Queue orphaned leaves for gradual decay instead of removing them
+# instantly. Each queued leaf picks a random delay so the canopy falls
+# apart visibly (Alpha-style) rather than popping out in one frame.
 func _decay_orphaned_leaves(log_world_pos: Vector3i) -> void:
 	var orphans: Array[Vector3i] = LeafDecay.find_orphan_leaves(get_world_block, log_world_pos)
+	if orphans.is_empty():
+		return
+	var now: float = Time.get_ticks_msec() / 1000.0
 	for p: Vector3i in orphans:
-		set_world_block(p, Blocks.AIR)
+		var delay: float = randf_range(_LEAF_DECAY_DELAY_MIN, _LEAF_DECAY_DELAY_MAX)
+		_decaying_leaves.append({"pos": p, "decay_at": now + delay})
+
+
+# Drain any leaves whose decay delay has elapsed. Re-checks connectivity
+# at the moment of decay, so if the player placed a log during the grace
+# period the remaining orphans quietly reattach and survive. In-place
+# reverse-loop removal (no per-frame Array rebuild); cap per-tick BFS
+# count so a large forest harvest doesn't spike the main thread when
+# many orphans hit their timer on the same frame.
+func _tick_leaf_decay() -> void:
+	if _decaying_leaves.is_empty():
+		return
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var processed: int = 0
+	for i in range(_decaying_leaves.size() - 1, -1, -1):
+		var entry: Dictionary = _decaying_leaves[i]
+		if entry.decay_at > now:
+			continue
+		_decaying_leaves.remove_at(i)
+		var p: Vector3i = entry.pos
+		# Re-check: leaf might have been saved by a freshly placed log, or
+		# already removed by an adjacent decay rippling through.
+		if LeafDecay.is_orphan(get_world_block, p):
+			set_world_block(p, Blocks.AIR)
+		processed += 1
+		if processed >= _LEAF_DECAY_MAX_PER_TICK:
+			return
 
 
 # World-coord block read. Returns AIR if the chunk isn't loaded.

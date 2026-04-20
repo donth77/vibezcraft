@@ -31,6 +31,7 @@ public:
 	static constexpr int SIZE_Z = 16;
 	// Mirrors scripts/world/blocks.gd.
 	static constexpr int AIR = 0;
+	static constexpr int LEAVES = 8;
 
 	MesherNative();
 	~MesherNative();
