@@ -1,10 +1,23 @@
 # Minecraft Alpha Clone
 
-A from-scratch, AI-assisted clone of Minecraft Java Edition Alpha (2010), built in Godot 4 + GDScript.
+A from-scratch, AI-assisted clone of Minecraft Java Edition Alpha (2010), built in **Godot 4, GDScript, and C++**. The gameplay and scene-graph logic is pure GDScript; the chunk mesher and worldgen base-terrain fill are native C++ via GDExtension (see `src/`). Both native paths are guarded by byte-identical parity tests against pure-GDScript reference implementations — see `tests/test_mesher_native.gd` and `tests/test_worldgen_native.gd`.
 
 ## Docs
 - [`.claude/PLANNING.md`](./.claude/PLANNING.md) — vision, stack rationale, Alpha mechanics reference
 - [`.claude/implementationplan.md`](./.claude/implementationplan.md) — phase-by-phase execution plan
+- [`CLAUDE.md`](./CLAUDE.md) — working conventions and architecture invariants
+- [`optimizations.md`](./optimizations.md) — catalog of deferred performance work
+
+## Build
+
+The game loads against a prebuilt native library (`bin/libmesher_native.*.dylib|so|dll`). When you first clone the repo (or pull changes to anything under `src/`), rebuild:
+
+```sh
+git submodule update --init --recursive              # fetch godot-cpp
+scons platform=macos target=template_debug -j8       # or platform=linux / windows
+```
+
+Without the rebuilt library the game still runs — it falls through to the pure-GDScript implementations and logs `[Game] using GDScript Mesher` / `[Game] using GDScript Worldgen` at startup.
 
 ## Run
 

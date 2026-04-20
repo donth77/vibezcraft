@@ -4,7 +4,13 @@ Guidance for Claude Code when working in this repo.
 
 ## Project
 
-A from-scratch clone of **Minecraft Java Edition Alpha v1.2.0 (2010)** in **Godot 4 + GDScript**. Strict Alpha-core mechanics with tasteful modern QoL. Overworld only, no Nether. Purpose-built binary save format (not Anvil-compatible).
+A from-scratch clone of **Minecraft Java Edition Alpha v1.2.0 (2010)** in **Godot 4, GDScript, and C++**. Strict Alpha-core mechanics with tasteful modern QoL. Overworld only, no Nether. Purpose-built binary save format (not Anvil-compatible).
+
+Gameplay and scene-graph logic is GDScript. Two performance-critical paths are native C++ via GDExtension:
+- `MesherNative.mesh_chunk_data` (`src/mesher_native.cpp`) — chunk meshing + collision face soup.
+- `WorldgenNative.build_base_terrain` (`src/worldgen_native.cpp`) — heightmap + stratified layer fill (ores + trees stay in GDScript).
+
+Both have pure-GDScript reference implementations (`Mesher.mesh_chunk`, `Worldgen._build_base_terrain_gdscript`) that the native ports must match byte-for-byte; parity is enforced by `tests/test_mesher_native.gd` and `tests/test_worldgen_native.gd`. When the native library isn't built, the game falls through to GDScript — there's no hard dependency on the extension loading.
 
 Canonical planning docs:
 - `.claude/PLANNING.md` — vision, stack rationale, Alpha mechanics reference
@@ -96,6 +102,9 @@ performance_plan.md           # measurement-first perf roadmap (instrumentation 
 # Run
 godot --path . main.tscn
 MC_CLONE_TEXTURE_PACK=programmer_art godot --path . main.tscn
+
+# Rebuild native extension (needed after any change under src/)
+scons platform=macos target=template_debug -j8    # or linux / windows
 
 # Tests (GUT)
 godot --headless --path . -s addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit
