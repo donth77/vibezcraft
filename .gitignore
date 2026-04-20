@@ -30,4 +30,20 @@ exports/
 .gut_editor_config.json
 .gut_editor_shortcuts.cfg
 
-.claude 
+.claude
+
+# GDExtension native build artifacts
+bin/*.dylib
+bin/*.so
+bin/*.dll
+bin/*.exp
+bin/*.lib
+bin/*.pdb
+godot-cpp/bin/
+godot-cpp/gen/
+*.o
+*.obj
+*.os
+.sconsign.dblite
+.sconf_temp/
+config.log
