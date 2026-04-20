@@ -102,3 +102,51 @@ func test_parity_grass_column_exercises_all_three_face_kinds() -> void:
 	chunk.set_block(8, 40, 8, Blocks.GRASS)
 	var both := _mesh_both(chunk)
 	_assert_parity(both[0], both[1], "isolated grass block")
+
+
+# --- Collision parity ---
+
+
+# Guards the trimesh-on-worker optimization. The face soup emitted by
+# MesherNative must produce a ConcavePolygonShape3D byte-equivalent to
+# the one ArrayMesh.create_trimesh_shape() produces from the render mesh.
+# If they ever diverge, the collision mesh won't match the visual mesh.
+func _collision_faces_via_old_path(chunk: Chunk) -> PackedVector3Array:
+	var gds: Dictionary = Mesher.mesh_chunk(chunk)
+	if gds.vertices.is_empty():
+		return PackedVector3Array()
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = gds.vertices
+	arrays[Mesh.ARRAY_NORMAL] = gds.normals
+	arrays[Mesh.ARRAY_TEX_UV] = gds.uvs
+	arrays[Mesh.ARRAY_INDEX] = gds.indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var shape: ConcavePolygonShape3D = mesh.create_trimesh_shape()
+	return shape.get_faces() if shape != null else PackedVector3Array()
+
+
+func test_parity_collision_faces_single_block() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(8, 64, 8, Blocks.STONE)
+	var native = ClassDB.instantiate("MesherNative")
+	var data: Dictionary = native.mesh_chunk_data(
+		chunk.blocks, chunk.max_y, BlockAtlas.uv_table_flat()
+	)
+	var native_faces: PackedVector3Array = data.collision_faces
+	var expected := _collision_faces_via_old_path(chunk)
+	assert_eq(native_faces.size(), expected.size(), "single block: collision face count")
+	assert_eq(native_faces, expected, "single block: collision faces byte-equal")
+
+
+func test_parity_collision_faces_worldgen_chunk() -> void:
+	var chunk := Worldgen.generate_chunk(0, 0)
+	var native = ClassDB.instantiate("MesherNative")
+	var data: Dictionary = native.mesh_chunk_data(
+		chunk.blocks, chunk.max_y, BlockAtlas.uv_table_flat()
+	)
+	var native_faces: PackedVector3Array = data.collision_faces
+	var expected := _collision_faces_via_old_path(chunk)
+	assert_eq(native_faces.size(), expected.size(), "worldgen: collision face count")
+	assert_eq(native_faces, expected, "worldgen: collision faces byte-equal")

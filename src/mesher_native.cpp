@@ -65,6 +65,12 @@ Dictionary MesherNative::mesh_chunk_data(
 	PackedVector3Array norms;
 	PackedVector2Array uvs;
 	PackedInt32Array indices;
+	// Collision faces = triangle soup (3 verts per triangle, flat). Built
+	// alongside the render mesh so ConcavePolygonShape3D can be constructed
+	// on the main thread without calling ArrayMesh.create_trimesh_shape()
+	// (which walked the mesh to extract this same data). Byte-equivalent
+	// to the old path — enforced by test_parity_collision_faces.
+	PackedVector3Array collision_faces;
 
 	const int block_count = SIZE_X * SIZE_Y * SIZE_Z;
 	if (p_blocks.size() < block_count) {
@@ -74,6 +80,7 @@ Dictionary MesherNative::mesh_chunk_data(
 		result["normals"] = norms;
 		result["uvs"] = uvs;
 		result["indices"] = indices;
+		result["collision_faces"] = collision_faces;
 		return result;
 	}
 
@@ -124,26 +131,44 @@ Dictionary MesherNative::mesh_chunk_data(
 					const float nxf = FACE_NORMALS[face][0];
 					const float nyf = FACE_NORMALS[face][1];
 					const float nzf = FACE_NORMALS[face][2];
-					for (int v = 0; v < 4; v++) {
-						verts.append(Vector3(
-								x + FACE_VERTS[face][v][0],
-								y + FACE_VERTS[face][v][1],
-								z + FACE_VERTS[face][v][2]));
-						norms.append(Vector3(nxf, nyf, nzf));
-					}
+					Vector3 v0(x + FACE_VERTS[face][0][0], y + FACE_VERTS[face][0][1],
+							z + FACE_VERTS[face][0][2]);
+					Vector3 v1(x + FACE_VERTS[face][1][0], y + FACE_VERTS[face][1][1],
+							z + FACE_VERTS[face][1][2]);
+					Vector3 v2(x + FACE_VERTS[face][2][0], y + FACE_VERTS[face][2][1],
+							z + FACE_VERTS[face][2][2]);
+					Vector3 v3(x + FACE_VERTS[face][3][0], y + FACE_VERTS[face][3][1],
+							z + FACE_VERTS[face][3][2]);
+					verts.append(v0);
+					verts.append(v1);
+					verts.append(v2);
+					verts.append(v3);
+					const Vector3 normal(nxf, nyf, nzf);
+					norms.append(normal);
+					norms.append(normal);
+					norms.append(normal);
+					norms.append(normal);
 					// UVs: V-flipped so the top of the face samples the top
 					// of the texture (matches GDScript Mesher winding).
 					uvs.append(Vector2(uv_x, uv_y + uv_h));
 					uvs.append(Vector2(uv_x, uv_y));
 					uvs.append(Vector2(uv_x + uv_w, uv_y));
 					uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
-					// Reversed winding for cull_back.
+					// Reversed winding for cull_back: triangles are (0,2,1)
+					// and (0,3,2) in vertex space → (v0,v2,v1) and (v0,v3,v2).
 					indices.append(base);
 					indices.append(base + 2);
 					indices.append(base + 1);
 					indices.append(base);
 					indices.append(base + 3);
 					indices.append(base + 2);
+					// Same two triangles as a flat soup for trimesh collision.
+					collision_faces.append(v0);
+					collision_faces.append(v2);
+					collision_faces.append(v1);
+					collision_faces.append(v0);
+					collision_faces.append(v3);
+					collision_faces.append(v2);
 				}
 			}
 		}
@@ -154,6 +179,7 @@ Dictionary MesherNative::mesh_chunk_data(
 	result["normals"] = norms;
 	result["uvs"] = uvs;
 	result["indices"] = indices;
+	result["collision_faces"] = collision_faces;
 	return result;
 }
 

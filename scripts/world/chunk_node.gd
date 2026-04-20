@@ -60,5 +60,13 @@ func _apply_mesh_data(data: Dictionary) -> void:
 	array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	array_mesh.surface_set_material(0, BlockAtlas.material())
 	_mesh_instance.mesh = array_mesh
-	_collision_shape.shape = array_mesh.create_trimesh_shape()
+	# Prefer the worker-built collision faces (native mesher path). When the
+	# GDScript fallback ran, collision_faces won't be in the dict and we
+	# re-derive the shape from the mesh on the main thread.
+	if data.has("collision_faces"):
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(data.collision_faces)
+		_collision_shape.shape = shape
+	else:
+		_collision_shape.shape = array_mesh.create_trimesh_shape()
 	PerfProbe.end("chunk_node.apply", probe_token)
