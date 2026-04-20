@@ -55,6 +55,44 @@ const _FACE_KIND: Array = [
 	BlockAtlas.FACE_SIDE,
 ]
 
+# Set by Game._ready() after the GDExtension loads. Shared across all
+# worker threads — MesherNative.mesh_chunk_data is stateless so concurrent
+# calls are safe.
+static var _native_mesher: RefCounted
+
+
+# Main-thread init. No-op if the native extension isn't available; callers
+# fall through to the GDScript path automatically.
+static func enable_native() -> bool:
+	if _native_mesher != null:
+		return true
+	if not ClassDB.class_exists("MesherNative"):
+		push_warning(
+			"Mesher.enable_native: MesherNative class not in ClassDB (extension not loaded?)"
+		)
+		return false
+	_native_mesher = ClassDB.instantiate("MesherNative")
+	if _native_mesher == null:
+		push_warning("Mesher.enable_native: failed to instantiate MesherNative")
+		return false
+	return true
+
+
+# Fast path used by ChunkManager / ChunkNode during normal gameplay. Uses
+# the C++ implementation when available (byte-identical to mesh_chunk —
+# enforced by tests/test_mesher_native.gd parity cases) and falls back to
+# the pure-GDScript mesh_chunk otherwise. Keep call sites calling this one;
+# tests continue to exercise the GDScript path via mesh_chunk directly.
+static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
+	if _native_mesher != null:
+		var probe_token := PerfProbe.begin("mesher.mesh_chunk")
+		var result: Dictionary = _native_mesher.mesh_chunk_data(
+			chunk.blocks, chunk.max_y, BlockAtlas.uv_table_flat()
+		)
+		PerfProbe.end("mesher.mesh_chunk", probe_token)
+		return result
+	return mesh_chunk(chunk)
+
 
 static func mesh_chunk(chunk: Chunk) -> Dictionary:
 	var probe_token := PerfProbe.begin("mesher.mesh_chunk")

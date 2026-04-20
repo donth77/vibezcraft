@@ -39,7 +39,7 @@ func _process(_delta: float) -> void:
 # Re-mesh on the main thread. Used when a player edit dirties the chunk —
 # infrequent enough that a worker dispatch isn't worth the bookkeeping.
 func _rebuild_mesh() -> void:
-	_apply_mesh_data(Mesher.mesh_chunk(chunk))
+	_apply_mesh_data(Mesher.mesh_chunk_fast(chunk))
 
 
 func _apply_mesh_data(data: Dictionary) -> void:

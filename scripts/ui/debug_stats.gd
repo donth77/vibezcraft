@@ -6,18 +6,25 @@ extends PanelContainer
 
 const UPDATE_INTERVAL_SEC: float = 0.25
 const _FONT_SIZE: int = 36
+const _PERF_FONT_SIZE: int = 18
 
 var _player: Node3D
 var _chunk_manager: Node
 var _label: Label
+var _perf_label: Label
+var _copy_button: Button
+var _copied_flash: float = 0.0  # seconds remaining for "Copied!" label
 var _accum: float = 0.0
 
 
 func _ready() -> void:
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
-	# Anchor top-right; PanelContainer hugs its child Label tightly, so we
-	# don't pre-size width — let the panel shrink to fit the longest line
-	# plus the styling margins.
+	# PASS so the Copy button inside still receives clicks once the player
+	# has released the mouse (Esc). Label + scroll child are IGNORE, the
+	# Button defaults to STOP on its own hit rect.
+	mouse_filter = Control.MOUSE_FILTER_PASS
+	# Anchor top-right, auto-sizing: let the container shrink to content.
+	# No offset_bottom — PanelContainer hugs its VBox child and the VBox's
+	# internal caps keep the whole panel on-screen.
 	anchor_left = 1.0
 	anchor_top = 0.0
 	anchor_right = 1.0
@@ -25,10 +32,10 @@ func _ready() -> void:
 	offset_left = -440
 	offset_top = 56
 	offset_right = -16
-	offset_bottom = 56 + 44 * 9  # ~9 lines of 44px
+	offset_bottom = 56  # container will expand downward as needed
 	size_flags_horizontal = Control.SIZE_SHRINK_END
+	size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 
-	# Faded solid background only — no border per user feedback.
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.05, 0.05, 0.06, 0.78)
 	sb.corner_radius_top_left = 6
@@ -41,6 +48,12 @@ func _ready() -> void:
 	sb.content_margin_bottom = 8
 	add_theme_stylebox_override("panel", sb)
 
+	var vbox := VBoxContainer.new()
+	vbox.mouse_filter = Control.MOUSE_FILTER_PASS
+	vbox.add_theme_constant_override("separation", 4)
+	add_child(vbox)
+
+	# Main stats — large font.
 	_label = Label.new()
 	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
@@ -49,22 +62,58 @@ func _ready() -> void:
 	_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
 	_label.add_theme_constant_override("outline_size", 3)
 	_label.text = ""
-	add_child(_label)
+	vbox.add_child(_label)
+
+	# Perf probes — tiny font so they never blow out the panel height.
+	_perf_label = Label.new()
+	_perf_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_perf_label.add_theme_font_size_override("font_size", _PERF_FONT_SIZE)
+	_perf_label.add_theme_color_override("font_color", Color(0.85, 0.95, 1.0, 1.0))
+	_perf_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 1))
+	_perf_label.add_theme_constant_override("outline_size", 2)
+	_perf_label.text = ""
+	vbox.add_child(_perf_label)
+
+	_copy_button = Button.new()
+	_copy_button.text = "Copy stats"
+	_copy_button.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_copy_button.add_theme_font_size_override("font_size", 20)
+	_copy_button.pressed.connect(_on_copy_pressed)
+	vbox.add_child(_copy_button)
 
 	_player = get_tree().root.get_node_or_null("Main/Player") as Node3D
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
+
+
+func _on_copy_pressed() -> void:
+	var payload := _format_stats()
+	var perf := _format_perf()
+	if perf != "":
+		payload += "\n\n" + perf
+	payload += "\n\n--- PerfProbe raw snapshot ---\n"
+	payload += str(PerfProbe.snapshot())
+	DisplayServer.clipboard_set(payload)
+	_copied_flash = 1.2
+	_copy_button.text = "Copied!"
 
 
 func _process(delta: float) -> void:
 	visible = Game.debug_enabled
 	if not visible:
 		return
+	if _copied_flash > 0.0:
+		_copied_flash -= delta
+		if _copied_flash <= 0.0 and _copy_button != null:
+			_copy_button.text = "Copy stats"
 	_accum += delta
 	if _accum < UPDATE_INTERVAL_SEC:
 		return
 	_accum = 0.0
 	if _label != null:
 		_label.text = _format_stats()
+	if _perf_label != null:
+		_perf_label.text = _format_perf()
 
 
 func _format_stats() -> String:
@@ -94,6 +143,22 @@ func _format_stats() -> String:
 		lines.append("Block: %d, %d, %d" % [int(floor(p.x)), int(floor(p.y)), int(floor(p.z))])
 	var mem_mb: float = float(OS.get_static_memory_usage()) / 1048576.0
 	lines.append("Mem: %.1f MB" % mem_mb)
+	return "\n".join(lines)
+
+
+# PerfProbe p50/p95 (in µs) per instrumented site. Shown in a small font
+# so it doesn't push the panel off-screen. Empty until the game has run
+# long enough to record samples.
+func _format_perf() -> String:
+	var snap: Dictionary = PerfProbe.snapshot()
+	if snap.is_empty():
+		return ""
+	var lines: Array[String] = ["Perf p50/p95 µs:"]
+	var keys: Array = snap.keys()
+	keys.sort()
+	for probe_label: String in keys:
+		var e: Dictionary = snap[probe_label]
+		lines.append("  %s: %d / %d (n=%d)" % [probe_label, e.p50, e.p95, e.count])
 	return "\n".join(lines)
 
 

@@ -127,7 +127,7 @@ func _compute_chunk_data(coord: Vector2i, saved_chunk: Chunk) -> void:
 	var chunk: Chunk = (
 		saved_chunk if saved_chunk != null else Worldgen.generate_chunk(coord.x, coord.y)
 	)
-	var mesh_data := Mesher.mesh_chunk(chunk)
+	var mesh_data := Mesher.mesh_chunk_fast(chunk)
 	_result_mutex.lock()
 	_ready_results[coord] = {"chunk": chunk, "mesh": mesh_data, "from_save": saved_chunk != null}
 	_result_mutex.unlock()
@@ -180,7 +180,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 # Synchronous fallback used at startup so the player has terrain to land on.
 func _spawn_chunk_sync(coord: Vector2i) -> void:
 	var chunk := Worldgen.generate_chunk(coord.x, coord.y)
-	var mesh_data := Mesher.mesh_chunk(chunk)
+	var mesh_data := Mesher.mesh_chunk_fast(chunk)
 	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
 
 
