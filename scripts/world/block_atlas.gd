@@ -47,6 +47,9 @@ static var _uv_rects: Dictionary = {}
 # Populated in build(); read-only afterwards so workers (mesher) can read
 # lock-free. Saves a string match + dict lookup per face.
 static var _block_face_uvs: Array[Rect2] = []
+# Flat float view of _block_face_uvs for native-extension marshalling.
+# 4 floats per entry: (x, y, w, h). Read-only after build().
+static var _uv_table_flat: PackedFloat32Array = PackedFloat32Array()
 static var _material: ShaderMaterial
 static var _overlay_material: ShaderMaterial  # depth-test-disabled variant for FP held items
 static var _slot_size: int = 32  # auto-detected on build()
@@ -96,12 +99,19 @@ static func build() -> void:
 # resulting array is read-only so mesher workers can index it directly.
 static func _build_block_face_uvs() -> void:
 	_block_face_uvs.resize(_MAX_BLOCK_IDS * 3)
+	_uv_table_flat.resize(_MAX_BLOCK_IDS * 3 * 4)
 	var face_names: Array[String] = ["top", "bottom", "side"]
 	var default_rect := Rect2(0, 0, 0, 0)
 	for bid in range(_MAX_BLOCK_IDS):
 		for fk in range(3):
 			var tex_name: String = Blocks.get_face_texture(bid, face_names[fk])
-			_block_face_uvs[bid * 3 + fk] = _uv_rects.get(tex_name, default_rect)
+			var rect: Rect2 = _uv_rects.get(tex_name, default_rect)
+			_block_face_uvs[bid * 3 + fk] = rect
+			var base: int = (bid * 3 + fk) * 4
+			_uv_table_flat[base + 0] = rect.position.x
+			_uv_table_flat[base + 1] = rect.position.y
+			_uv_table_flat[base + 2] = rect.size.x
+			_uv_table_flat[base + 3] = rect.size.y
 
 
 # Tries each layout texture in turn and returns the first one that loads,
@@ -136,6 +146,14 @@ static func uv_rect_for(block_id: int, face_kind: int) -> Rect2:
 	return _block_face_uvs[block_id * 3 + face_kind]
 
 
+# Flat float array (4 floats per Rect2) for native-extension consumers.
+# Indexed the same way as uv_rect_for: (block_id * 3 + face_kind) * 4.
+static func uv_table_flat() -> PackedFloat32Array:
+	if _uv_table_flat.is_empty():
+		build()
+	return _uv_table_flat
+
+
 # Single ShaderMaterial shared across every chunk. Called from the main thread
 # only (chunk_node._ready); materials are RefCounted so sharing is safe.
 static func material() -> ShaderMaterial:
@@ -161,5 +179,6 @@ static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
 	_block_face_uvs = []
+	_uv_table_flat = PackedFloat32Array()
 	_material = null
 	_overlay_material = null
