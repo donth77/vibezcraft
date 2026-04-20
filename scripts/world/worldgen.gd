@@ -334,18 +334,17 @@ static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 
 
 # Beta-faithful oak (matches WorldGenTrees from mc-dev / Bukkit). The
-# 4-layer canopy WRAPS around the top of the trunk instead of stacking
-# above it. Vanilla loop:
+# 4-layer canopy WRAPS around the top of the trunk. Vanilla loop:
 #   for i1 = j+l-3 to j+l:                  # 4 layers, k2 = -3..0 from j+l
-#     l1 = 1 - k2 / 2                        # widths: 2, 2, 1, 1 (radius)
+#     l1 = 1 - k2 / 2                       # radii: 2, 2, 1, 1
 #     for dx,dz in -l1..l1:
-#       skip if corner AND (random || k2==0)
+#       place unless (abs(dx)==l1 AND abs(dz)==l1 AND (rand(2)==0 OR k2==0))
 #
-# Translated:
-#   trunk_top - 2  (5×5, randomize corners)
-#   trunk_top - 1  (5×5, randomize corners)
-#   trunk_top      (3×3, always trim corners — overlaps trunk top block)
-#   trunk_top + 1  (3×3, always trim corners — single block ABOVE trunk)
+# Mapped to our dy offsets from trunk_top (= base_y + trunk_height - 1):
+#   dy = -2 (vanilla k2 = -3): radius 2, 50% corners
+#   dy = -1 (vanilla k2 = -2): radius 2, 50% corners
+#   dy =  0 (vanilla k2 = -1): radius 1, 50% corners
+#   dy = +1 (vanilla k2 =  0): radius 1, corners always trimmed
 static func _place_oak(
 	chunk: Chunk, base_x: int, base_y: int, base_z: int, trunk_height: int, t_hash: int
 ) -> void:
@@ -361,7 +360,7 @@ static func _place_oak(
 	var layers: Array = [
 		[-2, 2, true],
 		[-1, 2, true],
-		[0, 1, false],
+		[0, 1, true],
 		[1, 1, false],
 	]
 	for layer_idx in range(layers.size()):

@@ -231,11 +231,24 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var local_x: int = world_pos.x - chunk_x * Chunk.SIZE_X
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
+	var old_id: int = chunk_node.chunk.get_block(local_x, world_pos.y, local_z)
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
 	# Just mark the coord as needing persistence; actual compression
 	# happens lazily on unload (compressing on every edit would burn cycles
 	# the player can feel during fast mining/placement).
 	_dirty_loaded[coord] = true
+	# Leaf decay — when a log is removed, scan nearby leaves and orphan
+	# any that can no longer BFS-reach a log within LeafDecay.DECAY_RADIUS.
+	# The nested set_world_block writes only AIR over LEAVES (never LOG),
+	# so this cannot recurse indefinitely.
+	if old_id == Blocks.LOG and id != Blocks.LOG:
+		_decay_orphaned_leaves(world_pos)
+
+
+func _decay_orphaned_leaves(log_world_pos: Vector3i) -> void:
+	var orphans: Array[Vector3i] = LeafDecay.find_orphan_leaves(get_world_block, log_world_pos)
+	for p: Vector3i in orphans:
+		set_world_block(p, Blocks.AIR)
 
 
 # World-coord block read. Returns AIR if the chunk isn't loaded.
