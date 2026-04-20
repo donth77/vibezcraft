@@ -1,6 +1,7 @@
 #include "register_types.h"
 
 #include "mesher_native.h"
+#include "worldgen_native.h"
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/defs.hpp>
@@ -13,6 +14,7 @@ void initialize_mesher_native_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 	GDREGISTER_CLASS(MesherNative);
+	GDREGISTER_CLASS(WorldgenNative);
 }
 
 void uninitialize_mesher_native_module(ModuleInitializationLevel p_level) {

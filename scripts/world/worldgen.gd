@@ -58,6 +58,11 @@ const _SPAWN_Z: int = 8
 const _SPAWN_TREE_EXCLUSION_RADIUS: int = 4
 
 static var _noise: FastNoiseLite
+# Set by Game._ready() after the GDExtension loads. Fills the bedrock /
+# stone / dirt / grass base layers in C++; ore + tree passes stay in
+# GDScript. Parity with the GDScript fill is guaranteed by
+# tests/test_worldgen_native.gd.
+static var _native_worldgen: RefCounted
 
 
 static func _get_noise() -> FastNoiseLite:
@@ -74,19 +79,24 @@ static func surface_height(world_x: int, world_z: int) -> int:
 	return SEA_LEVEL + int(round(n * float(HEIGHT_AMPLITUDE)))
 
 
+# Main-thread init. No-op when the native extension isn't loaded.
+static func enable_native() -> bool:
+	if _native_worldgen != null:
+		return true
+	if not ClassDB.class_exists("WorldgenNative"):
+		return false
+	_native_worldgen = ClassDB.instantiate("WorldgenNative")
+	return _native_worldgen != null
+
+
 static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	var probe_token := PerfProbe.begin("worldgen.generate_chunk")
 	var chunk := Chunk.new()
 	# 1. Heightmap + stratified base (bedrock / stone / dirt / grass).
-	# Coords are trusted here (x,z < SIZE_X/Z; y ≤ h < SIZE_Y), so use the
-	# unchecked setter to skip ~100k bounds conditionals per chunk.
-	for x in range(Chunk.SIZE_X):
-		for z in range(Chunk.SIZE_Z):
-			var world_x: int = chunk_x * Chunk.SIZE_X + x
-			var world_z: int = chunk_z * Chunk.SIZE_Z + z
-			var h: int = surface_height(world_x, world_z)
-			for y in range(h + 1):
-				chunk.set_block_unchecked(x, y, z, _block_at(world_x, y, world_z, h))
+	if _native_worldgen != null:
+		_build_base_terrain_native(chunk, chunk_x, chunk_z)
+	else:
+		_build_base_terrain_gdscript(chunk, chunk_x, chunk_z)
 	# 2. Ore veins — only replaces stone, never grass/dirt/bedrock.
 	_scatter_ores(chunk, chunk_x, chunk_z)
 	# 3. Trees — must come after surface placement so we know where grass is.
@@ -94,6 +104,33 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
+
+
+# Pure-GDScript fill. Kept as the reference implementation; the native
+# path must produce byte-identical chunk.blocks.
+static func _build_base_terrain_gdscript(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			var world_x: int = chunk_x * Chunk.SIZE_X + x
+			var world_z: int = chunk_z * Chunk.SIZE_Z + z
+			var h: int = surface_height(world_x, world_z)
+			for y in range(h + 1):
+				chunk.set_block_unchecked(x, y, z, _block_at(world_x, y, world_z, h))
+
+
+# Native fill. GDScript samples the heightmap (256 FastNoiseLite calls —
+# already native), C++ does the ~17k per-block inner loop.
+static func _build_base_terrain_native(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var heightmap := PackedInt32Array()
+	heightmap.resize(Chunk.SIZE_X * Chunk.SIZE_Z)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			var world_x: int = chunk_x * Chunk.SIZE_X + x
+			var world_z: int = chunk_z * Chunk.SIZE_Z + z
+			heightmap[z * Chunk.SIZE_X + x] = surface_height(world_x, world_z)
+	var result: Dictionary = _native_worldgen.build_base_terrain(chunk_x, chunk_z, heightmap)
+	chunk.blocks = result.blocks
+	chunk.max_y = result.max_y
 
 
 static func _block_at(world_x: int, y: int, world_z: int, surface_y: int) -> int:

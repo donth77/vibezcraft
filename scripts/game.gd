@@ -99,13 +99,18 @@ func _ready() -> void:
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
-	# Opt in to the native mesher (GDExtension). Falls back silently to the
-	# GDScript Mesher if the extension isn't loaded (e.g. headless CI without
-	# a built .dylib). Parity is enforced by tests/test_mesher_native.gd.
+	# Opt in to the native mesher + worldgen base-terrain fill (GDExtension).
+	# Silently falls back to GDScript if the extension isn't loaded.
+	# Parity enforced by tests/test_mesher_native.gd and
+	# tests/test_worldgen_native.gd.
 	if Mesher.enable_native():
 		print("[Game] using native MesherNative (GDExtension)")
 	else:
 		print("[Game] using GDScript Mesher")
+	if Worldgen.enable_native():
+		print("[Game] using native WorldgenNative (GDExtension)")
+	else:
+		print("[Game] using GDScript Worldgen")
 	# Load crafting recipes from disk once at boot.
 	Recipes.ensure_loaded()
 	# Bake 3D-isometric block icons for the inventory. Setup is sync; the
