@@ -32,7 +32,7 @@ var _slot_icons: Array = []  # Array[TextureRect]
 var _slot_counts: Array = []  # Array[Label]
 var _slot_dur_bars: Array = []  # Array[DurabilityBar]
 var _selection_rect: TextureRect
-var _font: FontFile = load(FONT_PATH) as FontFile
+var _font: FontFile = MinecraftFont.get_font()
 
 
 func _ready() -> void:
@@ -97,10 +97,10 @@ func _build_slots() -> void:
 		# 8×SCALE keeps the glyphs at the original aspect for crisp pixel art.
 		count.add_theme_font_size_override("font_size", 8 * SCALE)
 		count.add_theme_color_override("font_color", Color(1, 1, 1))
-		count.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-		# Thinner outline (~6% of glyph height) reads as a drop-shadow rather
-		# than a thick ring around each letter — vanilla MC's effect.
-		count.add_theme_constant_override("outline_size", 2)
+		count.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+		# Native MC drop-shadow — 1 source-pixel offset, scaled by SCALE.
+		count.add_theme_constant_override("shadow_offset_x", SCALE)
+		count.add_theme_constant_override("shadow_offset_y", SCALE)
 		count.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		count.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 		count.mouse_filter = Control.MOUSE_FILTER_IGNORE

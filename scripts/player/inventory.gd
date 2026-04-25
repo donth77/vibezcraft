@@ -107,6 +107,24 @@ func consume_one_selected() -> bool:
 	return true
 
 
+# Swap the selected slot's contents with a different item + count.
+# Used by buckets (empty → filled, filled → empty) where the action
+# consumes the original and produces a different item in the same slot.
+# Matches vanilla ItemStack.setItemID / setStackSize being called back
+# to back in ItemBucket.a().
+func replace_selected(new_item_id: int, new_count: int) -> void:
+	var s: ItemStack = selected()
+	if s == null:
+		return
+	s.item_id = new_item_id
+	s.count = new_count
+	# ItemStack tracks `damage` (uses consumed), not absolute durability —
+	# max is derived from Items._TOOL_DATA via max_durability(). Reset
+	# damage to 0 so a fresh bucket starts pristine.
+	s.damage = 0
+	changed.emit()
+
+
 # Damages the selected tool by 1 use. No-op if the slot isn't a tool.
 # Returns true if the tool just broke this hit (so caller can play SFX).
 # Always emits `changed` if anything happened, so the UI redraws the

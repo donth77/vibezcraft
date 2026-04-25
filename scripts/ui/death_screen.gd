@@ -37,13 +37,14 @@ func _ready() -> void:
 	var title := Label.new()
 	title.text = "You Died!"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var font: FontFile = load(FONT_PATH) as FontFile
+	var font: FontFile = MinecraftFont.get_font()
 	if font != null:
 		title.add_theme_font_override("font", font)
 	title.add_theme_font_size_override("font_size", 72)
 	title.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
-	title.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	title.add_theme_constant_override("outline_size", 6)
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	title.add_theme_constant_override("shadow_offset_x", 4)
+	title.add_theme_constant_override("shadow_offset_y", 4)
 	vbox.add_child(title)
 
 	var btn := Button.new()
@@ -52,6 +53,7 @@ func _ready() -> void:
 	if font != null:
 		btn.add_theme_font_override("font", font)
 	btn.add_theme_font_size_override("font_size", 28)
+	btn.pressed.connect(SFX.play_click)
 	btn.pressed.connect(_on_respawn_pressed)
 	vbox.add_child(btn)
 

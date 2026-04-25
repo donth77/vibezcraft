@@ -103,6 +103,10 @@ ITEM_TILES = {
 	"diamond": (7, 3),
 	"stick": (5, 3),
 	"flint": (6, 0),
+	# Vanilla Alpha 1.2.6 items.png row 0: leather/chain/iron/diamond/gold
+	# helmets at cols 0-4, then flint_and_steel at col 5, flint at col 6,
+	# coal at col 7. Verified by visual inspection of the vendored items.png.
+	"flint_and_steel": (5, 0),
 	"leather": (7, 5),
 	# Armor: rows 0=helmet, 1=chest, 2=legs, 3=boots; col 2=iron, 3=diamond, 4=gold.
 	"iron_helmet": (2, 0),

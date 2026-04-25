@@ -9,6 +9,17 @@ extends Node
 const REACH: float = 5.0
 const PLACE_COOLDOWN_MS: int = 50
 const DIG_SOUND_INTERVAL_MS: int = 300
+# Vanilla bz.java:114-143 spawns ONE EntityDiggingFX per tick (50 ms at
+# 20 TPS) at the face being mined. We match vanilla's per-tick cadence
+# so the dig face has the same crumb density as the original. BlockFx's
+# mining pool absorbs the 50ms × 0.35s = ~7 in-flight emitters cheaply.
+const MINING_PARTICLE_INTERVAL_MS: int = 50
+# preload() instead of `class_name BlockFx` direct ref — Godot's editor
+# class index lags one reload behind for new class_name files (same trick
+# chunk_manager.gd uses for TickScheduler). Headless `--check-only` parses
+# this script before block_fx.gd is registered, so the direct identifier
+# would fail at parse time.
+const _BLOCK_FX: GDScript = preload("res://scripts/world/block_fx.gd")
 const NO_TARGET: Vector3i = Vector3i(-2147483648, -2147483648, -2147483648)
 const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.png"
 # Hoe + farmland are Beta 1.6 additions, not in Alpha 1.2.6. The recipe
@@ -28,6 +39,7 @@ var _mining_target: Vector3i = NO_TARGET
 var _mining_progress: float = 0.0
 var _mining_total_time: float = 0.0
 var _last_dig_sound_ms: int = 0
+var _last_mining_particle_ms: int = 0
 # Wall-clock timestamp when the current mining session started (sec).
 # Used purely by the debug logger to compare expected vs measured break.
 var _mining_started_at: float = 0.0
@@ -76,9 +88,20 @@ func _world_input_active() -> bool:
 func _update_highlight(hit: Dictionary) -> void:
 	if hit.is_empty():
 		_highlight.visible = false
-	else:
-		_highlight.visible = true
-		_highlight.global_position = Vector3(hit.block_pos) + Vector3(0.5, 0.5, 0.5)
+		return
+	_highlight.visible = true
+	# Per-block selection AABB — defaults to a unit cube but plants get
+	# the tighter vanilla bbox (sapling = (0.1,0,0.1)..(0.9,0.8,0.9), per
+	# BlockSapling() in Bukkit/mc-dev). The base wireframe is a unit cube
+	# centered on origin; we scale + offset it to match the per-block AABB.
+	# Torches use meta-aware AABBs (vanilla ob.java:122-138) so wall-mount
+	# variants get the correct offset against the support wall instead of
+	# floating in the air cell next to it.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var hit_meta: int = _chunk_manager.get_world_block_meta(hit.block_pos)
+	var aabb: AABB = Blocks.selection_aabb(hit_id, hit_meta)
+	_highlight.scale = aabb.size
+	_highlight.global_position = Vector3(hit.block_pos) + aabb.position + aabb.size * 0.5
 
 
 func _update_mining(hit: Dictionary, delta: float) -> void:
@@ -104,6 +127,17 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		_creative_break(target)
 		_reset_mining()
 		return
+	# Stale-collider guard: after a block break, the chunk's trimesh is
+	# rebuilt on a worker so for 1-3 frames the raycast still hits the old
+	# geometry at the just-emptied cell. Block data is authoritative and
+	# already says AIR; treating that hit as a mineable block makes
+	# `Blocks.break_time(AIR, ...)` fall through hardness' match and return
+	# the default 1.0 hardness → a spurious ~1.5 s "slow" timer that the
+	# player sees as the crack resetting and progressing slowly.
+	var target_id_now: int = _chunk_manager.get_world_block(target)
+	if target_id_now == Blocks.AIR:
+		_set_player_mining(false)
+		return
 	if target != _mining_target:
 		_start_mining(target)
 		if _mining_total_time < 0.0:
@@ -117,6 +151,14 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		_last_dig_sound_ms = now
 		var id: int = _chunk_manager.get_world_block(target)
 		SFX.play_break(id)
+	# Vanilla bz.java:114-143 — sprinkle one EntityDiggingFX per tick at
+	# the face being hit. We spawn at MINING_PARTICLE_INTERVAL_MS cadence
+	# (every ~3 vanilla ticks) so the trickle is visible without flooding.
+	# `hit.normal_i` is the OUTWARD face normal (e.g. (0,1,0) for top).
+	if now - _last_mining_particle_ms >= MINING_PARTICLE_INTERVAL_MS:
+		_last_mining_particle_ms = now
+		var mining_id: int = _chunk_manager.get_world_block(target)
+		_BLOCK_FX.spawn_mining(_chunk_manager, target, mining_id, Vector3(hit.normal_i))
 	# Update crack overlay — pick the integer stage based on progress
 	var damage: float = clamp(_mining_progress / _mining_total_time, 0.0, 1.0)
 	var stage: int = clamp(int(damage * float(_crack_stages)), 0, _crack_stages - 1)
@@ -133,11 +175,18 @@ func _start_mining(target: Vector3i) -> void:
 	_mining_target = target
 	_mining_progress = 0.0
 	_last_dig_sound_ms = 0
+	_last_mining_particle_ms = 0
 	var id: int = _chunk_manager.get_world_block(target)
 	var tool_id: int = _held_tool_id()
 	_mining_total_time = Blocks.break_time(id, tool_id)
+	# Underwater dig penalty — vanilla EntityPlayer.getPlayerRelativeBlockHardness
+	# (mc-dev) multiplies block hardness by 0.2 (i.e. takes 5× longer) when
+	# `isInsideOfMaterial(WATER)`. Applied here so the crack animation +
+	# completion stay in sync with the actual slower timing.
+	if _mining_total_time > 0.0 and _head_submerged_in_water():
+		_mining_total_time *= 5.0
 	_mining_started_at = Time.get_ticks_msec() / 1000.0
-	if Game.debug_enabled:
+	if Game.debug_mining:
 		print(
 			(
 				"[Mine START] block=%s tool=%s expected=%.3fs (speed=%.1f)"
@@ -149,6 +198,23 @@ func _start_mining(target: Vector3i) -> void:
 				]
 			)
 		)
+
+
+# True if the player's eye cell is water. Mirrors player._head_in_water;
+# re-derived here so interaction.gd doesn't need a hard dep on the
+# concrete Player class (same pattern as _is_creative()'s untyped `get`).
+func _head_submerged_in_water() -> bool:
+	if _chunk_manager == null:
+		return false
+	var player: Node3D = get_parent() as Node3D
+	if player == null:
+		return false
+	var head_cell := Vector3i(
+		int(floor(player.global_position.x)),
+		int(floor(player.global_position.y + 0.7)),
+		int(floor(player.global_position.z))
+	)
+	return Blocks.is_water(_chunk_manager.get_world_block(head_cell))
 
 
 # Returns the currently-selected tool item id (or AIR if no tool/empty).
@@ -176,7 +242,7 @@ func _complete_break(target: Vector3i) -> void:
 	var broken_id: int = _chunk_manager.get_world_block(target)
 	if broken_id == Blocks.AIR or broken_id == Blocks.BEDROCK:
 		return
-	if Game.debug_enabled:
+	if Game.debug_mining:
 		var elapsed: float = Time.get_ticks_msec() / 1000.0 - _mining_started_at
 		var tool_id: int = _held_tool_id()
 		print(
@@ -198,6 +264,13 @@ func _complete_break(target: Vector3i) -> void:
 		_drop_furnace_contents(target)
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
+	# Vanilla bz.java:95-112 → ki.java (EntityDiggingFX). 24-particle
+	# burst sampled from the block's atlas region, tinted to 60% so it
+	# reads as crumbs rather than full-bright tile fragments.
+	# preload() instead of the class_name — Godot's editor class index
+	# lags one reload behind for new class_name files (TickScheduler had
+	# the same issue). The preload path doesn't depend on the index.
+	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
 	# Drop is gated by tool tier — bare hand on stone yields nothing,
 	# wrong-tier pick on iron ore yields nothing, etc.
 	var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
@@ -235,6 +308,7 @@ func _creative_break(target: Vector3i) -> void:
 		return
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
+	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
 	# Creative: skip the dropped-item dance, go straight to inventory
 	var inventory: Inventory = _player_inventory()
 	if inventory != null:
@@ -248,12 +322,31 @@ func _is_creative() -> bool:
 	return false
 
 
+# gdlint: disable=max-returns
 func _try_place() -> void:
 	var now: int = Time.get_ticks_msec()
 	if now - _last_place_ms < PLACE_COOLDOWN_MS:
 		return
 	var hit := _raycast()
-	if hit.is_empty() or _chunk_manager == null:
+	if _chunk_manager == null:
+		return
+	# Buckets run even when `hit` is empty — the bucket's fluid-aware scan
+	# handles pointing at open water (no collider → raycast passes through)
+	# and pointing at open sky for lava-source placement.
+	var held_inv: Inventory = _player_inventory()
+	if held_inv != null:
+		var held_stack: ItemStack = held_inv.selected()
+		if held_stack != null and not held_stack.is_empty():
+			var held_id: int = held_stack.item_id
+			if (
+				held_id == Items.BUCKET_EMPTY
+				or held_id == Items.BUCKET_WATER
+				or held_id == Items.BUCKET_LAVA
+			):
+				if _try_bucket(hit, -1):
+					_last_place_ms = now
+				return
+	if hit.is_empty():
 		return
 	# RMB on a placed crafting table opens its 3x3 craft screen instead of
 	# placing whatever the player is holding. Vanilla MC behavior.
@@ -269,6 +362,27 @@ func _try_place() -> void:
 	# Hoe + dirt/grass + top face hit + air above → till to farmland.
 	# Verbatim from ItemHoe.interactWith (Bukkit/mc-dev).
 	if _try_hoe_till(hit, hit_id):
+		_last_place_ms = now
+		return
+	# Flint and steel — vanilla nv.java a(...): right-click on a face
+	# of an opaque block places FIRE in the air cell on the face's
+	# normal side, costs 1 durability.
+	if _try_flint_and_steel(hit, hit_id):
+		_last_place_ms = now
+		return
+	# Bone meal on sapling → instant tree growth. Vanilla
+	# IBlockFragilePlantElement.b() in BlockSapling: rolls 0.45 chance
+	# per use to advance the growth, with two stages to clear before the
+	# tree pops; expected uses ≈ 4.4 to fully grow. We collapse the two
+	# stages into one — same end state, half the bonemeal grind.
+	if _try_bonemeal(hit, hit_id):
+		_last_place_ms = now
+		return
+	# Bucket — fills from water/lava source on pointed cell OR places
+	# fluid source at (hit.block_pos + normal) if holding a filled bucket.
+	# Mirrors vanilla ItemBucket.use (ds.java). (Handled above when hit
+	# is empty — this branch catches the solid-hit case.)
+	if _try_bucket(hit, hit_id):
 		_last_place_ms = now
 		return
 	if _place_block_from_held(hit):
@@ -309,6 +423,180 @@ func _try_hoe_till(hit: Dictionary, hit_id: int) -> bool:
 	return true
 
 
+# Returns true if a flint-and-steel ignition fired (caller updates cooldown).
+# Vanilla nv.java::ItemFlintAndSteel.a(...) places FIRE in the AIR cell
+# adjacent to the face hit, on the face's outward normal. Conditions:
+#   * Held item is FLINT_AND_STEEL.
+#   * Target cell is opaque (i.e. has a face the player could click).
+#   * Cell at (hit.block_pos + normal_i) is AIR (place fire there).
+# Costs 1 durability per ignition; plays the fizz SFX. Vanilla also re-
+# uses the same right-click handler to ignite TNT (deferred — no TNT yet)
+# and to detonate creepers (deferred — no mobs yet).
+func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	if stack.is_empty() or stack.item_id != Items.FLINT_AND_STEEL:
+		return false
+	# Need a solid (opaque) target so there's a face to ignite against;
+	# clicking sky / leaves shouldn't drop a free-floating fire.
+	if not Blocks.is_opaque(hit_id):
+		return false
+	# Place fire on the air cell touching the hit face. normal_i points
+	# OUTWARD from that face (e.g. (0,1,0) for top), so block_pos +
+	# normal_i is the AIR cell where fire lands.
+	var fire_pos: Vector3i = hit.block_pos + hit.normal_i
+	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
+		return false
+	_chunk_manager.set_world_block(fire_pos, Blocks.FIRE)
+	# Vanilla plays "fire.ignite" but we don't have that asset — fizz
+	# is the closest existing SFX (lava-on-water has the same crackle
+	# character). Swap in real fire.ignite once mob/fire SFX bundle lands.
+	SFX.play_fizz(false)
+	if inv.damage_selected_tool():
+		SFX.play_tool_break()
+	return true
+
+
+# Returns true if a bonemeal use was consumed (caller updates cooldown).
+# Vanilla rules (BlockSapling.IBlockFragilePlantElement.a/b in mc-dev):
+# bonemeal on a sapling has a 45% chance to advance growth; on success
+# the sapling either advances stage or grows into a tree. We collapse
+# the two stages into one growth step. The dice roll matches vanilla so
+# the player still feels the "needs a few uses" pacing.
+func _try_bonemeal(hit: Dictionary, hit_id: int) -> bool:
+	if hit_id != Blocks.SAPLING:
+		return false
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	if stack.is_empty() or stack.item_id != Items.BONEMEAL:
+		return false
+	# 45% chance per use, per vanilla. A whiff still consumes one bonemeal.
+	if randf() < 0.45:
+		_chunk_manager.grow_tree_at(hit.block_pos)
+	inv.consume_one_selected()
+	return true
+
+
+# Bucket use — covers three cases mirroring ds.java::ItemBucket.a() :
+#   1. Empty bucket + nearest fluid source along look-ray: fill bucket,
+#      destroy the source cell. (Alpha lets you bucket-up a source block
+#      for free.)
+#   2. Filled bucket: place the fluid source at (hit.block_pos + normal)
+#      if that cell is AIR or replaceable. Bucket becomes empty.
+# Returns true if either of the above fired.
+#
+# The raycast (`hit`) may be null or point past water because water has
+# no collision shape — the physics ray passes straight through a water
+# column and lands on the seabed. For buckets we do a separate fluid-
+# aware scan: step along the look direction in ~1-block increments out
+# to REACH and stop at the first fluid-source cell encountered.
+# gdlint: disable=max-returns
+# gdlint: disable=unused-argument
+func _try_bucket(hit: Dictionary, hit_id: int) -> bool:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	if stack.is_empty():
+		return false
+	var item_id: int = stack.item_id
+	# Empty bucket — scan along look ray for the nearest fluid source.
+	if item_id == Items.BUCKET_EMPTY:
+		var source_hit: Dictionary = _scan_fluid_source()
+		if source_hit.is_empty():
+			return false
+		var fluid_id: int = source_hit.block_id
+		_chunk_manager.set_world_block(source_hit.pos, Blocks.AIR)
+		if Blocks.is_water(fluid_id):
+			inv.replace_selected(Items.BUCKET_WATER, 1)
+		else:
+			inv.replace_selected(Items.BUCKET_LAVA, 1)
+		_trigger_player_use_swing()
+		return true
+	# Filled bucket — place fluid source on the face we clicked (or on
+	# the cell the ray points at if the raycast missed entirely).
+	if item_id == Items.BUCKET_WATER or item_id == Items.BUCKET_LAVA:
+		var place_pos: Vector3i
+		if not hit.is_empty():
+			place_pos = hit.block_pos + hit.normal_i
+		else:
+			# No block in range — place at the first non-solid cell along
+			# the look ray within REACH. Lets the player drop water into
+			# air ahead of them, not just against a wall.
+			var empty_cell: Dictionary = _scan_placeable_cell()
+			if empty_cell.is_empty():
+				return false
+			place_pos = empty_cell.pos
+		var dest_id: int = _chunk_manager.get_world_block(place_pos)
+		if not Blocks.is_replaceable(dest_id) and dest_id != Blocks.AIR:
+			return false
+		var source_id: int = (
+			Blocks.WATER_STILL if item_id == Items.BUCKET_WATER else Blocks.LAVA_STILL
+		)
+		# Write as STILL with meta=0 — _schedule_fluid_tick in ChunkManager
+		# will demote to FLOWING so the spread algorithm picks it up.
+		_chunk_manager.set_world_block_with_meta(place_pos, source_id, 0)
+		inv.replace_selected(Items.BUCKET_EMPTY, 1)
+		_trigger_player_use_swing()
+		return true
+	return false
+
+
+# Kicks the one-shot swing animation on the player model. Called after a
+# successful bucket fill/place — mirrors vanilla's item-use swing. Silent
+# no-op if the player node doesn't expose the hook (e.g. tests).
+func _trigger_player_use_swing() -> void:
+	var player: Node = get_parent()
+	if player != null and player.has_method("trigger_use_swing"):
+		player.call("trigger_use_swing")
+
+
+# Walk the look ray in small steps looking for a fluid source cell
+# (water_still or lava_still with meta=0, OR water_flowing/lava_flowing
+# source — vanilla only picks up sources per ItemBucket.a, but source
+# is always meta=0 regardless of the id). Returns {pos, block_id} or
+# empty dict. Fluid cells have no physics collider so the ordinary
+# raycast passes through them.
+func _scan_fluid_source() -> Dictionary:
+	var origin: Vector3 = _camera.global_position
+	var direction: Vector3 = -_camera.global_transform.basis.z
+	var step: float = 0.25
+	var max_steps: int = int(REACH / step)
+	for i in range(max_steps):
+		var t: float = step * float(i + 1)
+		var world_p: Vector3 = origin + direction * t
+		var cell := Vector3i(int(floor(world_p.x)), int(floor(world_p.y)), int(floor(world_p.z)))
+		var id: int = _chunk_manager.get_world_block(cell)
+		if not (Blocks.is_water(id) or Blocks.is_lava(id)):
+			continue
+		var meta: int = _chunk_manager.get_world_block_meta(cell)
+		# Alpha only fills buckets from sources; flowing cells are skipped.
+		if meta == 0:
+			return {"pos": cell, "block_id": id}
+	return {}
+
+
+# Walk the look ray and return the first AIR/replaceable cell — used
+# when the raycast misses solid terrain (player pointing at open sky).
+func _scan_placeable_cell() -> Dictionary:
+	var origin: Vector3 = _camera.global_position
+	var direction: Vector3 = -_camera.global_transform.basis.z
+	var step: float = 0.25
+	var max_steps: int = int(REACH / step)
+	for i in range(max_steps):
+		var t: float = step * float(i + 1)
+		var world_p: Vector3 = origin + direction * t
+		var cell := Vector3i(int(floor(world_p.x)), int(floor(world_p.y)), int(floor(world_p.z)))
+		var id: int = _chunk_manager.get_world_block(cell)
+		if id == Blocks.AIR or Blocks.is_replaceable(id):
+			return {"pos": cell}
+	return {}
+
+
 func _open_crafting_table() -> void:
 	var table: Control = (
 		get_tree().root.get_node_or_null("Main/Player/Crosshair/CraftingTableScreen") as Control
@@ -327,6 +615,7 @@ func _open_furnace(pos: Vector3i) -> void:
 
 
 # Returns true if a block was actually placed (i.e., consumed an item).
+# gdlint: disable=max-returns
 func _place_block_from_held(hit: Dictionary) -> bool:
 	var inv: Inventory = _player_inventory()
 	if inv == null:
@@ -339,18 +628,115 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# a textureless mystery block into the world.
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
-	var place: Vector3i = hit.block_pos + hit.normal_i
-	if _chunk_manager.get_world_block(place) != Blocks.AIR:
-		return false
+	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
+	# water / etc., the new block goes INTO that cell (overwriting the
+	# replaceable). Solid cubes push placement into the neighbor cell as
+	# usual. Cross-quad raycast normals aren't axis-aligned anyway, so
+	# routing through the neighbor would produce diagonal placements that
+	# look broken.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var place: Vector3i
+	if Blocks.is_replaceable(hit_id):
+		place = hit.block_pos
+	else:
+		place = hit.block_pos + hit.normal_i
+		# Neighbor cell must be empty OR replaceable (water, plants). The
+		# earlier hardcoded `!= AIR` check rejected placement into water
+		# even when the water was right next to the face the player
+		# clicked — breaking the common "dam up a stream" workflow.
+		var neighbor_id: int = _chunk_manager.get_world_block(place)
+		if neighbor_id != Blocks.AIR and not Blocks.is_replaceable(neighbor_id):
+			return false
+	# Per-block placement validity (BlockPlant.canPlace → grass/dirt/
+	# farmland support) AND player-occupancy guard. Blocks the player
+	# from planting saplings on stone / sand / mid-air (vanilla rejects)
+	# and from placing a block inside their own feet/head (would clip).
+	var support_id: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
 	var player: Node3D = get_parent()
 	var pp := player.global_position
 	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
-	if place == player_block or place == player_block + Vector3i(0, 1, 0):
+	var blocks_player: bool = place == player_block or place == player_block + Vector3i(0, 1, 0)
+	if blocks_player or not Blocks.can_place_at(stack.item_id, support_id):
 		return false
+	# Vanilla BlockTorch (ob.java:30-64) requires AT LEAST ONE solid neighbor
+	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5
+	# encoding which neighbor is the support. Without this, torches just
+	# float in mid-air when the player aims at a wall.
+	if stack.item_id == Blocks.TORCH:
+		var torch_meta: int = _torch_meta_from_face(hit.normal_i, place)
+		if torch_meta == 0:
+			return false  # no valid support neighbor → reject placement
+		# Replacing a non-AIR cell (water, plant) — drop the displaced block
+		# before clobbering, same path the cube branch takes below.
+		var displaced_for_torch: int = _chunk_manager.get_world_block(place)
+		if displaced_for_torch != Blocks.AIR:
+			var dd: int = Blocks.drops(displaced_for_torch)
+			if dd != Blocks.AIR:
+				_spawn_dropped_item(place, dd)
+		_chunk_manager.set_world_block_with_meta(place, Blocks.TORCH, torch_meta)
+		SFX.play_place(Blocks.TORCH)
+		inv.consume_one_selected()
+		return true
+	# Replacing a non-AIR cell — vanilla Block.dropBlockAsItem fires before
+	# the new block clobbers the old one, so e.g. placing stone over a
+	# sapling drops the sapling as a pickup. Skipped if the cell was AIR.
+	var displaced_id: int = _chunk_manager.get_world_block(place)
+	if displaced_id != Blocks.AIR:
+		var displaced_drop: int = Blocks.drops(displaced_id)
+		if displaced_drop != Blocks.AIR:
+			_spawn_dropped_item(place, displaced_drop)
 	_chunk_manager.set_world_block(place, stack.item_id)
 	SFX.play_place(stack.item_id)
 	inv.consume_one_selected()
 	return true
+
+
+# Vanilla ob.java:46-64 onPlace — encodes which neighbor supports the torch:
+#   meta 1 = -X neighbor, 2 = +X, 3 = -Z, 4 = +Z, 5 = -Y (floor)
+# Vanilla also has a fallback (ob.java:71-83) that scans neighbors when meta
+# is invalid; we replicate that as the final pass so a torch placed against
+# a non-solid clicked face still finds any other valid support before giving
+# up and rejecting placement.
+# gdlint: disable=max-returns
+func _torch_meta_from_face(normal_i: Vector3i, place: Vector3i) -> int:
+	# First try the clicked face — vanilla prefers the face the player aimed at.
+	# normal_i = +Y (clicked top): support is at -Y of placement cell → meta 5.
+	# normal_i = ±X / ±Z: support is at the OPPOSITE side of placement cell.
+	if normal_i.y == 1 and _torch_neighbor_solid(place + Vector3i(0, -1, 0)):
+		return 5
+	if normal_i.x == 1 and _torch_neighbor_solid(place + Vector3i(-1, 0, 0)):
+		return 1
+	if normal_i.x == -1 and _torch_neighbor_solid(place + Vector3i(1, 0, 0)):
+		return 2
+	if normal_i.z == 1 and _torch_neighbor_solid(place + Vector3i(0, 0, -1)):
+		return 3
+	if normal_i.z == -1 and _torch_neighbor_solid(place + Vector3i(0, 0, 1)):
+		return 4
+	# Vanilla ceiling face (normal_i.y == -1) is unsupported in Alpha — torches
+	# can't hang upside-down. Fall through to the "any neighbor solid" rescan.
+	if _torch_neighbor_solid(place + Vector3i(-1, 0, 0)):
+		return 1
+	if _torch_neighbor_solid(place + Vector3i(1, 0, 0)):
+		return 2
+	if _torch_neighbor_solid(place + Vector3i(0, 0, -1)):
+		return 3
+	if _torch_neighbor_solid(place + Vector3i(0, 0, 1)):
+		return 4
+	if _torch_neighbor_solid(place + Vector3i(0, -1, 0)):
+		return 5
+	return 0  # no valid support → reject
+
+
+# Vanilla `cy.g(x,y,z)` is "is this a solid full cube" — used for torch
+# canPlaceBlockAt + canPlaceTorchOn. We approximate via Blocks.is_opaque,
+# which is true for full solid cubes and false for plants / fluids / fire /
+# torches themselves. Matches the Alpha vanilla check closely enough that
+# torches reject placement on non-solid neighbors as expected.
+func _torch_neighbor_solid(pos: Vector3i) -> bool:
+	if _chunk_manager == null:
+		return false
+	var nb: int = _chunk_manager.get_world_block(pos)
+	return nb != Blocks.AIR and Blocks.is_opaque(nb)
 
 
 func _set_player_mining(active: bool) -> void:
@@ -371,6 +757,11 @@ func _raycast() -> Dictionary:
 	var origin := _camera.global_position
 	var direction := -_camera.global_transform.basis.z
 	var query := PhysicsRayQueryParameters3D.create(origin, origin + direction * REACH)
+	# Layer 1 = solid world (cube collision). Layer 2 = non-cube selection-
+	# only shapes (sapling cross-quads, future torches/levers/buttons) —
+	# the player physics body ignores layer 2 so plants stay passable, but
+	# the cursor still needs to target them, so the raycast opts both in.
+	query.collision_mask = 0b11
 	var player: CollisionObject3D = get_parent() as CollisionObject3D
 	if player != null:
 		query.exclude = [player.get_rid()]
@@ -497,12 +888,13 @@ func _build_crack() -> MeshInstance3D:
 		push_error("[Crack] failed to load atlas: " + CRACK_ATLAS_PATH)
 	else:
 		_crack_stages = max(1, int(round(float(tex.get_height()) / float(tex.get_width()))))
-		print(
-			(
-				"[Crack] atlas loaded: %dx%d, %d stages"
-				% [tex.get_width(), tex.get_height(), _crack_stages]
+		if Game.debug_mesh:
+			print(
+				(
+					"[Crack] atlas loaded: %dx%d, %d stages"
+					% [tex.get_width(), tex.get_height(), _crack_stages]
+				)
 			)
-		)
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/crack.gdshader") as Shader
 	mat.set_shader_parameter("crack_atlas", tex)

@@ -1,5 +1,6 @@
 #include "register_types.h"
 
+#include "lighting_native.h"
 #include "mesher_native.h"
 #include "worldgen_native.h"
 
@@ -15,6 +16,7 @@ void initialize_mesher_native_module(ModuleInitializationLevel p_level) {
 	}
 	GDREGISTER_CLASS(MesherNative);
 	GDREGISTER_CLASS(WorldgenNative);
+	GDREGISTER_CLASS(LightingNative);
 }
 
 void uninitialize_mesher_native_module(ModuleInitializationLevel p_level) {

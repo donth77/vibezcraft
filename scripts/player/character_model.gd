@@ -144,6 +144,17 @@ const MINING_SWING_DEG: float = 50.0
 # the current cycle complete (no instant snap-back to rest).
 const SWING_DURATION_SEC: float = 0.30
 
+# Third-person fire rendering. Vanilla Render.renderEntityOnFire
+# (Render.java) draws animated fire quads around the entity AABB when
+# `entity.bg > 0`. We use four billboarded quads (front/back/left/right)
+# sharing the canonical Beta fire_layer_0.png strip at 24 FPS. Kept
+# hidden until set_on_fire(true).
+const _FIRE_STRIP_PATH_0: String = "res://assets/textures/particles/fire_layer_0.png"
+const _FIRE_STRIP_PATH_1: String = "res://assets/textures/particles/fire_layer_1.png"
+const _FIRE_STRIP_FRAMES: int = 32
+const _FIRE_STRIP_CELL_PX: int = 16
+const _FIRE_ANIM_FPS: float = 24.0
+
 var head: MeshInstance3D
 var body: MeshInstance3D
 var arm_l: Node3D
@@ -168,10 +179,17 @@ var _walk_phase: float = 0.0
 var _swing_progress: float = 0.0  # 0..1 within the current swing cycle
 var _swing_active_visual: bool = false
 
+var _fire_pivot: Node3D
+var _fire_sprites: Array[Sprite3D] = []
+var _fire_anim_time: float = 0.0
+var _fire_visible: bool = false
+
 
 func _ready() -> void:
 	_skin_mat = _build_skin_material()
 	_build_parts()
+	_build_fire_billboards()
+	set_process(true)
 
 
 func update_walk_animation(speed: float, delta: float, skip_right_arm: bool = false) -> void:
@@ -217,6 +235,124 @@ func update_mining_swing(active: bool, delta: float) -> float:
 
 func is_mining_visually() -> bool:
 	return _swing_active_visual
+
+
+# One-shot arm swing for right-click item-use (bucket fill/place, hoe
+# till, eat-a-food-item, etc.). Vanilla MC plays the same wind-up-and-
+# swing animation the break path uses, but for a single cycle rather
+# than looping — the arm arcs once and returns to rest. update_mining_swing
+# handles the looping case; this entry point just seeds the cycle if it
+# isn't already running.
+func trigger_use_swing() -> void:
+	if _swing_active_visual:
+		return
+	_swing_progress = 0.0
+	_swing_active_visual = true
+
+
+# Stacked layered flame sprites — port of Beta-era
+# Render.renderEntityOnFire (matches Spoutcraft Render.java:44-89).
+# Beta differs from Alpha 1.2.6 in five key ways: 5 dense layers
+# instead of 3 (loop steps 0.45 in unscaled units, not 1.0); +Z
+# offset toward camera (+0.03) instead of -0.04 away; alternating
+# fire_layer_0.png + fire_layer_1.png textures; every other
+# layer-pair flips U coords so adjacent layers don't clone. We use
+# Beta because Alpha 1.2.6 had no third-person view (gq.java) — Beta
+# 1.5+ is the first vanilla version where this render actually had
+# to look right from outside the body.
+#
+# Pivot Node3D parents all layers + rotates around Y in _process to
+# face the camera (matching `glRotatef(-playerViewY, 0, 1, 0)` Spout
+# line 57). Pivot positioned at entity FEET (capsule center − 0.9),
+# uniformly scaled by f7 = entity.width * 1.4 = 0.84 m.
+func _build_fire_billboards() -> void:
+	var strip0: Texture2D = load(_FIRE_STRIP_PATH_0) as Texture2D
+	var strip1: Texture2D = load(_FIRE_STRIP_PATH_1) as Texture2D
+	if strip0 == null:
+		return
+	if strip1 == null:
+		strip1 = strip0  # graceful fallback
+	_fire_pivot = Node3D.new()
+	_fire_pivot.visible = false
+	_fire_pivot.position = Vector3(0, -0.9, 0)
+	_fire_pivot.scale = Vector3.ONE * 0.84
+	add_child(_fire_pivot)
+	# Beta loop: while (var15 > 0) { ...; var15 -= 0.45; var16 -= 0.45;
+	# var13 *= 0.9; var17 += 0.03; ++var18 }. var15 starts at
+	# entity.height/var11 = 1.8/0.84 = 2.143 → loop runs 5 times
+	# (2.143, 1.693, 1.243, 0.793, 0.343, then -0.107 stops).
+	const _LAYER_COUNT: int = 5
+	const _LAYER_HEIGHT: float = 1.4
+	const _LAYER_SHRINK: float = 0.9
+	const _LAYER_Y_STEP: float = 0.45
+	const _LAYER_Z_STEP: float = 0.03  # +Z toward camera in Beta
+	const _STACK_Z_INIT: float = -0.26  # -0.3 + (int)2.143 * 0.02
+	var x_scale: float = 1.0
+	# var16 in Beta starts at 0 (posY - boundingBox.minY = 0 for
+	# standard entities) and decreases by 0.45 per layer. Quad
+	# vertices are at (±0.5*x_scale, [-var16, 1.4-var16], var17), so
+	# the y-center of layer N is at (1.4 - var16)/2 - var16/2 + var16
+	# = 0.7 - var16. With var16 = -0.45*N, y_center = 0.7 + 0.45*N.
+	for i: int in range(_LAYER_COUNT):
+		var s := Sprite3D.new()
+		# Alternate fire_layer_0 / fire_layer_1 like Spoutcraft line 64.
+		s.texture = strip0 if (i % 2 == 0) else strip1
+		s.hframes = 1
+		s.vframes = _FIRE_STRIP_FRAMES
+		s.frame = 0
+		s.pixel_size = 1.0 / 16.0
+		# Spoutcraft line 70-74: every other layer-PAIR flips U coords.
+		# We approximate by negating scale.x on those layers, which
+		# horizontally mirrors the sprite (keeps width magnitude correct).
+		var x_sign: float = -1.0 if (i / 2) % 2 == 0 else 1.0
+		s.scale = Vector3(x_scale * x_sign, _LAYER_HEIGHT, 1.0)
+		s.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		s.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+		s.shaded = false
+		s.transparent = true
+		s.alpha_cut = SpriteBase3D.ALPHA_CUT_DISABLED
+		s.double_sided = true
+		s.render_priority = 5 + i
+		var y_center: float = 0.7 + _LAYER_Y_STEP * float(i)
+		var z_pos: float = _STACK_Z_INIT + _LAYER_Z_STEP * float(i)
+		s.position = Vector3(0, y_center, z_pos)
+		_fire_pivot.add_child(s)
+		_fire_sprites.append(s)
+		x_scale *= _LAYER_SHRINK
+
+
+func set_on_fire(on: bool) -> void:
+	if on == _fire_visible:
+		return
+	_fire_visible = on
+	if _fire_pivot != null:
+		_fire_pivot.visible = on
+
+
+func _process(delta: float) -> void:
+	if not _fire_visible or _fire_pivot == null or _fire_sprites.is_empty():
+		return
+	# Rotate the pivot around Y so the stack always faces the active
+	# camera — matches vanilla aq.java:47's `glRotatef(-b.i, 0, 1, 0)`
+	# where b.i is EntityRenderer.prevYaw. Computed in world space to
+	# handle the character_model's own yaw correctly.
+	var cam: Camera3D = get_viewport().get_camera_3d()
+	if cam != null:
+		var cam_pos: Vector3 = cam.global_position
+		var pivot_pos: Vector3 = _fire_pivot.global_position
+		var to_cam: Vector3 = cam_pos - pivot_pos
+		# Only the horizontal component matters — we rotate around Y.
+		to_cam.y = 0.0
+		if to_cam.length_squared() > 0.0001:
+			var yaw: float = atan2(to_cam.x, to_cam.z)
+			# Undo any inherited yaw from character_model so the fire
+			# faces world-space camera direction.
+			var parent_yaw: float = (self as Node3D).global_rotation.y
+			_fire_pivot.rotation.y = yaw - parent_yaw
+	_fire_anim_time += delta * _FIRE_ANIM_FPS
+	var base_frame: int = int(_fire_anim_time) % _FIRE_STRIP_FRAMES
+	for s: Sprite3D in _fire_sprites:
+		s.frame = base_frame
 
 
 # Builds a standalone right-arm MeshInstance3D using the same skin and UV

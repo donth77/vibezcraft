@@ -1,4 +1,4 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=12 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 [ext_resource type="Script" path="res://scripts/ui/inventory_screen.gd" id="2_inv"]
@@ -8,24 +8,55 @@
 [ext_resource type="Script" path="res://scripts/ui/hp_bar.gd" id="6_hp"]
 [ext_resource type="Script" path="res://scripts/ui/death_screen.gd" id="7_death"]
 [ext_resource type="Script" path="res://scripts/ui/damage_overlay.gd" id="8_damage"]
+[ext_resource type="Script" path="res://scripts/ui/air_bar.gd" id="9_air"]
+[ext_resource type="Script" path="res://scripts/ui/water_overlay.gd" id="10_water"]
+[ext_resource type="Script" path="res://scripts/ui/debug_item_spawner.gd" id="11_spawner"]
+[ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
+[ext_resource type="Texture2D" path="res://assets/textures/gui/icons.png" id="13_icons"]
+[ext_resource type="Shader" path="res://shaders/crosshair.gdshader" id="14_xhair_sh"]
+
+[sub_resource type="AtlasTexture" id="AtlasTexture_xhair"]
+atlas = ExtResource("13_icons")
+region = Rect2(0, 0, 16, 16)
+filter_clip = true
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_xhair"]
+shader = ExtResource("14_xhair_sh")
 
 [node name="Crosshair" type="CanvasLayer"]
 
-[node name="Plus" type="Label" parent="."]
+; Vanilla Alpha crosshair (nl.java:62-66):
+;   glBindTexture("/gui/icons.png")
+;   glEnable(GL_BLEND); glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_COLOR)
+;   drawTexturedModalRect(w/2 - 7, h/2 - 7, 0, 0, 16, 16)
+;
+; → blits the top-left 16×16 tile of icons.png with framebuffer inversion.
+; The sprite has a 9×9 white "+" centered in the 16×16 tile, so arms land
+; 27×3 px at GUI scale 3. We reproduce the blend in shaders/crosshair.gdshader
+; (Godot has no GL_ONE_MINUS_DST_COLOR preset), and scale the 16×16 sprite by
+; 3 to match vanilla GUI scale on 1080p. BackBufferCopy ensures SCREEN_TEXTURE
+; is populated before the shader samples it.
+[node name="Plus" type="Control" parent="."]
 anchors_preset = 8
 anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -10.0
-offset_top = -14.0
-offset_right = 10.0
-offset_bottom = 6.0
-text = "+"
-horizontal_alignment = 1
-vertical_alignment = 1
-theme_override_font_sizes/font_size = 22
-modulate = Color(1, 1, 1, 0.85)
+mouse_filter = 2
+
+[node name="Copy" type="BackBufferCopy" parent="Plus"]
+copy_mode = 1
+rect = Rect2(-32, -32, 64, 64)
+
+[node name="Sprite" type="TextureRect" parent="Plus"]
+offset_left = -21.0
+offset_top = -21.0
+offset_right = 27.0
+offset_bottom = 27.0
+texture = SubResource("AtlasTexture_xhair")
+stretch_mode = 1
+texture_filter = 1
+material = SubResource("ShaderMaterial_xhair")
 mouse_filter = 2
 
 [node name="DamageOverlay" type="ColorRect" parent="."]
@@ -34,6 +65,19 @@ anchor_bottom = 1.0
 mouse_filter = 2
 color = Color(0.8, 0.1, 0.1, 0)
 script = ExtResource("8_damage")
+
+[node name="WaterOverlay" type="ColorRect" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(0.08, 0.20, 0.50, 0)
+script = ExtResource("10_water")
+
+[node name="FireOverlay" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("12_fire")
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
 
@@ -48,6 +92,18 @@ offset_top = -136.0
 offset_bottom = -100.0
 mouse_filter = 2
 script = ExtResource("6_hp")
+
+[node name="AirBar" type="Control" parent="."]
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 44.0
+offset_right = 364.0
+offset_top = -136.0
+offset_bottom = -100.0
+mouse_filter = 2
+script = ExtResource("9_air")
 
 [node name="InventoryScreen" type="Control" parent="."]
 anchor_right = 1.0
@@ -78,6 +134,12 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("7_death")
+
+[node name="DebugItemSpawner" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("11_spawner")
 
 [node name="DebugLabel" type="Label" parent="."]
 anchors_preset = 1

@@ -6,10 +6,18 @@ extends Control
 # get_tree().paused on open/close. (In multiplayer Alpha the game kept
 # running; this clone is singleplayer-only so pause is always in effect.)
 #
-# Layout & strings match GuiIngameMenu: title "Game menu", three 200×20
-# buttons centered vertically: "Back to Game", "Options...", "Save and Quit
-# to Title". Options is disabled until we have an options screen; Save and
-# Quit calls get_tree().quit() — the world-save hook will land in phase 5.
+# Layout & strings follow vanilla's GuiIngameMenu, with two intentional
+# divergences: "Quit to Title" instead of "Save and Quit to Title" (we
+# don't have persistence yet — relabeling so the button doesn't lie to
+# the player) and an extra "Quit to Desktop" row (modern convenience;
+# vanilla only exposed desktop-quit from the title screen).
+#
+# The Options entry is deliberately disabled in-game: the settings we
+# expose (texture pack, render distance) only take effect at scene boot
+# — flipping them mid-session would require a live atlas rebuild +
+# chunk-manager rewire we haven't plumbed. Players reach the settings
+# screen from the title instead (MainMenu → Settings). The button stays
+# on the pause menu for visual parity with vanilla.
 #
 # Button visuals come from the vanilla widgets.png (three 200×20 rows at
 # y=46/66/86 for disabled/normal/hover). We draw the sprite through a
@@ -53,7 +61,7 @@ func _ready() -> void:
 	# PROCESS_MODE_ALWAYS lets our _input() fire even after we pause the tree —
 	# without it, we couldn't close the menu with ESC.
 	process_mode = Node.PROCESS_MODE_ALWAYS
-	_font = load(FONT_PATH) as FontFile
+	_font = MinecraftFont.get_font()
 	_widgets = load(WIDGETS_PATH) as Texture2D
 	_build_ui()
 
@@ -88,8 +96,12 @@ func _build_ui() -> void:
 	title.add_theme_font_override("font", _font)
 	title.add_theme_font_size_override("font_size", 12 * SCALE)
 	title.add_theme_color_override("font_color", _TEXT_NORMAL)
-	title.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	title.add_theme_constant_override("outline_size", 4)
+	# Vanilla MC uses a 1 px black drop shadow at native scale, not an outline.
+	# Bitmap-font outlines stamp the glyph 8× at offsets which inflates the
+	# visual footprint past the label's measured width.
+	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	title.add_theme_constant_override("shadow_offset_x", SCALE)
+	title.add_theme_constant_override("shadow_offset_y", SCALE)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.custom_minimum_size = Vector2(BTN_W, 0)
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -102,9 +114,9 @@ func _build_ui() -> void:
 	vbox.add_child(gap)
 
 	vbox.add_child(_make_button("Back to Game", false, _on_resume))
-	# "Options..." stays disabled until phase 7's settings screen lands.
-	vbox.add_child(_make_button("Options...", true, Callable()))
-	vbox.add_child(_make_button("Save and Quit to Title", false, _on_quit))
+	vbox.add_child(_make_button("Options...", false, _on_open_options))
+	vbox.add_child(_make_button("Quit to Title", false, _on_quit_to_title))
+	vbox.add_child(_make_button("Quit to Desktop", false, _on_quit_to_desktop))
 
 
 func _make_button(label_text: String, disabled: bool, on_click: Callable) -> Control:
@@ -134,8 +146,9 @@ func _make_button(label_text: String, disabled: bool, on_click: Callable) -> Con
 	label.add_theme_font_override("font", _font)
 	label.add_theme_font_size_override("font_size", 10 * SCALE)
 	label.add_theme_color_override("font_color", _TEXT_DISABLED if disabled else _TEXT_NORMAL)
-	label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	label.add_theme_constant_override("outline_size", 4)
+	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	label.add_theme_constant_override("shadow_offset_x", SCALE)
+	label.add_theme_constant_override("shadow_offset_y", SCALE)
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -164,6 +177,7 @@ func _make_button(label_text: String, disabled: bool, on_click: Callable) -> Con
 				and event.button_index == MOUSE_BUTTON_LEFT
 				and not event.pressed
 			):
+				SFX.play_click()
 				on_click.call()
 	)
 	return root
@@ -207,8 +221,48 @@ func _on_resume() -> void:
 	close()
 
 
-func _on_quit() -> void:
-	# Vanilla Alpha saves the world then returns to the title screen. Our
-	# save system lands in phase 5 and we have no title; quitting the app
-	# is the closest equivalent. Revisit once save/load is wired up.
+func _on_open_options() -> void:
+	# In-game options is a SEPARATE scene from main-menu Settings — only
+	# exposes live-applicable knobs (fps cap). Anything that requires a
+	# scene reload (render_distance, clouds) or world regen (seed) stays
+	# on the main-menu path where those needs are met naturally.
+	var packed: PackedScene = load("res://scenes/ui/in_game_options.tscn") as PackedScene
+	if packed == null:
+		return
+	var overlay: Control = packed.instantiate() as Control
+	if overlay == null:
+		return
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	get_tree().get_root().add_child(overlay)
+	# Hide the world HUD (crosshair, hotbar, hp, etc.) so it doesn't bleed
+	# through the options overlay. The Crosshair CanvasLayer is the root
+	# of all gameplay HUD per scenes/ui/crosshair.tscn. Restored in
+	# _on_options_closed.
+	var hud: CanvasLayer = get_tree().get_root().find_child("Crosshair", true, false) as CanvasLayer
+	if hud != null:
+		hud.visible = false
+	visible = false
+	overlay.tree_exited.connect(_on_options_closed.bind(hud))
+
+
+func _on_options_closed(hud: CanvasLayer) -> void:
+	# Fired when the options overlay queue_frees itself. Re-show pause
+	# menu + game HUD; tree stays paused.
+	visible = true
+	if hud != null:
+		hud.visible = true
+
+
+func _on_quit_to_title() -> void:
+	# Bare "Quit to Title" — we don't persist the world yet, so the vanilla
+	# "Save and quit to title" wording would lie to the player. Rename
+	# once phase-7 save/load lands and we can actually flush state to disk.
+	get_tree().paused = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	get_tree().change_scene_to_file("res://scenes/ui/main_menu.tscn")
+
+
+func _on_quit_to_desktop() -> void:
+	# Modern convenience — vanilla Alpha only exposed this via the title
+	# screen. Skip world-save hook (same deferred-to-phase-7 story).
 	get_tree().quit()

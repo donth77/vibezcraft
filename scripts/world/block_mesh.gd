@@ -94,5 +94,5 @@ static func _build(block_id: int, size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	mesh.surface_set_material(0, BlockAtlas.material())
+	mesh.surface_set_material(0, BlockAtlas.entity_material())
 	return mesh

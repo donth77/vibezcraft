@@ -12,6 +12,10 @@ static func register_defaults() -> void:
 	_add_key("move_right", KEY_D)
 	_add_key("jump", KEY_SPACE)
 	_add_key("sneak", KEY_SHIFT)
+	# Creative-flight descend. Sneak also works (vanilla Java binding) but
+	# Ctrl / Cmd feel more natural for a lot of players and don't collide
+	# with the sneak toggle. Both bind to the same action.
+	_add_keys("fly_down", [KEY_CTRL, KEY_META])
 	_add_key("pause", KEY_ESCAPE)
 	_add_mouse("interact_break", MOUSE_BUTTON_LEFT)
 	_add_mouse("interact_place", MOUSE_BUTTON_RIGHT)
@@ -29,23 +33,33 @@ static func register_defaults() -> void:
 	# F5 cycles 1st/3rd-person perspective (vanilla MC binding). V as alt
 	# (in case the user remapped F5 elsewhere on macOS).
 	_add_keys("toggle_perspective", [KEY_F5, KEY_V])
-	# Debug toggles — F1/F2 are media keys on Mac by default; bind G/H as alts.
+	# Debug toggles — F1 is a media key on Mac by default; bind G as alt.
 	_add_keys("debug_creative", [KEY_F1, KEY_G])
-	_add_keys("debug_fill_hotbar", [KEY_F2, KEY_H])
-	# J = drop one of every craftable tool into the inventory (debug only).
-	# F3 is reserved for the stats-panel toggle (see below), so only J here.
-	_add_key("debug_fill_tools", KEY_J)
-	# K = smelting starter pack (raw ores + cobblestone + coal). Lets devs
-	# exercise the furnace path without first finding ore deposits.
-	_add_key("debug_fill_smelt", KEY_K)
+	# F4 opens the debug item spawner UI (quantity + grid of every
+	# implemented block & item). Replaces the old per-set hotkeys
+	# (debug_fill_hotbar / _tools / _smelt) that were getting crowded.
+	_add_key("debug_item_spawner", KEY_F4)
 	# F3 toggles the debug stats panel; F9 copies its contents to clipboard.
 	# These work independently of debug_toggle — the panel can show even when
 	# full debug mode is off.
 	_add_key("debug_stats_toggle", KEY_F3)
 	_add_key("debug_stats_copy", KEY_F9)
+	# F6 = manual trigger for the 3×3 cave/lava scout scan. Manual-only
+	# (not auto-refreshed) so the 225K-get_block pass doesn't stack onto
+	# dig-frame hitches.
+	_add_key("debug_stats_scout", KEY_F6)
+	# F7 = wipe the PerfProbe ring buffer so the next window of samples
+	# isolates whatever the user is doing right now ("walk for 5 s, see
+	# what spiked"). Without it, p95/max stay polluted by boot-time chunk
+	# rush forever.
+	_add_key("debug_stats_reset_perf", KEY_F7)
 	# T = open the FP held-tool tuner panel (debug only). Lets you drag
 	# sliders for each rest-pose / swing axis at runtime.
 	_add_key("debug_tool_tuner", KEY_T)
+	# F8 = cycle the chunk-shader light heatmap (off / sky_light / block_light /
+	# combined). Used to diagnose lighting fill vs mesher packing — see
+	# `chunk.gdshader` debug_view uniform.
+	_add_key("debug_lighting_view", KEY_F8)
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:

@@ -301,12 +301,6 @@ func open() -> void:
 	# state. We restore on close() based on _was_captured.
 	_was_captured = Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print(
-		(
-			"[ToolTuner] open: mouse_mode=%d (VISIBLE=%d), rect=%s"
-			% [Input.mouse_mode, Input.MOUSE_MODE_VISIBLE, str(get_rect())]
-		)
-	)
 
 
 func close() -> void:

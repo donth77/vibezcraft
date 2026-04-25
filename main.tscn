@@ -1,14 +1,55 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=9 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/player/player.tscn" id="1_player"]
 [ext_resource type="PackedScene" path="res://scenes/world/chunk_manager.tscn" id="2_mgr"]
+[ext_resource type="Script" path="res://scripts/world/day_night_driver.gd" id="3_daynight"]
+[ext_resource type="Script" path="res://scripts/ui/loading_screen.gd" id="4_loading"]
+[ext_resource type="Script" path="res://scripts/world/sky_dome.gd" id="5_sky"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMat_main"]
+; Alpha-style vertical gradient. oz.java gives the noon zenith color;
+; the horizon wash toward lighter cyan is what Beta-era renderSky does
+; by drawing a "horizon dish" quad (kb.java:updateFogColor + RenderGlobal).
+; day_night_driver animates both stops from WorldTime each frame.
+sky_top_color = Color(0.7529412, 0.84705883, 1, 1)
+sky_horizon_color = Color(0.88, 0.93, 1.0, 1)
+sky_curve = 0.15
+ground_horizon_color = Color(0.88, 0.93, 1.0, 1)
+ground_bottom_color = Color(0.7529412, 0.84705883, 1, 1)
+; Suppress the built-in sun disc — sky_dome.gd draws its own textured
+; sun/moon quads driven by WorldTime.
+sun_angle_max = 0.0
+
+[sub_resource type="Sky" id="Sky_main"]
+sky_material = SubResource("SkyMat_main")
+; process_mode = 3 (REALTIME) picks the fastest code path; we also pin
+; radiance_size to the minimum because `ambient_light_source = 2` (COLOR)
+; means Environment uses `ambient_light_color` directly, never samples
+; the sky radiance. Any non-zero radiance size here is wasted work that
+; the sky re-bakes whenever day_night_driver rewrites the gradient.
+process_mode = 3
+radiance_size = 0
 
 [sub_resource type="Environment" id="Env_main"]
-background_mode = 1
-background_color = Color(0.5, 0.7, 0.9, 1)
+background_mode = 2
+sky = SubResource("Sky_main")
+; Chunk geometry uses `chunk.gdshader` with `unshaded` — it bakes the full
+; vanilla lighting model into ALBEDO and bypasses Godot's PBR pipeline. The
+; ambient term below is only consumed by NON-chunk geometry: player skin,
+; mobs, dropped items, particles. Without it, all of those go pitch black
+; in any scene that lacks a DirectionalLight, since Godot multiplies
+; ALBEDO × (lights + ambient). 0.45 was the project's pre-existing value —
+; matches vanilla's "everything gets a baseline" feel for entities while
+; leaving terrain untouched.
 ambient_light_source = 2
 ambient_light_color = Color(1, 1, 1, 1)
 ambient_light_energy = 0.45
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.88, 0.93, 1.0, 1)
+fog_depth_begin = 64.0
+fog_depth_end = 128.0
+fog_sky_affect = 0.0
 
 [node name="Main" type="Node3D"]
 
@@ -19,6 +60,15 @@ environment = SubResource("Env_main")
 transform = Transform3D(0.866, -0.25, 0.433, 0, 0.866, 0.5, -0.5, -0.433, 0.75, 0, 80, 0)
 light_energy = 1.5
 shadow_enabled = true
+
+[node name="DayNightDriver" type="Node" parent="."]
+script = ExtResource("3_daynight")
+
+[node name="SkyDome" type="Node3D" parent="."]
+script = ExtResource("5_sky")
+
+[node name="LoadingScreen" type="CanvasLayer" parent="."]
+script = ExtResource("4_loading")
 
 [node name="ChunkManager" parent="." instance=ExtResource("2_mgr")]
 

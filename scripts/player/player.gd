@@ -1,9 +1,15 @@
 # gdlint: disable=max-file-lines
+# gdlint: disable=class-definitions-order
 extends CharacterBody3D
 
 signal health_changed(current: int, maximum: int)
 signal damaged(amount: int, source: String)
 signal died
+# Emitted with remaining air as a fraction in [0, 1]. Bar UI hides at 1.0.
+signal air_changed(fraction: float)
+# Edge signal for the underwater blue tint overlay. Emitted only when the
+# head-submerged state actually flips to avoid per-frame repaints.
+signal head_submerged_changed(submerged: bool)
 
 const WALK_SPEED: float = 4.317
 const SNEAK_SPEED: float = 1.295
@@ -11,6 +17,49 @@ const JUMP_VELOCITY: float = 8.0
 const GRAVITY: float = -32.0
 const MOUSE_SENSITIVITY: float = 0.002
 const PITCH_LIMIT_DEG: float = 89.0
+
+# Vanilla water physics (EntityLiving.e() in Bukkit/mc-dev):
+#   motY *= 0.5
+#   motY -= 0.02
+# Per-tick (20 Hz). Terminal sink = 0.02 / (1 - 0.5) = 0.04 blocks/tick = 0.8 m/s.
+# Horizontal damping by the same 0.5, so top walking speed in water ≈ 50%
+# of land speed at steady state. We run at 60 Hz; convert the per-tick
+# factors to per-second continuous equivalents:
+#   drag per second    = 0.5^20  = 9.5e-7 (effectively "near zero very fast")
+#   gravity per second = -0.02 * 20 = -0.4 m/s of additional down-velocity
+#     but capped by drag so terminal stays at 0.8 m/s sink.
+# Rather than hand-tune those, port the same form per-frame with exp-mapped
+# drag so timestep independence holds: v *= pow(drag_per_tick, delta*20).
+const WATER_DRAG_PER_TICK: float = 0.5
+const WATER_GRAVITY_PER_TICK: float = 0.02  # blocks/tick, downward
+# Vanilla EntityHuman swim-up: when jump is held in water, motY += 0.04
+# per tick (a continuous upward thrust, not a single impulse like ground
+# jump). 0.04 × 20 = 0.8 blocks/sec² of upward accel — just strong enough
+# to beat gravity and rise toward the surface.
+const SWIM_UP_PER_TICK: float = 0.04
+# Horizontal input acceleration in water — vanilla's `this.a(f, f1, 0.02F)`
+# vs land's 0.1F. We apply it as a direct target-speed clamp here (the
+# actual acceleration is handled by move_and_slide), scaled by the vanilla
+# ratio 0.02/0.1 = 0.2 of land speed. But vanilla's terminal water swim
+# speed is ~2 m/s (not 0.86 m/s) because of how the thrust + drag interact;
+# 50% of WALK_SPEED is closer to the felt speed.
+const WATER_MOVE_SPEED: float = WALK_SPEED * 0.5
+
+# Vanilla creative flight: double-tap jump toggles flight, space = ascend,
+# sneak = descend, horizontal speed doubles. Vanilla's default fly speed is
+# ~10.89 m/s (2.5× walk). Only available in creative mode — exits whenever
+# creative toggles off.
+const FLY_SPEED: float = 10.89
+const FLY_VERTICAL_SPEED: float = 7.5
+# Max seconds between two jump presses that still count as a double-tap.
+# Vanilla uses ~0.3 s; shorter feels sluggish, longer triggers accidentally.
+const FLY_DOUBLE_TAP_SEC: float = 0.3
+
+# Vanilla EntityLiving.deathTime → render-pitch mapping. Over ~20 ticks
+# (1 s) the body rolls 0° → 90° on death. Camera + character model both
+# tilt; the collision capsule itself stays upright.
+const _DEATH_TILT_DURATION_SEC: float = 1.0
+const _DEATH_TILT_MAX_DEG: float = 90.0
 
 # Vanilla MC Alpha player health — 20 half-hearts (10 full hearts on the
 # HUD). Reaches 0 → death → instant respawn (no death screen yet).
@@ -33,70 +82,48 @@ const HEALTH_REGEN_INTERVAL_SEC: float = 4.0
 # unlike mob damage which it does reduce.
 const DAMAGE_GENERIC: String = "generic"
 const DAMAGE_FALL: String = "fall"
+const DAMAGE_DROWN: String = "drown"
+const DAMAGE_LAVA: String = "lava"
+# Vanilla EntityLiving: airTicks = 300 (15 s) when head out of water,
+# decrements each tick head is submerged. At -20 ticks (1 s past zero),
+# deals 2 damage and resets to 0. We use seconds instead of ticks.
+const _AIR_MAX_SEC: float = 15.0
+const _DROWN_DAMAGE_INTERVAL_SEC: float = 1.0
+const _DROWN_DAMAGE: int = 2
 
-const _DEBUG_FILL_BLOCKS: Array = [
-	Blocks.STONE,
-	Blocks.COBBLESTONE,
-	Blocks.DIRT,
-	Blocks.GRASS,
-	Blocks.SAND,
-	Blocks.GRAVEL,
-	Blocks.LOG,
-	Blocks.PLANKS,
-	Blocks.LEAVES,
-]
+# Lava contact damage. Vanilla Alpha Entity.burn/attackEntityFrom(LAVA, 4)
+# fires once per physics tick (~50 ms) while the entity is touching a
+# lava cell, plus sets the entity on fire for 15 s afterward. We run the
+# damage on a half-second timer like drowning so it doesn't out-pace the
+# hurt-resistant-time cooldown, and skip the fire-tick for now (requires
+# an entity-fire system we don't have yet).
+const _LAVA_DAMAGE_INTERVAL_SEC: float = 0.5
+const _LAVA_DAMAGE: int = 4
 
-# Smelting / tool-tier starter pack — ALL raw ores + fuel (for furnace
-# path) PLUS already-smelted ingots + diamond (for direct tool crafting
-# without having to smelt every time). 16 of each. Bound to KEY_K.
-const _DEBUG_FILL_SMELT: Array = [
-	Blocks.COAL_ORE,
-	Blocks.IRON_ORE,
-	Blocks.GOLD_ORE,
-	Blocks.DIAMOND_ORE,
-	Blocks.COBBLESTONE,
-	Items.COAL,
-	Items.IRON_INGOT,
-	Items.GOLD_INGOT,
-	Items.DIAMOND,
-]
+# Timer state for lava contact damage. Mirrors `_drown_tick` — accumulates
+# delta while the player's feet/body overlap a lava cell, fires damage
+# every interval, resets when the player leaves lava.
+var _lava_tick: float = 0.0
+# Edge-detect flag for the lava-entry fizz SFX. True while player's AABB
+# overlaps lava; on rising edge (false → true), play one fizz sound.
+var _was_in_lava: bool = false
 
-# Every tool we've built. As new tools come online (stone/iron/diamond
-# pick, axe, shovel, sword), append the IDs here.
-const _DEBUG_FILL_TOOLS: Array = [
-	Items.WOODEN_PICKAXE,
-	Items.WOODEN_AXE,
-	Items.WOODEN_SHOVEL,
-	Items.WOODEN_SWORD,
-	Items.STONE_PICKAXE,
-	Items.STONE_AXE,
-	Items.STONE_SHOVEL,
-	Items.STONE_SWORD,
-	Items.IRON_PICKAXE,
-	Items.IRON_AXE,
-	Items.IRON_SHOVEL,
-	Items.IRON_SWORD,
-	Items.DIAMOND_PICKAXE,
-	Items.DIAMOND_AXE,
-	Items.DIAMOND_SHOVEL,
-	Items.DIAMOND_SWORD,
-	Items.GOLD_PICKAXE,
-	Items.GOLD_AXE,
-	Items.GOLD_SHOVEL,
-	Items.GOLD_SWORD,
-	Items.IRON_HELMET,
-	Items.IRON_CHESTPLATE,
-	Items.IRON_LEGGINGS,
-	Items.IRON_BOOTS,
-	Items.DIAMOND_HELMET,
-	Items.DIAMOND_CHESTPLATE,
-	Items.DIAMOND_LEGGINGS,
-	Items.DIAMOND_BOOTS,
-	# Hoe is Beta 1.6 — kept here as a debug-only grant. The recipe is
-	# disabled so normal players can't craft one, but devs can press J in
-	# debug mode to test the till logic.
-	Items.WOODEN_HOE,
-]
+# Vanilla Alpha Entity.K() (lw.java:206-212): on lava contact the fire
+# counter `bg` is set to 600 ticks at 20 Hz = 30 seconds. While bg > 0,
+# a 1-damage fire tick applies every 20 ticks (see bg%20 check at
+# lw.java:200-203). Earlier drafts used 15 s — Beta/Release shortened
+# it; Alpha 1.2.6 is the full 30 s so the "swim quick or you die"
+# pressure is authentic.
+const _FIRE_AFTER_LAVA_SEC: float = 30.0
+const _FIRE_BURN_INTERVAL_SEC: float = 1.0
+const _FIRE_BURN_DAMAGE: int = 1
+var _fire_remaining_sec: float = 0.0
+var _fire_burn_tick: float = 0.0
+
+# Old _DEBUG_FILL_* constants and per-set hotkey handlers lived here;
+# they've been replaced by the DebugItemSpawner UI (F4), which ships a
+# grid of every implemented block + item plus a quantity selector.
+# Adding a new item no longer requires touching player.gd.
 const _CAM_FIRST_PERSON: Vector3 = Vector3(0, 0.7, 0)
 const _CAM_THIRD_BACK: Vector3 = Vector3(0, 1.0, 3.5)
 const _CAM_THIRD_FRONT: Vector3 = Vector3(0, 1.0, -3.5)
@@ -118,6 +145,22 @@ const _FP_SWING_TRANSLATE_SCALE: float = 0.5  # screen-space units
 # of horizontal travel (and only when grounded). Sneaking is naturally
 # slower so the same distance gives a longer interval, no special-case.
 const _STEP_INTERVAL_M: float = 1.6
+# Swim-sound stride — vanilla emits `game.neutral.swim` per block traveled
+# at vanilla water speed (~0.8 m/s). Our water speed is ~2.7× faster
+# (2.16 m/s, tuned for non-tedious gameplay), so stretch the distance
+# accordingly. Net cadence lands at roughly 1 sound per second of active
+# swimming, matching vanilla perception.
+const _SWIM_INTERVAL_M: float = 2.7
+# Minimum seconds between splash sounds. Without this, a player treading
+# with jump held edges the feet across the water cell boundary on every
+# micro-bob and re-triggers splash each time — audible as SFX spam.
+const _SPLASH_MIN_INTERVAL_SEC: float = 1.0
+# Minimum entry speed (m/s) for a splash. Vanilla fires unconditionally on
+# the !inWater→inWater edge with volume scaled by speed, so we keep only a
+# tiny gate to skip dead-stop cell flips. Walk speed (4.317) easily clears
+# this, so wading off a beach still splashes. Tread-spam at the surface
+# is debounced via _SPLASH_MIN_INTERVAL_SEC.
+const _SPLASH_MIN_SPEED: float = 0.5
 const _FP_SWING_Y_TWIST_DEG: float = -15.0  # subtle wrist hint; vanilla 70° over-rotates our pose
 const _FP_SWING_X_TILT_DEG: float = -25.0  # tilt-down at peak — main rotation contribution
 
@@ -137,12 +180,29 @@ const _TP_HELD_BLOCK_POSITION: Vector3 = Vector3(0, -0.78, -0.18)
 const _TP_HELD_BLOCK_ROTATION: Vector3 = Vector3(0, -0.4363, 0)  # (0°, -25°, 0°)
 const _TP_HELD_BLOCK_SIZE: float = 0.30
 
+# Per-tick flow push for swimming in flowing water/lava. Cheap — a single
+# get_world_block + 4 neighbor reads per frame. Only runs when the player's
+# center cell is fluid (not every frame of play). Vanilla EntityLiving.move
+# scales the flow vector by 0.014 per tick — that's the constant here.
+const _FLUID_FLOW_PUSH_PER_TICK: float = 0.014
+
 @export var sneak_toggle: bool = false  # false = hold to sneak, true = press to toggle
 
 var inventory: Inventory
 var creative_mode: bool = false
 var perspective: int = PERSPECTIVE_FIRST
 var is_mining: bool = false  # set by Interaction; drives mining-swing animation
+
+
+# One-shot arm swing for right-click item-use (bucket fill/place, etc.).
+# Called by Interaction after a successful use; character_model runs
+# through one swing cycle and returns to rest. Looping mining swings
+# are handled separately via `is_mining`.
+func trigger_use_swing() -> void:
+	if _character_model != null and _character_model.has_method("trigger_use_swing"):
+		_character_model.trigger_use_swing()
+
+
 var health: int = MAX_HEALTH
 
 # Fall tracking — _fall_peak_y is the HIGHEST Y reached during the
@@ -209,6 +269,32 @@ var _tp_held_tool_pixel_size: float = 0.035
 var _tuner_mode: String = "fp"
 
 var _is_sneaking: bool = false
+# Creative flight state. `_is_flying` short-circuits gravity + vertical
+# input in _physics_process; `_last_jump_press_time` drives the vanilla
+# double-tap-to-toggle pattern. Both reset when creative mode exits.
+var _is_flying: bool = false
+# Vanilla EntityLiving.deathTime counts up each tick while dead; the render
+# pass maps that into a Z-axis roll of the entity model from 0° → 90° over
+# the first ~20 ticks (1 s). We track elapsed seconds in the same shape
+# and apply the roll to the camera (first-person view tilts with the
+# falling head) and the character model (third-person body lies sideways).
+var _death_time_sec: float = 0.0
+var _last_jump_press_time: float = -10.0
+# Water state between frames — `_was_in_water` drives the splash trigger
+# (vanilla Entity.N() fires on !inWater → inWater edge). `_swim_distance`
+# accumulates horizontal travel while submerged, stepping `play_swim()` at
+# a vanilla-like stride cadence.
+var _was_in_water: bool = false
+var _swim_distance: float = 0.0
+# Wall-clock timestamp of the last splash — debounces edge-flip spam.
+var _last_splash_time: float = -10.0
+# Drowning — time in seconds of air remaining. At 0, `_drown_tick` counts
+# up toward _DROWN_DAMAGE_INTERVAL_SEC and applies damage each interval.
+var _air_sec: float = _AIR_MAX_SEC
+var _drown_tick: float = 0.0
+# Tracks head-submerged state across frames for the underwater-tint
+# overlay. Signal is edge-triggered so the HUD only repaints on transitions.
+var _was_head_submerged: bool = false
 var _step_distance: float = 0.0  # accumulates horizontal travel between footsteps
 var _character_model: Node3D
 var _fp_hand: Node3D  # first-person right hand attached to camera
@@ -340,8 +426,14 @@ func _update_held_item() -> void:
 		# Block IDs live in [1..99]; non-block items (sticks, tools, coal,
 		# ingots, diamond) start at Items.STICK = 100. Block-IDs get a 3D
 		# cube held in the hand; everything else uses the sprite-extruded
-		# mesh (vanilla MC's ItemModelGenerator path).
-		if id >= Items.STICK:
+		# mesh (vanilla MC's ItemModelGenerator path). Non-cube blocks
+		# (sapling, future torches/plants) also route through the sprite
+		# path — vanilla renders them as flat 2D billboards in the held
+		# position via RenderItem.renderItemIn2D, not as a textured cube.
+		# Without this, the sapling icon tiles onto all six faces of the
+		# held cube, which reads as obviously wrong.
+		var as_sprite: bool = id >= Items.STICK or Blocks.needs_gdscript_mesher(id)
+		if as_sprite:
 			_build_held_tool(id)
 		else:
 			_build_held_block(id)
@@ -380,7 +472,7 @@ func _build_held_block(id: int) -> void:
 func _build_held_tool(id: int) -> void:
 	var tex: Texture2D = ItemIcons.icon_for(id)
 	if tex == null:
-		print("[HeldTool] no texture for item id %d" % id)
+		push_warning("[HeldTool] no texture for item id %d" % id)
 		return
 	# Pivot node sits at the FIST. Rotation pivots here, so the head arcs
 	# forward while the handle stays in place — like vanilla MC's swing.
@@ -754,6 +846,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_apply_mouse_motion(event)
 		return
+	# Dead — block all player-action inputs (perspective swap, inventory,
+	# hotbar cycling, drop, pause, debug toggles, etc.). The Respawn button
+	# on the DeathScreen Control is unaffected because button clicks don't
+	# go through the player's _unhandled_input. Mirrors vanilla MC's
+	# GuiGameOver: input is locked except for the on-screen widget.
+	# `_physics_process` already gates movement on `health <= 0` (line 1064).
+	if health <= 0:
+		return
 	if event.is_action_pressed("toggle_inventory"):
 		_toggle_inventory_screen()
 	elif event.is_action_pressed("pause"):
@@ -777,19 +877,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		Game.debug_enabled = not Game.debug_enabled
 		if not Game.debug_enabled:
 			creative_mode = false  # leaving debug also clears creative
+			_is_flying = false  # and creative-only flight along with it
 		_update_debug_label()
 	elif event.is_action_pressed("toggle_perspective"):
 		perspective = (perspective + 1) % PERSPECTIVE_COUNT
 		_apply_perspective()
 	elif Game.debug_enabled and event.is_action_pressed("debug_creative"):
 		creative_mode = not creative_mode
+		if not creative_mode:
+			_is_flying = false
 		_update_debug_label()
-	elif Game.debug_enabled and event.is_action_pressed("debug_fill_hotbar"):
-		_debug_fill_hotbar()
-	elif Game.debug_enabled and event.is_action_pressed("debug_fill_tools"):
-		_debug_fill_tools()
-	elif Game.debug_enabled and event.is_action_pressed("debug_fill_smelt"):
-		_debug_fill_smelt()
 	elif event.is_action_pressed("debug_tool_tuner"):
 		if _tool_tuner != null and _tool_tuner.has_method("toggle"):
 			_tool_tuner.toggle()
@@ -888,29 +985,6 @@ func _player_look_direction() -> Vector3:
 	return horiz * cos(pitch) + Vector3(0, sin(pitch), 0)
 
 
-func _debug_fill_hotbar() -> void:
-	for i in range(min(_DEBUG_FILL_BLOCKS.size(), Inventory.HOTBAR_SIZE)):
-		var stack: ItemStack = inventory.slots[i]
-		stack.item_id = _DEBUG_FILL_BLOCKS[i]
-		stack.count = ItemStack.MAX_SIZE
-	inventory.changed.emit()
-
-
-# Drops one of every craftable tool into the inventory. Uses add_item so
-# the tools land in the first available hotbar/main slot, instead of
-# overwriting whatever's there.
-func _debug_fill_tools() -> void:
-	for tool_id: int in _DEBUG_FILL_TOOLS:
-		inventory.add_item(tool_id, 1)
-
-
-# Smelting starter pack — 16 of each raw ore + cobblestone + coal so the
-# furnace + smelting + ingot path can be tested without spelunking.
-func _debug_fill_smelt() -> void:
-	for item_id: int in _DEBUG_FILL_SMELT:
-		inventory.add_item(item_id, 16)
-
-
 func _update_debug_label() -> void:
 	var label: Label = get_node_or_null("Crosshair/DebugLabel") as Label
 	if label == null:
@@ -983,6 +1057,120 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
+	# Previously this lived near the bottom of the function, which meant
+	# the water / flight branches' early returns skipped it: drown damage
+	# fired once, set cooldown to 1.0, and while submerged the cooldown
+	# never decremented. Second drown attempt was always blocked, damage
+	# silently stopped after one heart.
+	if _damage_cooldown_remaining > 0.0:
+		_damage_cooldown_remaining = maxf(0.0, _damage_cooldown_remaining - delta)
+	# Dead — skip all physics, input, air ticking, and fall tracking.
+	# Vanilla EntityLiving pegs motX/Y/Z to 0 on death and gates the
+	# locomotion branches on `isAlive()`. Our respawn handler restores
+	# control; until then, the corpse just sits still on the death screen
+	# while the death-tilt animation plays.
+	if health <= 0:
+		velocity = Vector3.ZERO
+		_death_time_sec += delta
+		_apply_death_tilt()
+		return
+	# Air / drowning tick — runs before branch dispatch so the bar updates
+	# consistently whether the player is swimming, walking, or flying.
+	_tick_air(delta)
+	_tick_lava(delta)
+	# Creative flight — double-tap jump toggles. Detected here (not in
+	# _unhandled_input) so the jump press still triggers a normal ground
+	# jump on the first tap; the second tap within FLY_DOUBLE_TAP_SEC
+	# promotes it to a flight toggle. While flying, gravity is skipped and
+	# sneak/jump drive vertical motion directly.
+	if creative_mode and Input.is_action_just_pressed("jump"):
+		var now: float = Time.get_ticks_msec() / 1000.0
+		if now - _last_jump_press_time < FLY_DOUBLE_TAP_SEC:
+			_is_flying = not _is_flying
+			velocity.y = 0.0
+		_last_jump_press_time = now
+
+	if creative_mode and _is_flying:
+		_update_flight_physics()
+		move_and_slide()
+		# Airborne — no footstep cadence, no fall tracking while flying.
+		# (fall tracking is disarmed because _is_flying disables gravity and
+		# we reset _fall_peak_y below so we don't take phantom damage when
+		# flight ends mid-air.)
+		_fall_peak_y = global_position.y
+		_was_on_floor = false
+		return
+
+	# Water physics — EntityLiving.e()'s water branch in Bukkit/mc-dev.
+	# Swim motion replaces land gravity + jump + walk speed entirely while
+	# the player's center cell is submerged. Fall tracking is reset so
+	# entering water at high speed doesn't read as a landing impact.
+	if _is_in_water():
+		# Splash on entry — vanilla Entity.N() edge detect: fires when
+		# inWater flips false → true. We add two guards vanilla doesn't
+		# strictly need but that prevent obvious spam in our 60 Hz /
+		# larger-capsule setup:
+		#   * cooldown of _SPLASH_MIN_INTERVAL_SEC (jumping in water
+		#     flips the AABB water test on/off once per hop)
+		#   * minimum entry speed (slow re-entries from a small jump
+		#     shouldn't trigger a new splash)
+		if not _was_in_water:
+			var now: float = Time.get_ticks_msec() / 1000.0
+			var entry_speed: float = velocity.length()
+			if (
+				entry_speed >= _SPLASH_MIN_SPEED
+				and now - _last_splash_time >= _SPLASH_MIN_INTERVAL_SEC
+			):
+				_last_splash_time = now
+				SFX.play_splash(velocity)
+		_was_in_water = true
+		_update_water_physics(delta)
+		var attempted_vx: float = velocity.x
+		var attempted_vz: float = velocity.z
+		move_and_slide()
+		# Swim cadence — tick a random swim sample every _SWIM_INTERVAL_M
+		# of horizontal travel. Mirrors Entity.h()'s `game.neutral.swim`.
+		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
+		_swim_distance += horiz_speed * delta
+		if _swim_distance >= _SWIM_INTERVAL_M:
+			_swim_distance = 0.0
+			SFX.play_swim()
+			# Beta Entity.handleWaterMovement spawns bubble particles
+			# trailing the entity each swim tick. We piggy-back on the
+			# swim cadence so bubbles emit at the same per-distance
+			# rate as the swim sound. Position offset behind the player
+			# so they trail rather than spawn on the body.
+			var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+			if cm != null:
+				var trail: Vector3 = global_position - velocity.normalized() * 0.3
+				FluidFx.spawn_water_bubble(cm, trail, velocity * 0.2, 3)
+		# Auto-step gated by three vanilla-matching conditions (see
+		# EntityLiving.e() `positionChanged && this.c(...)`):
+		#   1. is_on_wall — touched something horizontally
+		#   2. _pushing_into_wall — input actively driving into it
+		#      (mirrors `positionChanged` = motion-was-clipped)
+		#   3. _head_above_water — eye cell is air. Vanilla's 0.6m step-up
+		#      test fails while head is submerged, so gating here prevents
+		#      an auto-jumping loop at the water's edge.
+		if is_on_wall() and _pushing_into_wall(attempted_vx, attempted_vz) and _head_above_water():
+			_try_water_step_up()
+		# Keep walk animation running while swimming — Alpha had no
+		# dedicated swim pose (introduced in 1.13); Steve's limbs used the
+		# normal walk cycle in water. Mining swing still takes priority.
+		if _character_model != null and _character_model.has_method("update_walk_animation"):
+			var progress: float = _character_model.update_mining_swing(is_mining, delta)
+			var arm_locked: bool = _character_model.is_mining_visually()
+			_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
+			if _fp_hand != null and _fp_hand.visible:
+				_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
+		_fall_peak_y = global_position.y
+		_was_on_floor = false
+		return
+	# Left water this frame — clear splash/swim state so next entry re-fires.
+	_was_in_water = false
+	_swim_distance = 0.0
+
 	if not is_on_floor():
 		velocity.y += GRAVITY * delta
 	if Input.is_action_just_pressed("jump") and is_on_floor():
@@ -1033,8 +1221,9 @@ func _physics_process(delta: float) -> void:
 			_apply_tool_swing(_held_tool_pivot, _held_tool_position, _held_tool_rotation, progress)
 
 	_update_fall_tracking()
-	if _damage_cooldown_remaining > 0.0:
-		_damage_cooldown_remaining = maxf(0.0, _damage_cooldown_remaining - delta)
+	# Cooldown decrement moved to the top of _physics_process so it runs
+	# for every branch (water, flight, walking). Leaving the comment here
+	# as a breadcrumb.
 	_tick_health_regen(delta)
 
 
@@ -1085,8 +1274,16 @@ func _update_fall_tracking() -> void:
 func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 	if amount <= 0 or health <= 0:
 		return
-	if _damage_cooldown_remaining > 0.0:
-		return  # vanilla hurtResistantTime — drop overlapping hits
+	# Vanilla EntityLiving.damageEntity: `if (noDamageTicks > maxNoDamageTicks
+	# / 2.0) { if (f <= lastDamage) drop; else partial-land; }` — hits are
+	# only dropped in the FIRST half of the grace period. In the second
+	# half, any new damage lands fully and resets the cooldown. Our drown
+	# damage fires every 1 s exactly when the cooldown is expiring; with
+	# the old `> 0.0` check, a race frame blocked it and drown effectively
+	# stopped after one heart. Half-cooldown gate matches vanilla and lets
+	# drowns tick through.
+	if _damage_cooldown_remaining > DAMAGE_COOLDOWN_SEC * 0.5:
+		return
 	var final_amount: int = amount
 	if source != DAMAGE_FALL and inventory != null:
 		# Vanilla armor formula: final = damage × (25 - total_points) / 25.
@@ -1111,8 +1308,43 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 	damaged.emit(final_amount, source)
 	health_changed.emit(health, MAX_HEALTH)
 	if health == 0:
+		_drop_inventory_on_death()
 		died.emit()
 		_show_death_screen()
+
+
+# Vanilla EntityPlayer.dropAllItems / inventoryDrops — every non-empty
+# slot (hotbar + main + armor + craft grid) gets ejected as a
+# DroppedItem at the player's eye position with a small random outward
+# velocity. Slots are cleared in-place so the inventory is empty when
+# the player respawns.
+func _drop_inventory_on_death() -> void:
+	if inventory == null:
+		return
+	var chunk_manager: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if chunk_manager == null:
+		return
+	var eye_pos: Vector3 = global_position + Vector3(0, _CAM_FIRST_PERSON.y, 0)
+	# Iterate every persistent slot (HOTBAR + MAIN + ARMOR + CRAFT_GRID).
+	# CRAFT_RESULT is virtual / re-derived, so skip it.
+	for i in range(Inventory.CRAFT_START + Inventory.CRAFT_SIZE):
+		var stack: ItemStack = inventory.slots[i]
+		if stack.is_empty():
+			continue
+		var dropped_id: int = stack.item_id
+		var count: int = stack.count
+		stack.clear()
+		for _n in range(count):
+			# Random spread — vanilla scatters drops in a small cone
+			# around the player so they don't all stack on one tile.
+			var fling := Vector3(
+				randf_range(-2.5, 2.5), randf_range(0.5, 1.5), randf_range(-2.5, 2.5)
+			)
+			var item := DroppedItem.new()
+			chunk_manager.add_child(item)
+			item.global_position = eye_pos
+			item.setup(dropped_id, fling, DroppedItem.PLAYER_DROP_DELAY_SEC)
+	inventory.changed.emit()
 
 
 func _show_death_screen() -> void:
@@ -1137,7 +1369,38 @@ func _respawn() -> void:
 	_damage_cooldown_remaining = 0.0
 	_regen_accum = 0.0
 	health = MAX_HEALTH
+	# Clear fire + lava state — vanilla Entity.reset() zeros bg (fireTicks)
+	# on respawn. Without this the trailing burn keeps ticking damage after
+	# the player teleports back to spawn.
+	_fire_remaining_sec = 0.0
+	_fire_burn_tick = 0.0
+	_was_in_lava = false
+	_lava_tick = 0.0
+	# Clear death-tilt so the view returns to upright immediately on respawn.
+	_death_time_sec = 0.0
+	if _camera != null:
+		_camera.rotation.z = 0.0
+	if _character_model != null:
+		_character_model.rotation.z = 0.0
+		if _character_model.has_method("set_on_fire"):
+			_character_model.call("set_on_fire", false)
 	health_changed.emit(health, MAX_HEALTH)
+
+
+# Vanilla EntityLiving render-tilt on death: over ~20 ticks (1 s) the
+# entity's body roll interpolates from 0° to 90°, so the model lies flat.
+# We apply it to the camera (for first-person view tilt; the camera IS
+# the head in FP) and to the character model (for third-person so the
+# body visibly falls). The Player CharacterBody3D itself stays upright so
+# the capsule collision doesn't shift, matching vanilla where the entity
+# bounding box doesn't change on death.
+func _apply_death_tilt() -> void:
+	var progress: float = clampf(_death_time_sec / _DEATH_TILT_DURATION_SEC, 0.0, 1.0)
+	var angle: float = deg_to_rad(_DEATH_TILT_MAX_DEG) * progress
+	if _camera != null:
+		_camera.rotation.z = angle
+	if _character_model != null:
+		_character_model.rotation.z = angle
 
 
 # Vanilla EntityPlayer.damageArmor — distributes durability loss across
@@ -1167,6 +1430,330 @@ func _apply_mouse_motion(event: InputEventMouseMotion) -> void:
 	_camera.rotate_x(pitch_sign * -event.relative.y * MOUSE_SENSITIVITY)
 	var pitch_limit: float = deg_to_rad(PITCH_LIMIT_DEG)
 	_camera.rotation.x = clamp(_camera.rotation.x, -pitch_limit, pitch_limit)
+
+
+# Vanilla EntityLiving.P() — full AABB overlap test against water blocks
+# (Bukkit/mc-dev EntityLiving.a(Material)). We approximate with three
+# vertical probes along the capsule spine (feet, center, head) since the
+# 0.3×1.8 capsule spans up to two cells vertically.
+#
+# Center-only sampling was the "auto-jumps once, can't clear shore" bug:
+# step-up lifts the origin past the water cell boundary in one frame, water
+# mode ends, land gravity (-32 m/s²) slams the player back down instead of
+# letting the arc carry them forward onto the shore. With feet probes,
+# water mode persists until the FEET clear water — matching vanilla's AABB
+# behavior and giving the step-up impulse its full ~0.75 s to carry the
+# player forward.
+# Vanilla EntityLiving drowning tick (Bukkit/mc-dev EntityLiving.java ~L147):
+#   if (head in water) airTicks = j(airTicks);     // decrements
+#   if (airTicks == -20) { airTicks = 0; damageEntity(DROWN, 2); bubbles; }
+#   else airTicks = 300;                           // full refill out of water
+# Creative bypasses drowning entirely (`abilities.isInvulnerable` branch).
+# We emit `air_changed` only when the fraction actually changes enough to
+# repaint a bubble slot, to avoid a signal every frame while submerged.
+func _tick_air(delta: float) -> void:
+	var head_submerged: bool = _head_in_water()
+	if head_submerged != _was_head_submerged:
+		_was_head_submerged = head_submerged
+		head_submerged_changed.emit(head_submerged)
+	if head_submerged and not creative_mode:
+		_air_sec -= delta
+		if _air_sec <= 0.0:
+			_drown_tick += delta
+			if _drown_tick >= _DROWN_DAMAGE_INTERVAL_SEC:
+				_drown_tick = 0.0
+				take_damage(_DROWN_DAMAGE, DAMAGE_DROWN)
+	else:
+		# Not submerged — vanilla snaps air back to full instantly.
+		_air_sec = _AIR_MAX_SEC
+		_drown_tick = 0.0
+	air_changed.emit(clampf(_air_sec / _AIR_MAX_SEC, 0.0, 1.0))
+
+
+# Lava contact damage. Mirrors vanilla Entity.burn (Alpha source at
+# vendor/alpha-1.2.6-src/src/ij.java) — fires 4 damage per tick while
+# the entity's AABB overlaps a lava cell. Creative-mode bypasses this
+# just like drowning. We sample feet + body-center cells since the
+# player's AABB spans ~1.8 m; anywhere we overlap a LAVA block should
+# trigger. Damage timer is 0.5 s so it respects hurt-resistant-time
+# without creating a frame-rate-dependent pulse.
+func _tick_lava(delta: float) -> void:
+	if creative_mode:
+		# Vanilla lw.java:194-198 — when `bm` (creative) is set, the fire
+		# counter `bg` drains by 4 per tick instead of 1. At 20 TPS that's
+		# 80 ticks/sec → a fresh 600-tick lava ignite burns out in 7.5 s
+		# (vs 30 s in survival). No new damage is dealt; just drain.
+		_lava_tick = 0.0
+		_was_in_lava = false
+		if _fire_remaining_sec > 0.0:
+			_fire_remaining_sec = maxf(0.0, _fire_remaining_sec - delta * 4.0)
+			_fire_burn_tick = 0.0
+		return
+	var in_lava: bool = _is_in_lava()
+	# FIRE contact seeds the same fire-remaining timer lava uses. Vanilla's
+	# BlockFire.a(cy,...,Entity,ao2) calls `entity.setFire(8)` — 8 ticks
+	# = 0.4 s, re-seeded while standing IN the fire, so effectively the
+	# timer stays topped up. We re-seed to _FIRE_AFTER_LAVA_SEC (30s) so
+	# the burn continues after stepping off the fire, matching lava.
+	var in_fire: bool = _is_in_fire()
+	if in_fire:
+		_fire_remaining_sec = _FIRE_AFTER_LAVA_SEC
+	# Water extinguishes fire — vanilla Entity.K() / extinguish() zeroes
+	# the fire counter when the entity is in water (ij.java:406-411). One
+	# fizz SFX on the extinguish edge, then the trailing burn stops.
+	if _fire_remaining_sec > 0.0 and _is_in_water():
+		_fire_remaining_sec = 0.0
+		_fire_burn_tick = 0.0
+		SFX.play_fizz(false)
+	# Rising-edge fizz + fire-timer seed. Vanilla fires both on
+	# isInLava() transition: one-shot sizzle sound + Entity.setFire(15).
+	if in_lava and not _was_in_lava:
+		SFX.play_fizz(false)
+	if in_lava:
+		_fire_remaining_sec = _FIRE_AFTER_LAVA_SEC
+	_was_in_lava = in_lava
+	if in_lava:
+		_lava_tick += delta
+		if _lava_tick >= _LAVA_DAMAGE_INTERVAL_SEC:
+			_lava_tick = 0.0
+			take_damage(_LAVA_DAMAGE, DAMAGE_LAVA)
+	else:
+		_lava_tick = 0.0
+	# Fire-after-lava trail. Ticks down regardless of current lava state
+	# (being re-seeded above when the player is still in lava). Each
+	# _FIRE_BURN_INTERVAL_SEC applies 1 damage until the 15-s window
+	# expires. Vanilla's is implemented via Entity.fire counter; same
+	# result, simpler timer here.
+	if _fire_remaining_sec > 0.0:
+		_fire_remaining_sec = maxf(0.0, _fire_remaining_sec - delta)
+		_fire_burn_tick += delta
+		if _fire_burn_tick >= _FIRE_BURN_INTERVAL_SEC:
+			_fire_burn_tick = 0.0
+			if not in_lava:
+				# Only tick the trailing burn OUTSIDE lava — while in
+				# lava, _LAVA_DAMAGE above already dominates. Avoids
+				# stacking 4+1 hits per tick.
+				take_damage(_FIRE_BURN_DAMAGE, DAMAGE_LAVA)
+	else:
+		_fire_burn_tick = 0.0
+	# Third-person flame billboards on the character model. FP is handled
+	# by fire_overlay.gd; TP needs a visible flame around the body.
+	if _character_model != null and _character_model.has_method("set_on_fire"):
+		_character_model.call("set_on_fire", on_fire())
+
+
+# True while the player is taking or recovering from lava damage.
+# HUD overlay reads this to tint the screen; same semantic as
+# `_was_head_submerged` for water. Exposed as a read-only property for
+# the HUD layer via Player.on_fire.
+func on_fire() -> bool:
+	return _fire_remaining_sec > 0.0 or _was_in_lava
+
+
+# True if any of the 3 cells the player's AABB spans (feet / waist /
+# head) is lava. Vanilla Alpha checks Entity.isInsideOfMaterial(LAVA);
+# our sampling is a cheap approximation that still catches the common
+# cases (standing in, walking into, falling in). Corner-straddle edge
+# cases are rare and the next tick resolves them.
+func _is_in_lava() -> bool:
+	# `global_position` is the CAPSULE CENTER (not the feet) — the collision
+	# shape is a 1.8-tall Capsule3D with default zero transform, so the feet
+	# sit at center − 0.9. Sample the three player-occupied cells at feet /
+	# waist / eye relative to center, matching `_is_in_water`. Earlier values
+	# (+0.1, +0.9, +1.6) sat entirely ABOVE the capsule and never intersected
+	# a 1-block lava puddle the player was standing in.
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	for dy: float in [-0.85, 0.0, 0.7]:
+		var y: int = int(floor(global_position.y + dy))
+		if Blocks.is_lava(cm.get_world_block(Vector3i(x, y, z))):
+			return true
+	return false
+
+
+# Any of the 3 player AABB cells is FIRE. Used to trigger the fire-damage
+# timer without the 0.5s lava cadence (fire already uses the 1 dmg/sec
+# fire-trail path, so a single contact re-seeds the trail).
+func _is_in_fire() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	for dy: float in [-0.85, 0.0, 0.7]:
+		var y: int = int(floor(global_position.y + dy))
+		if cm.get_world_block(Vector3i(x, y, z)) == Blocks.FIRE:
+			return true
+	return false
+
+
+# Head submerged = eye cell is water. Matches vanilla Entity.a(Material)
+# which samples at `locY + headHeight` (0 for Entity, but eye-level for
+# players in EntityLiving overrides).
+func _head_in_water() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var head_cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + 0.7)),
+		int(floor(global_position.z))
+	)
+	return Blocks.is_water(cm.get_world_block(head_cell))
+
+
+func _is_in_water() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	var sample_dys: Array = [-0.85, 0.0, 0.7]  # feet, center, eye (inside capsule)
+	for dy: float in sample_dys:
+		var y: int = int(floor(global_position.y + dy))
+		if Blocks.is_water(cm.get_world_block(Vector3i(x, y, z))):
+			return true
+	return false
+
+
+# True when the player's eye cell is not water — their head has cleared
+# the surface. Used to gate the auto-step (vanilla's 0.6m step-up check
+# only passes when you've already swum high enough to breach, otherwise
+# the overhead cell is water and `this.c(...)` fails).
+func _head_above_water() -> bool:
+	return not _head_in_water()
+
+
+# Vanilla's `positionChanged` test, re-expressed for CharacterBody3D. We
+# were pushing into a wall this frame iff (a) our attempted horizontal
+# velocity had meaningful magnitude and (b) it pointed into the wall we
+# bumped (opposite to get_wall_normal, which points OUTWARD from the
+# wall toward us).
+func _pushing_into_wall(attempted_vx: float, attempted_vz: float) -> bool:
+	var attempted: Vector3 = Vector3(attempted_vx, 0, attempted_vz)
+	if attempted.length_squared() < 0.25:  # ignore < 0.5 m/s jitter
+		return false
+	var wall_normal: Vector3 = get_wall_normal()
+	# Dot against -wall_normal: positive means we're aimed into the wall.
+	# The 0.3 threshold kills grazing contact where the input is nearly
+	# parallel to the wall.
+	return attempted.normalized().dot(-wall_normal) > 0.3
+
+
+# Vanilla's swim-onto-land auto-step. Fires when move_and_slide reports a
+# horizontal wall collision. Probes the block that would be the step-up
+# cell — one above the player's waist in the direction of the wall. If
+# that cell is passable (AIR or water), nudge velocity.y up to 6 m/s so
+# the player hops onto the shore. Matches the motY = 0.3 line in
+# EntityLiving.e() in Bukkit/mc-dev.
+func _try_water_step_up() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return
+	var wall_normal: Vector3 = get_wall_normal()
+	if wall_normal.length_squared() < 0.01:
+		return
+	# Sample the cell just inside the wall (0.5m past the capsule edge) one
+	# block above the player's waist. If that cell is passable, the step is
+	# physically possible and vanilla would have fired its canMove check.
+	var into_wall: Vector3 = -wall_normal
+	var probe_x: int = int(floor(global_position.x + into_wall.x * 0.5))
+	var probe_z: int = int(floor(global_position.z + into_wall.z * 0.5))
+	var probe_y: int = int(floor(global_position.y + 1.0))
+	var above_id: int = cm.get_world_block(Vector3i(probe_x, probe_y, probe_z))
+	if above_id == Blocks.AIR or Blocks.is_water(above_id):
+		# Clamp UP only — don't cancel a downward swim.
+		velocity.y = maxf(velocity.y, 6.0)
+
+
+# Port of EntityLiving.e()'s `this.P()` branch. Per-tick vanilla ops
+# converted to timestep-independent form so the same feel holds at any
+# physics frame rate:
+#   v *= pow(WATER_DRAG_PER_TICK, delta*20)        # the *= 0.5 per tick
+#   v.y -= WATER_GRAVITY_PER_TICK * delta*20       # the -= 0.02 per tick
+#   v.y += SWIM_UP_PER_TICK * delta*20 (if jump)   # vanilla's swim thrust
+# Horizontal input uses WATER_MOVE_SPEED as a direct target since the
+# drag-plus-thrust equilibrium is what we're shooting for (vanilla's
+# `this.a(f, f1, 0.02F)` thrust + 0.5 drag settles at ~2 m/s; our direct
+# 50%-of-walk-speed target is close enough and avoids a solver loop).
+func _update_water_physics(delta: float) -> void:
+	var tick_scale: float = delta * 20.0  # how many 20 Hz vanilla ticks this frame spans
+	# Horizontal input → target velocity (X/Z). No input → drag-only.
+	var input_dir: Vector2 = Input.get_vector(
+		"move_left", "move_right", "move_forward", "move_back"
+	)
+	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+	if direction != Vector3.ZERO:
+		velocity.x = direction.x * WATER_MOVE_SPEED
+		velocity.z = direction.z * WATER_MOVE_SPEED
+	else:
+		var drag: float = pow(WATER_DRAG_PER_TICK, tick_scale)
+		velocity.x *= drag
+		velocity.z *= drag
+	# Vertical: vanilla drag, vanilla gravity, optional swim-up thrust.
+	# No passive buoyancy / no surface clamp — vanilla water has neither.
+	# Verified against EntityLiving.e() water branch (Bukkit/mc-dev):
+	#   motY *= 0.5
+	#   motY -= 0.02
+	#   [swim thrust if jump pressed]
+	# Terminal sink rate ≈ 0.8 m/s; holding jump reverses it. The visible
+	# "surface bob" in vanilla is the natural rhythm of tap-jump to stay
+	# afloat, not a buoyancy force.
+	var v_drag: float = pow(WATER_DRAG_PER_TICK, tick_scale)
+	velocity.y *= v_drag
+	velocity.y -= WATER_GRAVITY_PER_TICK * tick_scale * 20.0
+	if Input.is_action_pressed("jump"):
+		# Upward thrust, scaled like vanilla's motY += 0.04/tick in m/s².
+		velocity.y += SWIM_UP_PER_TICK * tick_scale * 20.0
+	# Flow-current push. Vanilla ld.java:157 `a(cy,x,y,z,Entity,Vec3)` adds
+	# the fluid's flow vector to the entity's motion each tick, scaled by
+	# 0.014 per vanilla EntityLiving.move(). BlockFluids.flow_vector returns
+	# a unit-ish world-space Vec3 from the level gradient across neighbors;
+	# we apply it as an impulse so the player drifts downstream instead of
+	# standing motionless in rapids.
+	_apply_fluid_flow_push(tick_scale)
+
+
+func _apply_fluid_flow_push(tick_scale: float) -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + 0.9)),  # waist-ish so we don't miss the cell
+		int(floor(global_position.z))
+	)
+	var id: int = cm.get_world_block(cell)
+	if not Blocks.is_fluid(id):
+		return
+	var flow: Vector3 = BlockFluids.flow_vector(cm, cell, id)
+	if flow.length_squared() == 0.0:
+		return
+	var push: Vector3 = flow * _FLUID_FLOW_PUSH_PER_TICK * tick_scale * 20.0
+	velocity.x += push.x
+	velocity.z += push.z
+
+
+# Horizontal motion at FLY_SPEED (ignores sneak slow-down; vanilla doesn't
+# crouch while flying). Vertical: jump = up, sneak OR fly_down (Ctrl/Cmd)
+# = down, neither = hover. Both descend bindings are first-class — sneak
+# matches vanilla Java, Ctrl/Cmd is the more ergonomic alt.
+func _update_flight_physics() -> void:
+	var input_dir: Vector2 = Input.get_vector(
+		"move_left", "move_right", "move_forward", "move_back"
+	)
+	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
+	velocity.x = direction.x * FLY_SPEED
+	velocity.z = direction.z * FLY_SPEED
+	if Input.is_action_pressed("jump"):
+		velocity.y = FLY_VERTICAL_SPEED
+	elif Input.is_action_pressed("sneak") or Input.is_action_pressed("fly_down"):
+		velocity.y = -FLY_VERTICAL_SPEED
+	else:
+		velocity.y = 0.0
 
 
 func _update_sneak() -> void:

@@ -65,11 +65,20 @@ func test_parity_negative_quadrant_chunk() -> void:
 func test_native_chunk_still_passes_base_layer_assertions() -> void:
 	# Reuses the invariants from test_worldgen.gd but on the native path,
 	# to make sure the C++ fill respects the bedrock / dirt / stone /
-	# grass contract independently of the parity-vs-GDScript check.
+	# grass contract independently of the parity-vs-GDScript check. Surface
+	# can be grass OR beach sand depending on whether the column sits in
+	# the beach band around sea level.
 	var chunk := _generate_with_native(0, 0)
+	var surface_ok: Array[int] = [Blocks.GRASS, Blocks.SAND]
+	var subsurface_ok: Array[int] = [Blocks.DIRT, Blocks.SAND]
 	for x: int in [0, 7, 15]:
 		for z: int in [0, 7, 15]:
 			var h := Worldgen.surface_height(x, z)
 			assert_eq(chunk.get_block(x, 0, z), Blocks.BEDROCK, "(%d,0,%d) bedrock" % [x, z])
-			assert_eq(chunk.get_block(x, h, z), Blocks.GRASS, "(%d,%d,%d) grass" % [x, h, z])
-			assert_eq(chunk.get_block(x, h - 1, z), Blocks.DIRT, "(%d,%d,%d) dirt" % [x, h - 1, z])
+			assert_true(
+				chunk.get_block(x, h, z) in surface_ok, "(%d,%d,%d) grass or sand" % [x, h, z]
+			)
+			assert_true(
+				chunk.get_block(x, h - 1, z) in subsurface_ok,
+				"(%d,%d,%d) dirt or sand" % [x, h - 1, z]
+			)

@@ -155,7 +155,14 @@ static func set_held_item(item_id: int) -> void:
 	pivot.add_child(orient)
 
 	var mesh := MeshInstance3D.new()
-	if item_id >= Items.STICK:
+	# Non-cube blocks (sapling, future torches/plants) take the sprite
+	# path too — same reasoning as player.gd: vanilla renders them as a
+	# flat 2D billboard, not a textured cube. Without this the inventory
+	# avatar holds a cube tiled with the sapling icon on every face.
+	var as_sprite: bool = (
+		item_id >= Items.STICK or (item_id != 0 and Blocks.needs_gdscript_mesher(item_id))
+	)
+	if as_sprite:
 		var tex: Texture2D = ItemIcons.icon_for(item_id)
 		if tex == null:
 			return
@@ -164,7 +171,7 @@ static func set_held_item(item_id: int) -> void:
 			return
 		mesh.mesh = arr_mesh
 		var ps: float = 0.035
-		# Non-tools (coal, ingots, diamond) get tighter scale + no
+		# Non-tools (coal, ingots, diamond, plants) get tighter scale + no
 		# handle-pivot offset — same rule as player.gd TP logic.
 		if Items.is_tool_item(item_id):
 			mesh.scale = Vector3(ps, ps, ps)

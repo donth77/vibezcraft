@@ -52,6 +52,14 @@ const FLINT: int = 128
 # source yet (cows haven't shipped); you can debug-grant via console once
 # inventory APIs land for ad-hoc spawns.
 const LEATHER: int = 124
+# Bone meal — vanilla `ItemDye` (subtype 15). Right-click on a sapling
+# fast-tracks it into a tree (BlockSapling.grow). Pre-Beta-1.8 vanilla
+# only sources bone meal from skeleton bone drops, ground in the craft
+# grid → 3× bone meal. Skeletons aren't shipped yet, so for now this is
+# debug-only (J in tool_tuner). The right-click handler is fully wired so
+# the moment skeletons + bones land, the recipe in data/recipes.json can
+# enable and the path becomes naturally reachable.
+const BONEMEAL: int = 129
 
 # Armor — iron, gold, diamond × {helmet, chestplate, leggings, boots}.
 # Slot routing (head/chest/legs/feet) is derived from the id via the
@@ -69,6 +77,22 @@ const DIAMOND_HELMET: int = 138
 const DIAMOND_CHESTPLATE: int = 139
 const DIAMOND_LEGGINGS: int = 140
 const DIAMOND_BOOTS: int = 141
+# Vanilla Alpha ItemBucket (ds.java) — one class, three in-game forms
+# toggled by ItemBucket.itemID stored per-stack. We use three separate
+# ids instead for simplicity; the interaction code in interaction.gd
+# swaps item ids on use (empty + water source → water bucket, etc.).
+# Alpha buckets don't stack (stack size = 1) — handled in max_stack_size
+# via `is_tool_item` once we mark these; until then, vanilla bucket is a
+# non-tool item that stacks, which is WRONG but harmless for testing.
+const BUCKET_EMPTY: int = 142
+const BUCKET_WATER: int = 143
+const BUCKET_LAVA: int = 144
+# Vanilla Alpha ItemFlintAndSteel — extends Item directly (not ItemTool),
+# stack=1, durability=64 (65 uses including the final-break consumption).
+# Right-click on a face places FIRE in the air cell on that face's normal
+# side, costs 1 durability per ignition. Vanilla recipe: iron_ingot in
+# top-left, flint in bottom-right of a 2×2 grid. See data/recipes.json.
+const FLINT_AND_STEEL: int = 145
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -89,6 +113,11 @@ const TOOL_TYPE_AXE: int = 2
 const TOOL_TYPE_SHOVEL: int = 3
 const TOOL_TYPE_SWORD: int = 4
 const TOOL_TYPE_HOE: int = 5  # Beta-era; see WOODEN_HOE note above
+# Flint-and-steel doesn't really fit any of the dig-tool taxonomies (it's
+# not for breaking blocks, just for igniting fire). Carved out as its own
+# type so the break-time / harvest-level paths can ignore it cleanly,
+# while still routing through `_TOOL_DATA` for stack=1 + durability.
+const TOOL_TYPE_FLINT_AND_STEEL: int = 6
 
 # Vanilla armor defense points (Bukkit/mc-dev `EnumArmorMaterial`).
 # Full-set totals: gold 11, iron 15, diamond 20. Damage reduction
@@ -136,6 +165,10 @@ const _TOOL_DATA: Dictionary = {
 	GOLD_AXE: [TOOL_TYPE_AXE, 12.0, 0, 32],
 	GOLD_SHOVEL: [TOOL_TYPE_SHOVEL, 12.0, 0, 32],
 	GOLD_SWORD: [TOOL_TYPE_SWORD, 12.0, 0, 32],
+	# Vanilla nv.java sets aY=64 (durability) + aX=1 (stack=1). speed/
+	# harvest_level are unused for flint-and-steel since it's not a dig
+	# tool — we pass 1.0/0 as benign defaults.
+	FLINT_AND_STEEL: [TOOL_TYPE_FLINT_AND_STEEL, 1.0, 0, 64],
 }
 
 
@@ -179,6 +212,8 @@ static func id_from_name(item_name: String) -> int:
 			return FLINT
 		"sapling":
 			return Blocks.SAPLING
+		"torch":
+			return Blocks.TORCH
 		"iron_pickaxe":
 			return IRON_PICKAXE
 		"diamond_pickaxe":
@@ -203,6 +238,8 @@ static func id_from_name(item_name: String) -> int:
 			return CHARCOAL
 		"leather":
 			return LEATHER
+		"bonemeal":
+			return BONEMEAL
 		"iron_helmet":
 			return IRON_HELMET
 		"iron_chestplate":
@@ -227,6 +264,14 @@ static func id_from_name(item_name: String) -> int:
 			return DIAMOND_LEGGINGS
 		"diamond_boots":
 			return DIAMOND_BOOTS
+		"bucket":
+			return BUCKET_EMPTY
+		"water_bucket":
+			return BUCKET_WATER
+		"lava_bucket":
+			return BUCKET_LAVA
+		"flint_and_steel":
+			return FLINT_AND_STEEL
 		"air":
 			return Blocks.AIR
 		"bedrock":
@@ -338,6 +383,8 @@ static func display_name(item_id: int) -> String:
 			return "Charcoal"
 		LEATHER:
 			return "Leather"
+		BONEMEAL:
+			return "Bone Meal"
 		IRON_HELMET:
 			return "Iron Helmet"
 		IRON_CHESTPLATE:
@@ -362,6 +409,14 @@ static func display_name(item_id: int) -> String:
 			return "Diamond Leggings"
 		DIAMOND_BOOTS:
 			return "Diamond Boots"
+		BUCKET_EMPTY:
+			return "Bucket"
+		BUCKET_WATER:
+			return "Water Bucket"
+		BUCKET_LAVA:
+			return "Lava Bucket"
+		FLINT_AND_STEEL:
+			return "Flint and Steel"
 		Blocks.AIR:
 			return ""
 		Blocks.BEDROCK:
@@ -471,5 +526,10 @@ static func tool_durability(item_id: int) -> int:
 # stack to ItemStack.MAX_SIZE (64).
 static func max_stack_size(item_id: int) -> int:
 	if is_tool_item(item_id):
+		return 1
+	# Vanilla ItemBucket overrides maxStackSize to 1 — filled buckets
+	# need per-stack state (which fluid), and even empty buckets follow
+	# the same convention. Matches ItemBucket.itemID uniqueness rule.
+	if item_id == BUCKET_EMPTY or item_id == BUCKET_WATER or item_id == BUCKET_LAVA:
 		return 1
 	return ItemStack.MAX_SIZE

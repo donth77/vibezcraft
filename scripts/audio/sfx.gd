@@ -47,6 +47,27 @@ const _DIG_SOUNDS: Dictionary = {
 
 const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
 const _TOOL_BREAK_SOUND: String = "res://assets/audio/sfx/tool_break.ogg"
+# Alpha 1.2.6 `sound3/random/click.ogg` — UI click for menu buttons.
+const _CLICK_SOUND: String = "res://assets/audio/sfx/click.ogg"
+# Alpha 1.2.6 `sound3/random/glass{1,2,3}.ogg` — sharp shatter that BlockGlass
+# emits on break (StepSoundC.soundOnDestroyed override). The step / place
+# sound stays "stone" via _material_for since vanilla glass uses Material.glass
+# whose stepSoundName is "step.stone".
+const _GLASS_BREAK_SOUNDS: Array = [
+	"res://assets/audio/sfx/random/glass1.ogg",
+	"res://assets/audio/sfx/random/glass2.ogg",
+	"res://assets/audio/sfx/random/glass3.ogg",
+]
+# Alpha 1.2.6 `sound3/random/fizz.ogg` — extracted from
+# InventivetalentDev/minecraft-assets @ a1.2.6 (vendor client.jar
+# doesn't ship audio; the launcher downloads it on first run). Used
+# for lava→obsidian/cobble conversion and lava-contact burn cues.
+const _FIZZ_SOUND: String = "res://assets/audio/sfx/fluid/fizz.ogg"
+# Alpha 1.2.6 `sound3/fire/fire.ogg` — low crackling loop-able clip.
+# Vanilla `qh.java::b(cy,x,y,z,Random)` (BlockFire.randomDisplayTick)
+# plays this 1-in-24 per random tick on a FIRE cell at pitch
+# `(rand * 0.7 + 0.3)`, volume `1.0 + rand`. We scale similarly below.
+const _FIRE_CRACKLE_SOUND: String = "res://assets/audio/sfx/fire/fire.ogg"
 # Player damage sounds — vanilla EntityHuman.getHurtSound /
 # getFallSound. hit{1,2,3} rotate randomly per hit; fallbig fires when
 # the fall damage is > 4, else fallsmall.
@@ -57,6 +78,19 @@ const _PLAYER_HIT_SOUNDS: Array = [
 ]
 const _PLAYER_FALL_BIG: String = "res://assets/audio/sfx/damage/fallbig.ogg"
 const _PLAYER_FALL_SMALL: String = "res://assets/audio/sfx/damage/fallsmall.ogg"
+# Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
+# water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
+# by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
+# during horizontal motion while submerged — vanilla `Entity.h()` emits
+# `game.neutral.swim` on a stride interval tied to travel distance.
+const _WATER_SPLASH_SOUND: String = "res://assets/audio/sfx/water/splash.ogg"
+const _WATER_SWIM_SOUNDS: Array = [
+	"res://assets/audio/sfx/water/swim1.ogg",
+	"res://assets/audio/sfx/water/swim2.ogg",
+	"res://assets/audio/sfx/water/swim3.ogg",
+	"res://assets/audio/sfx/water/swim4.ogg",
+]
+
 # Vanilla MC plays step.gravel for hoe tilling, soil step events, etc.
 const _GRAVEL_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/step/gravel1.ogg",
@@ -126,6 +160,12 @@ func _ready() -> void:
 
 
 func play_break(block_id: int) -> void:
+	# Glass has a dedicated shatter set, not the stone dig variants — vanilla
+	# BlockGlass overrides StepSound.soundOnDestroyed to "random.glass*".
+	if block_id == Blocks.GLASS:
+		var path: String = _GLASS_BREAK_SOUNDS[randi() % _GLASS_BREAK_SOUNDS.size()]
+		_play_one(path, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+		return
 	var mat := _material_for(block_id)
 	if mat == "":
 		return
@@ -204,6 +244,32 @@ func _play_one(path: String, volume_db: float, pitch: float) -> void:
 	player.play()
 
 
+# Water entry splash — vanilla Entity.N() plays `random.splash` when the
+# entity transitions from !inWater to inWater (lw.java:160-184). Volume is
+# `clamp(sqrt(vx²·0.2 + vy² + vz²·0.2) · 0.2, 0, 1)` — vertical impact
+# weighted 5× horizontal so cannonball jumps are loud and gentle wades are
+# soft but audible. Pitch jitter is `1.0 + (rand - rand) * 0.4`.
+func play_splash(velocity: Vector3) -> void:
+	var weighted: float = (
+		velocity.x * velocity.x * 0.2 + velocity.y * velocity.y + velocity.z * velocity.z * 0.2
+	)
+	var f: float = clampf(sqrt(weighted) * 0.2, 0.0, 1.0)
+	if f <= 0.0:
+		return
+	var volume_db: float = linear_to_db(f)
+	var pitch: float = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER) * 0.4
+	_play_one(_WATER_SPLASH_SOUND, volume_db, pitch)
+
+
+# Ongoing swim cadence — one random swim sample per stride while the
+# player is moving horizontally through water. Vanilla's `Entity.h()`
+# cycles `game.neutral.swim` on the same block-travel tracker the footstep
+# system uses, so player.gd drives the interval.
+func play_swim() -> void:
+	var path: String = _WATER_SWIM_SOUNDS[randi() % _WATER_SWIM_SOUNDS.size()]
+	_play_one(path, _STEP_VOLUME_DB, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+
+
 # Tool snap — vanilla MC's random/break.ogg, played when a tool's
 # durability hits zero and the stack is consumed.
 func play_tool_break() -> void:
@@ -216,6 +282,86 @@ func play_tool_break() -> void:
 	player.stream = stream
 	player.volume_db = 0.0
 	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.play()
+
+
+# Lava fizzle — fires when a lava cell converts to obsidian/cobble after
+# touching water, and also as a one-shot on player-lava contact.
+# Mirrors ld.java:257 `random.fizz`. Vanilla's pitch jitter is `2.6 +
+# (rand - rand) * 0.8` — treat that as a mean near 2.6× with a ±0.8
+# range, same shape we can do with pitch_scale.
+func play_fizz(loud: bool = false) -> void:
+	var stream: AudioStream = _stream_cache.get(_FIZZ_SOUND)
+	if stream == null:
+		stream = load(_FIZZ_SOUND) as AudioStream
+		_stream_cache[_FIZZ_SOUND] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	# Conversion: loud bubbly hiss. Lava-touch: quieter, shorter-feeling
+	# via pitch shift so the two audio cues feel distinct.
+	player.volume_db = 0.0 if loud else -6.0
+	var base_pitch: float = 2.6 if loud else 1.8
+	player.pitch_scale = base_pitch + randf_range(-0.4, 0.4)
+	player.play()
+
+
+# Fire crackle — mirrors vanilla qh.java:186-188 BlockFire.randomDisplayTick:
+# 1-in-24 per random tick roll plays this sound at pitch ~0.65 (rand * 0.7
+# + 0.3 midpoint). Caller rolls the probability and invokes with the world
+# position of the fire cell so distance-attenuation works via AudioStreamPlayer
+# position (today we use the non-positional pool for simplicity).
+func play_fire_crackle() -> void:
+	var stream: AudioStream = _stream_cache.get(_FIRE_CRACKLE_SOUND)
+	if stream == null:
+		stream = load(_FIRE_CRACKLE_SOUND) as AudioStream
+		_stream_cache[_FIRE_CRACKLE_SOUND] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	# Vanilla pitch: rand(0..1) * 0.7 + 0.3 → [0.3, 1.0], volume 1.0 + rand.
+	# Map to our dB range: ~-4 dB midpoint, ± 2 dB jitter.
+	player.volume_db = -4.0 + randf_range(-2.0, 2.0)
+	player.pitch_scale = randf_range(0.3, 1.0)
+	player.play()
+
+
+# Lava surface pop — vanilla ld.java's randomDisplayTick calls `random.pop`
+# alongside the lava spark particle. Reuses the existing pop.ogg stream
+# with a muted volume + lower pitch so it reads as a bubble rather than a
+# sharp item-pickup cue.
+func play_lava_pop() -> void:
+	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
+	if stream == null:
+		stream = load(_PICKUP_SOUND) as AudioStream
+		_stream_cache[_PICKUP_SOUND] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = -8.0
+	player.pitch_scale = 0.5 + randf_range(-0.1, 0.1)
+	player.play()
+
+
+# Menu/button click — vanilla MC plays `random.click` at pitch 1.0 for any
+# menu button activation. Pitch is fixed (no jitter) in vanilla so repeated
+# clicks read as a single consistent UI cue.
+func play_click() -> void:
+	var stream: AudioStream = _stream_cache.get(_CLICK_SOUND)
+	if stream == null:
+		stream = load(_CLICK_SOUND) as AudioStream
+		_stream_cache[_CLICK_SOUND] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = 0.0
+	player.pitch_scale = 1.0
 	player.play()
 
 
@@ -251,15 +397,22 @@ func _play_random(material: String, base_pitch: float) -> void:
 	player.play()
 
 
+# gdlint: disable=max-returns
 func _material_for(block_id: int) -> String:
 	match block_id:
-		Blocks.STONE, Blocks.COBBLESTONE, Blocks.BEDROCK, Blocks.BRICK, Blocks.OBSIDIAN:
+		Blocks.STONE, Blocks.COBBLESTONE, Blocks.BEDROCK, Blocks.BRICK:
 			return "stone"
-		Blocks.DIRT, Blocks.GRASS, Blocks.LEAVES:
+		Blocks.OBSIDIAN, Blocks.COAL_ORE, Blocks.IRON_ORE, Blocks.GOLD_ORE:
+			return "stone"
+		Blocks.DIAMOND_ORE, Blocks.FURNACE, Blocks.LIT_FURNACE, Blocks.GLASS:
+			return "stone"
+		Blocks.DIRT, Blocks.GRASS, Blocks.LEAVES, Blocks.SAPLING:
 			return "grass"
 		Blocks.SAND:
 			return "sand"
-		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE:
+		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE, Blocks.TORCH:
+			# Torch uses wood per vanilla nq.java:9 + nq.aq registration:
+			# `new ob(50, 80).c(0.0f).a(0.9375f).a(e)` where `e = bi("wood", ...)`.
 			return "wood"
 		Blocks.GRAVEL, Blocks.FARMLAND:
 			return "gravel"

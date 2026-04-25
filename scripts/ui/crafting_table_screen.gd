@@ -62,7 +62,7 @@ func _ready() -> void:
 	_local_slots = []
 	for i in range(TOTAL_LOCAL_SLOTS):
 		_local_slots.append(ItemStack.new())
-	_font = load(FONT_PATH) as FontFile
+	_font = MinecraftFont.get_font()
 	_build_dim_background()
 	_build_panel()
 	_build_cursor_overlay()
@@ -193,8 +193,9 @@ func _make_slot_panel(parent: Control, native_x: int, native_y: int) -> Panel:
 	count.add_theme_font_override("font", _font)
 	count.add_theme_font_size_override("font_size", 8 * SCALE)
 	count.add_theme_color_override("font_color", Color(1, 1, 1))
-	count.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	count.add_theme_constant_override("outline_size", 2)
+	count.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	count.add_theme_constant_override("shadow_offset_x", SCALE)
+	count.add_theme_constant_override("shadow_offset_y", SCALE)
 	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	count.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	count.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -215,8 +216,9 @@ func _build_cursor_overlay() -> void:
 	_cursor_count_label.add_theme_font_override("font", _font)
 	_cursor_count_label.add_theme_font_size_override("font_size", 8 * SCALE)
 	_cursor_count_label.add_theme_color_override("font_color", Color(1, 1, 1))
-	_cursor_count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	_cursor_count_label.add_theme_constant_override("outline_size", 2)
+	_cursor_count_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	_cursor_count_label.add_theme_constant_override("shadow_offset_x", SCALE)
+	_cursor_count_label.add_theme_constant_override("shadow_offset_y", SCALE)
 	_cursor_count_label.size = Vector2(16 * SCALE, 16 * SCALE)
 	_cursor_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_cursor_count_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
@@ -228,8 +230,9 @@ func _build_cursor_overlay() -> void:
 	_tooltip.add_theme_font_override("font", _font)
 	_tooltip.add_theme_font_size_override("font_size", 7 * SCALE)
 	_tooltip.add_theme_color_override("font_color", Color(1, 1, 1))
-	_tooltip.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	_tooltip.add_theme_constant_override("outline_size", 3)
+	_tooltip.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	_tooltip.add_theme_constant_override("shadow_offset_x", SCALE)
+	_tooltip.add_theme_constant_override("shadow_offset_y", SCALE)
 	var tip_style := StyleBoxFlat.new()
 	tip_style.bg_color = Color(0.06, 0.04, 0.10, 0.92)
 	tip_style.border_color = Color(0.30, 0.18, 0.50, 0.95)

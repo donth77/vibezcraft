@@ -8,7 +8,7 @@ extends RefCounted
 
 const GRID_SIZE := 8  # 8x8 = 64 slots; plenty of room for new blocks
 const PACK_BASE := "res://assets/textures/blocks/packs/"
-const DEFAULT_PACK := "pixellab"
+const DEFAULT_PACK := "alpha_vanilla"
 
 # Face kinds for the precomputed UV lookup. Mapped from mesher's face_idx
 # (0-5) via Mesher._FACE_KIND so the fast indexed path and the old string
@@ -45,6 +45,10 @@ const _LAYOUT := {
 	"furnace_front_lit": 22,
 	"glass": 23,
 	"sapling": 24,
+	"lava_still": 25,
+	"lava_flowing": 26,
+	"torch": 27,
+	"fire": 28,
 }
 
 static var active_pack: String = DEFAULT_PACK
@@ -59,6 +63,17 @@ static var _block_face_uvs: Array[Rect2] = []
 static var _uv_table_flat: PackedFloat32Array = PackedFloat32Array()
 static var _material: ShaderMaterial
 static var _overlay_material: ShaderMaterial  # depth-test-disabled variant for FP held items
+# Entity variant — same chunk shader + atlas, but a SEPARATE ShaderMaterial
+# instance so debug uniforms (the F8 heatmap's `debug_view`) pushed onto the
+# main `_material` don't bleed onto dropped items / falling blocks / the
+# held block on the third-person model. Without this, every entity mesh
+# rendered green in heatmap mode because its mesh ships with no per-vertex
+# COLOR and Godot defaults missing COLOR to white = sky_light=15.
+static var _entity_material: ShaderMaterial
+# Translucent, scrolling-noise water material shared by every chunk's water
+# mesh. Owns no state — the shader is self-contained (see shaders/water.gdshader).
+static var _water_material: ShaderMaterial
+static var _lava_material: ShaderMaterial
 static var _slot_size: int = 32  # auto-detected on build()
 
 
@@ -73,6 +88,16 @@ static func build() -> void:
 		_slot_size * GRID_SIZE, _slot_size * GRID_SIZE, false, Image.FORMAT_RGBA8
 	)
 	var slot_uv: float = 1.0 / float(GRID_SIZE)
+	# Half-texel UV inset to kill atlas bleed at tile borders. Without
+	# this, a face whose UV vertex lands exactly on the slot boundary
+	# (e.g. 0.125 = end of slot 0) can sample the FIRST texel of the
+	# adjacent slot — visible as the thin white seams between blocks.
+	# Vanilla MC's terrain.png leaves a 1-px gutter; we shrink the rect
+	# in UV space instead so we don't have to repack textures, and we
+	# still get pixel-perfect Alpha look (sub-pixel inset is invisible).
+	# Texel size in UV = 1 / (slot_size × GRID_SIZE); half-texel inset
+	# is half that on each side.
+	var inset: float = 0.5 / float(_slot_size * GRID_SIZE)
 	for tex_name: String in _LAYOUT:
 		var idx: int = _LAYOUT[tex_name]
 		var col: int = idx % GRID_SIZE
@@ -96,7 +121,12 @@ static func build() -> void:
 		atlas_image.blit_rect(
 			img, Rect2i(0, 0, _slot_size, _slot_size), Vector2i(col * _slot_size, row * _slot_size)
 		)
-		_uv_rects[tex_name] = Rect2(col * slot_uv, row * slot_uv, slot_uv, slot_uv)
+		_uv_rects[tex_name] = Rect2(
+			col * slot_uv + inset,
+			row * slot_uv + inset,
+			slot_uv - 2.0 * inset,
+			slot_uv - 2.0 * inset,
+		)
 	_texture = ImageTexture.create_from_image(atlas_image)
 	_build_block_face_uvs()
 
@@ -153,6 +183,34 @@ static func uv_rect_for(block_id: int, face_kind: int) -> Rect2:
 	return _block_face_uvs[block_id * 3 + face_kind]
 
 
+# Returns a STANDALONE Image of just this block's face tile — copied out
+# of the packed atlas with no AtlasTexture region indirection. Used by
+# BlockFx to bake per-block-id particle textures without the half-texel
+# inset / region remapping that was causing neighboring atlas tiles to
+# bleed into break particles. Returns null if the block has no texture
+# for the given face (AIR, unknown ids).
+#
+# Resolves directly via _LAYOUT to avoid round-tripping through the UV
+# rect (which carries a half-texel inset for shader bleed prevention,
+# producing fragile float-to-int math when extracting pixel bounds).
+static func tile_image(block_id: int, face_kind: int) -> Image:
+	if _texture == null:
+		build()
+	if _texture == null:
+		return null
+	var face_names: Array[String] = ["top", "bottom", "side"]
+	var tex_name: String = Blocks.get_face_texture(block_id, face_names[face_kind])
+	if not _LAYOUT.has(tex_name):
+		return null
+	var idx: int = _LAYOUT[tex_name]
+	var col: int = idx % GRID_SIZE
+	var row: int = idx / GRID_SIZE
+	var atlas_img: Image = _texture.get_image()
+	if atlas_img == null:
+		return null
+	return atlas_img.get_region(Rect2i(col * _slot_size, row * _slot_size, _slot_size, _slot_size))
+
+
 # Flat float array (4 floats per Rect2) for native-extension consumers.
 # Indexed the same way as uv_rect_for: (block_id * 3 + face_kind) * 4.
 static func uv_table_flat() -> PackedFloat32Array:
@@ -182,6 +240,42 @@ static func overlay_material() -> ShaderMaterial:
 	return _overlay_material
 
 
+# Variant for ENTITY block meshes — dropped items, falling blocks, the
+# third-person held block. Same shader as chunks (same atlas, same Notch
+# face shade, same brightness LUT) but a separate material instance so the
+# F8 heatmap's `debug_view` uniform set on `_material` doesn't bleed into
+# entity meshes (which carry no per-vertex sky_light info and would render
+# as a flat heatmap value). Entities always run with `debug_view = 0`
+# (its default) regardless of what the terrain heatmap is doing.
+static func entity_material() -> ShaderMaterial:
+	if _entity_material == null:
+		_entity_material = ShaderMaterial.new()
+		# gdlint: disable=duplicated-load
+		_entity_material.shader = load("res://shaders/chunk.gdshader") as Shader
+		_entity_material.set_shader_parameter("atlas_texture", texture())
+	return _entity_material
+
+
+# Shared translucent water ShaderMaterial, used by every chunk's water
+# MeshInstance3D. Stateless — the shader animates from TIME so a single
+# material works for every chunk without per-instance uniforms.
+static func water_material() -> ShaderMaterial:
+	if _water_material == null:
+		_water_material = ShaderMaterial.new()
+		_water_material.shader = load("res://shaders/water.gdshader") as Shader
+	return _water_material
+
+
+# Shared opaque lava ShaderMaterial. Procedural animation like water but
+# slower + emissive so it reads as molten. One material instance for all
+# chunks' lava meshes — TIME-driven, no per-chunk uniforms.
+static func lava_material() -> ShaderMaterial:
+	if _lava_material == null:
+		_lava_material = ShaderMaterial.new()
+		_lava_material.shader = load("res://shaders/lava.gdshader") as Shader
+	return _lava_material
+
+
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
@@ -189,3 +283,6 @@ static func reset() -> void:
 	_uv_table_flat = PackedFloat32Array()
 	_material = null
 	_overlay_material = null
+	_entity_material = null
+	_water_material = null
+	_lava_material = null

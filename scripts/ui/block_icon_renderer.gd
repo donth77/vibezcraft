@@ -38,7 +38,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.GRAVEL,
 	Blocks.FURNACE,
 	Blocks.GLASS,
-	Blocks.SAPLING,
+	# SAPLING is intentionally NOT iconified — it renders as a cross-quad
+	# in-world (not a cube), so the iso-cube bake reads as an oversized
+	# blocky sprite. Falls through to ItemIcons' flat sprite path which
+	# loads packs/{active}/sapling.png directly, matching how vanilla MC
+	# inventory shows non-cube items.
 ]
 
 static var _viewport: SubViewport

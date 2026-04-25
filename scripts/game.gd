@@ -1,5 +1,13 @@
 extends Node
 
+# Cloud rendering quality — mirrors vanilla's `Options.fancyGraphics`
+# split (vendor/alpha-1.2.6-src/src/f.java:b vs c). 0=off (no clouds),
+# 1=fast (single flat textured plane, low cost), 2=fancy (3D box clouds
+# with per-face shading — the iconic look). SkyDome reads this on _ready.
+const CLOUD_QUALITY_OFF: int = 0
+const CLOUD_QUALITY_FAST: int = 1
+const CLOUD_QUALITY_FANCY: int = 2
+
 # Active texture pack. Covers blocks, per-pack item sprites (if any), and
 # Steve's skin. Value corresponds to a folder name under
 # `assets/textures/blocks/packs/` (items live in the `items/` subdir of each
@@ -9,10 +17,22 @@ extends Node
 #   • "pixellab"         — AI-generated 32x32
 #   • "programmer_art"   — CC-BY 4.0 from github.com/deathcap/ProgrammerArt
 @export var texture_pack: String = "alpha_vanilla"
+@export_enum("Off", "Fast", "Fancy") var cloud_quality: int = CLOUD_QUALITY_FANCY
 
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.
 var debug_enabled: bool = false
+
+# Per-category logging flags. Independent of `debug_enabled` so a dev can
+# tail one subsystem (e.g. mining timing) without flipping every debug
+# hotkey on. Set via env / .env: MC_CLONE_DEBUG_MINING, _LIGHTING, _MESH,
+# _WORLDGEN. Pattern at call sites is `if Game.debug_mining: print(...)`
+# so the gating cost is one bool load when the flag is off.
+var debug_mining: bool = false
+var debug_lighting: bool = false
+var debug_mesh: bool = false
+var debug_worldgen: bool = false
+var debug_clouds: bool = false
 
 
 # Same precedence rule used by every config var below: OS env > .env > default.
@@ -95,11 +115,92 @@ func _read_dotenv() -> Dictionary:
 func _ready() -> void:
 	InputActions.register_defaults()
 	_apply_resolution_override()
-	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", texture_pack)
+	# Install the bitmap MC font as the global fallback so every Control that
+	# doesn't override its font picks it up automatically — no per-scene wiring.
+	var mc_font := MinecraftFont.get_font()
+	if mc_font != null:
+		ThemeDB.fallback_font = mc_font
+		ThemeDB.fallback_font_size = MinecraftFont.CELL
+	# Frame-rate cap from user settings (default 90). Perceived smoothness
+	# depends on frame-time variance, not peak fps — an uncapped 120 fps
+	# with dips to 100 during chunk streaming reads as stuttery; a steady
+	# 90 fps with the same absolute spike (fits in 11.1 ms vs 8.3 ms) reads
+	# as smooth. Loaded later in _ready via SettingsMenu.apply_config, but
+	# we set an interim value here so the early-boot scene doesn't run
+	# uncapped while the config is still being parsed.
+	Engine.max_fps = 90
+	# Precedence: env > .env > user://settings.cfg > @export default. The
+	# settings file is what the Main-Menu → Settings screen writes, so it
+	# survives relaunches; env / .env still win so devs can override without
+	# editing the saved profile.
+	var cfg := SettingsMenu.load_config()
+	var settings_pack: String = cfg.get_value("graphics", "texture_pack", texture_pack)
+	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", settings_pack)
 	BlockAtlas.active_pack = resolved_pack
 	BlockAtlas.build()
+	# Cloud quality from settings.cfg (set via Main-Menu → Options).
+	# Defaults to the @export value (FANCY) on first launch.
+	cloud_quality = int(cfg.get_value("graphics", "cloud_quality", cloud_quality))
+	# FPS cap + vsync are independent user settings. Default vsync = Off
+	# (VSYNC_DISABLED) so fps_cap is the actual ceiling out-of-the-box —
+	# Godot's native vsync default of ENABLED would clamp to display
+	# refresh and silently override the cap.
+	Engine.max_fps = int(cfg.get_value("graphics", "fps_cap", 90))
+	DisplayServer.window_set_vsync_mode(
+		int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
+	)
 	debug_enabled = _resolve_bool("MC_CLONE_DEBUG_MODE", false)
-	print("[Game] texture_pack=%s debug_enabled=%s" % [resolved_pack, str(debug_enabled)])
+	debug_mining = _resolve_bool("MC_CLONE_DEBUG_MINING", false)
+	debug_lighting = _resolve_bool("MC_CLONE_DEBUG_LIGHTING", false)
+	debug_mesh = _resolve_bool("MC_CLONE_DEBUG_MESH", false)
+	debug_worldgen = _resolve_bool("MC_CLONE_DEBUG_WORLDGEN", false)
+	debug_clouds = _resolve_bool("MC_CLONE_DEBUG_CLOUDS", false)
+	# World seed: read from settings.cfg [world] seed, OR randomize on
+	# first run and persist so the same seed loads on every relaunch
+	# (matches vanilla, where level.dat pins the seed once a world is
+	# created). MUST run before Worldgen.surface_height below — that call
+	# warms the noise generator with the current seed; if we apply the
+	# seed after, the warmed noise stays on whatever the default was.
+	#
+	# Headless mode = running under GUT (godot --headless -s gut_cmdln).
+	# Tests pin terrain assertions to the default seed 12345; randomizing
+	# would re-seed the world per test run and explode every layout-
+	# dependent assertion. Production / interactive runs always randomize
+	# on first launch.
+	var headless: bool = DisplayServer.get_name() == "headless"
+	var world_seed: int = int(cfg.get_value("world", "seed", 0))
+	if not headless:
+		if world_seed == 0:
+			# 0 sentinel = unset. Randomize across the full positive int
+			# range (avoid 0 itself so we don't loop). Persist so future
+			# launches stay on the same world.
+			randomize()
+			world_seed = randi_range(1, 0x7FFFFFFF)
+			cfg.set_value("world", "seed", world_seed)
+			cfg.save("user://settings.cfg")
+		Worldgen.apply_world_seed(world_seed)
+	else:
+		# Headless: leave Worldgen.WORLD_SEED at the 12345 default so
+		# layout-dependent tests stay deterministic regardless of any
+		# user://settings.cfg the dev's interactive runs may have left
+		# behind. Tests that want a different seed must apply it
+		# explicitly via Worldgen.apply_world_seed in their setup.
+		world_seed = Worldgen.WORLD_SEED
+	print(
+		(
+			"[Game] texture_pack=%s cloud_quality=%d world_seed=%d debug_enabled=%s"
+			% [resolved_pack, cloud_quality, world_seed, str(debug_enabled)]
+		)
+	)
+	# Only mention category flags when at least one is on — otherwise the
+	# extra line is noise on every launch.
+	if debug_mining or debug_lighting or debug_mesh or debug_worldgen:
+		print(
+			(
+				"[Game] debug categories: mining=%s lighting=%s mesh=%s worldgen=%s"
+				% [str(debug_mining), str(debug_lighting), str(debug_mesh), str(debug_worldgen)]
+			)
+		)
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
@@ -115,6 +216,10 @@ func _ready() -> void:
 		print("[Game] using native WorldgenNative (GDExtension)")
 	else:
 		print("[Game] using GDScript Worldgen")
+	if Lighting.enable_native():
+		print("[Game] using native LightingNative (GDExtension)")
+	else:
+		print("[Game] using GDScript Lighting")
 	# Load crafting recipes from disk once at boot.
 	Recipes.ensure_loaded()
 	# Bake 3D-isometric block icons for the inventory. Setup is sync; the

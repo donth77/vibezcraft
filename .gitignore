@@ -36,6 +36,7 @@ exports/
 # so we can re-extract textures/data without re-downloading, but never
 # redistributed — their IP, not ours.
 vendor/
+Minecraft Alpha 1.2.6/
 
 # GDExtension native build artifacts
 bin/*.dylib

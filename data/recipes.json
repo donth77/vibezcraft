@@ -215,6 +215,30 @@
       "pattern": ["CCC", "C C", "CCC"],
       "key": {"C": "cobblestone"},
       "result": {"id": "furnace", "count": 1}
+    },
+    {
+      "id": "bucket",
+      "pattern": ["I I", " I "],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "bucket", "count": 1}
+    },
+    {
+      "id": "torch_from_coal",
+      "pattern": ["C", "S"],
+      "key": {"C": "coal", "S": "stick"},
+      "result": {"id": "torch", "count": 4}
+    },
+    {
+      "id": "torch_from_charcoal",
+      "pattern": ["C", "S"],
+      "key": {"C": "charcoal", "S": "stick"},
+      "result": {"id": "torch", "count": 4}
+    },
+    {
+      "id": "flint_and_steel",
+      "pattern": ["I ", " F"],
+      "key": {"I": "iron_ingot", "F": "flint"},
+      "result": {"id": "flint_and_steel", "count": 1}
     }
   ],
   "shapeless": [],

@@ -70,7 +70,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_cursor = ItemStack.new()
-	_font = load(FONT_PATH) as FontFile
+	_font = MinecraftFont.get_font()
 	_build_dim_background()
 	_build_panel()
 	_build_cursor_overlay()
@@ -220,8 +220,9 @@ func _place_slot_overlay(parent: Control, slot_index: int, native_x: int, native
 	count.add_theme_font_override("font", _font)
 	count.add_theme_font_size_override("font_size", 8 * SCALE)
 	count.add_theme_color_override("font_color", Color(1, 1, 1))
-	count.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	count.add_theme_constant_override("outline_size", 2)
+	count.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	count.add_theme_constant_override("shadow_offset_x", SCALE)
+	count.add_theme_constant_override("shadow_offset_y", SCALE)
 	count.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	count.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	count.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -260,8 +261,9 @@ func _build_cursor_overlay() -> void:
 	_cursor_count_label.add_theme_font_override("font", _font)
 	_cursor_count_label.add_theme_font_size_override("font_size", 8 * SCALE)
 	_cursor_count_label.add_theme_color_override("font_color", Color(1, 1, 1))
-	_cursor_count_label.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	_cursor_count_label.add_theme_constant_override("outline_size", 2)
+	_cursor_count_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	_cursor_count_label.add_theme_constant_override("shadow_offset_x", SCALE)
+	_cursor_count_label.add_theme_constant_override("shadow_offset_y", SCALE)
 	_cursor_count_label.size = Vector2(16 * SCALE, 16 * SCALE)
 	_cursor_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_cursor_count_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
@@ -276,8 +278,9 @@ func _build_cursor_overlay() -> void:
 	_tooltip.add_theme_font_override("font", _font)
 	_tooltip.add_theme_font_size_override("font_size", 7 * SCALE)
 	_tooltip.add_theme_color_override("font_color", Color(1, 1, 1))
-	_tooltip.add_theme_color_override("font_outline_color", Color(0, 0, 0))
-	_tooltip.add_theme_constant_override("outline_size", 3)
+	_tooltip.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+	_tooltip.add_theme_constant_override("shadow_offset_x", SCALE)
+	_tooltip.add_theme_constant_override("shadow_offset_y", SCALE)
 	var tip_style := StyleBoxFlat.new()
 	tip_style.bg_color = Color(0.06, 0.04, 0.10, 0.92)
 	tip_style.border_color = Color(0.30, 0.18, 0.50, 0.95)
@@ -326,6 +329,18 @@ func _input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		var slot: int = _slot_under_mouse()
+		# Vanilla Container.transferStackInSlot: shift+left-click sends
+		# the clicked stack to the "other" zone — armor pieces go to
+		# their matching armor slot, everything else hops between
+		# main/hotbar. Bypasses cursor entirely.
+		if (
+			event.pressed
+			and event.button_index == MOUSE_BUTTON_LEFT
+			and event.shift_pressed
+			and slot >= 0
+		):
+			_handle_shift_click(slot)
+			return
 		if event.pressed:
 			_on_mouse_down(event.button_index, slot)
 		else:
@@ -502,6 +517,85 @@ func _handle_left_click(slot_index: int) -> void:
 		tmp.damage = slot.damage
 		slot.copy_from(_cursor)
 		_cursor.copy_from(tmp)
+	_after_slot_change(slot_index)
+
+
+func _handle_shift_click(slot_index: int) -> void:
+	# Vanilla shift-click routing:
+	#   • Armor item in main/hotbar → fly to matching armor slot if empty
+	#   • Item in armor slot → fly back to main/hotbar
+	#   • Crafting result → take whole result, distribute (consumes inputs)
+	#   • Anything else: hop between hotbar (0-8) and main (9-35)
+	# Cursor is untouched. Whole-stack transfer; partial split happens only
+	# when the destination already has a partial stack of the same id.
+	if slot_index == Inventory.CRAFT_RESULT:
+		# Repeatedly take the result + add to inventory until inputs run out.
+		while true:
+			var result: ItemStack = inventory.slots[Inventory.CRAFT_RESULT]
+			if result.is_empty():
+				break
+			var added_id: int = result.item_id
+			var added_n: int = result.count
+			var overflow: int = inventory.add_item(added_id, added_n)
+			if overflow > 0:
+				break  # no more room
+			inventory.consume_craft_inputs()
+		_after_slot_change(slot_index)
+		return
+	var src: ItemStack = inventory.slots[slot_index]
+	if src.is_empty():
+		return
+	var armor_kind: int = Items.armor_slot_for(src.item_id)
+	# Source is armor in main/hotbar → equip into matching armor slot if free.
+	if armor_kind != Items.ARMOR_SLOT_NONE and not _is_armor_slot(slot_index):
+		var dest: int = Inventory.ARMOR_START + armor_kind - Items.ARMOR_SLOT_HEAD
+		var dest_slot: ItemStack = inventory.slots[dest]
+		if dest_slot.is_empty():
+			dest_slot.copy_from(src)
+			src.clear()
+			_after_slot_change(slot_index)
+			return
+		# Slot taken — fall through to the generic main/hotbar hop below.
+	# Source is in an armor slot → send to inventory.
+	if _is_armor_slot(slot_index):
+		var overflow_a: int = inventory.add_item(src.item_id, src.count)
+		src.count = overflow_a
+		if src.count <= 0:
+			src.clear()
+		_after_slot_change(slot_index)
+		return
+	# Generic hop: hotbar (0-8) ↔ main (9-35). Find the FIRST same-id partial
+	# stack in the destination zone, else first empty.
+	var to_hotbar: bool = slot_index >= Inventory.MAIN_START
+	var range_start: int
+	var range_end: int
+	if to_hotbar:
+		range_start = 0
+		range_end = Inventory.HOTBAR_SIZE
+	else:
+		range_start = Inventory.MAIN_START
+		range_end = Inventory.MAIN_START + Inventory.MAIN_SIZE
+	# Pass 1 — merge into existing partials of the same id.
+	var max_per_slot: int = Items.max_stack_size(src.item_id)
+	for i in range(range_start, range_end):
+		if src.is_empty():
+			break
+		var other: ItemStack = inventory.slots[i]
+		if other.item_id == src.item_id and other.count < max_per_slot:
+			var room: int = max_per_slot - other.count
+			var moved: int = mini(room, src.count)
+			other.count += moved
+			src.count -= moved
+			if src.count <= 0:
+				src.clear()
+	# Pass 2 — fill empty slots in the destination zone.
+	for i in range(range_start, range_end):
+		if src.is_empty():
+			break
+		var other2: ItemStack = inventory.slots[i]
+		if other2.is_empty():
+			other2.copy_from(src)
+			src.clear()
 	_after_slot_change(slot_index)
 
 

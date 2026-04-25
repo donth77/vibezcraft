@@ -40,6 +40,78 @@ const GLASS := 21
 # we currently render as a full alpha-tested cube (proper cross-mesh
 # requires non-cube mesher path — same TODO as torches/slabs/stairs).
 const SAPLING := 22
+# Vanilla Alpha distinguishes two water block ids: BlockFlowing (id 8) and
+# BlockStationary (id 9). Worldgen writes STILL when filling oceans;
+# flowing spread lands with the BlockFlowing.java port in phase 6b. Our
+# stable-append rule prevents matching vanilla's ids exactly — ids 8/9
+# are already LEAVES/SAND here.
+const WATER_FLOWING := 23
+const WATER_STILL := 24
+# Vanilla Alpha BlockFluids with material hb.g (ld.java:8 — shared class
+# with water). Two IDs mirror vanilla's flowing/still split. Unbreakable,
+# emits max block-light (15 per ld.java:168 `d() return 30` on the Alpha
+# internal 0-30 scale, = 15 on our 0-15 scale). Worldgen caves fill the
+# bottom of carves with LAVA_STILL below y=10 per lx.java:115-116.
+const LAVA_FLOWING := 25
+const LAVA_STILL := 26
+# Vanilla Alpha BlockFire (qh.java, id 51). Placed by lava ignition on a
+# flammable (LOG/PLANKS/LEAVES) neighbor. Stores age 0..15 in meta;
+# scheduled ticks via BlockFire.update age the cell, probabilistically
+# burn adjacent flammables to AIR, and extinguish when support is gone.
+# Non-opaque, emits block-light 15 (qh.java:47 `d() return 10` on the
+# 0-15 vanilla HUD scale, but internal is 30/30 = we use 15). Rendered
+# as a cross-quad like SAPLING — vanilla uses 4 tilted quads but the
+# CROSS mesh path already ships and reads clearly.
+const FIRE := 27
+# Vanilla Alpha BlockTorch (nq.aE, id 50). Emits block-light 14 (vanilla's
+# `d() return 14`). Renders as a 2/16-thick × 10/16-tall pillar — for now
+# floor-only (meta 0); wall variants (meta 1-4) land in the next pass.
+# Hardness 0 = instant break. Drops itself via standard cube drops.
+const TORCH := 28
+
+# Mesh shape selectors — used by the chunk mesher to pick the right
+# vertex layout per block. Default CUBE is the hot path; non-cube
+# shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
+# shape: bump the enum, branch in mesher.gd._emit_block_faces, and
+# (if the GDExtension is loaded) the C++ MesherNative — or list the
+# shape in NON_CUBE_SHAPES so MesherNative defers it to the GDScript
+# path while the cube fast-path stays native.
+const MESH_SHAPE_CUBE: int = 0
+const MESH_SHAPE_CROSS: int = 1  # two crossed quads, like sapling/grass-plant
+const MESH_SHAPE_TORCH: int = 2  # small pillar centered in cell (floor torch)
+
+# Lazy-init lookup table for light_opacity (built on first access).
+# Direct PackedByteArray index is significantly faster than a multi-arm
+# match in GDScript — called ~30K times per worldgen chunk + ~30K times
+# per lighting BFS pass.
+static var _light_opacity_lut: PackedByteArray
+
+
+# Dispatch a scheduled block-tick fired by `TickScheduler`. `manager` is
+# the ChunkManager (typed Node to avoid a hard import — static classes
+# can't reference autoloads directly). `pos` is world coords. `block_id`
+# is the id scheduled when the tick was enqueued — checking it against
+# the current block at `pos` is the caller's job (the cell may have been
+# broken mid-delay, in which case the tick is a no-op).
+#
+# Stub handler — Flow #3 adds the BlockFlowing / BlockLava branches here.
+# For now the tick fires but does nothing; tests exercise the scheduler
+# mechanism without any side effects.
+static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
+	# Cell may have been modified since the tick was scheduled (player
+	# edit, flow conversion, etc.). Drop the tick if so — vanilla's
+	# BlockFlowing.b() makes the same check before acting.
+	var current_id: int = manager.get_world_block(pos)
+	if current_id != block_id:
+		return
+	# Flow #3 — fluid tick dispatch. BlockFluids owns the spread algorithm
+	# (ja.java port); we dispatch flowing water and flowing lava into it.
+	# STILL variants don't tick in vanilla — they only re-check on a
+	# neighbor change via BlockFluids.on_neighbor_changed.
+	if block_id == WATER_FLOWING or block_id == LAVA_FLOWING:
+		BlockFluids.update(manager, pos, block_id)
+	elif block_id == FIRE:
+		BlockFire.update(manager, pos)
 
 
 static func is_opaque(id: int) -> bool:
@@ -48,7 +120,47 @@ static func is_opaque(id: int) -> bool:
 	# faces behind them and the shader discard would then punch straight
 	# through to the world background. Mesher pairs this with a "same-id
 	# cull" so adjacent leaves/glass don't emit shared internal faces.
-	return id != AIR and id != LEAVES and id != GLASS and id != SAPLING
+	# Water is also non-opaque so terrain faces behind it stay visible
+	# when we add the translucent water material in a later step.
+	return (
+		id != AIR
+		and id != LEAVES
+		and id != GLASS
+		and id != SAPLING
+		and id != WATER_FLOWING
+		and id != WATER_STILL
+		and id != LAVA_FLOWING
+		and id != LAVA_STILL
+		and id != FIRE
+		and id != TORCH
+	)
+
+
+# True if fire will consume this block — PLANKS, LOG, LEAVES per vanilla
+# BlockFire.setBurnProperties (qh.java:13-18). Wool/tnt/bookshelf would
+# also be flammable but we don't have those blocks yet.
+static func is_flammable(id: int) -> bool:
+	return id == LOG or id == PLANKS or id == LEAVES
+
+
+# True for either water variant. Used by mesher (skip meshing until the
+# water shader lands), player physics (swim detection, later step), and
+# worldgen (beach placement is adjacency-driven off the same test).
+static func is_water(id: int) -> bool:
+	return id == WATER_FLOWING or id == WATER_STILL
+
+
+# True for either lava variant. Vanilla's BlockFluids with material hb.g
+# (ld.java) — shares most logic with water but damages entities on contact
+# and emits light. Worldgen uses it for cave-floor lava pools (lx.java:115).
+static func is_lava(id: int) -> bool:
+	return id == LAVA_FLOWING or id == LAVA_STILL
+
+
+# True for any BlockFluids variant (water + lava). Handy for entity physics
+# (swimming / fluid-drag paths) and mesher (variable-height fluid surface).
+static func is_fluid(id: int) -> bool:
+	return is_water(id) or is_lava(id)
 
 
 # Vanilla BlockGravel + BlockSand inherit BlockFalling, which schedules
@@ -58,16 +170,185 @@ static func has_gravity(id: int) -> bool:
 	return id == SAND or id == GRAVEL
 
 
+# Vanilla BlockPlant.a(Block) — what the plant accepts as a support block
+# directly below it. Same set used by saplings, flowers, tall grass, etc.
+# Bukkit/mc-dev BlockPlant.java: `block == GRASS || block == DIRT || block
+# == SOIL` (SOIL == FARMLAND). When the cell below changes to anything
+# else, ChunkManager drops the plant and spawns a DroppedItem.
+static func is_valid_plant_support(id: int) -> bool:
+	return id == GRASS or id == DIRT or id == FARMLAND
+
+
+# Vanilla Block.isReplaceable(world,x,y,z) — true for cells the player
+# can place INTO (the new block overwrites the old one). Plants and
+# water are replaceable in vanilla; we currently only enable it for
+# plants — placing into water needs the bucket / fluid-displacement
+# system, which doesn't exist yet, so leaving water non-replaceable
+# avoids dropping phantom water "items" via the displacement path.
+static func is_replaceable(id: int) -> bool:
+	# Vanilla BlockFluid.isBlockReplaceable returns true — placing into
+	# water/lava overwrites the fluid cell (Alpha lets you destroy source
+	# blocks this way too; bucket displacement came in 1.4). Including
+	# lava here would let the player trivially neutralize lava pools by
+	# placing dirt; that's vanilla-accurate but we're leaving it off
+	# until lava damage lands (Flow #5) so the hazard still matters.
+	return id == AIR or id == SAPLING or id == WATER_FLOWING or id == WATER_STILL or id == FIRE
+
+
+# Vanilla `Block.lightOpacity` — how much sky/block light this block
+# subtracts when light passes through. 0 = fully transparent (air, glass,
+# sapling), 1 = leaves (vanilla BlockLeaves uses 1), 3 = water (Bukkit/mc-dev
+# Block.p(): BlockFlowing/BlockStationary call `.g(3)` to set this), 15 =
+# fully opaque (cuts light to 0). Used by Lighting._column_pass and
+# _lateral_pass — consult those for the propagation rule.
+#
+# LUT declaration lives at the top of the file (next to MESH_SHAPE_*) to
+# satisfy gdlint's class-definitions-order rule. Build/access below.
+static func _build_light_opacity_lut() -> void:
+	_light_opacity_lut = PackedByteArray()
+	_light_opacity_lut.resize(256)
+	# Default 15 (fully opaque) for every id. Then patch the transparent
+	# / partially-transparent ones — easier to maintain than a 256-entry
+	# constant where most entries say "15".
+	for i in range(256):
+		_light_opacity_lut[i] = 15
+	_light_opacity_lut[AIR] = 0
+	_light_opacity_lut[GLASS] = 0
+	_light_opacity_lut[SAPLING] = 0
+	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
+	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
+	# `q` to `a() ? 255 : 0`, and BlockFluids.a() returns false — ld.java:53).
+	# The sky-light column pass (ha.java:199-200) bumps 0 → 1, so fluids
+	# attenuate 1 per step. Bukkit/Beta later raised water to 3 (`.g(3)`),
+	# which we originally used — that made ocean floors pitch-black at ~5
+	# blocks deep, not authentic Alpha. Lava block-light emission (15) is
+	# carried separately via light_emission().
+	_light_opacity_lut[WATER_FLOWING] = 0
+	_light_opacity_lut[WATER_STILL] = 0
+	_light_opacity_lut[LAVA_FLOWING] = 0
+	_light_opacity_lut[LAVA_STILL] = 0
+	# Vanilla qh.java (BlockFire) has no opacity override → inherits the
+	# default 0 because fire is non-solid. Keep it transparent so fire
+	# doesn't cast a sky-light shadow on blocks below it.
+	_light_opacity_lut[FIRE] = 0
+	# Vanilla nq.aq (BlockTorch) — non-solid (.b()=false), so vanilla's
+	# `nq.q[id]` defaults to 0 = transparent. Without this entry the LUT
+	# defaults to 15 (opaque), which causes two visible bugs:
+	#   * Torch casts a sky-light shadow on cells below — dark spots under
+	#     every torch even though its block-light=14 should be lighting them.
+	#   * The sky_light BFS fires on every torch place/break (op_diff !=0)
+	#     where it shouldn't — wasted work plus the shadow side effect.
+	_light_opacity_lut[TORCH] = 0
+
+
+static func light_opacity(id: int) -> int:
+	if _light_opacity_lut.is_empty():
+		_build_light_opacity_lut()
+	if id < 0 or id >= _light_opacity_lut.size():
+		return 15
+	return _light_opacity_lut[id]
+
+
+# Block-light emission on the 0..15 scale (torches, lava, glowstone). Base
+# for block-light BFS — each source seeds its cell with this value and
+# neighbors decay by max(opacity, 1) per step. Sourced from Alpha Block.d()
+# overrides; lava returns 30 on Alpha's 0-30 internal scale (ld.java:168)
+# which maps to 15 on our scale. Not yet consumed by Lighting (block-light
+# channel lands in a later pass) but wiring it here keeps block metadata
+# complete so the lighting port flips on without revisiting every block.
+static func light_emission(id: int) -> int:
+	match id:
+		LAVA_FLOWING, LAVA_STILL:
+			return 15
+		FIRE:
+			return 15  # qh.java:47 `d() return 10` on Alpha 0-30 → 15 on our 0-15 scale
+		TORCH:
+			return 14  # vanilla nq.aE BlockTorch `d() return 14`
+	return 0
+
+
+# True if `id` (the block the player wants to place) is allowed in a cell
+# where the block directly below is `support_id`. Vanilla uses
+# Block.canPlaceAt; for plants this delegates to BlockPlant.j(world,...).
+# Cubes have no support requirement (return true unconditionally).
+static func can_place_at(id: int, support_id: int) -> bool:
+	if id == SAPLING:
+		return is_valid_plant_support(support_id)
+	return true
+
+
+# Cursor-selection AABB in cell-local coords (origin at the cell's
+# (x,y,z), unit cube spans [(0,0,0), (1,1,1)]). Mirrors vanilla MC's
+# Block.maxX/Y/Z fields set by the constructor — see BlockSapling()
+# (`f=0.4 → (0.1, 0, 0.1)..(0.9, 0.8, 0.9)`) and BlockPlant() (`f=0.2 →
+# (0.3, 0, 0.3)..(0.7, 0.6, 0.7)`) in Bukkit/mc-dev. Used by the player's
+# selection-highlight wireframe so plants get a tight box matching the
+# rendered sprite instead of a full unit cube floating around them.
+# Cube blocks (default) get the unit cube AABB.
+static func selection_aabb(id: int, meta: int = 0) -> AABB:
+	if id == SAPLING:
+		return AABB(Vector3(0.1, 0.0, 0.1), Vector3(0.8, 0.8, 0.8))
+	if id == TORCH:
+		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
+		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
+		#   2 (+X support): (0.7,  0.2, 0.35)..(1.0, 0.8, 0.65)
+		#   3 (-Z support): (0.35, 0.2, 0)..(0.65,  0.8, 0.3)
+		#   4 (+Z support): (0.35, 0.2, 0.7)..(0.65, 0.8, 1.0)
+		#   5 / 0 (floor):  (0.4,  0,   0.4)..(0.6,  0.6, 0.6)
+		# Vanilla uses f2=0.15 for wall variants and f2=0.1 for floor; the
+		# constants below are derived from that.
+		match meta & 7:
+			1:
+				return AABB(Vector3(0.0, 0.2, 0.35), Vector3(0.3, 0.6, 0.3))
+			2:
+				return AABB(Vector3(0.7, 0.2, 0.35), Vector3(0.3, 0.6, 0.3))
+			3:
+				return AABB(Vector3(0.35, 0.2, 0.0), Vector3(0.3, 0.6, 0.3))
+			4:
+				return AABB(Vector3(0.35, 0.2, 0.7), Vector3(0.3, 0.6, 0.3))
+			_:
+				# 5 / 0 — floor torch
+				return AABB(Vector3(0.4, 0.0, 0.4), Vector3(0.2, 0.6, 0.2))
+	return AABB(Vector3.ZERO, Vector3.ONE)
+
+
+# Mesh shape for the chunk mesher. Default = full cube; only the few
+# non-cube blocks need to override. Branched on per-block in
+# Mesher._emit_block_faces.
+static func mesh_shape(id: int) -> int:
+	if id == SAPLING or id == FIRE:
+		return MESH_SHAPE_CROSS
+	if id == TORCH:
+		return MESH_SHAPE_TORCH
+	return MESH_SHAPE_CUBE
+
+
+# True if the mesher should hand this block to the GDScript path even
+# when the native MesherNative GDExtension is loaded. Native handles only
+# CUBE today; non-cube shapes are sparse enough that doing them in
+# GDScript per chunk has negligible cost.
+static func needs_gdscript_mesher(id: int) -> bool:
+	return mesh_shape(id) != MESH_SHAPE_CUBE
+
+
 # Block hardness — base for all break-time math. Vanilla MC values, in
 # "block-hardness units" not seconds. Final time = hardness × multiplier
 # (1.5 if correct tool, 5.0 if wrong/no tool) ÷ tool speed.
 static func hardness(id: int) -> float:
 	match id:
-		BEDROCK:
+		BEDROCK, WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL:
+			# Fluids are unbreakable by hand; in vanilla they're only
+			# removable via bucket pickup (separate interaction, not a
+			# mining break). Lava also damages on contact, so letting the
+			# player "mine" it would be a bad experience anyway.
 			return -1.0  # unbreakable
+		FIRE:
+			# Vanilla qh.java has no hardness but the block drops to AIR
+			# on any click — behaviorally equivalent to hardness 0 here.
+			return 0.0
 		LEAVES, GLASS:
 			return 0.2
-		SAPLING:
+		SAPLING, TORCH:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
 			return 0.5
@@ -288,6 +569,18 @@ static func name_of(id: int) -> String:
 			return "glass"
 		SAPLING:
 			return "sapling"
+		WATER_FLOWING:
+			return "water_flowing"
+		WATER_STILL:
+			return "water"
+		LAVA_FLOWING:
+			return "lava_flowing"
+		LAVA_STILL:
+			return "lava"
+		FIRE:
+			return "fire"
+		TORCH:
+			return "torch"
 	return "unknown"
 
 
@@ -362,4 +655,17 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "glass"
 		SAPLING:
 			return "sapling"
+		WATER_FLOWING, WATER_STILL:
+			# No water texture in the atlas yet — the mesher skips water until
+			# the dedicated water render pass lands. Return empty so any other
+			# caller knows there's no bound tile.
+			return ""
+		LAVA_STILL:
+			return "lava_still"
+		LAVA_FLOWING:
+			return "lava_flowing"
+		FIRE:
+			return "fire"
+		TORCH:
+			return "torch"
 	return ""
