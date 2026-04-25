@@ -97,10 +97,6 @@ const _ITEM_PLACEHOLDER_COLORS: Dictionary = {
 	Items.BUCKET_EMPTY: Color(0.75, 0.75, 0.78),  # steel grey
 	Items.BUCKET_WATER: Color(0.25, 0.45, 0.9),  # water blue
 	Items.BUCKET_LAVA: Color(0.98, 0.63, 0.0),  # lava orange
-	# Flint-and-steel — vanilla sprite is a small grey-and-brown bar.
-	# Iron-grey is close enough to read as "metallic tool" until a real
-	# sprite drops in (mcasset.cloud/a1.2.6 → gui/items.png tile).
-	Items.FLINT_AND_STEEL: Color(0.65, 0.62, 0.58),
 }
 
 static var _cache: Dictionary = {}

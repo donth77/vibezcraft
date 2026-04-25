@@ -347,6 +347,28 @@ func play_lava_pop() -> void:
 	player.play()
 
 
+# Flint-and-steel ignite — vanilla Alpha 1.2.6 (nv.java) was actually
+# SILENT on ignite (the only audio cue was the resulting fire's ambient
+# crackle). Modern MC plays `item.flintandsteel.use`, a short metallic
+# strike. We use the existing `random.click` asset at slight downward
+# pitch (0.9) so the strike reads as a tactile "snap" without sounding
+# like a UI button. Swap to a real fire.ignite OGG when a flint-and-
+# steel SFX bundle drops in.
+func play_flint_and_steel() -> void:
+	var stream: AudioStream = _stream_cache.get(_CLICK_SOUND)
+	if stream == null:
+		stream = load(_CLICK_SOUND) as AudioStream
+		_stream_cache[_CLICK_SOUND] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = 0.0
+	player.pitch_scale = 0.9
+	player.play()
+
+
 # Menu/button click — vanilla MC plays `random.click` at pitch 1.0 for any
 # menu button activation. Pitch is fixed (no jitter) in vanilla so repeated
 # clicks read as a single consistent UI cue.
