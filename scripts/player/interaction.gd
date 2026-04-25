@@ -450,10 +450,11 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
 		return false
 	_chunk_manager.set_world_block(fire_pos, Blocks.FIRE)
-	# Vanilla plays "fire.ignite" but we don't have that asset — fizz
-	# is the closest existing SFX (lava-on-water has the same crackle
-	# character). Swap in real fire.ignite once mob/fire SFX bundle lands.
-	SFX.play_fizz(false)
+	# `random.click` at pitch 0.9 — see SFX.play_flint_and_steel for the
+	# vanilla audio note (Alpha was silent; modern MC plays a metallic
+	# strike). Click-at-low-pitch is the closest tactile substitute we
+	# have without bundling a dedicated fire.ignite OGG.
+	SFX.play_flint_and_steel()
 	if inv.damage_selected_tool():
 		SFX.play_tool_break()
 	return true
