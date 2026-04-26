@@ -264,7 +264,11 @@ func _build_cursor_overlay() -> void:
 	_cursor_count_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
 	_cursor_count_label.add_theme_constant_override("shadow_offset_x", SCALE)
 	_cursor_count_label.add_theme_constant_override("shadow_offset_y", SCALE)
-	_cursor_count_label.size = Vector2(16 * SCALE, 16 * SCALE)
+	# 18×SCALE rect (matches a slot panel's count label dims) so the
+	# bottom-right text lands 1×SCALE below the 16×SCALE icon — same
+	# spot a stack's count occupies in a slot. _process re-positions
+	# the rect each frame at icon.pos - (SCALE, SCALE).
+	_cursor_count_label.size = Vector2(18 * SCALE, 18 * SCALE)
 	_cursor_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_cursor_count_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	_cursor_count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -663,9 +667,13 @@ func _process(_delta: float) -> void:
 	var mouse: Vector2 = get_global_mouse_position()
 	if _cursor_icon.visible:
 		_cursor_icon.position = mouse - _cursor_icon.size * 0.5
-		# Count label overlays the icon rect so the "64" sits in the same
-		# bottom-right spot it would occupy if the stack were in a slot.
-		_cursor_count_label.position = _cursor_icon.position
+		# A slot's count label sits in an SLOT_PX (18×SCALE) box positioned
+		# at the panel's origin — so its bottom-aligned text lands 1×SCALE
+		# *below* the 16×SCALE icon. To keep the count from jumping up by
+		# 1×SCALE when an item leaves a slot for the cursor, mirror that
+		# offset here: shift the cursor's count rect 1×SCALE up-left of the
+		# icon and pad it by 2×SCALE in both dimensions.
+		_cursor_count_label.position = _cursor_icon.position - Vector2(SCALE, SCALE)
 	_update_tooltip(mouse)
 
 

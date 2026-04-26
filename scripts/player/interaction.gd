@@ -1,3 +1,4 @@
+# gdlint: disable=max-file-lines
 extends Node
 
 # Raycast-based block break/place wired into the player's Inventory.
@@ -102,6 +103,7 @@ func _update_highlight(hit: Dictionary) -> void:
 	var aabb: AABB = Blocks.selection_aabb(hit_id, hit_meta)
 	_highlight.scale = aabb.size
 	_highlight.global_position = Vector3(hit.block_pos) + aabb.position + aabb.size * 0.5
+	_highlight.rotation = Vector3.ZERO
 
 
 func _update_mining(hit: Dictionary, delta: float) -> void:
@@ -262,6 +264,21 @@ func _complete_break(target: Vector3i) -> void:
 	# clear the entry so the coord can be reused.
 	if broken_id == Blocks.FURNACE or broken_id == Blocks.LIT_FURNACE:
 		_drop_furnace_contents(target)
+	# Same vanilla rule for chests — tile-entity contents drop as items
+	# when the block is broken, then ChestStorage forgets the position.
+	if broken_id == Blocks.CHEST:
+		_drop_chest_contents(target)
+	# Doors: break both halves. Upper drops nothing (gv.java:163), lower
+	# drops the door item. Also remove the partner half.
+	if broken_id == Blocks.WOODEN_DOOR or broken_id == Blocks.IRON_DOOR:
+		_break_door(target, broken_id)
+		return
+	# Async re-mesh — chunk_manager.set_world_block flips chunk.dirty + a
+	# `_priority_apply` flag on the chunk_node so the result skips the
+	# 1-per-frame apply budget queue (avoids the ghost-block bug where the
+	# player's edit got stuck behind background relight churn). Worker
+	# still does the heavy mesh build off-main, so no frame-spike from
+	# the GDScript mesher path on chunks with non-cube blocks.
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
 	# Vanilla bz.java:95-112 → ki.java (EntityDiggingFX). 24-particle
@@ -294,6 +311,40 @@ func _drop_furnace_contents(target: Vector3i) -> void:
 	FurnaceManager.forget(target)
 
 
+# Spit out every non-empty stack in the chest, one DroppedItem per item
+# (matches the per-item burst vanilla MC produces from
+# Block.dropAsStack). Then forget the position so a future chest at the
+# same coords starts empty.
+func _drop_chest_contents(target: Vector3i) -> void:
+	if not ChestStorage.has_chest(target):
+		return
+	for stack: ItemStack in ChestStorage.contents_snapshot(target):
+		for i in range(stack.count):
+			_spawn_dropped_item(target, stack.item_id)
+	ChestStorage.forget(target)
+
+
+# Break a door — removes both halves, drops the door item only from the lower.
+# Vanilla gv.java:162-170: upper half `(n2 & 8) != 0` → return 0 (no drop).
+func _break_door(target: Vector3i, door_id: int) -> void:
+	var meta: int = _chunk_manager.get_world_block_meta(target)
+	var is_upper: bool = (meta & 8) != 0
+	var lower: Vector3i = target if not is_upper else target + Vector3i(0, -1, 0)
+	var upper: Vector3i = target if is_upper else target + Vector3i(0, 1, 0)
+	_chunk_manager.set_world_block(lower, Blocks.AIR)
+	if _chunk_manager.get_world_block(upper) == door_id:
+		_chunk_manager.set_world_block(upper, Blocks.AIR)
+	SFX.play_break(door_id)
+	_BLOCK_FX.spawn_break(_chunk_manager, target, door_id)
+	# Only the lower half drops the item.
+	var dropped_id: int = Blocks.random_drop(door_id, _held_tool_id())
+	if dropped_id != Blocks.AIR:
+		_spawn_dropped_item(lower, dropped_id)
+	var inv: Inventory = _player_inventory()
+	if inv != null and inv.damage_selected_tool():
+		SFX.play_tool_break()
+
+
 func _spawn_dropped_item(block_pos: Vector3i, dropped_id: int) -> void:
 	var item := DroppedItem.new()
 	var spawn_pos := Vector3(block_pos) + Vector3(0.5, 0.5, 0.5)
@@ -305,6 +356,21 @@ func _spawn_dropped_item(block_pos: Vector3i, dropped_id: int) -> void:
 func _creative_break(target: Vector3i) -> void:
 	var broken_id: int = _chunk_manager.get_world_block(target)
 	if broken_id == Blocks.AIR:
+		return
+	# Doors: break both halves in creative too.
+	if broken_id == Blocks.WOODEN_DOOR or broken_id == Blocks.IRON_DOOR:
+		var meta: int = _chunk_manager.get_world_block_meta(target)
+		var partner: Vector3i = (
+			target + Vector3i(0, -1, 0) if (meta & 8) != 0 else target + Vector3i(0, 1, 0)
+		)
+		_chunk_manager.set_world_block(target, Blocks.AIR)
+		if _chunk_manager.get_world_block(partner) == broken_id:
+			_chunk_manager.set_world_block(partner, Blocks.AIR)
+		SFX.play_break(broken_id)
+		_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
+		var inventory: Inventory = _player_inventory()
+		if inventory != null:
+			inventory.add_item(Blocks.drops(broken_id), 1)
 		return
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
@@ -357,6 +423,14 @@ func _try_place() -> void:
 		return
 	if hit_id == Blocks.FURNACE or hit_id == Blocks.LIT_FURNACE:
 		_open_furnace(hit.block_pos)
+		_last_place_ms = now
+		return
+	if hit_id == Blocks.CHEST:
+		_open_chest(hit.block_pos)
+		_last_place_ms = now
+		return
+	if hit_id == Blocks.WOODEN_DOOR:
+		_toggle_door(hit.block_pos, hit_id)
 		_last_place_ms = now
 		return
 	# Hoe + dirt/grass + top face hit + air above → till to farmland.
@@ -615,6 +689,49 @@ func _open_furnace(pos: Vector3i) -> void:
 		screen.open_at(pos)
 
 
+# Right-click on a chest opens its 27-slot screen and tweens the lid up.
+# The screen close-callback closes the lid again so the animation tracks
+# the UI state symmetrically. ChestNode lookup goes through ChunkManager
+# since chests are children of their owning chunk_node.
+func _open_chest(pos: Vector3i) -> void:
+	var screen: Node = get_tree().root.get_node_or_null("Main/Player/Crosshair/ChestScreen")
+	if screen == null or not screen.has_method("open_for"):
+		return
+	var node: ChestNode = _chunk_manager.find_chest_node_at(pos) if _chunk_manager else null
+	if node != null:
+		node.set_open(true)
+	# Vanilla TileEntityChest plays `random.chestopen` here (c.java).
+	SFX.play_chest_open()
+	screen.open_for(
+		pos,
+		func() -> void:
+			if node != null:
+				node.set_open(false)
+			SFX.play_chest_close()
+	)
+
+
+# Vanilla gv.java:82-103 — toggle door open/close. Only called for wooden
+# doors; iron doors need redstone (not implemented) and fall through to
+# normal block placement instead.
+func _toggle_door(pos: Vector3i, block_id: int) -> void:
+	var meta: int = _chunk_manager.get_world_block_meta(pos)
+	# If we clicked the upper half, delegate to the lower half.
+	if (meta & 8) != 0:
+		var lower := pos + Vector3i(0, -1, 0)
+		if _chunk_manager.get_world_block(lower) == block_id:
+			_toggle_door(lower, block_id)
+		return
+	# Toggle bit 2 (open/close) on both halves.
+	var new_lower: int = meta ^ 4
+	_chunk_manager.set_world_block_with_meta(pos, block_id, new_lower)
+	var upper := pos + Vector3i(0, 1, 0)
+	if _chunk_manager.get_world_block(upper) == block_id:
+		# Vanilla gv.java:94 — upper half gets (n5 ^ 4) + 8.
+		_chunk_manager.set_world_block_with_meta(upper, block_id, new_lower + 8)
+	SFX.play_door_toggle()
+
+
 # Returns true if a block was actually placed (i.e., consumed an item).
 # gdlint: disable=max-returns
 func _place_block_from_held(hit: Dictionary) -> bool:
@@ -627,6 +744,10 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# Only block IDs are placeable. Tools, sticks, coal etc. are non-block
 	# items (Items.* IDs >= 100) and right-clicking with one shouldn't drop
 	# a textureless mystery block into the world.
+	# Door items are non-block (id >= 100) but still placeable — they spawn
+	# a two-block-tall door block. Route through a dedicated handler.
+	if stack.item_id == Items.WOODEN_DOOR or stack.item_id == Items.IRON_DOOR:
+		return _try_place_door(hit, stack)
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
@@ -686,10 +807,188 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		var displaced_drop: int = Blocks.drops(displaced_id)
 		if displaced_drop != Blocks.AIR:
 			_spawn_dropped_item(place, displaced_drop)
+	# Vanilla c.java:c() orients the chest based on the player's yaw at
+	# placement time (so the latched front faces the player). meta 0..3
+	# encodes -Z / -X / +Z / +X (matches ChestNode.set_facing).
+	if stack.item_id == Blocks.CHEST:
+		var meta: int = _chest_meta_from_yaw()
+		_chunk_manager.set_world_block_with_meta(place, Blocks.CHEST, meta)
+		SFX.play_place(Blocks.CHEST)
+		inv.consume_one_selected()
+		return true
+	# Stairs orient with the ascending side facing the player's look
+	# direction — mb.java:170-183 uses `(yaw*4/360+0.5)&3` then remaps.
+	if stack.item_id == Blocks.WOOD_STAIRS or stack.item_id == Blocks.COBBLESTONE_STAIRS:
+		var meta: int = _stair_meta_from_yaw()
+		_chunk_manager.set_world_block_with_meta(place, stack.item_id, meta)
+		SFX.play_place(stack.item_id)
+		inv.consume_one_selected()
+		return true
 	_chunk_manager.set_world_block(place, stack.item_id)
 	SFX.play_place(stack.item_id)
 	inv.consume_one_selected()
 	return true
+
+
+# Pick the chest facing meta (0..3) from the player's current yaw, so
+# the chest's "front" (where the latch sits) ends up pointing at the
+# player. Mirrors vanilla c.java::c() in BlockChest, which uses
+# `MathHelper.floor_double(EntityLiving.aw * 4 / 360 + 0.5) & 3` then
+# maps direction id → block meta. We collapse those steps into one
+# yaw-quadrant lookup below.
+func _chest_meta_from_yaw() -> int:
+	var player: Node3D = get_parent()
+	# Yaw in radians, atan2(-x, -z) so 0 = facing -Z (Godot's default
+	# forward). Map the four quadrants to the 4 cardinal directions and
+	# pick the chest meta that orients the front toward the player.
+	var yaw: float = player.global_transform.basis.get_euler().y
+	# Quantize to nearest cardinal: 0 = -Z, 1 = -X, 2 = +Z, 3 = +X.
+	# +0.5 rotation/8 offset puts the threshold midway between cardinals.
+	var dir: int = int(round(yaw / (PI / 2.0))) & 3
+	# The chest's front faces the OPPOSITE of the player's gaze direction
+	# (so the player sees the latched face). dir of 0 (player facing -Z)
+	# means the chest front faces +Z, which is meta 2 in our scheme.
+	match dir:
+		0:
+			return 2  # player faces -Z → chest front +Z
+		1:
+			return 3  # player faces -X → chest front +X
+		2:
+			return 0  # player faces +Z → chest front -Z
+		3:
+			return 1  # player faces +X → chest front -X
+	return 0
+
+
+# Stair orientation from player yaw. Vanilla mb.java:171 quantizes
+# `(yaw * 4/360 + 0.5) & 3` then remaps to meta. Stairs ascend in the
+# direction the player faces. Our Godot dir convention:
+#   dir 0 = facing -Z, 1 = -X, 2 = +Z, 3 = +X.
+# Vanilla meta geometry (from mb.java:43-66):
+#   meta 0: ascending +X, meta 1: ascending -X,
+#   meta 2: ascending +Z, meta 3: ascending -Z.
+func _stair_meta_from_yaw() -> int:
+	var player: Node3D = get_parent()
+	var yaw: float = player.global_transform.basis.get_euler().y
+	var dir: int = int(round(yaw / (PI / 2.0))) & 3
+	match dir:
+		0:
+			return 3  # facing -Z → ascending -Z
+		1:
+			return 1  # facing -X → ascending -X
+		2:
+			return 2  # facing +Z → ascending +Z
+		3:
+			return 0  # facing +X → ascending +X
+	return 0
+
+
+# Vanilla eu.java door placement. RMB on a top face (+Y normal) of a solid
+# block: place door at (block_pos + Vector3i(0,1,0)), oriented by yaw, with
+# hinge determined from neighboring solidity. Must have air at both the
+# placement cell AND the cell above. Consumes one door item on success.
+# gdlint: disable=max-returns
+func _try_place_door(hit: Dictionary, stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	# Vanilla eu.java:10 — doors only place on the top face.
+	if hit.normal_i.y != 1:
+		return false
+	var place: Vector3i = hit.block_pos + hit.normal_i
+	var block_id: int = (
+		Blocks.WOODEN_DOOR if stack.item_id == Items.WOODEN_DOOR else Blocks.IRON_DOOR
+	)
+	# Vanilla gv.java:184-188 — solid ground + two air cells above.
+	if not _torch_neighbor_solid(hit.block_pos):
+		return false
+	if place.y >= 127:
+		return false
+	var above: Vector3i = place + Vector3i(0, 1, 0)
+	if _chunk_manager.get_world_block(place) != Blocks.AIR:
+		return false
+	if _chunk_manager.get_world_block(above) != Blocks.AIR:
+		return false
+	# Player occupancy check.
+	var player: Node3D = get_parent()
+	var pp := player.global_position
+	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
+	if (
+		place == player_block
+		or place == player_block + Vector3i(0, 1, 0)
+		or above == player_block
+		or above == player_block + Vector3i(0, 1, 0)
+	):
+		return false
+	# Orientation from yaw — eu.java:16.
+	var yaw: float = player.global_transform.basis.get_euler().y
+	var dir: int = int(round(yaw / (PI / 2.0))) & 3
+	# Map Godot yaw dirs to vanilla eu.java direction convention:
+	#   Godot dir 0 = facing -Z → vanilla dir 3
+	#   Godot dir 1 = facing -X → vanilla dir 0
+	#   Godot dir 2 = facing +Z → vanilla dir 1
+	#   Godot dir 3 = facing +X → vanilla dir 2
+	var n6: int
+	match dir:
+		0:
+			n6 = 3
+		1:
+			n6 = 0
+		2:
+			n6 = 1
+		_:
+			n6 = 2
+	# Hinge side — eu.java:22-38. Check solidity of blocks to the left
+	# and right (from the player's perspective) to decide if the hinge
+	# flips. When the left side has more solid neighbors (or an existing
+	# door), the hinge shifts to the right.
+	var n7: int = 0  # perpendicular offset X
+	var n8: int = 0  # perpendicular offset Z
+	if n6 == 0:
+		n8 = 1
+	elif n6 == 1:
+		n7 = -1
+	elif n6 == 2:
+		n8 = -1
+	elif n6 == 3:
+		n7 = 1
+	var left_solid: int = (
+		(_solid_at(place + Vector3i(-n7, 0, -n8)) as int)
+		+ (_solid_at(place + Vector3i(-n7, 1, -n8)) as int)
+	)
+	var right_solid: int = (
+		(_solid_at(place + Vector3i(n7, 0, n8)) as int)
+		+ (_solid_at(place + Vector3i(n7, 1, n8)) as int)
+	)
+	var left_door: bool = (
+		_chunk_manager.get_world_block(place + Vector3i(-n7, 0, -n8)) == block_id
+		or _chunk_manager.get_world_block(place + Vector3i(-n7, 1, -n8)) == block_id
+	)
+	var right_door: bool = (
+		_chunk_manager.get_world_block(place + Vector3i(n7, 0, n8)) == block_id
+		or _chunk_manager.get_world_block(place + Vector3i(n7, 1, n8)) == block_id
+	)
+	var flip_hinge: bool = false
+	if left_door and not right_door:
+		flip_hinge = true
+	elif right_solid > left_solid:
+		flip_hinge = true
+	if flip_hinge:
+		n6 = (n6 - 1) & 3
+		n6 += 4
+	_chunk_manager.set_world_block_with_meta(place, block_id, n6)
+	_chunk_manager.set_world_block_with_meta(above, block_id, n6 + 8)
+	SFX.play_place(block_id)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+func _solid_at(pos: Vector3i) -> bool:
+	if _chunk_manager == null:
+		return false
+	var id: int = _chunk_manager.get_world_block(pos)
+	return id != Blocks.AIR and Blocks.is_opaque(id)
 
 
 # Vanilla ob.java:46-64 onPlace — encodes which neighbor supports the torch:

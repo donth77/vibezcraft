@@ -43,6 +43,10 @@ const _BLOCKS: Array = [
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,
+	Blocks.CHEST,
+	Blocks.FENCE,
+	Blocks.WOOD_STAIRS,
+	Blocks.COBBLESTONE_STAIRS,
 ]
 
 const _ITEMS: Array = [
@@ -59,6 +63,8 @@ const _ITEMS: Array = [
 	Items.BUCKET_WATER,
 	Items.BUCKET_LAVA,
 	Items.FLINT_AND_STEEL,
+	Items.WOODEN_DOOR,
+	Items.IRON_DOOR,
 	Items.WOODEN_PICKAXE,
 	Items.WOODEN_AXE,
 	Items.WOODEN_SHOVEL,

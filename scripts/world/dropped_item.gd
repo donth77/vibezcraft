@@ -67,7 +67,16 @@ func setup(
 	# as flat 2D billboards on the ground, not as textured cubes with the
 	# icon tiled on every face.
 	_mesh = MeshInstance3D.new()
-	_is_sprite_item = (p_item_id >= Items.STICK or Blocks.needs_gdscript_mesher(p_item_id))
+	# Sprite path: items (id ≥ 100) and flat-billboard blocks (cross-quads
+	# like sapling/fire, and torches). MESH_SHAPE_EXTERNAL blocks (chest)
+	# read as cubes in inventory and on the ground — same fix as the
+	# held-item routing in player.gd::_update_held_item.
+	var shape: int = Blocks.mesh_shape(p_item_id) if p_item_id < 100 else -1
+	_is_sprite_item = (
+		p_item_id >= Items.STICK
+		or shape == Blocks.MESH_SHAPE_CROSS
+		or shape == Blocks.MESH_SHAPE_TORCH
+	)
 	if _is_sprite_item:
 		_build_sprite_mesh(p_item_id)
 	else:

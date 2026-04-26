@@ -49,6 +49,31 @@ public:
 	// toward it; adjacent lava same-id culls). Same ids as blocks.gd.
 	static constexpr int LAVA_FLOWING = 25;
 	static constexpr int LAVA_STILL = 26;
+	// Non-cube blocks that don't fill their cell — torches, fire, and
+	// saplings render as cross-quads / pillars, so adjacent solid faces
+	// must STAY emitted (otherwise placing a torch on a wall culls the
+	// stone face it's mounted on, and the sky/background shows through).
+	// Mirrors the exclusion list in Blocks.is_opaque().
+	static constexpr int FIRE = 27;
+	static constexpr int TORCH = 28;
+	// Tile-entity / non-cube blocks that DON'T fill their cell — chest is
+	// a 14/16 inset body + lid (rendered via ChestNode entity), fence is
+	// a 6/16 post + rails. The native mesher must NOT emit cube faces for
+	// these cells (the GDScript non-cube pass handles them) AND must
+	// treat them as non-opaque for neighbor face-culling, otherwise the
+	// surrounding cubes cull the faces those entities are supposed to
+	// reveal. Mirrors Blocks.is_opaque exclusions.
+	static constexpr int CHEST = 29;
+	static constexpr int FENCE = 30;
+	// Stairs — two-box step geometry (mb.java). Non-opaque (mb.java:27),
+	// handled by GDScript mesher. Native path must skip cube emission and
+	// treat as non-opaque for neighbor culling.
+	static constexpr int WOOD_STAIRS = 31;
+	static constexpr int COBBLESTONE_STAIRS = 32;
+	// Doors — thin 3/16 slab, non-opaque (gv.java:35 a()=false). Handled by
+	// GDScript mesher; native path skips cube emission and treats as non-opaque.
+	static constexpr int WOODEN_DOOR = 33;
+	static constexpr int IRON_DOOR = 34;
 
 	MesherNative();
 	~MesherNative();

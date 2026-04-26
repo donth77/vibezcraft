@@ -219,7 +219,9 @@ func _build_cursor_overlay() -> void:
 	_cursor_count_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
 	_cursor_count_label.add_theme_constant_override("shadow_offset_x", SCALE)
 	_cursor_count_label.add_theme_constant_override("shadow_offset_y", SCALE)
-	_cursor_count_label.size = Vector2(16 * SCALE, 16 * SCALE)
+	# Match slot count rect dims so cursor text lines up with the slot
+	# convention (see inventory_screen for the rationale).
+	_cursor_count_label.size = Vector2(18 * SCALE, 18 * SCALE)
 	_cursor_count_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_cursor_count_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	_cursor_count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -568,7 +570,7 @@ func _process(_delta: float) -> void:
 	var mouse: Vector2 = get_global_mouse_position()
 	if _cursor_icon.visible:
 		_cursor_icon.position = mouse - _cursor_icon.size * 0.5
-		_cursor_count_label.position = _cursor_icon.position
+		_cursor_count_label.position = _cursor_icon.position - Vector2(SCALE, SCALE)
 	_update_tooltip(mouse)
 
 

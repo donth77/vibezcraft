@@ -2,10 +2,7 @@
 // shading and atlas sampling, but with depth_test_disabled so the held block
 // always draws on top of world geometry (matches vanilla MC's hand pass).
 // `unshaded` matches chunk.gdshader — ambient_light_energy is 0 in main.tscn,
-// so without it Godot's PBR would gate ALBEDO to black. Held items still get
-// per-face Notch shade; they just don't sample world block-light yet (a
-// future pass could push player-cell light_level into a uniform here so the
-// held block dims in caves like vanilla).
+// so without it Godot's PBR would gate ALBEDO to black.
 shader_type spatial;
 render_mode cull_back, depth_test_disabled, unshaded;
 

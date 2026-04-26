@@ -63,6 +63,21 @@ var _collision_active: bool = true
 # whose workers finish the same frame all apply on the same frame — a
 # 3-mesh GPU upload × N chunks spike (120 → 70 fps range).
 var _pending_apply: Dictionary = {}
+# Set true by ChunkManager.set_world_block on player-edited chunks. The
+# next pending_apply skips the global per-frame apply budget so the edit
+# becomes visible within 1-2 frames of the break, even when many other
+# chunks are queued for apply behind background relight churn. Without
+# this, the player's broken block could hang as a "ghost block" for many
+# seconds at FAR render distance with active chunk streaming. Cleared
+# automatically on apply.
+var _priority_apply: bool = false
+
+# CHEST cells in this chunk get a separate ChestNode entity (see
+# scripts/entities/chest_node.gd) for animated lid rendering. The chunk
+# mesher skips face emission for CHEST so we don't double-draw. Keyed
+# by chunk-local Vector3i; rebuilt every _apply_mesh_data so adds /
+# removes track block edits without per-event signals.
+var _chest_nodes: Dictionary = {}
 
 
 func _init() -> void:
@@ -130,7 +145,6 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	# `chunk` is assigned in _ready and never nulled, so no null-guard needed.
 	# 1) Drain any completed worker re-mesh result onto the scene.
 	if _remesh_task_id != -1 and WorkerThreadPool.is_task_completed(_remesh_task_id):
 		WorkerThreadPool.wait_for_task_completion(_remesh_task_id)
@@ -139,25 +153,30 @@ func _process(_delta: float) -> void:
 		var data: Dictionary = _remesh_result
 		_remesh_result = {}
 		_remesh_mutex.unlock()
-		if not data.is_empty():
+		if not data.is_empty() and not chunk.dirty:
 			_pending_apply = data
 	# 2) If we're holding a pending apply, try to spend a ChunkManager
-	#    apply budget this frame. If the budget is exhausted we wait —
-	#    the data stays in _pending_apply for next frame.
+	#    apply budget this frame. Priority-apply bypasses the budget for
+	#    player-edited chunks so the edit lands in 1-2 frames instead of
+	#    waiting behind background relight churn.
+	if chunk.dirty and not _pending_apply.is_empty():
+		_pending_apply = {}
 	if not _pending_apply.is_empty():
 		var manager: Node = get_parent()
-		var has_budget: bool = manager == null or not manager.has_method("try_consume_apply_budget")
+		var has_budget: bool = _priority_apply
 		if not has_budget:
-			has_budget = manager.call("try_consume_apply_budget")
+			has_budget = manager == null or not manager.has_method("try_consume_apply_budget")
+			if not has_budget:
+				has_budget = manager.call("try_consume_apply_budget")
 		if has_budget:
 			var data: Dictionary = _pending_apply
 			_pending_apply = {}
+			_priority_apply = false
 			_apply_mesh_data(data)
-	# 2) If the chunk dirtied (player edit) and no task is in flight,
-	#    dispatch a re-mesh off the main thread. Snapshots the block +
-	#    light arrays so the worker can't race with further writes.
+	# 3) If the chunk dirtied (player edit) and no task is in flight,
+	#    dispatch a re-mesh off the main thread.
 	if chunk.dirty and _remesh_task_id == -1:
-		chunk.dirty = false  # claim the work — further edits re-set it
+		chunk.dirty = false
 		_dispatch_remesh()
 
 
@@ -232,9 +251,18 @@ func _compute_chunk_coord() -> Vector2i:
 # the mutex so _process can pick it up next frame.
 func _remesh_worker(snap: Chunk) -> void:
 	var data := Mesher.mesh_chunk_fast(snap)
-	_remesh_mutex.lock()
+	var mtx: Mutex = _remesh_mutex
+	if mtx == null:
+		return
+	mtx.lock()
 	_remesh_result = data
-	_remesh_mutex.unlock()
+	mtx.unlock()
+
+
+func cancel_remesh_task() -> void:
+	if _remesh_task_id != -1:
+		WorkerThreadPool.wait_for_task_completion(_remesh_task_id)
+		_remesh_task_id = -1
 
 
 # Synchronous re-mesh for callers that NEED the mesh updated this frame
@@ -303,15 +331,12 @@ func _apply_mesh_data(data: Dictionary) -> void:
 			_collision_faces_cache = (
 				derived.get_faces() if derived != null else PackedVector3Array()
 			)
-		# Prefer the worker-built shape (Mesher._attach_collision_shape ran
-		# the BVH build off-main); falls back to a main-thread build only
-		# when the data dict came from the legacy GDScript path that didn't
-		# pre-bake. Caching the shape lets set_collision_active toggle the
-		# attachment without rebuilding the BVH on every chunk-boundary
-		# crossing.
-		if data.has("collision_shape"):
-			_collision_shape_cache = data.collision_shape
-		elif not _collision_faces_cache.is_empty():
+		# Build the collision shape on the main thread.
+		# ConcavePolygonShape3D.set_faces() calls PhysicsServer3D
+		# internally, which is not thread-safe — shapes built on a
+		# worker thread may never reach the physics server, leaving
+		# stale collision in place (ghost-block bug).
+		if not _collision_faces_cache.is_empty():
 			_collision_shape_cache = ConcavePolygonShape3D.new()
 			_collision_shape_cache.set_faces(_collision_faces_cache)
 		else:
@@ -339,6 +364,13 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		warrs[Mesh.ARRAY_VERTEX] = data.water_vertices
 		warrs[Mesh.ARRAY_NORMAL] = data.water_normals
 		warrs[Mesh.ARRAY_TEX_UV] = data.water_uvs
+		# Per-vertex sky/block light — water shader multiplies its color by
+		# max(sky·sky_factor, block) so caves / night dim water like cubes.
+		# Native paths emit `water_colors`; GDScript path always does.
+		# Missing key means stale extension before the lighting wiring; fall
+		# back to `null` and the shader skips the multiply (constant tint).
+		if data.has("water_colors") and not data.water_colors.is_empty():
+			warrs[Mesh.ARRAY_COLOR] = data.water_colors
 		warrs[Mesh.ARRAY_INDEX] = data.water_indices
 		var water_mesh := ArrayMesh.new()
 		water_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, warrs)
@@ -357,6 +389,8 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		larrs[Mesh.ARRAY_VERTEX] = data.lava_vertices
 		larrs[Mesh.ARRAY_NORMAL] = data.lava_normals
 		larrs[Mesh.ARRAY_TEX_UV] = data.lava_uvs
+		if data.has("lava_colors") and not data.lava_colors.is_empty():
+			larrs[Mesh.ARRAY_COLOR] = data.lava_colors
 		larrs[Mesh.ARRAY_INDEX] = data.lava_indices
 		var lava_mesh := ArrayMesh.new()
 		lava_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, larrs)
@@ -364,4 +398,45 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		_lava_mesh_instance.mesh = lava_mesh
 	else:
 		_lava_mesh_instance.mesh = null
+	_sync_chest_entities()
 	PerfProbe.end("chunk_node.apply", probe_token)
+
+
+# Walk the chunk for CHEST cells and ensure a ChestNode exists at each.
+# Removes orphan entities for cells whose block is no longer a chest.
+# Cheap because chest count per chunk is low (0..few) — we do a single
+# linear scan over `chunk.blocks` keyed on the CHEST byte.
+func _sync_chest_entities() -> void:
+	var seen: Dictionary = {}
+	# `chunk.blocks` is the flat PackedByteArray; inline-iterate via
+	# Chunk.SIZE_X/Y/Z so we don't pay the per-call get_block bounds check.
+	for y in range(Chunk.SIZE_Y):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var idx: int = y * Chunk.SIZE_X * Chunk.SIZE_Z + z * Chunk.SIZE_X + x
+				if chunk.blocks[idx] != Blocks.CHEST:
+					continue
+				var key := Vector3i(x, y, z)
+				seen[key] = true
+				if not _chest_nodes.has(key):
+					var node := ChestNode.new()
+					# ChestNode mesh is centered on XZ (origin at cell
+					# center), so node position = cell center. set_facing
+					# rotates about this origin → pivots around the
+					# chest's centerline as expected.
+					node.position = Vector3(float(x) + 0.5, float(y), float(z) + 0.5)
+					add_child(node)
+					_chest_nodes[key] = node
+				var meta: int = chunk.get_block_meta(x, y, z)
+				_chest_nodes[key].set_facing(meta)
+	# Despawn any chest entity whose cell is no longer a chest.
+	for key: Vector3i in _chest_nodes.keys():
+		if not seen.has(key):
+			_chest_nodes[key].queue_free()
+			_chest_nodes.erase(key)
+
+
+# Called by interaction.gd via ChunkManager.find_chest_node_at(world_pos)
+# so the right-click-to-open path can drive set_open() on the entity.
+func find_chest_node_at_local(local_pos: Vector3i) -> ChestNode:
+	return _chest_nodes.get(local_pos, null)

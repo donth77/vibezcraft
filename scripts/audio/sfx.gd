@@ -58,6 +58,17 @@ const _GLASS_BREAK_SOUNDS: Array = [
 	"res://assets/audio/sfx/random/glass2.ogg",
 	"res://assets/audio/sfx/random/glass3.ogg",
 ]
+# Alpha 1.2.6 `sound3/random/chestopen.ogg` + `chestclosed.ogg` — the
+# wooden creak vanilla TileEntityChest plays on lid open / close.
+# Sourced from the local PrismLauncher Alpha install (mcasset.cloud
+# /a1.2.6 has the same files if anyone needs to re-extract). Pitch-jitter
+# matches vanilla GuiContainerChest.click which seeds Random per frame.
+const _CHEST_OPEN_SOUND: String = "res://assets/audio/sfx/random/chestopen.ogg"
+const _CHEST_CLOSE_SOUND: String = "res://assets/audio/sfx/random/chestclosed.ogg"
+# Alpha 1.2.6 `newsound/random/door_{open,close}.ogg` — gv.java:98-102
+# randomly picks one of the two on every toggle. Pitch jitter 0.9..1.0.
+const _DOOR_OPEN_SOUND: String = "res://assets/audio/sfx/random/door_open.ogg"
+const _DOOR_CLOSE_SOUND: String = "res://assets/audio/sfx/random/door_close.ogg"
 # Alpha 1.2.6 `sound3/random/fizz.ogg` — extracted from
 # InventivetalentDev/minecraft-assets @ a1.2.6 (vendor client.jar
 # doesn't ship audio; the launcher downloads it on first run). Used
@@ -178,6 +189,26 @@ func play_place(block_id: int) -> void:
 	if mat == "":
 		return
 	_play_random(mat, 0.85)
+
+
+# Vanilla TileEntityChest plays `random.chestopen` on RMB-interact and
+# `random.chestclose` when the GUI closes (BlockChest.j → playSoundEffect
+# in c.java). Pitch jitter matches the same `rand * 0.1 + 0.9` envelope
+# every other random.* sound uses.
+func play_chest_open() -> void:
+	_play_one(_CHEST_OPEN_SOUND, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+
+
+func play_chest_close() -> void:
+	_play_one(_CHEST_CLOSE_SOUND, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
+
+
+# Vanilla gv.java:98-102 — randomly picks door_open or door_close on every
+# toggle, with pitch `rand * 0.1 + 0.9`. Not keyed to actual open/close
+# state — just a random 50/50 pick per interaction, same as vanilla.
+func play_door_toggle() -> void:
+	var path: String = _DOOR_OPEN_SOUND if randf() < 0.5 else _DOOR_CLOSE_SOUND
+	_play_one(path, 0.0, randf_range(0.9, 1.0))
 
 
 # Footstep — picks a random variant for the block's material.
@@ -422,7 +453,7 @@ func _play_random(material: String, base_pitch: float) -> void:
 # gdlint: disable=max-returns
 func _material_for(block_id: int) -> String:
 	match block_id:
-		Blocks.STONE, Blocks.COBBLESTONE, Blocks.BEDROCK, Blocks.BRICK:
+		Blocks.STONE, Blocks.COBBLESTONE, Blocks.COBBLESTONE_STAIRS, Blocks.BEDROCK, Blocks.BRICK:
 			return "stone"
 		Blocks.OBSIDIAN, Blocks.COAL_ORE, Blocks.IRON_ORE, Blocks.GOLD_ORE:
 			return "stone"
@@ -433,9 +464,11 @@ func _material_for(block_id: int) -> String:
 		Blocks.SAND:
 			return "sand"
 		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE, Blocks.TORCH:
-			# Torch uses wood per vanilla nq.java:9 + nq.aq registration:
-			# `new ob(50, 80).c(0.0f).a(0.9375f).a(e)` where `e = bi("wood", ...)`.
 			return "wood"
+		Blocks.CHEST, Blocks.FENCE, Blocks.WOOD_STAIRS, Blocks.WOODEN_DOOR:
+			return "wood"
+		Blocks.IRON_DOOR:
+			return "stone"
 		Blocks.GRAVEL, Blocks.FARMLAND:
 			return "gravel"
 	return ""

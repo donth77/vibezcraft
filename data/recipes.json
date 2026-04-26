@@ -217,6 +217,30 @@
       "result": {"id": "furnace", "count": 1}
     },
     {
+      "id": "chest",
+      "pattern": ["PPP", "P P", "PPP"],
+      "key": {"P": "planks"},
+      "result": {"id": "chest", "count": 1}
+    },
+    {
+      "id": "fence",
+      "pattern": ["SSS", "SSS"],
+      "key": {"S": "stick"},
+      "result": {"id": "fence", "count": 2}
+    },
+    {
+      "id": "wood_stairs",
+      "pattern": ["#  ", "## ", "###"],
+      "key": {"#": "planks"},
+      "result": {"id": "wood_stairs", "count": 4}
+    },
+    {
+      "id": "cobblestone_stairs",
+      "pattern": ["#  ", "## ", "###"],
+      "key": {"#": "cobblestone"},
+      "result": {"id": "cobblestone_stairs", "count": 4}
+    },
+    {
       "id": "bucket",
       "pattern": ["I I", " I "],
       "key": {"I": "iron_ingot"},
@@ -239,6 +263,18 @@
       "pattern": ["I ", " F"],
       "key": {"I": "iron_ingot", "F": "flint"},
       "result": {"id": "flint_and_steel", "count": 1}
+    },
+    {
+      "id": "wooden_door",
+      "pattern": ["PP", "PP", "PP"],
+      "key": {"P": "planks"},
+      "result": {"id": "wooden_door", "count": 1}
+    },
+    {
+      "id": "iron_door",
+      "pattern": ["II", "II", "II"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_door", "count": 1}
     }
   ],
   "shapeless": [],

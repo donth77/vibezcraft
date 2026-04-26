@@ -197,6 +197,7 @@ func _update_chunk_set() -> void:
 		if _dirty_loaded.has(coord):
 			_persist_chunk(coord, _chunks[coord].chunk)
 			_dirty_loaded.erase(coord)
+		_chunks[coord].cancel_remesh_task()
 		_chunks[coord].queue_free()
 		_chunks.erase(coord)
 	# Drop queued chunks that are no longer needed. In-place reverse-loop
@@ -340,6 +341,8 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 
 # Synchronous fallback used at startup so the player has terrain to land on.
 func _spawn_chunk_sync(coord: Vector2i) -> void:
+	if _chunks.has(coord):
+		return
 	var chunk := Worldgen.generate_chunk(coord.x, coord.y)
 	Lighting.fill_sky_light(chunk)
 	Lighting.fill_block_light(chunk)
@@ -516,6 +519,25 @@ func _player_chunk_coord() -> Vector2i:
 	)
 
 
+# Find the ChestNode entity at a given world cell, or null if none. Used
+# by interaction.gd to drive the lid open/close animation when the
+# chest UI opens. Routes through the owning chunk_node, which maintains
+# a per-chunk dict of chest entities (chunk_node._sync_chest_entities).
+func find_chest_node_at(world_pos: Vector3i) -> ChestNode:
+	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
+	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
+	var coord := Vector2i(chunk_x, chunk_z)
+	if not _chunks.has(coord):
+		return null
+	var chunk_node: Node3D = _chunks[coord]
+	var local := Vector3i(
+		world_pos.x - chunk_x * Chunk.SIZE_X, world_pos.y, world_pos.z - chunk_z * Chunk.SIZE_Z
+	)
+	if chunk_node.has_method("find_chest_node_at_local"):
+		return chunk_node.find_chest_node_at_local(local)
+	return null
+
+
 # World-coord block edit. Looks up the right chunk, converts to local coords,
 # applies. Silently no-ops if the target is outside the currently loaded area.
 # Marks the chunk as "modified" so it's preserved across unload/reload.
@@ -531,6 +553,12 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var old_id: int = chunk_node.chunk.get_block(local_x, world_pos.y, local_z)
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
 	_dirty_loaded[coord] = true
+	# Priority-apply flag — the upcoming worker re-mesh result skips the
+	# 1-per-frame apply budget queue. Without this, player edits at FAR
+	# render distance can hang behind background relight-driven re-meshes
+	# for many seconds (ghost-block bug). chunk_node clears the flag on
+	# apply.
+	chunk_node.set("_priority_apply", true)
 	# Edge-edit neighbor refresh. Native mesher culls faces across chunk
 	# seams via chunk_node._attach_neighbor_edges; neighbors must re-mesh
 	# when our edit lands on a seam cell, otherwise their opposing face

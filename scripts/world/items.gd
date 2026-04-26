@@ -93,6 +93,11 @@ const BUCKET_LAVA: int = 144
 # side, costs 1 durability per ignition. Vanilla recipe: iron_ingot in
 # top-left, flint in bottom-right of a 2×2 grid. See data/recipes.json.
 const FLINT_AND_STEEL: int = 145
+# Vanilla Alpha door items (eu.java). maxStackSize=1 (eu.java:aX=1),
+# right-click-place on a top-face spawns a two-block-tall door oriented
+# by player yaw. Wood door opens/closes on RMB; iron requires redstone.
+const WOODEN_DOOR: int = 146
+const IRON_DOOR: int = 147
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -272,6 +277,10 @@ static func id_from_name(item_name: String) -> int:
 			return BUCKET_LAVA
 		"flint_and_steel":
 			return FLINT_AND_STEEL
+		"wooden_door":
+			return WOODEN_DOOR
+		"iron_door":
+			return IRON_DOOR
 		"air":
 			return Blocks.AIR
 		"bedrock":
@@ -316,6 +325,14 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.FARMLAND
 		"gravel":
 			return Blocks.GRAVEL
+		"chest":
+			return Blocks.CHEST
+		"fence":
+			return Blocks.FENCE
+		"wood_stairs":
+			return Blocks.WOOD_STAIRS
+		"cobblestone_stairs":
+			return Blocks.COBBLESTONE_STAIRS
 	return -1
 
 
@@ -417,6 +434,10 @@ static func display_name(item_id: int) -> String:
 			return "Lava Bucket"
 		FLINT_AND_STEEL:
 			return "Flint and Steel"
+		WOODEN_DOOR:
+			return "Wooden Door"
+		IRON_DOOR:
+			return "Iron Door"
 		Blocks.AIR:
 			return ""
 		Blocks.BEDROCK:
@@ -459,6 +480,18 @@ static func display_name(item_id: int) -> String:
 			return "Farmland"
 		Blocks.GRAVEL:
 			return "Gravel"
+		Blocks.CHEST:
+			return "Chest"
+		Blocks.TORCH:
+			return "Torch"
+		Blocks.FIRE:
+			return "Fire"
+		Blocks.FENCE:
+			return "Fence"
+		Blocks.WOOD_STAIRS:
+			return "Wooden Stairs"
+		Blocks.COBBLESTONE_STAIRS:
+			return "Cobblestone Stairs"
 	return ""
 
 
@@ -531,5 +564,8 @@ static func max_stack_size(item_id: int) -> int:
 	# need per-stack state (which fluid), and even empty buckets follow
 	# the same convention. Matches ItemBucket.itemID uniqueness rule.
 	if item_id == BUCKET_EMPTY or item_id == BUCKET_WATER or item_id == BUCKET_LAVA:
+		return 1
+	# Vanilla eu.java:aX=1 — door items don't stack.
+	if item_id == WOODEN_DOOR or item_id == IRON_DOOR:
 		return 1
 	return ItemStack.MAX_SIZE

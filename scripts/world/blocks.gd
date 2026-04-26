@@ -68,6 +68,38 @@ const FIRE := 27
 # floor-only (meta 0); wall variants (meta 1-4) land in the next pass.
 # Hardness 0 = instant break. Drops itself via standard cube drops.
 const TORCH := 28
+# Vanilla Alpha BlockChest (c.java / nq.au, id 54). 27-slot container with
+# an animated lid (cz.java::TileEntityChestRenderer). Hardness 2.5, axe-
+# preferred per c.c(2.5f).a(e). Rendered as a separate ChestNode entity
+# (so the lid can pivot for open/close) — the chunk mesher emits NO
+# visual faces for CHEST cells, only collision. Block-meta 0..3 carries
+# facing direction (0 = -Z, 1 = -X, 2 = +Z, 3 = +X), set on placement
+# from the player's yaw.
+const CHEST := 29
+# Vanilla Alpha BlockFence (gd.java / nq.aZ, id 85). Uses the planks
+# texture (vanilla terrain index 4 = `nq.aZ.bg`). Hardness 2.0, axe-
+# preferred, material wood. Renders as a 6/16-wide post (always) +
+# two horizontal rails at y=6-9/16 and y=12-15/16, each rail emitting
+# arms toward neighbors that are also fences. Hitbox extends 0.5 above
+# the cell (1.5 total height) so the player can't hop a single fence —
+# vanilla gd.java:13 `arrayList.add(co.b(x, y, z, x+1, y+1.5, z+1))`.
+# Alpha-specific: connects to FENCES ONLY (not solid blocks). Beta+
+# extended this to all opaque cubes; we stay Alpha-faithful.
+const FENCE := 30
+# Vanilla Alpha BlockStairs (mb.java) — two variants: wood (nq.at, id 53)
+# and cobblestone (nq.aH, id 67). Each stair renders as a bottom half-slab
+# + an upper step (two boxes, orientation from meta 0..3). Inherits
+# hardness/material from its parent block. Resistance = parent / 3 per
+# mb.java:15. Non-opaque (mb.java:27 returns false).
+const WOOD_STAIRS := 31
+const COBBLESTONE_STAIRS := 32
+# Vanilla Alpha BlockDoor (gv.java). Two block IDs per door type (wood id=64,
+# iron id=71 in vanilla). Each door occupies two vertically adjacent cells;
+# metadata encodes facing (bits 0-1), open state (bit 2), and upper/lower
+# half (bit 3). Upper half drops AIR; lower drops the door item. Iron doors
+# don't open by hand (require redstone, which we don't have yet).
+const WOODEN_DOOR := 33
+const IRON_DOOR := 34
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -79,6 +111,26 @@ const TORCH := 28
 const MESH_SHAPE_CUBE: int = 0
 const MESH_SHAPE_CROSS: int = 1  # two crossed quads, like sapling/grass-plant
 const MESH_SHAPE_TORCH: int = 2  # small pillar centered in cell (floor torch)
+# No visual emit from the chunk mesher; the block is rendered by an
+# external entity (e.g. ChestNode for chests). Mesher still emits a
+# full-cube collision soup so the player has solid ground / can't walk
+# through. Adjacent opaque cubes treat this cell as opaque (face culling
+# proceeds normally), so the entity covers the visual gap.
+const MESH_SHAPE_EXTERNAL: int = 3
+# Neighbor-aware fence post + rails. The mesher checks the 4 horizontal
+# neighbors for same-id (fence-to-fence-only per Alpha gd.java:1199) and
+# emits arms into the connected directions on top of an always-rendered
+# 6/16 post. Collision soup includes the 1.5-tall hitbox so the player
+# can't hop a single fence (gd.java:12-14). Custom selection bbox stays
+# at full-cell-width-by-1.5-tall too, matching vanilla's selection.
+const MESH_SHAPE_FENCE: int = 4
+# Two-box stair step with 4 facing orientations (meta 0..3). Each
+# orientation renders a full-width bottom half-slab + a half-width
+# full-height upper step. Vanilla render type 10 (bk.java:1246-1263).
+const MESH_SHAPE_STAIRS: int = 5
+# Thin 3/16-block slab with 4 orientations × open/closed from metadata.
+# Two-block tall: lower half renders the bottom texture, upper the top.
+const MESH_SHAPE_DOOR: int = 6
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -133,6 +185,22 @@ static func is_opaque(id: int) -> bool:
 		and id != LAVA_STILL
 		and id != FIRE
 		and id != TORCH
+		# Vanilla c.java BlockChest is a tile-entity that doesn't fill its
+		# cell — the body is inset 1/16 on each XZ side, so neighbors
+		# (especially the cell below) MUST keep emitting their faces or
+		# the player sees through the chest's bottom inset to the sky.
+		# Mirrors how Glass / Leaves opt out for the same shader-driven
+		# reason.
+		and id != CHEST
+		# Fence renders as a thin post + rails (6/16 wide, with 1.5-tall
+		# hitbox); neighboring cubes must keep emitting their faces so the
+		# air around the post shows the world behind. Vanilla gd.a()
+		# returns false for the same reason.
+		and id != FENCE
+		and id != WOOD_STAIRS
+		and id != COBBLESTONE_STAIRS
+		and id != WOODEN_DOOR
+		and id != IRON_DOOR
 	)
 
 
@@ -188,11 +256,19 @@ static func is_valid_plant_support(id: int) -> bool:
 static func is_replaceable(id: int) -> bool:
 	# Vanilla BlockFluid.isBlockReplaceable returns true — placing into
 	# water/lava overwrites the fluid cell (Alpha lets you destroy source
-	# blocks this way too; bucket displacement came in 1.4). Including
-	# lava here would let the player trivially neutralize lava pools by
-	# placing dirt; that's vanilla-accurate but we're leaving it off
-	# until lava damage lands (Flow #5) so the hazard still matters.
-	return id == AIR or id == SAPLING or id == WATER_FLOWING or id == WATER_STILL or id == FIRE
+	# blocks this way too; bucket displacement came in 1.4). Lava is
+	# included now that HP/damage shipped in Phase 5+ — the hazard is
+	# real, so the gameplay loop "place dirt to bridge a lava pool" is
+	# meaningful rather than a trivial safe-out.
+	return (
+		id == AIR
+		or id == SAPLING
+		or id == WATER_FLOWING
+		or id == WATER_STILL
+		or id == LAVA_FLOWING
+		or id == LAVA_STILL
+		or id == FIRE
+	)
 
 
 # Vanilla `Block.lightOpacity` — how much sky/block light this block
@@ -239,6 +315,16 @@ static func _build_light_opacity_lut() -> void:
 	#   * The sky_light BFS fires on every torch place/break (op_diff !=0)
 	#     where it shouldn't — wasted work plus the shadow side effect.
 	_light_opacity_lut[TORCH] = 0
+	# Fence: thin post + rails — light passes around it. Vanilla gd.a()
+	# returns false (not opaque cube) and isOpaqueCube → light_opacity=0.
+	_light_opacity_lut[FENCE] = 0
+	# Stairs: non-opaque (mb.java:27 returns false). Light passes through
+	# the open half of the step shape.
+	_light_opacity_lut[WOOD_STAIRS] = 0
+	_light_opacity_lut[COBBLESTONE_STAIRS] = 0
+	# Doors: thin slab, light passes around them. gv.java:35 a()=false.
+	_light_opacity_lut[WOODEN_DOOR] = 0
+	_light_opacity_lut[IRON_DOOR] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -307,9 +393,42 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 			4:
 				return AABB(Vector3(0.35, 0.2, 0.7), Vector3(0.3, 0.6, 0.3))
 			_:
-				# 5 / 0 — floor torch
-				return AABB(Vector3(0.4, 0.0, 0.4), Vector3(0.2, 0.6, 0.2))
+				# 5 / 0 — floor torch. Mesh sits at y+0.125..y+0.75
+				# (vanilla bk.java applies +0.125 Y offset). AABB
+				# extends to 0.75 so the wireframe encloses the flame tip.
+				return AABB(Vector3(0.4, 0.0, 0.4), Vector3(0.2, 0.75, 0.2))
+	if id == FENCE:
+		# Vanilla gd.java:13 `co.b(x, y, z, x+1, y+1.5, z+1)` — full cell
+		# width, 1.5 high so the highlight wraps the half-block extension
+		# above the cell that prevents the player from hopping over.
+		return AABB(Vector3.ZERO, Vector3(1.0, 1.5, 1.0))
+	if id == WOODEN_DOOR or id == IRON_DOOR:
+		return _door_selection_aabb(meta)
 	return AABB(Vector3.ZERO, Vector3.ONE)
+
+
+static func _door_selection_aabb(meta: int) -> AABB:
+	var facing: int = _door_facing(meta)
+	var f: float = 0.1875  # 3/16 door thickness
+	match facing:
+		0:
+			return AABB(Vector3(0, 0, 0), Vector3(1, 1, f))
+		1:
+			return AABB(Vector3(1.0 - f, 0, 0), Vector3(f, 1, 1))
+		2:
+			return AABB(Vector3(0, 0, 1.0 - f), Vector3(1, 1, f))
+		3:
+			return AABB(Vector3(0, 0, 0), Vector3(f, 1, 1))
+	return AABB(Vector3.ZERO, Vector3.ONE)
+
+
+# Vanilla gv.java:177 — derives the visual facing from metadata. When the
+# door is closed (bit 2 == 0), the facing rotates by -1 from raw meta bits.
+# When open (bit 2 != 0), raw bits are the facing directly.
+static func _door_facing(meta: int) -> int:
+	if (meta & 4) == 0:
+		return (meta - 1) & 3
+	return meta & 3
 
 
 # Mesh shape for the chunk mesher. Default = full cube; only the few
@@ -320,6 +439,14 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_CROSS
 	if id == TORCH:
 		return MESH_SHAPE_TORCH
+	if id == CHEST:
+		return MESH_SHAPE_EXTERNAL
+	if id == FENCE:
+		return MESH_SHAPE_FENCE
+	if id == WOOD_STAIRS or id == COBBLESTONE_STAIRS:
+		return MESH_SHAPE_STAIRS
+	if id == WOODEN_DOOR or id == IRON_DOOR:
+		return MESH_SHAPE_DOOR
 	return MESH_SHAPE_CUBE
 
 
@@ -354,8 +481,15 @@ static func hardness(id: int) -> float:
 			return 0.5
 		GRASS, FARMLAND, GRAVEL:
 			return 0.6
-		LOG, PLANKS, CRAFTING_TABLE:
+		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, COBBLESTONE_STAIRS:
+			# mb.java:14 `this.c(nq2.bi)` — inherits parent hardness (2.0).
 			return 2.0
+		WOODEN_DOOR:
+			return 3.0  # gv.java: nq.aE `c(3.0f)` — wood door
+		IRON_DOOR:
+			return 5.0  # gv.java: nq.aL `c(5.0f)` — iron door
+		CHEST:
+			return 2.5  # c.java:c(2.5f) — slightly tougher than planks
 		STONE, COBBLESTONE, BRICK:
 			return 1.5
 		FURNACE, LIT_FURNACE:
@@ -388,14 +522,16 @@ static func required_harvest_level(id: int) -> int:
 # 0 = any/none (no bonus from any tool). Mirrors vanilla ItemPickaxe's block list.
 static func preferred_tool_type(id: int) -> int:
 	match id:
-		STONE, COBBLESTONE, BRICK, OBSIDIAN:
+		STONE, COBBLESTONE, COBBLESTONE_STAIRS, BRICK, OBSIDIAN:
 			return Items.TOOL_TYPE_PICKAXE
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
 			return Items.TOOL_TYPE_PICKAXE
 		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
-		LOG, PLANKS:
+		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR:
 			return Items.TOOL_TYPE_AXE
+		IRON_DOOR:
+			return Items.TOOL_TYPE_PICKAXE
 		DIRT, GRASS, SAND, FARMLAND, GRAVEL:
 			return Items.TOOL_TYPE_SHOVEL
 	return 0
@@ -514,6 +650,18 @@ static func drops(id: int) -> int:
 			return SAPLING  # drops itself when broken
 		BEDROCK:
 			return AIR
+		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
+			# Fluids and fire have no item form. When displaced (e.g. a block
+			# placed on a water cell) `_place_block_from_held` drops the
+			# replaced cell — without these cases, drops() fell through to
+			# `return id` and spawned a dropped item with the water/lava/fire
+			# BLOCK id, which renders as a blank grey "no-icon, no-name"
+			# pickup since item-id space is disjoint from block-id space.
+			return AIR
+		WOODEN_DOOR:
+			return Items.WOODEN_DOOR
+		IRON_DOOR:
+			return Items.IRON_DOOR
 		COAL_ORE:
 			return Items.COAL
 		DIAMOND_ORE:
@@ -581,6 +729,14 @@ static func name_of(id: int) -> String:
 			return "fire"
 		TORCH:
 			return "torch"
+		WOOD_STAIRS:
+			return "wood_stairs"
+		COBBLESTONE_STAIRS:
+			return "cobblestone_stairs"
+		WOODEN_DOOR:
+			return "wooden_door"
+		IRON_DOOR:
+			return "iron_door"
 	return "unknown"
 
 
@@ -603,6 +759,10 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "grass_side"
 		COBBLESTONE:
 			return "cobblestone"
+		BRICK:
+			return "brick"
+		OBSIDIAN:
+			return "obsidian"
 		LOG:
 			match face:
 				"top", "bottom":
@@ -668,4 +828,36 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "fire"
 		TORCH:
 			return "torch"
+		CHEST:
+			# Chest has 3 faces in vanilla terrain.png (c.java reads bg-1
+			# for top/bottom, bg+1 for the latched front, bg for the
+			# unmarked sides). The actual rendering goes through ChestNode
+			# (separate entity), but BlockAtlas needs an entry so the
+			# block icon renderer + tooltip preview have something to
+			# show. The mesher skips CHEST cells, so this only feeds the
+			# 3D icon path.
+			match face:
+				"top", "bottom":
+					return "chest_top"
+				_:
+					return "chest_side"
+		FENCE:
+			# Vanilla nq.aZ uses terrain index 4 (= planks). Same texture
+			# on every face of the post and rails — see gd.java:8
+			# `super(n2, 4, hb.c)` and bk.java:1192 onward.
+			return "planks"
+		WOOD_STAIRS:
+			return "planks"
+		COBBLESTONE_STAIRS:
+			return "cobblestone"
 	return ""
+
+
+# Door texture varies by half — upper vs lower. Metadata bit 3 selects.
+# Called by the mesher with the actual metadata; the base get_face_texture
+# above can't branch on meta so doors route through here.
+static func door_texture(id: int, meta: int) -> String:
+	var is_upper: bool = (meta & 8) != 0
+	if id == WOODEN_DOOR:
+		return "door_wood_upper" if is_upper else "door_wood_lower"
+	return "door_iron_upper" if is_upper else "door_iron_lower"

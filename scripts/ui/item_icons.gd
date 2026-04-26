@@ -86,6 +86,8 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# pack. Other packs fall through to the placeholder color until they
 	# ship their own sprite.
 	Items.FLINT_AND_STEEL: "flint_and_steel",
+	Items.WOODEN_DOOR: "wooden_door",
+	Items.IRON_DOOR: "iron_door",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

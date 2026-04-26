@@ -49,6 +49,26 @@ const _LAYOUT := {
 	"lava_flowing": 26,
 	"torch": 27,
 	"fire": 28,
+	# Append-only — slot indices are persisted via mesher UV bakes / native
+	# extension marshalling, so don't renumber existing entries. Both have
+	# matching PNGs in every pack (extracted by extract_alpha_pack.py for
+	# alpha_vanilla; hand-authored for the others) — without these LAYOUT
+	# entries `Blocks.get_face_texture` returns the right name but
+	# `BlockAtlas._uv_rects.get(name)` falls through to Rect2(0,0,0,0),
+	# baking grey-pixel-only UVs into the cube mesh and the icon renderer.
+	"brick": 29,
+	"obsidian": 30,
+	# Chest tiles. Vanilla c.java references `bg = 26` for chest_top,
+	# `bg + 1 = 27` for chest_front, but those terrain.png positions are
+	# vanilla-internal — our atlas indices are independent. Slot order
+	# below is append-only same as brick/obsidian above.
+	"chest_top": 31,
+	"chest_side": 32,
+	"chest_front": 33,
+	"door_wood_lower": 34,
+	"door_wood_upper": 35,
+	"door_iron_lower": 36,
+	"door_iron_upper": 37,
 }
 
 static var active_pack: String = DEFAULT_PACK

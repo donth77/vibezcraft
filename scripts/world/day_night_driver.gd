@@ -78,4 +78,10 @@ func _process(_delta: float) -> void:
 	# Push WorldTime.sky_factor into the chunk shader uniform so per-vertex
 	# sky_light scales with the day cycle. Single shared ShaderMaterial
 	# (BlockAtlas._material) — one set call covers every chunk in the world.
-	BlockAtlas.material().set_shader_parameter("sky_factor", WorldTime.sky_factor())
+	# Water + lava share the same lighting convention now that their meshes
+	# carry per-vertex COLOR (water_colors / lava_colors); push to those
+	# materials too so they dim at night / in caves like cube blocks.
+	var sf: float = WorldTime.sky_factor()
+	BlockAtlas.material().set_shader_parameter("sky_factor", sf)
+	BlockAtlas.water_material().set_shader_parameter("sky_factor", sf)
+	BlockAtlas.lava_material().set_shader_parameter("sky_factor", sf)

@@ -2,6 +2,7 @@
 
 #include "lighting_native.h"
 #include "mesher_native.h"
+#include "water_fx_native.h"
 #include "worldgen_native.h"
 
 #include <gdextension_interface.h>
@@ -17,6 +18,7 @@ void initialize_mesher_native_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(MesherNative);
 	GDREGISTER_CLASS(WorldgenNative);
 	GDREGISTER_CLASS(LightingNative);
+	GDREGISTER_CLASS(WaterFXNative);
 }
 
 void uninitialize_mesher_native_module(ModuleInitializationLevel p_level) {

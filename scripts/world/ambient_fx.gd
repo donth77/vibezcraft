@@ -45,6 +45,8 @@ static func tick(manager: Node, _player_coord: Vector2i, player_y: int) -> void:
 			_lava(manager, wx, wy, wz)
 		elif id == Blocks.FIRE:
 			_fire(manager, wx, wy, wz)
+		elif id == Blocks.TORCH:
+			_torch(manager, wx, wy, wz)
 
 
 # Lava-cell ambient: only fires when the cell directly above is AIR
@@ -73,3 +75,16 @@ static func _fire(manager: Node, wx: int, wy: int, wz: int) -> void:
 		SFX.play_fire_crackle()
 	if randi() % 2 == 0:
 		FluidFx.spawn_fire_smoke(manager, Vector3i(wx, wy, wz))
+
+
+# Torch-cell ambient: flame + smoke at the torch tip, meta-aware so wall
+# torches' particles end up on the leaning side. Mirrors `bk.b`
+# (BlockTorch.randomDisplayTick) which spawns one smoke + one flame per
+# roll. Vanilla rolls 1/anything-low here since torches are common; we
+# gate at 1-in-3 so a 10 Hz × 1000-cell scan with a few torches in range
+# produces roughly the vanilla density without flooding the pool.
+static func _torch(manager: Node, wx: int, wy: int, wz: int) -> void:
+	if randi() % 3 != 0:
+		return
+	var meta: int = manager.call("get_world_block_meta", Vector3i(wx, wy, wz)) as int
+	FluidFx.spawn_torch_particles(manager, Vector3i(wx, wy, wz), meta)

@@ -1,3 +1,4 @@
+# gdlint: disable=max-file-lines
 class_name Mesher
 extends RefCounted
 
@@ -122,57 +123,112 @@ static func enable_native() -> bool:
 # don't carry COLOR (the water shader ignores it). Parity is guarded by
 # tests/test_mesher_native.gd.
 static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
-	var native_eligible: bool = _native_mesher != null and not chunk.has_non_cube_blocks
-	if native_eligible:
-		var probe_token := PerfProbe.begin("mesher.mesh_chunk")
-		var result: Dictionary = (
-			_native_mesher
-			. mesh_chunk_data_lit(
-				chunk.blocks,
-				chunk.block_meta,
-				chunk.sky_light,
-				chunk.block_light,
-				chunk.max_y,
-				BlockAtlas.uv_table_flat(),
-				chunk.edge_blocks_west,
-				chunk.edge_blocks_east,
-				chunk.edge_blocks_north,
-				chunk.edge_blocks_south,
-				chunk.edge_meta_west,
-				chunk.edge_meta_east,
-				chunk.edge_meta_north,
-				chunk.edge_meta_south,
-			)
-		)
-		_attach_collision_shape(result)
-		PerfProbe.end("mesher.mesh_chunk", probe_token)
+	if _native_mesher == null:
+		var result: Dictionary = mesh_chunk(chunk)
 		return result
-	var result: Dictionary = mesh_chunk(chunk)
-	_attach_collision_shape(result)
+	var probe_token := PerfProbe.begin("mesher.mesh_chunk")
+	var result: Dictionary = (
+		_native_mesher
+		. mesh_chunk_data_lit(
+			chunk.blocks,
+			chunk.block_meta,
+			chunk.sky_light,
+			chunk.block_light,
+			chunk.max_y,
+			BlockAtlas.uv_table_flat(),
+			chunk.edge_blocks_west,
+			chunk.edge_blocks_east,
+			chunk.edge_blocks_north,
+			chunk.edge_blocks_south,
+			chunk.edge_meta_west,
+			chunk.edge_meta_east,
+			chunk.edge_meta_north,
+			chunk.edge_meta_south,
+		)
+	)
+	if chunk.has_non_cube_blocks:
+		_append_non_cube_geometry(chunk, result)
+	PerfProbe.end("mesher.mesh_chunk", probe_token)
 	return result
 
 
-# Build the ConcavePolygonShape3D from the mesher's collision-face soup
-# and stash it on the result dict. Runs on whatever thread the mesher
-# was called on — safe for WorkerThreadPool tasks because Godot 4's
-# PhysicsServer3D defaults to thread-safe (PhysicsServer3DWrapMT) so
-# shape RID allocation + set_faces queue through the server's mutex.
-#
-# Pre-building here moves the BVH construction (the dominant cost in
-# chunk_node._apply_mesh_data — p50 ~2 ms, max 6+ ms) off the main
-# thread. The main-thread apply just attaches the already-built shape
-# to the StaticBody3D's CollisionShape3D, which is ~µs.
-#
-# Skips on empty soup (no opaque cells in the chunk → no collision).
-static func _attach_collision_shape(result: Dictionary) -> void:
-	if not result.has("collision_faces"):
+# GDScript pass for non-cube blocks only (CROSS, TORCH, EXTERNAL).
+# Appends their geometry into the native mesher's result dict so the
+# native path handles 99% of the chunk while GDScript covers the few
+# special-shape blocks.
+static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var collision_faces := PackedVector3Array()
+	var plant_faces := PackedVector3Array()
+	var top: int = mini(chunk.max_y + 1, Chunk.SIZE_Y - 1)
+	for y in range(top + 1):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var id := chunk.get_block(x, y, z)
+				if id == Blocks.AIR:
+					continue
+				var ms: int = Blocks.mesh_shape(id)
+				if ms == Blocks.MESH_SHAPE_CROSS:
+					_emit_cross_quads(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_TORCH:
+					_emit_torch_quads(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_EXTERNAL:
+					_emit_external_collision(x, y, z, collision_faces)
+				elif ms == Blocks.MESH_SHAPE_FENCE:
+					_emit_fence_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_STAIRS:
+					_emit_stair_geometry(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_DOOR:
+					_emit_door_geometry(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+					)
+	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
-	var faces: PackedVector3Array = result["collision_faces"]
-	if faces.is_empty():
-		return
-	var shape := ConcavePolygonShape3D.new()
-	shape.set_faces(faces)
-	result["collision_shape"] = shape
+	# Packed*Array types use CoW — `result["key"].append_array()` would
+	# mutate a temporary copy, leaving the dict unchanged. Extract, append,
+	# reassign instead.
+	var rv: PackedVector3Array = result["vertices"]
+	var base_vert: int = rv.size()
+	if base_vert > 0 and not verts.is_empty():
+		var shifted := PackedInt32Array()
+		shifted.resize(indices.size())
+		for i in range(indices.size()):
+			shifted[i] = indices[i] + base_vert
+		indices = shifted
+	rv.append_array(verts)
+	result["vertices"] = rv
+	var rn: PackedVector3Array = result["normals"]
+	rn.append_array(norms)
+	result["normals"] = rn
+	var ru: PackedVector2Array = result["uvs"]
+	ru.append_array(uvs)
+	result["uvs"] = ru
+	var rc: PackedColorArray = result["colors"]
+	rc.append_array(colors)
+	result["colors"] = rc
+	var ri: PackedInt32Array = result["indices"]
+	ri.append_array(indices)
+	result["indices"] = ri
+	if not collision_faces.is_empty():
+		var cf: PackedVector3Array = result.get("collision_faces", PackedVector3Array())
+		cf.append_array(collision_faces)
+		result["collision_faces"] = cf
+	if not plant_faces.is_empty():
+		var pf: PackedVector3Array = result.get("plant_faces", PackedVector3Array())
+		pf.append_array(plant_faces)
+		result["plant_faces"] = pf
 
 
 static func mesh_chunk(chunk: Chunk) -> Dictionary:
@@ -211,6 +267,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 	var water_verts := PackedVector3Array()
 	var water_norms := PackedVector3Array()
 	var water_uvs := PackedVector2Array()
+	var water_colors := PackedColorArray()
 	var water_indices := PackedInt32Array()
 	# Lava gets its own arrays → separate opaque mesh with the emissive
 	# lava shader. Same tapered-surface algorithm as water (vanilla
@@ -219,6 +276,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 	var lava_verts := PackedVector3Array()
 	var lava_norms := PackedVector3Array()
 	var lava_uvs := PackedVector2Array()
+	var lava_colors := PackedColorArray()
 	var lava_indices := PackedInt32Array()
 
 	# Skip empty layers above the highest filled block — saves ~60% of
@@ -232,12 +290,30 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 					continue
 				if Blocks.is_water(id):
 					_emit_fluid_faces(
-						chunk, x, y, z, id, water_verts, water_norms, water_uvs, water_indices
+						chunk,
+						x,
+						y,
+						z,
+						id,
+						water_verts,
+						water_norms,
+						water_uvs,
+						water_colors,
+						water_indices
 					)
 					continue
 				if Blocks.is_lava(id):
 					_emit_fluid_faces(
-						chunk, x, y, z, id, lava_verts, lava_norms, lava_uvs, lava_indices
+						chunk,
+						x,
+						y,
+						z,
+						id,
+						lava_verts,
+						lava_norms,
+						lava_uvs,
+						lava_colors,
+						lava_indices
 					)
 					continue
 				# Shape dispatch — cube hot path stays inline; non-cube
@@ -252,6 +328,25 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 				elif ms == Blocks.MESH_SHAPE_TORCH:
 					_emit_torch_quads(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_EXTERNAL:
+					# Externally-rendered block (e.g. CHEST → ChestNode entity).
+					# Emit full-cube collision so the player can't walk through
+					# the cell, but skip every visual face — the entity owns
+					# the visible geometry. Same fallthrough applies if anyone
+					# else opts in to MESH_SHAPE_EXTERNAL later.
+					_emit_external_collision(x, y, z, collision_faces)
+				elif ms == Blocks.MESH_SHAPE_FENCE:
+					_emit_fence_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_STAIRS:
+					_emit_stair_geometry(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_DOOR:
+					_emit_door_geometry(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
 					)
 				else:
 					_emit_block_faces(
@@ -270,10 +365,12 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 		"water_vertices": water_verts,
 		"water_normals": water_norms,
 		"water_uvs": water_uvs,
+		"water_colors": water_colors,
 		"water_indices": water_indices,
 		"lava_vertices": lava_verts,
 		"lava_normals": lava_norms,
 		"lava_uvs": lava_uvs,
+		"lava_colors": lava_colors,
 		"lava_indices": lava_indices,
 	}
 
@@ -361,6 +458,327 @@ static func _emit_block_faces(
 		collision_faces.append(v2)
 
 
+# Full-cube collision soup for an externally-rendered cell (CHEST etc.).
+# Six faces × two triangles → 36 vertices added to `collision_faces`.
+# Caller skips the visual emit, leaving the visible geometry to the
+# entity. Triangle winding mirrors the cube path's
+# `[base, base+2, base+1, base, base+3, base+2]` so the trimesh shape
+# has matching outward-facing normals.
+static func _emit_external_collision(
+	x: int, y: int, z: int, collision_faces: PackedVector3Array
+) -> void:
+	var origin := Vector3(x, y, z)
+	for face_idx in range(6):
+		var face_verts: Array = _FACE_VERTS[face_idx]
+		var v0: Vector3 = origin + (face_verts[0] as Vector3)
+		var v1: Vector3 = origin + (face_verts[1] as Vector3)
+		var v2: Vector3 = origin + (face_verts[2] as Vector3)
+		var v3: Vector3 = origin + (face_verts[3] as Vector3)
+		collision_faces.append(v0)
+		collision_faces.append(v2)
+		collision_faces.append(v1)
+		collision_faces.append(v0)
+		collision_faces.append(v3)
+		collision_faces.append(v2)
+
+
+# Vanilla BlockFence geometry (gd.java + bk.java:1190-1239). Always emits a
+# 6/16-wide post; for each of the 4 horizontal neighbors that ALSO holds a
+# fence (Alpha-faithful — vanilla checks `cy.a(...) == nq.bh`, same-id only,
+# bk.java:1199-1208), emits two rail boxes (top y=12-15/16, bottom y=6-9/16)
+# extending from the post out to the cell edge in that direction.
+#
+# Hitbox is 1.5 cells tall to match gd.java:13's
+# `(x, y, z) → (x+1, y+1.5, z+1)` collision bbox — the player can't trivially
+# hop a single fence. Collision soup spans the full hitbox; visible mesh
+# stays at the 16/16 post height (vanilla's 1.5 hitbox is purely physical).
+# gdlint: disable=function-arguments-number
+static func _emit_fence_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array
+) -> void:
+	# Connection probes — same convention as bk.java:1205-1208 but with our
+	# Vector3i offsets. Alpha gates on same-id neighbors only; we mirror that
+	# strictly. Solid-block connection is a Beta+ change we deliberately omit.
+	var conn_west: bool = chunk.get_block(x - 1, y, z) == Blocks.FENCE
+	var conn_east: bool = chunk.get_block(x + 1, y, z) == Blocks.FENCE
+	var conn_north: bool = chunk.get_block(x, y, z - 1) == Blocks.FENCE
+	var conn_south: bool = chunk.get_block(x, y, z + 1) == Blocks.FENCE
+	# Sample sky/block light at the fence's own cell — fence faces don't
+	# have an obvious "open neighbor" the way cube faces do, and the cell
+	# above is generally air. Self-light is what RenderBlocks.k() does
+	# (bk.java:1010 reads `nq2.b(this.a, n2, n3, n4)` — own cell brightness).
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	# Post — 6/16 × 16/16 × 6/16, always rendered. Texture wraps onto every
+	# face from the planks tile (Blocks.get_face_texture(FENCE, ...) → "planks").
+	var rect: Rect2 = BlockAtlas.uv_rect("planks")
+	_emit_box(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(float(x) + 0.375, float(y), float(z) + 0.375),
+		Vector3(float(x) + 0.625, float(y) + 1.0, float(z) + 0.625),
+		rect,
+		face_light
+	)
+	# Top rail (y 12/16-15/16) and bottom rail (y 6/16-9/16). Each rail
+	# emits a separate box on the X axis if the cell connects E or W, and
+	# on the Z axis if it connects N or S. Vanilla bk.java:1216-1219:
+	#   f7 = bl6 ? 0.0 : f3   (-X end snaps to 0 if -X neighbor is fence)
+	#   f8 = bl7 ? 1.0 : f4   (+X end snaps to 1 if +X neighbor is fence)
+	# The "isolated post-only" case falls out: when no neighbor is a fence,
+	# both ends collapse to [0.4375, 0.5625] which sits inside the post —
+	# the box is degenerate and visually invisible, so we skip emission.
+	for rail_y in [Vector2(0.75, 0.9375), Vector2(0.375, 0.5625)]:
+		var y0: float = rail_y.x
+		var y1: float = rail_y.y
+		# X rail
+		if conn_west or conn_east:
+			var rx0: float = 0.0 if conn_west else 0.4375
+			var rx1: float = 1.0 if conn_east else 0.5625
+			_emit_box(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				Vector3(float(x) + rx0, float(y) + y0, float(z) + 0.4375),
+				Vector3(float(x) + rx1, float(y) + y1, float(z) + 0.5625),
+				rect,
+				face_light
+			)
+		# Z rail
+		if conn_north or conn_south:
+			var rz0: float = 0.0 if conn_north else 0.4375
+			var rz1: float = 1.0 if conn_south else 0.5625
+			_emit_box(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				Vector3(float(x) + 0.4375, float(y) + y0, float(z) + rz0),
+				Vector3(float(x) + 0.5625, float(y) + y1, float(z) + rz1),
+				rect,
+				face_light
+			)
+	# Collision: 1×1.5×1 box matching gd.java:13. Player physics already
+	# gates on the trimesh, so emitting these 6 faces gives the fence its
+	# vanilla "can't hop" hitbox without any cube-mesh collision faces.
+	var c0 := Vector3(float(x), float(y), float(z))
+	var c1 := Vector3(float(x) + 1.0, float(y) + 1.5, float(z) + 1.0)
+	_emit_collision_box(collision_faces, c0, c1)
+
+
+# Vanilla stair geometry — two axis-aligned boxes per cell, orientation
+# driven by block_meta 0..3. Each orientation has a bottom half-slab and
+# a full-height upper step. Box dims from mb.java:43-66. Both boxes use
+# the parent block's texture on every face (planks for WOOD_STAIRS,
+# cobblestone for COBBLESTONE_STAIRS).
+# gdlint: disable=function-arguments-number
+static func _emit_stair_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	block_id: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z) & 3
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	# Two-box layout per meta — directly from mb.java:43-66.
+	var box_a_min: Vector3
+	var box_a_max: Vector3
+	var box_b_min: Vector3
+	var box_b_max: Vector3
+	match meta:
+		0:
+			box_a_min = Vector3(fx, fy, fz)
+			box_a_max = Vector3(fx + 0.5, fy + 0.5, fz + 1.0)
+			box_b_min = Vector3(fx + 0.5, fy, fz)
+			box_b_max = Vector3(fx + 1.0, fy + 1.0, fz + 1.0)
+		1:
+			box_a_min = Vector3(fx, fy, fz)
+			box_a_max = Vector3(fx + 0.5, fy + 1.0, fz + 1.0)
+			box_b_min = Vector3(fx + 0.5, fy, fz)
+			box_b_max = Vector3(fx + 1.0, fy + 0.5, fz + 1.0)
+		2:
+			box_a_min = Vector3(fx, fy, fz)
+			box_a_max = Vector3(fx + 1.0, fy + 0.5, fz + 0.5)
+			box_b_min = Vector3(fx, fy, fz + 0.5)
+			box_b_max = Vector3(fx + 1.0, fy + 1.0, fz + 1.0)
+		_:
+			box_a_min = Vector3(fx, fy, fz)
+			box_a_max = Vector3(fx + 1.0, fy + 1.0, fz + 0.5)
+			box_b_min = Vector3(fx, fy, fz + 0.5)
+			box_b_max = Vector3(fx + 1.0, fy + 0.5, fz + 1.0)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var tex_name: String = Blocks.get_face_texture(block_id, "side")
+	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+	_emit_box(verts, norms, uvs, colors, indices, box_a_min, box_a_max, rect, face_light)
+	_emit_box(verts, norms, uvs, colors, indices, box_b_min, box_b_max, rect, face_light)
+	# Two-box collision matching the visual step shape so the player can
+	# walk up stairs without jumping (0.5-block step height).
+	_emit_collision_box(collision_faces, box_a_min, box_a_max)
+	_emit_collision_box(collision_faces, box_b_min, box_b_max)
+
+
+# Door geometry — thin 3/16-block slab with 4 orientations × open/closed.
+# Metadata layout (gv.java): bits 0-1 = raw direction, bit 2 = open flag,
+# bit 3 = upper/lower half. Visual facing is derived via _door_facing
+# (same as Blocks._door_facing). Each cell renders ONE half of the door
+# (upper or lower); the block above/below holds the other half.
+# gdlint: disable=function-arguments-number
+static func _emit_door_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	block_id: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	var f: float = 0.1875  # 3/16 door thickness
+	var facing: int = Blocks._door_facing(meta)
+	var mn: Vector3
+	var mx: Vector3
+	match facing:
+		0:
+			mn = Vector3(fx, fy, fz)
+			mx = Vector3(fx + 1.0, fy + 1.0, fz + f)
+		1:
+			mn = Vector3(fx + 1.0 - f, fy, fz)
+			mx = Vector3(fx + 1.0, fy + 1.0, fz + 1.0)
+		2:
+			mn = Vector3(fx, fy, fz + 1.0 - f)
+			mx = Vector3(fx + 1.0, fy + 1.0, fz + 1.0)
+		_:
+			mn = Vector3(fx, fy, fz)
+			mx = Vector3(fx + f, fy + 1.0, fz + 1.0)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var tex_name: String = Blocks.door_texture(block_id, meta)
+	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_light)
+	_emit_collision_box(collision_faces, mn, mx)
+
+
+# Axis-aligned box helper. Emits 6 faces with planks texture (UV-tiled
+# from the atlas rect) and per-face lighting. Used by fence post + rails.
+# Triangle winding mirrors the cube path (`[base, base+2, base+1, base,
+# base+3, base+2]`) so cull_back keeps outward sides. UVs are V-flipped
+# the same way as the cube path so the planks pattern reads upright.
+# gdlint: disable=function-arguments-number
+static func _emit_box(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	mn: Vector3,
+	mx: Vector3,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	# 8 corners. Indexed bit-wise: bit0=x (mn/mx), bit1=y, bit2=z.
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	# Face-vert order matches mesher's `_FACE_VERTS` so the winding +
+	# UV mapping below stays consistent with cube faces.
+	var faces: Array = [
+		[c010, c011, c111, c110, Vector3.UP],
+		[c001, c000, c100, c101, Vector3.DOWN],
+		[c100, c110, c111, c101, Vector3.RIGHT],
+		[c001, c011, c010, c000, Vector3.LEFT],
+		[c101, c111, c011, c001, Vector3.BACK],
+		[c000, c010, c110, c100, Vector3.FORWARD],
+	]
+	for face in faces:
+		var base: int = verts.size()
+		var fv: Vector3 = face[4]
+		for i in range(4):
+			verts.append(face[i])
+			norms.append(fv)
+		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+		uvs.append(Vector2(rect.position.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+
+
+# Six-face collision soup for a generic AABB. Used by FENCE for its
+# vanilla-faithful 1×1.5×1 hitbox. Triangle winding matches the cube
+# path so the trimesh shape's outward normals stay consistent.
+static func _emit_collision_box(
+	collision_faces: PackedVector3Array, mn: Vector3, mx: Vector3
+) -> void:
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	var faces: Array = [
+		[c010, c011, c111, c110],
+		[c001, c000, c100, c101],
+		[c100, c110, c111, c101],
+		[c001, c011, c010, c000],
+		[c101, c111, c011, c001],
+		[c000, c010, c110, c100],
+	]
+	for face in faces:
+		collision_faces.append(face[0])
+		collision_faces.append(face[2])
+		collision_faces.append(face[1])
+		collision_faces.append(face[0])
+		collision_faces.append(face[3])
+		collision_faces.append(face[2])
+
+
 # Emit water faces into the dedicated water vertex stream. Face rules:
 #   • Only emit against AIR neighbors. Opaque solids already draw their own
 #     face toward water (since Blocks.is_opaque(water) == false), so two
@@ -376,6 +794,7 @@ static func _emit_block_faces(
 # UVs match the block's world-space XZ (for top/bottom) or YZ/XY (for
 # sides) so the animated shader sees a continuous ripple pattern across
 # chunk boundaries without seams.
+# gdlint: disable=function-arguments-number
 static func _emit_fluid_faces(
 	chunk: Chunk,
 	x: int,
@@ -385,6 +804,7 @@ static func _emit_fluid_faces(
 	verts: PackedVector3Array,
 	norms: PackedVector3Array,
 	uvs: PackedVector2Array,
+	colors: PackedColorArray,
 	indices: PackedInt32Array
 ) -> void:
 	# Per-corner top heights (Flow #4). Each of the 4 top-face corners is
@@ -403,6 +823,15 @@ static func _emit_fluid_faces(
 		_fluid_corner_height(chunk, x, y, z + 1, is_lava_fluid),  # SW
 		_fluid_corner_height(chunk, x + 1, y, z + 1, is_lava_fluid),  # SE
 	]
+	# Horizontal flow vector — ports vanilla ld.java:e() (BlockFluids
+	# .getFlowVector). Drives the water shader's directional UV scroll so
+	# the surface visibly streams toward lower-pressure neighbors. Returns
+	# (0,0) for static sources or fully-symmetric cells. Encoded into
+	# Color.b/.a as (x*0.5+0.5, z*0.5+0.5) so the [-1,1] range survives
+	# Color clamping to [0,1].
+	var flow: Vector2 = _fluid_flow_vector(chunk, x, y, z, is_lava_fluid)
+	var flow_b: float = flow.x * 0.5 + 0.5
+	var flow_a: float = flow.y * 0.5 + 0.5
 	for face_idx in range(6):
 		var no: Vector3i = _FACE_NEIGHBOR[face_idx]
 		var neighbor_id := chunk.get_block(x + no.x, y + no.y, z + no.z)
@@ -419,6 +848,16 @@ static func _emit_fluid_faces(
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
+		# Per-vertex face light — sample sky/block light at the OPEN cell
+		# adjacent to this face (same rule as cube faces). Without this, water
+		# reads at constant brightness regardless of caves / night, which made
+		# water surfaces look unlit in dark environments.
+		var sky_n: float = float(chunk.get_sky_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
+		var blk_n: float = float(chunk.get_block_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
+		# R=sky/15, G=block/15 (per-face light), B=flow.x encoded, A=flow.z
+		# encoded. Same flow value for all 6 faces of this cell — the cell's
+		# "spreading direction" is a property of the cell, not the face.
+		var face_light := Color(sky_n, blk_n, flow_b, flow_a)
 		var base := verts.size()
 		for v: Vector3 in face_verts:
 			# Top-corner vertex (y == 1): look up the per-corner height
@@ -456,6 +895,10 @@ static func _emit_fluid_faces(
 		uvs.append(Vector2(u0, v0))
 		uvs.append(Vector2(u1, v0))
 		uvs.append(Vector2(u1, v1))
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
 		indices.append_array(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)
@@ -509,6 +952,81 @@ static func _fluid_corner_height(chunk: Chunk, cx: int, y: int, cz: int, lava: b
 		# fluid cells, but be defensive). Flat floor — caller will clip.
 		return 0.0
 	return total_top / float(total_weight)
+
+
+# Per-cell horizontal flow vector. Mirrors vanilla ld.java:91-155
+# (BlockFluids.getFlowVector / `e()`). Used by water.gdshader to scroll
+# the surface UV along the direction the fluid is spreading toward.
+#
+# Algorithm: sum the (neighbor_offset * level_diff) contribution from
+# each of the 4 horizontal neighbors. A drop-ledge case (non-fluid,
+# non-solid neighbor with fluid one cell below) contributes as if the
+# below-neighbor's level were lifted by 8, pulling the surface toward
+# the cliff edge. Output is normalized to unit length; (0,0) for static
+# sources or fully-symmetric cells.
+#
+# We deliberately omit the falling-water (level >= 8) downward Y bias
+# from vanilla — only horizontal X/Z components are used for UV scroll,
+# so the Y term wouldn't affect rendering. Keep this aligned with the
+# C++ port (src/mesher_native.cpp::fluid_flow_vector) — parity is
+# enforced by tests/test_mesher_native.gd.
+static func _fluid_flow_vector(chunk: Chunk, x: int, y: int, z: int, lava: bool) -> Vector2:
+	var my_level: int = _fluid_effective_level(chunk, x, y, z, lava)
+	if my_level < 0:
+		return Vector2.ZERO
+	var fx: float = 0.0
+	var fz: float = 0.0
+	for dir_i in range(4):
+		var dx: int = 0
+		var dz: int = 0
+		match dir_i:
+			0:
+				dx = -1
+			1:
+				dz = -1
+			2:
+				dx = 1
+			3:
+				dz = 1
+		var nx: int = x + dx
+		var nz: int = z + dz
+		var n_level: int = _fluid_effective_level(chunk, nx, y, nz, lava)
+		if n_level < 0:
+			# Neighbor is not the same fluid. Solid block → no contribution
+			# (water can't flow into stone). Otherwise check below the
+			# neighbor — water spreading off a ledge tilts toward the drop
+			# even though the side cell is air.
+			var n_id: int = chunk.get_block(nx, y, nz)
+			if Blocks.is_opaque(n_id):
+				continue
+			n_level = _fluid_effective_level(chunk, nx, y - 1, nz, lava)
+			if n_level < 0:
+				continue
+			# Below counts as if 8 levels lower: diff = below_lvl - (my-8).
+			# Larger diff for shallower ledges → stronger pull.
+			var diff_drop: int = n_level - (my_level - 8)
+			fx += float(dx) * float(diff_drop)
+			fz += float(dz) * float(diff_drop)
+			continue
+		var diff: int = n_level - my_level
+		fx += float(dx) * float(diff)
+		fz += float(dz) * float(diff)
+	var v := Vector2(fx, fz)
+	if v == Vector2.ZERO:
+		return v
+	return v.normalized()
+
+
+# Effective fluid level for flow math: -1 if cell isn't this fluid family,
+# 0 if falling (meta >= 8, treated as a source for spreading purposes),
+# else the raw meta (1-7). Mirrors ld.java:c().
+static func _fluid_effective_level(chunk: Chunk, x: int, y: int, z: int, lava: bool) -> int:
+	var id: int = chunk.get_block(x, y, z)
+	var same: bool = Blocks.is_lava(id) if lava else Blocks.is_water(id)
+	if not same:
+		return -1
+	var lvl: int = chunk.get_block_meta(x, y, z)
+	return 0 if lvl >= 8 else lvl
 
 
 # Two perpendicular billboards (sapling, future tall-grass / flowers).
@@ -597,9 +1115,13 @@ static func _emit_cross_quads(
 #   meta 3 (-Z support): base at z = cell.z - 0.1, y + 0.2; tilt -0.4 Z
 #   meta 4 (+Z support): base at z = cell.z + 0.1, y + 0.2; tilt +0.4 Z
 #   meta 5 / 0 (floor):  no offset, no tilt — straight pillar in cell.
-# Side quads use cull_back (chunk shader default) — only the 2 quads
-# facing the camera render, so a torch reads as a 2-sided pillar with
-# proper depth from any angle. No back-face emission needed.
+# All 4 side quads emit BOTH windings (front + back) so every wall is
+# visible regardless of camera angle. Vanilla BlockTorch renders without
+# back-face culling for this exact reason — without the back winding,
+# cull_back hides the 2 walls facing away from the camera and the torch
+# reads as a 2-sided "corner" instead of a 3D pillar. Texture mirrors on
+# the back face, but the torch sprite is bilaterally symmetric so it
+# looks identical.
 static func _emit_torch_quads(
 	chunk: Chunk,
 	x: int,
@@ -618,14 +1140,226 @@ static func _emit_torch_quads(
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
 	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
-	# ---- bk.b dispatch: meta → (base position, tilt). Vanilla's 0.4 / 0.1
-	# / 0.2 constants correspond to: tilt magnitude / wall inset / y bump.
 	var meta: int = chunk.get_block_meta(x, y, z)
+	# Vanilla MC (both Alpha 1.2.6 bk.java:142-185 and Beta Bukkit/mc-dev
+	# RenderBlocks.renderBlockTorch) renders ALL torches as a closed
+	# 8-vert tight box — fully opaque, no alpha-test, no transparent
+	# texels in the geometry. Floor torches: upright box centered in the
+	# cell. Wall torches: same box transformed via the rotation pipeline.
+	# This is the only vanilla-faithful approach; the alpha-test wall
+	# variant we tried before doesn't exist in MC.
+	_emit_torch_box(
+		verts, norms, uvs, colors, indices, plant_faces, x, y, z, meta, rect, face_light
+	)
+
+
+# Floor-torch geometry — 4 axis-aligned full-cell wall quads with the
+# whole torch tile UV (alpha-tested to the central silhouette) plus one
+# horizontal flame quad at vanilla's d16 = 10/16 position. Each wall
+# emits BOTH front + back winding so cull_back doesn't hide the side
+# facing away from the camera (vanilla bk.a renders torches without
+# back-face culling). The visible result: torch silhouette on every
+# wall, central pillars overlap to read as a 3D torch pillar — matches
+# the look of vanilla Alpha.
+# gdlint: disable=function-arguments-number
+static func _emit_floor_torch_walls(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+	x: int,
+	y: int,
+	z: int,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	var d15: float = 0.0625  # 1/16 — half torch-pillar width
+	var d16: float = 0.625  # 10/16 — flame-quad height (vanilla bk.a)
 	var bx: float = float(x)
 	var by: float = float(y)
 	var bz: float = float(z)
-	var ax: float = 0.0  # tilt in X (bottom shifts by ax)
-	var az: float = 0.0  # tilt in Z
+	var cx: float = bx + 0.5
+	var cz: float = bz + 0.5
+	var u0: float = rect.position.x
+	var u1: float = rect.position.x + rect.size.x
+	var v0: float = rect.position.y
+	var v1: float = rect.position.y + rect.size.y
+	# 4 wall quads — each spans the full cell vertically and horizontally
+	# but the texture's transparent surround alpha-tests away everything
+	# except the central torch pillar.
+	# -X wall (x = cx - d15).
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(cx - d15, by + 1.0, bz),
+		Vector3(cx - d15, by + 0.0, bz),
+		Vector3(cx - d15, by + 0.0, bz + 1.0),
+		Vector3(cx - d15, by + 1.0, bz + 1.0),
+		Vector3(-1, 0, 0),
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	# +X wall (x = cx + d15).
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(cx + d15, by + 1.0, bz + 1.0),
+		Vector3(cx + d15, by + 0.0, bz + 1.0),
+		Vector3(cx + d15, by + 0.0, bz),
+		Vector3(cx + d15, by + 1.0, bz),
+		Vector3(1, 0, 0),
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	# +Z wall (z = cz + d15).
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(bx, by + 1.0, cz + d15),
+		Vector3(bx, by + 0.0, cz + d15),
+		Vector3(bx + 1.0, by + 0.0, cz + d15),
+		Vector3(bx + 1.0, by + 1.0, cz + d15),
+		Vector3(0, 0, 1),
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	# -Z wall (z = cz - d15).
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(bx + 1.0, by + 1.0, cz - d15),
+		Vector3(bx + 1.0, by + 0.0, cz - d15),
+		Vector3(bx, by + 0.0, cz - d15),
+		Vector3(bx, by + 1.0, cz - d15),
+		Vector3(0, 0, -1),
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	# Top-cap quad at y = by + 14/16 — sits at the very top of the
+	# visible flame silhouette (texture row 2 = top of opaque flame).
+	# Closes the transparent gap that the alpha-tested wall quads leave
+	# between cell-y 14/16 and cell-y 1.0. Samples the flame center
+	# (cols 7-9 / rows 6-8) so the cap reads as flame-colored. Vanilla's
+	# bk.a put a flame quad at d16=10/16 inside its tilted box; for our
+	# upright wall-quad torch the right cap height is the silhouette top.
+	var fy: float = by + 14.0 / 16.0
+	var ffu0: float = u0 + (u1 - u0) * (7.0 / 16.0)
+	var ffu1: float = u0 + (u1 - u0) * (9.0 / 16.0)
+	var ffv0: float = v0 + (v1 - v0) * (6.0 / 16.0)
+	var ffv1: float = v0 + (v1 - v0) * (8.0 / 16.0)
+	var fbase: int = verts.size()
+	verts.append(Vector3(cx - d15, fy, cz - d15))
+	verts.append(Vector3(cx - d15, fy, cz + d15))
+	verts.append(Vector3(cx + d15, fy, cz + d15))
+	verts.append(Vector3(cx + d15, fy, cz - d15))
+	for _i in range(4):
+		norms.append(Vector3(0, 1, 0))
+		colors.append(face_light)
+	uvs.append(Vector2(ffu0, ffv0))
+	uvs.append(Vector2(ffu0, ffv1))
+	uvs.append(Vector2(ffu1, ffv1))
+	uvs.append(Vector2(ffu1, ffv0))
+	indices.append_array(
+		[fbase, fbase + 1, fbase + 2, fbase, fbase + 2, fbase + 3] as PackedInt32Array
+	)
+	# Selection collision — emit the torch's full AABB (Blocks.selection_aabb
+	# floor variant: 0.4..0.6 in X/Z, 0..0.6 in Y) so the cursor can hit
+	# the torch from any nearby angle. Without this, only the tiny cap
+	# quad is targetable and the player has to perfectly aim to mine.
+	_append_torch_aabb_collision(
+		plant_faces, Vector3(bx + 0.4, by, bz + 0.4), Vector3(bx + 0.6, by + 0.6, bz + 0.6)
+	)
+
+
+# Emits 12 triangles covering an axis-aligned AABB into a face soup.
+# Used for torch selection collision so the cursor raycast can reach
+# the torch from any angle. Winding doesn't matter for the physics
+# shape — raycast hits both sides of every triangle.
+static func _append_torch_aabb_collision(
+	plant_faces: PackedVector3Array, mn: Vector3, mx: Vector3
+) -> void:
+	var v000 := Vector3(mn.x, mn.y, mn.z)
+	var v100 := Vector3(mx.x, mn.y, mn.z)
+	var v010 := Vector3(mn.x, mx.y, mn.z)
+	var v110 := Vector3(mx.x, mx.y, mn.z)
+	var v001 := Vector3(mn.x, mn.y, mx.z)
+	var v101 := Vector3(mx.x, mn.y, mx.z)
+	var v011 := Vector3(mn.x, mx.y, mx.z)
+	var v111 := Vector3(mx.x, mx.y, mx.z)
+	var faces: Array = [
+		[v010, v110, v111, v011],  # +Y
+		[v000, v001, v101, v100],  # -Y
+		[v100, v101, v111, v110],  # +X
+		[v000, v010, v011, v001],  # -X
+		[v001, v011, v111, v101],  # +Z
+		[v000, v100, v110, v010],  # -Z
+	]
+	for face: Array in faces:
+		plant_faces.append(face[0])
+		plant_faces.append(face[1])
+		plant_faces.append(face[2])
+		plant_faces.append(face[0])
+		plant_faces.append(face[2])
+		plant_faces.append(face[3])
+
+
+# Wall-torch geometry — same 4-wall + flame quad shape as the floor
+# variant, but the bottom of each wall is shifted by (ax, az) so the
+# whole torch leans into the supporting wall. ax/az and the +0.2 Y bump
+# come from vanilla's bk.b dispatch (with our wall-leaning approximation
+# of vanilla's full rotation math). The leaning bottom pulls the torch
+# pillar away from the support face's center toward the cell-center
+# wall, matching the look of an Alpha wall torch.
+# gdlint: disable=function-arguments-number
+static func _emit_wall_torch_quads(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+	x: int,
+	y: int,
+	z: int,
+	meta: int,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	var d15: float = 0.0625
+	var d16: float = 0.625
+	var bx: float = float(x)
+	var by: float = float(y)
+	var bz: float = float(z)
+	# Wall-mount offset + tilt magnitude (matches the prior implementation
+	# that the user confirmed reads like vanilla Alpha).
+	var ax: float = 0.0
+	var az: float = 0.0
 	match meta:
 		1:
 			bx -= 0.1
@@ -643,35 +1377,23 @@ static func _emit_torch_quads(
 			bz += 0.1
 			by += 0.2
 			az = 0.4
-		# 5 / 0 / anything else — floor torch, no offset and no tilt.
-	# ---- bk.a internals (vanilla lines 685-694):
-	# d15 = 1/16 = half torch-pillar width. d16 = 10/16 = torch height
-	# (used by the flame quad's vertical position).
-	var d15: float = 0.0625
-	var d16: float = 0.625
-	var d11: float = bx  # cell-origin x (vanilla d11 = (d2 += 0.5) - 0.5)
+	var d11: float = bx
 	var d12: float = bx + 1.0
 	var d13: float = bz
 	var d14: float = bz + 1.0
-	var cx: float = bx + 0.5  # cell-center x (vanilla's reassigned d2)
-	var cz: float = bz + 0.5  # cell-center z (vanilla's reassigned d4)
-	# Texture rect — full tile UV. Vanilla uses (f2..f3, f4..f5) which is
-	# the full 16×16 cell with a 0.01-pixel inset; our atlas rect already
-	# carries an equivalent half-texel inset for atlas-bleed safety.
+	var cx: float = bx + 0.5
+	var cz: float = bz + 0.5
 	var u0: float = rect.position.x
 	var u1: float = rect.position.x + rect.size.x
 	var v0: float = rect.position.y
 	var v1: float = rect.position.y + rect.size.y
-	# ---- 4 side quads (vanilla bk.a:699-714). Each is a 1.0×1.0 quad
-	# with alpha-tested torch sprite; bottom shifted by (ax, az) for tilt.
-	# Side -X (vanilla quad 1, 699-702): visible from -X direction.
-	_emit_torch_side_quad(
+	# -X wall.
+	_emit_floor_torch_wall(
 		verts,
 		norms,
 		uvs,
 		colors,
 		indices,
-		plant_faces,
 		Vector3(cx - d15, by + 1.0, d13),
 		Vector3(cx - d15 + ax, by + 0.0, d13 + az),
 		Vector3(cx - d15 + ax, by + 0.0, d14 + az),
@@ -683,14 +1405,13 @@ static func _emit_torch_quads(
 		v1,
 		face_light
 	)
-	# Side +X (vanilla quad 2, 703-706).
-	_emit_torch_side_quad(
+	# +X wall.
+	_emit_floor_torch_wall(
 		verts,
 		norms,
 		uvs,
 		colors,
 		indices,
-		plant_faces,
 		Vector3(cx + d15, by + 1.0, d14),
 		Vector3(cx + d15 + ax, by + 0.0, d14 + az),
 		Vector3(cx + d15 + ax, by + 0.0, d13 + az),
@@ -702,14 +1423,13 @@ static func _emit_torch_quads(
 		v1,
 		face_light
 	)
-	# Side +Z (vanilla quad 3, 707-710).
-	_emit_torch_side_quad(
+	# +Z wall.
+	_emit_floor_torch_wall(
 		verts,
 		norms,
 		uvs,
 		colors,
 		indices,
-		plant_faces,
 		Vector3(d11, by + 1.0, cz + d15),
 		Vector3(d11 + ax, by + 0.0, cz + d15 + az),
 		Vector3(d12 + ax, by + 0.0, cz + d15 + az),
@@ -721,14 +1441,13 @@ static func _emit_torch_quads(
 		v1,
 		face_light
 	)
-	# Side -Z (vanilla quad 4, 711-714).
-	_emit_torch_side_quad(
+	# -Z wall.
+	_emit_floor_torch_wall(
 		verts,
 		norms,
 		uvs,
 		colors,
 		indices,
-		plant_faces,
 		Vector3(d12, by + 1.0, cz - d15),
 		Vector3(d12 + ax, by + 0.0, cz - d15 + az),
 		Vector3(d11 + ax, by + 0.0, cz - d15 + az),
@@ -740,25 +1459,24 @@ static func _emit_torch_quads(
 		v1,
 		face_light
 	)
-	# ---- Flame quad (vanilla bk.a:695-698): horizontal 2/16 × 2/16 quad
-	# at torch tip y = by + d16. Position offset toward tilt direction by
-	# ax * (1 - d16) = ax * 0.375. Uses a tighter sub-rect of the texture
-	# (the central 2×2 texels for the flame). For simplicity we use the
-	# same full UV rect; the flame is barely visible from above anyway.
-	var ftx: float = cx + ax * (1.0 - d16)
-	var ftz: float = cz + az * (1.0 - d16)
-	var fy: float = by + d16
+	# Top-cap quad at the visible flame silhouette top (texture row 2 →
+	# cell-y 14/16 of the wall quad). Offset by ax/az * 0.125 toward the
+	# lean direction so the cap stays at the leaning torch tip.
+	var top_h: float = 14.0 / 16.0
+	var ftx: float = cx + ax * (1.0 - top_h)
+	var ftz: float = cz + az * (1.0 - top_h)
+	var fy: float = by + top_h
 	var ffu0: float = u0 + (u1 - u0) * (7.0 / 16.0)
 	var ffu1: float = u0 + (u1 - u0) * (9.0 / 16.0)
 	var ffv0: float = v0 + (v1 - v0) * (6.0 / 16.0)
 	var ffv1: float = v0 + (v1 - v0) * (8.0 / 16.0)
-	var fbase := verts.size()
+	var fbase: int = verts.size()
 	verts.append(Vector3(ftx - d15, fy, ftz - d15))
 	verts.append(Vector3(ftx - d15, fy, ftz + d15))
 	verts.append(Vector3(ftx + d15, fy, ftz + d15))
 	verts.append(Vector3(ftx + d15, fy, ftz - d15))
 	for _i in range(4):
-		norms.append(top_normal)
+		norms.append(Vector3(0, 1, 0))
 		colors.append(face_light)
 	uvs.append(Vector2(ffu0, ffv0))
 	uvs.append(Vector2(ffu0, ffv1))
@@ -767,28 +1485,37 @@ static func _emit_torch_quads(
 	indices.append_array(
 		[fbase, fbase + 1, fbase + 2, fbase, fbase + 2, fbase + 3] as PackedInt32Array
 	)
-	# Selection collision (one winding) — center the cursor box on the flame
-	# quad so the player can target the torch tip.
-	plant_faces.append(verts[fbase])
-	plant_faces.append(verts[fbase + 2])
-	plant_faces.append(verts[fbase + 1])
-	plant_faces.append(verts[fbase])
-	plant_faces.append(verts[fbase + 3])
-	plant_faces.append(verts[fbase + 2])
+	# Selection collision — full meta-aware AABB from Blocks.selection_aabb
+	# (wall variant: 0.3 wide × 0.6 tall × 0.3 deep, anchored at the
+	# support side per meta).
+	var aabb_min: Vector3
+	var aabb_max: Vector3
+	match meta:
+		1:
+			aabb_min = Vector3(float(x), float(y) + 0.2, float(z) + 0.35)
+			aabb_max = Vector3(float(x) + 0.3, float(y) + 0.8, float(z) + 0.65)
+		2:
+			aabb_min = Vector3(float(x) + 0.7, float(y) + 0.2, float(z) + 0.35)
+			aabb_max = Vector3(float(x) + 1.0, float(y) + 0.8, float(z) + 0.65)
+		3:
+			aabb_min = Vector3(float(x) + 0.35, float(y) + 0.2, float(z))
+			aabb_max = Vector3(float(x) + 0.65, float(y) + 0.8, float(z) + 0.3)
+		_:  # 4
+			aabb_min = Vector3(float(x) + 0.35, float(y) + 0.2, float(z) + 0.7)
+			aabb_max = Vector3(float(x) + 0.65, float(y) + 0.8, float(z) + 1.0)
+	_append_torch_aabb_collision(plant_faces, aabb_min, aabb_max)
 
 
-# Helper for one of the 4 axis-aligned torch side quads. Emits front
-# winding only — chunk shader's cull_back keeps the side facing the
-# camera; the opposing side is the back-to-back partner in this same
-# emit set, so any camera angle sees exactly 2 of the 4 quads.
+# Single wall quad emitted both front- and back-facing so cull_back
+# doesn't hide the side away from the camera. UV layout per vanilla:
+# v0=top-back, v1=bot-back, v2=bot-front, v3=top-front (CCW from outside).
 # gdlint: disable=function-arguments-number
-static func _emit_torch_side_quad(
+static func _emit_floor_torch_wall(
 	verts: PackedVector3Array,
 	norms: PackedVector3Array,
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	plant_faces: PackedVector3Array,
 	v0: Vector3,
 	v1: Vector3,
 	v2: Vector3,
@@ -805,26 +1532,331 @@ static func _emit_torch_side_quad(
 	verts.append(v1)
 	verts.append(v2)
 	verts.append(v3)
-	norms.append(normal)
-	norms.append(normal)
-	norms.append(normal)
-	norms.append(normal)
-	# Vanilla's UV pattern: top corners use V_top (image y small = top of
-	# texture = flame end), bottom corners use V_bot (image y large = stick
-	# bottom). U sweeps left → right for the +U side, right → left for
-	# the opposite. Following bk.a:699-702: (u0,v0)→(u0,v1)→(u1,v1)→(u1,v0).
+	for _i in range(4):
+		norms.append(normal)
+		colors.append(face_light)
 	uvs.append(Vector2(u0, v_top))
 	uvs.append(Vector2(u0, v_bot))
 	uvs.append(Vector2(u1, v_bot))
 	uvs.append(Vector2(u1, v_top))
-	colors.append(face_light)
-	colors.append(face_light)
-	colors.append(face_light)
-	colors.append(face_light)
+	# Front + back winding so cull_back keeps both sides visible.
 	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
-	plant_faces.append(v0)
-	plant_faces.append(v2)
-	plant_faces.append(v1)
-	plant_faces.append(v0)
-	plant_faces.append(v3)
-	plant_faces.append(v2)
+	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
+
+
+# Vanilla `ao.a(angle)` — rotation around X axis (sin/cos lookup in fi.java
+# resolves to standard sin/cos). Mirrors:
+#   new_y = y*cos + z*sin
+#   new_z = z*cos - y*sin
+static func _torch_rotate_x(v: Vector3, angle: float) -> Vector3:
+	var c: float = cos(angle)
+	var s: float = sin(angle)
+	return Vector3(v.x, v.y * c + v.z * s, v.z * c - v.y * s)
+
+
+# Vanilla `ao.b(angle)` — rotation around Y axis.
+#   new_x = x*cos + z*sin
+#   new_z = z*cos - x*sin
+static func _torch_rotate_y(v: Vector3, angle: float) -> Vector3:
+	var c: float = cos(angle)
+	var s: float = sin(angle)
+	return Vector3(v.x * c + v.z * s, v.y, v.z * c - v.x * s)
+
+
+# Vanilla-faithful unified torch geometry — closed 8-vert box of size
+# 0.125 × 0.625 × 0.125 per ob.java + bk.java:142-185, with tight UV
+# sub-rects on every face. Handles BOTH floor torches (meta 0 / 5) AND
+# wall torches (meta 1-4) by applying the full vanilla transformation
+# pipeline:
+#   1. Z shift +1/16              (bk.java:158, bl3=false branch)
+#   2. Rotate X by -40°            (bk.java:159)
+#   3. (wall only) Y shift -3/8    (bk.java:170)
+#   4. (wall only) Rotate X +90°   (bk.java:171)
+#   5. (wall only) Rotate Y per-meta — meta 1=-90°, 2=+90°, 3=180°, 4=0°
+#   6. Translate by cell-center + (0.5, 0.125 floor / 0.5 wall, 0.5)
+#
+# Faces follow vanilla's i3=0..5 ordering and per-vert UV mapping
+# (ao2=BL, ao3=TL, ao4=TR, ao5=BR per bk.java:225-228). Normals are
+# computed from the rotated verts so they stay correct after every
+# transform.
+# gdlint: disable=function-arguments-number
+static func _emit_torch_box(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+	x: int,
+	y: int,
+	z: int,
+	meta: int,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	var d15: float = 0.0625  # 1/16
+	var d16: float = 0.625  # 10/16
+	# Local-space box vertices (vanilla bk.java:151-158). ao[0..3] bottom,
+	# ao[4..7] top; ordering (-x,-z), (+x,-z), (+x,+z), (-x,+z).
+	var ao: Array[Vector3] = [
+		Vector3(-d15, 0.0, -d15),
+		Vector3(d15, 0.0, -d15),
+		Vector3(d15, 0.0, d15),
+		Vector3(-d15, 0.0, d15),
+		Vector3(-d15, d16, -d15),
+		Vector3(d15, d16, -d15),
+		Vector3(d15, d16, d15),
+		Vector3(-d15, d16, d15),
+	]
+	var is_wall: bool = meta == 1 or meta == 2 or meta == 3 or meta == 4
+	var ymeta: float = 0.0
+	match meta:
+		1:
+			ymeta = -PI * 0.5
+		2:
+			ymeta = PI * 0.5
+		3:
+			ymeta = PI
+		4:
+			ymeta = 0.0
+	var cx_off: float = float(x) + 0.5
+	var cz_off: float = float(z) + 0.5
+	var cy_off: float = float(y) + (0.5 if is_wall else 0.125)
+	for i in range(8):
+		var v: Vector3 = ao[i]
+		if is_wall:
+			# Vanilla bk.java:158-185 wall-torch pipeline. Steps 1-2 (Z+1/16
+			# + rotate-X -40°) are part of the wall transform — step 4
+			# (rotate-X +90°) rotates the leaning column horizontal so it
+			# can extend into the support wall. For floor torches there's
+			# no step 4 to undo it, so applying steps 1-2 leaves them
+			# leaning forward like a fallen cigarette. Skipping steps 1-2
+			# for floor torches gives an upright box (the visually correct
+			# look players expect from MC torches).
+			v.z += 0.0625
+			v = _torch_rotate_x(v, -0.69813174)
+			v.y -= 0.375
+			v = _torch_rotate_x(v, 1.5707964)
+			v = _torch_rotate_y(v, ymeta)
+		# Final translate to world cell.
+		ao[i] = Vector3(v.x + cx_off, v.y + cy_off, v.z + cz_off)
+	# Debug logger — set MC_CLONE_DEBUG_MESH=1 in .env to print the 8
+	# transformed verts for every torch the mesher emits. Confirms the
+	# GDScript path is running (vs the native mesher silently treating
+	# torches as cubes) and shows the actual geometry coords so we can
+	# tell if the rotation pipeline is producing the right shape.
+	if Game.debug_mesh:
+		print("[torch] (%d,%d,%d) meta=%d wall=%s" % [x, y, z, meta, str(is_wall)])
+	var u0: float = rect.position.x
+	var u1: float = rect.position.x + rect.size.x
+	var v0: float = rect.position.y
+	var v1: float = rect.position.y + rect.size.y
+	# UV setup. The pack's torch.png has the visible torch silhouette at
+	# cols 7-8 / rows 6-15 (rows 0-5 are transparent, no flame texels in
+	# this asset). Mapping rows 0-16 to the face leaves the top 37.5%
+	# transparent and rendering looked like missing faces. Mapping just
+	# rows 6-16 (the visible silhouette) to the full face height makes
+	# every side render as a clean opaque torch sprite — flame at top
+	# (rows 6-7 = yellow), stick body below (rows 8-15 = brown).
+	var su0: float = u0 + (u1 - u0) * (7.0 / 16.0)
+	var su1: float = u0 + (u1 - u0) * (9.0 / 16.0)
+	var t_v_top: float = v0 + (v1 - v0) * (6.0 / 16.0)
+	var t_v_bot: float = v0 + (v1 - v0) * (8.0 / 16.0)
+	var s_v_top: float = v0 + (v1 - v0) * (6.0 / 16.0)  # row 6 = top of flame
+	var s_v_bot: float = v1  # row 16 = bottom of stick
+	# i3=0 (local -Y bottom) and i3=1 (local +Y top) use the flame
+	# center sub-rect (cols 7-9 / rows 6-8). Side faces (i3=2..5) use
+	# cols 7-9 / rows 6-16, mapped with U across face width and V along
+	# face height (vert order: TL=high-Y opp-X, BL=low-Y opp-X, BR=low-Y
+	# X, TR=high-Y X) — standard mapping so the texture renders upright.
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[1],
+		ao[0],
+		ao[3],
+		ao[2],
+		su0,
+		t_v_top,
+		su1,
+		t_v_bot,
+		face_light,
+		true
+	)  # i3=0 — bottom of box, flame UV
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[6],
+		ao[7],
+		ao[4],
+		ao[5],
+		su0,
+		t_v_top,
+		su1,
+		t_v_bot,
+		face_light,
+		true
+	)  # i3=1 — top of box, flame UV
+	# Side faces — vert order = (TL=high Y, BL=low Y, BR=low Y opp X,
+	# TR=high Y opp X) with U across width, V along height.
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[4],
+		ao[0],
+		ao[1],
+		ao[5],
+		su0,
+		s_v_top,
+		su1,
+		s_v_bot,
+		face_light,
+		true
+	)  # i3=2 — local -Z face
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[5],
+		ao[1],
+		ao[2],
+		ao[6],
+		su0,
+		s_v_top,
+		su1,
+		s_v_bot,
+		face_light,
+		true
+	)  # i3=3 — local +X face
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[6],
+		ao[2],
+		ao[3],
+		ao[7],
+		su0,
+		s_v_top,
+		su1,
+		s_v_bot,
+		face_light,
+		true
+	)  # i3=4 — local +Z face
+	_emit_torch_box_face(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		plant_faces,
+		ao[7],
+		ao[3],
+		ao[0],
+		ao[4],
+		su0,
+		s_v_top,
+		su1,
+		s_v_bot,
+		face_light,
+		true
+	)  # i3=5 — local -X face
+	# Selection collision — Blocks.selection_aabb (meta-aware AABB) so the
+	# cursor can target the torch from any nearby angle, not just the tiny
+	# box faces. Without this, mining is frustrating because the player
+	# has to perfectly aim at the box silhouette.
+	var aabb_min: Vector3
+	var aabb_max: Vector3
+	match meta:
+		1:
+			aabb_min = Vector3(float(x), float(y) + 0.2, float(z) + 0.35)
+			aabb_max = Vector3(float(x) + 0.3, float(y) + 0.8, float(z) + 0.65)
+		2:
+			aabb_min = Vector3(float(x) + 0.7, float(y) + 0.2, float(z) + 0.35)
+			aabb_max = Vector3(float(x) + 1.0, float(y) + 0.8, float(z) + 0.65)
+		3:
+			aabb_min = Vector3(float(x) + 0.35, float(y) + 0.2, float(z))
+			aabb_max = Vector3(float(x) + 0.65, float(y) + 0.8, float(z) + 0.3)
+		4:
+			aabb_min = Vector3(float(x) + 0.35, float(y) + 0.2, float(z) + 0.7)
+			aabb_max = Vector3(float(x) + 0.65, float(y) + 0.8, float(z) + 1.0)
+		_:
+			aabb_min = Vector3(float(x) + 0.4, float(y), float(z) + 0.4)
+			aabb_max = Vector3(float(x) + 0.6, float(y) + 0.6, float(z) + 0.6)
+	_append_torch_aabb_collision(plant_faces, aabb_min, aabb_max)
+
+
+# Per-face emit using vanilla's UV mapping (TL,BL,BR,TR per CCW from
+# outside). Normal computed from the rotated verts so it tracks any
+# rotation pipeline applied before the call.
+# gdlint: disable=function-arguments-number
+static func _emit_torch_box_face(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+	v_tl: Vector3,
+	v_bl: Vector3,
+	v_br: Vector3,
+	v_tr: Vector3,
+	u_left: float,
+	v_top: float,
+	u_right: float,
+	v_bot: float,
+	face_light: Color,
+	add_selection: bool
+) -> void:
+	var base: int = verts.size()
+	# Vanilla bk.java draws torches with NO back-face culling, so it ships
+	# verts in CW-from-outside order. Our chunk shader uses cull_back, so
+	# we have to FLIP the winding to make the face's front point outward.
+	# Computing the normal as (v_br - v_tl) × (v_bl - v_tl) gives the
+	# outward-pointing direction (negation of the literal cross product),
+	# matching the flipped triangle indices below.
+	var normal: Vector3 = (v_br - v_tl).cross(v_bl - v_tl)
+	if normal.length_squared() > 1.0e-8:
+		normal = normal.normalized()
+	verts.append(v_tl)
+	verts.append(v_bl)
+	verts.append(v_br)
+	verts.append(v_tr)
+	for _i in range(4):
+		norms.append(normal)
+		colors.append(face_light)
+	uvs.append(Vector2(u_left, v_top))
+	uvs.append(Vector2(u_left, v_bot))
+	uvs.append(Vector2(u_right, v_bot))
+	uvs.append(Vector2(u_right, v_top))
+	# Standard CCW winding. Combined with the new vert order (TL=high-Y
+	# opp-X for sides), the per-triangle CCW direction matches the face's
+	# OUTWARD direction — cull_back keeps the face visible from outside.
+	# Earlier this was reversed because the OLD vert order needed a flip;
+	# the NEW order doesn't.
+	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
+	if add_selection:
+		plant_faces.append(v_tl)
+		plant_faces.append(v_br)
+		plant_faces.append(v_bl)
+		plant_faces.append(v_tl)
+		plant_faces.append(v_tr)
+		plant_faces.append(v_br)

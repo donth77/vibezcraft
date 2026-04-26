@@ -83,6 +83,14 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 	assert_eq(nat.water_vertices, gds.water_vertices, "%s: water vertices byte-equal" % label)
 	assert_eq(nat.water_normals, gds.water_normals, "%s: water normals byte-equal" % label)
 	assert_eq(nat.water_uvs, gds.water_uvs, "%s: water uvs byte-equal" % label)
+	# Water per-vertex COLOR (sky/15 in R, block/15 in G) — emitted only on
+	# the lit path. Byte-equal across native and GDScript so the day/night
+	# driver's sky_factor uniform produces the same brightness.
+	assert_eq(
+		nat.get("water_colors", PackedColorArray()),
+		gds.water_colors,
+		"%s: water colors byte-equal" % label
+	)
 	assert_eq(nat.water_indices, gds.water_indices, "%s: water indices byte-equal" % label)
 	assert_eq(
 		nat.get("lava_vertices", PackedVector3Array()).size(),
@@ -101,6 +109,11 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 	)
 	assert_eq(
 		nat.get("lava_uvs", PackedVector2Array()), gds.lava_uvs, "%s: lava uvs byte-equal" % label
+	)
+	assert_eq(
+		nat.get("lava_colors", PackedColorArray()),
+		gds.lava_colors,
+		"%s: lava colors byte-equal" % label
 	)
 	assert_eq(
 		nat.get("lava_indices", PackedInt32Array()),
@@ -200,6 +213,29 @@ func test_parity_worldgen_chunk_with_water() -> void:
 	var chunk := Worldgen.generate_chunk(-3, 3)
 	var both := _mesh_both(chunk)
 	_assert_parity(both[0], both[1], "worldgen chunk with ocean water")
+
+
+func test_water_flow_vector_points_at_lower_neighbor() -> void:
+	# Source water at (5, 64, 5) with a level-3 flowing neighbor at (6, 64, 5).
+	# Vanilla flow algorithm sums (neighbor_offset * level_diff) over the 4
+	# horizontal neighbors. With only one fluid neighbor, the sum is
+	# (+1, 0) * (3 - 0) = (3, 0). Normalized → (1, 0), packed into Color.b
+	# as (1*0.5+0.5)=1.0, Color.a as (0*0.5+0.5)=0.5. Both native and
+	# GDScript paths must agree — this is the only place that exercises a
+	# *non-zero* flow encoding (worldgen oceans are mostly static sources).
+	var chunk := Chunk.new()
+	chunk.set_block(5, 64, 5, Blocks.WATER_STILL)
+	chunk.set_block(6, 64, 5, Blocks.WATER_FLOWING)
+	chunk.set_block_meta(6, 64, 5, 3)
+	var both := _mesh_both(chunk)
+	_assert_parity(both[0], both[1], "water source with one flowing neighbor")
+	# Encoded flow on the source cell: B=1.0 (flow.x=+1), A=0.5 (flow.z=0).
+	# Pull any vertex from the source cell's contribution. A source's first
+	# face emit is +Y at base index 0 (water_colors[0]).
+	assert_gt(both[1].water_colors.size(), 0, "source cell emits water faces")
+	var c0: Color = both[1].water_colors[0]
+	assert_almost_eq(c0.b, 1.0, 0.001, "flow.x encoded → 1.0 (cell flows +X)")
+	assert_almost_eq(c0.a, 0.5, 0.001, "flow.z encoded → 0.5 (no Z flow)")
 
 
 # --- Collision parity ---

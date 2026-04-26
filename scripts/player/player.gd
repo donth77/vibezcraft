@@ -15,6 +15,9 @@ const WALK_SPEED: float = 4.317
 const SNEAK_SPEED: float = 1.295
 const JUMP_VELOCITY: float = 8.0
 const GRAVITY: float = -32.0
+# Vanilla EntityLiving.P = 0.5f — max ledge height the player steps onto
+# without jumping. Enables walking up stairs (0.5-block steps).
+const STEP_HEIGHT: float = 0.6
 const MOUSE_SENSITIVITY: float = 0.002
 const PITCH_LIMIT_DEG: float = 89.0
 
@@ -177,8 +180,12 @@ const _HELD_BLOCK_SIZE: float = 0.42
 # Third-person held block — parented to the right arm so it swings with the
 # mining animation. Position is at the wrist (arm hangs to y≈-0.75).
 const _TP_HELD_BLOCK_POSITION: Vector3 = Vector3(0, -0.78, -0.18)
-const _TP_HELD_BLOCK_ROTATION: Vector3 = Vector3(0, -0.4363, 0)  # (0°, -25°, 0°)
+const _TP_HELD_BLOCK_ROTATION: Vector3 = Vector3(-0.3491, -0.4363, 0)  # (-20°, -25°, 0°)
 const _TP_HELD_BLOCK_SIZE: float = 0.30
+const _TP_HELD_TORCH_POSITION: Vector3 = Vector3(0, -0.6, -0.22)
+const _TP_HELD_TORCH_ROTATION: Vector3 = Vector3(-0.7854, -0.4363, 0)  # (-45°, -25°, 0°)
+const _TP_HELD_FENCE_POSITION: Vector3 = Vector3(0, -0.6, -0.22)
+const _TP_HELD_FENCE_ROTATION: Vector3 = Vector3(-0.7854, -0.4363, 0)  # (-45°, -25°, 0°)
 
 # Per-tick flow push for swimming in flowing water/lava. Cheap — a single
 # get_world_block + 4 neighbor reads per frame. Only runs when the player's
@@ -331,6 +338,9 @@ func _ready() -> void:
 	var furnace_screen: Control = get_node_or_null("Crosshair/FurnaceScreen")
 	if furnace_screen != null:
 		furnace_screen.bind(inventory)
+	var chest_screen: Control = get_node_or_null("Crosshair/ChestScreen")
+	if chest_screen != null:
+		chest_screen.bind(inventory)
 	# Build the player character model (hidden in first person)
 	var model_script: GDScript = load("res://scripts/player/character_model.gd")
 	_character_model = model_script.new()
@@ -432,7 +442,20 @@ func _update_held_item() -> void:
 		# position via RenderItem.renderItemIn2D, not as a textured cube.
 		# Without this, the sapling icon tiles onto all six faces of the
 		# held cube, which reads as obviously wrong.
-		var as_sprite: bool = id >= Items.STICK or Blocks.needs_gdscript_mesher(id)
+		# Sprite path: items (id ≥ 100), cross-quads (sapling, fire), and
+		# torch — vanilla MC renders all of these as a flat 2D billboard in
+		# the held position via RenderItem.renderItemIn2D. CHEST is also
+		# routed through the GDScript mesher (MESH_SHAPE_EXTERNAL) but
+		# reads as a textured cube in the inventory icon — taking the
+		# sprite path made the held chest sample at the sprite extruder's
+		# native scale and balloon to fill the screen. Cube path keeps it
+		# the same size as any other held block.
+		var shape: int = Blocks.mesh_shape(id)
+		# Non-block items and cross-quad blocks (sapling/fire) take the
+		# sprite-extruder path. Everything else goes through the held-block
+		# path — BlockMesh.get_cube_mesh special-cases TORCH (pillar),
+		# FENCE (post), and STAIRS (step shape) so they render correctly.
+		var as_sprite: bool = id >= Items.STICK or shape == Blocks.MESH_SHAPE_CROSS
 		if as_sprite:
 			_build_held_tool(id)
 		else:
@@ -445,7 +468,10 @@ func _update_held_item() -> void:
 
 func _build_held_block(id: int) -> void:
 	_held_block = MeshInstance3D.new()
-	_held_block.mesh = BlockMesh.get_cube_mesh(id, _HELD_BLOCK_SIZE)
+	if id == Blocks.TORCH:
+		_held_block.mesh = BlockMesh.get_held_torch_mesh(_HELD_BLOCK_SIZE * 2.0)
+	else:
+		_held_block.mesh = BlockMesh.get_cube_mesh(id, _HELD_BLOCK_SIZE)
 	# Force the FP held block to draw on top of world geometry — same
 	# fix as the FP hand. Without this it z-fights nearby blocks.
 	_held_block.material_override = BlockAtlas.overlay_material()
@@ -458,9 +484,18 @@ func _build_held_block(id: int) -> void:
 		arm_r = _character_model.get("arm_r") as Node3D
 	if arm_r != null:
 		_held_block_tp = MeshInstance3D.new()
-		_held_block_tp.mesh = BlockMesh.get_cube_mesh(id, _TP_HELD_BLOCK_SIZE)
-		_held_block_tp.position = _TP_HELD_BLOCK_POSITION
-		_held_block_tp.rotation = _TP_HELD_BLOCK_ROTATION
+		if id == Blocks.TORCH:
+			_held_block_tp.mesh = BlockMesh.get_cube_mesh(Blocks.TORCH, _TP_HELD_BLOCK_SIZE * 2.0)
+			_held_block_tp.position = _TP_HELD_TORCH_POSITION
+			_held_block_tp.rotation = _TP_HELD_TORCH_ROTATION
+		elif id == Blocks.FENCE:
+			_held_block_tp.mesh = BlockMesh.get_cube_mesh(id, _TP_HELD_BLOCK_SIZE)
+			_held_block_tp.position = _TP_HELD_FENCE_POSITION
+			_held_block_tp.rotation = _TP_HELD_FENCE_ROTATION
+		else:
+			_held_block_tp.mesh = BlockMesh.get_cube_mesh(id, _TP_HELD_BLOCK_SIZE)
+			_held_block_tp.position = _TP_HELD_BLOCK_POSITION
+			_held_block_tp.rotation = _TP_HELD_BLOCK_ROTATION
 		arm_r.add_child(_held_block_tp)
 
 
@@ -535,14 +570,6 @@ func _build_held_tool(id: int) -> void:
 		# 50°Y / -25°Z inner sprite tilt when the toggle is on.
 		_held_tool_tp_orient = Node3D.new()
 		_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp)
-		# Axe sprites are mirror-arranged vs pickaxe (head upper-LEFT
-		# instead of upper-RIGHT), so the same orient transform points
-		# the blade back at the player's face. Flip 180° around the
-		# tool-local Y to swing the blade forward.
-		if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
-			_held_tool_tp_orient.transform.basis = (
-				_held_tool_tp_orient.transform.basis * Basis(Vector3.UP, deg_to_rad(180.0))
-			)
 		_held_tool_tp_pivot.add_child(_held_tool_tp_orient)
 
 		_held_tool_tp = MeshInstance3D.new()
@@ -555,7 +582,13 @@ func _build_held_tool(id: int) -> void:
 		if Items.is_tool_item(id):
 			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
 			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+			var px_sign: float = -1.0
+			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
+				_held_tool_tp.rotation.y = PI
+				px_sign = 1.0
+			_held_tool_tp.position = Vector3(
+				px_sign * tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0
+			)
 		else:
 			var loose_ps: float = tp_ps * 0.6
 			_held_tool_tp.scale = Vector3(loose_ps, loose_ps, loose_ps)
@@ -863,6 +896,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		var inv_screen: Control = get_node_or_null("Crosshair/InventoryScreen")
 		var table_screen: Control = get_node_or_null("Crosshair/CraftingTableScreen")
 		var furnace_screen: Control = get_node_or_null("Crosshair/FurnaceScreen")
+		var chest_screen: Control = get_node_or_null("Crosshair/ChestScreen")
 		var pause_menu: Control = get_node_or_null("Crosshair/PauseMenu")
 		if inv_screen != null and inv_screen.is_open():
 			inv_screen.toggle()
@@ -870,6 +904,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			table_screen.toggle()
 		elif furnace_screen != null and furnace_screen.is_open():
 			furnace_screen.close()
+		elif chest_screen != null and chest_screen.is_open():
+			chest_screen.close()
 		elif pause_menu != null:
 			pause_menu.open()
 			get_viewport().set_input_as_handled()
@@ -1190,7 +1226,11 @@ func _physics_process(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, 0, speed)
 		velocity.z = move_toward(velocity.z, 0, speed)
 
+	var was_grounded: bool = is_on_floor()
+	var pre_slide_vel: Vector3 = velocity
 	move_and_slide()
+	if was_grounded and is_on_wall() and not Input.is_action_pressed("jump"):
+		_try_step_up(pre_slide_vel)
 
 	# Footstep cadence — accumulate horizontal travel while grounded; fire a
 	# step sound (picked from the material under our feet) every STEP_INTERVAL_M.
@@ -1649,6 +1689,32 @@ func _pushing_into_wall(attempted_vx: float, attempted_vz: float) -> bool:
 # that cell is passable (AIR or water), nudge velocity.y up to 6 m/s so
 # the player hops onto the shore. Matches the motY = 0.3 line in
 # EntityLiving.e() in Bukkit/mc-dev.
+# Vanilla stepHeight = 0.5f (EntityLiving.P). When the player walks into
+# a wall while grounded, test whether lifting the body by STEP_HEIGHT
+# clears the obstacle. If so, keep the elevated position and re-run
+# horizontal movement — the player smoothly walks up stairs / slabs.
+func _try_step_up(intended_vel: Vector3) -> void:
+	var h_vel := Vector3(intended_vel.x, 0.0, intended_vel.z)
+	if h_vel.length_squared() < 0.001:
+		return
+	var saved_pos: Vector3 = global_position
+	var dt: float = get_physics_process_delta_time()
+	# Phase 1: lift up by STEP_HEIGHT.
+	move_and_collide(Vector3.UP * STEP_HEIGHT)
+	# Phase 2: try horizontal movement at elevated height.
+	move_and_collide(h_vel * dt)
+	# Phase 3: snap back down to floor.
+	move_and_collide(Vector3.DOWN * (STEP_HEIGHT + 0.05))
+	# Check horizontal progress.
+	var dx: float = global_position.x - saved_pos.x
+	var dz: float = global_position.z - saved_pos.z
+	if dx * dx + dz * dz < 0.0001:
+		global_position = saved_pos
+		return
+	velocity = intended_vel
+	velocity.y = 0.0
+
+
 func _try_water_step_up() -> void:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):

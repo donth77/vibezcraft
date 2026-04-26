@@ -4,24 +4,44 @@ shader_type spatial;
 // sorting over other translucent effects in the future (sun flares, etc).
 render_mode cull_disabled, blend_mix, depth_draw_opaque;
 
-// Alpha's water was synthesised at runtime by TextureWaterFX (client-side;
-// not in Bukkit/mc-dev which is server-only). It ran cellular automata on
-// a 16×16 buffer and packed the result into the 16-frame animated slot in
-// terrain.png. We emulate that look procedurally: two scales of hash noise
-// scrolled along orthogonal axes produces the same shimmering ripple at a
-// fraction of the cost.
+// Alpha's water was synthesised at runtime by TextureWaterFX (oe.java in
+// the CFR-decompiled source — client-side; not in Bukkit/mc-dev which is
+// server-only). It ran a cellular automaton on a 16×16 buffer and packed
+// the result into the 16-frame animated tile in terrain.png. We port
+// that filter as `WaterFXNative` (src/water_fx_native.cpp) and feed it
+// in as `water_fx_tex`. If the GDExtension isn't built or the autoload
+// hasn't pushed the texture yet, we fall back to a 2-octave hash-noise
+// ripple that approximates the same look at zero CPU cost.
 
+uniform sampler2D water_fx_tex : filter_nearest, repeat_enable;
+// 1.0 if the WaterFX driver has pushed a real texture, 0.0 otherwise.
+// Set automatically via texture_query() at fragment time — the hash
+// fallback path activates when no real texture is bound.
 uniform vec3 deep_color : source_color = vec3(0.05, 0.18, 0.42);
 uniform vec3 shallow_color : source_color = vec3(0.20, 0.48, 0.80);
-// Vanilla nq.A BlockFluid registers water at vertex alpha ~0.72; we bump
-// to 0.85 so water reads as a solid liquid surface even at night when
-// the surrounding terrain dims to ~25% sky_factor and the contrast
-// between water and shoreline collapses. Slight deviation from vanilla
-// in exchange for water staying visibly water at any time of day.
-uniform float alpha_strength : hint_range(0.0, 1.0) = 0.85;
+// Vanilla nq.A BlockFluid renders water at vertex alpha 0.7 with
+// per-vertex light modulating the color. With lighting now wired into
+// the shader (caves / night darken water like every other block), we
+// can drop alpha back near vanilla — 0.7 reads correctly without the
+// "almost transparent at night" issue the old constant-bright version
+// had. Tunable via the editor inspector.
+uniform float alpha_strength : hint_range(0.0, 1.0) = 0.7;
 uniform float scroll_speed : hint_range(0.0, 2.0) = 0.12;
+// Day/night driver pushes this every frame (day_night_driver.gd).
+// Range 0.10 (midnight) .. 1.0 (noon). Multiplied with per-vertex
+// sky_light to produce effective brightness; same convention as
+// chunk.gdshader.
+uniform float sky_factor = 1.0;
 
 varying vec3 v_normal;
+varying float v_sky;
+varying float v_block;
+// Cell-wide horizontal flow vector, decoded from COLOR.ba in the vertex
+// stage. Range -1..1 (0,0) for static sources / fully-symmetric cells.
+// Used in fragment to scroll the ripple noise along the water's
+// spreading direction — vanilla Alpha streams visibly drift toward
+// lower-pressure neighbors (ld.java:91-155 BlockFluids.getFlowVector).
+varying vec2 v_flow;
 
 
 float hash12(vec2 p) {
@@ -44,12 +64,43 @@ float ripple(vec2 p, float t) {
 
 void vertex() {
     v_normal = NORMAL;
+    // Mesher packs sky_light/15 in COLOR.r and block_light/15 in COLOR.g
+    // (same convention as chunk.gdshader, see Mesher._emit_fluid_faces).
+    v_sky = COLOR.r;
+    v_block = COLOR.g;
+    // Decode flow X/Z from COLOR.b/.a — encoded as (v*0.5 + 0.5) so the
+    // [-1,1] range round-trips through Color's [0,1] clamp without loss.
+    v_flow = vec2(COLOR.b, COLOR.a) * 2.0 - 1.0;
 }
 
 
 void fragment() {
     float t = TIME * scroll_speed;
-    float r = ripple(UV, t);
+    // Directional UV scroll: top/bottom faces drift along the cell's flow
+    // vector (so a stream visibly moves downhill); side faces drift
+    // downward in V (water sliding down a waterfall column). Side detection:
+    // |normal.y| < 0.5 → side. Magnitude tuned to match the existing
+    // built-in ripple time-scroll so the two effects feel cohesive rather
+    // than racing.
+    vec2 uv = UV;
+    if (abs(v_normal.y) > 0.5) {
+        uv -= v_flow * t;
+    } else {
+        uv += vec2(0.0, t);
+    }
+    // Sample the runtime cellular-automaton texture (16×16 RGBA from
+    // WaterFXNative). The R channel carries the squared-intensity field
+    // — same channel vanilla uses to drive the deep↔shallow color mix.
+    // If the texture hasn't been bound yet (extension not built / autoload
+    // not run), Godot returns vec4(0) for a default sampler2D, in which
+    // case we fall through to the procedural ripple so the surface still
+    // animates rather than going flat.
+    // UVs come from the mesher in cell-units (each block face spans
+    // 1.0 of UV), so the 16×16 FX texture tiles 1:1 with each block.
+    // `repeat_enable` on the sampler handles wrapping across blocks
+    // and across the time-scrolled offset.
+    vec4 fx = texture(water_fx_tex, uv);
+    float r = (fx.a > 0.01) ? fx.r : ripple(uv, t);
     vec3 col = mix(deep_color, shallow_color, r);
     // Notch-style face shading, toned down so sides don't go near-black —
     // underwater is already dim enough with translucent alpha.
@@ -63,6 +114,15 @@ void fragment() {
     } else {
         b = 0.80;
     }
-    ALBEDO = col * b;
+    // Effective per-vertex brightness — vanilla samples this from the
+    // open neighbor cell at mesh time. max() of sun-attenuated sky vs.
+    // raw block_light so torches dominate at night. Matches the formula
+    // chunk.gdshader uses for opaque blocks.
+    float light = max(v_sky * sky_factor, v_block);
+    // Floor at 0.10 so water never goes pitch-black even in unlit caves,
+    // matching vanilla's BlockFluids minimum visibility (player should
+    // still see *something* even underwater in pitch dark).
+    light = max(light, 0.10);
+    ALBEDO = col * b * light;
     ALPHA = alpha_strength;
 }

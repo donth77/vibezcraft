@@ -38,6 +38,18 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.GRAVEL,
 	Blocks.FURNACE,
 	Blocks.GLASS,
+	# CHEST renders as an external ChestNode entity in-world, but for the
+	# inventory icon we still bake it as a regular cube using its
+	# chest_top / chest_side textures via Blocks.get_face_texture. The
+	# 3D iso bake reads as a recognizable wooden chest cube — close
+	# enough to vanilla, no separate icon asset needed.
+	Blocks.CHEST,
+	# Fence renders as a post + neighbor-aware rails in-world, but for the
+	# inventory icon we bake it as a planks cube (fence shares the planks
+	# texture per nq.aZ.bg=4). Same precedent as CHEST: simple cube icon.
+	Blocks.FENCE,
+	Blocks.WOOD_STAIRS,
+	Blocks.COBBLESTONE_STAIRS,
 	# SAPLING is intentionally NOT iconified — it renders as a cross-quad
 	# in-world (not a cube), so the iso-cube bake reads as an oversized
 	# blocky sprite. Falls through to ItemIcons' flat sprite path which

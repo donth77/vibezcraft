@@ -32,6 +32,10 @@ static var _pool_parent: Node = null
 # Lava-spark material cache — see get_lava_spark_material below. Kept at
 # the top of the file to satisfy gdlint's class-definitions-order rule.
 static var _lava_spark_material: StandardMaterial3D = null
+# Torch-flame material cache — small yellow-orange billboard, vanilla
+# `EntityFlameFX` (db.java's flame entry). Lifetime ~1 s, slight upward
+# drift, no gravity.
+static var _torch_flame_material: StandardMaterial3D = null
 # Bubble (EntityBubbleFX) — particles.png tile 32 = (0, 16, 8, 8). Drifts
 # upward at 0.002/tick gravity, dies on leaving water.
 static var _bubble_material: StandardMaterial3D = null
@@ -160,10 +164,20 @@ static func _acquire(parent: Node, amount: int, extents: Vector3) -> GPUParticle
 	if _pool.is_empty() and _pool_parent == null:
 		warm_pool(parent)
 	while not _pool.is_empty():
-		var p: GPUParticles3D = _pool.pop_back()
-		if is_instance_valid(p):
-			_configure_runtime(p, amount, extents)
-			return p
+		# Pop UNTYPED — assigning a freed instance to a typed
+		# `GPUParticles3D` local triggers Godot's type check on the value
+		# itself ("Trying to assign invalid previously freed instance"),
+		# which fires before we ever reach the is_instance_valid guard.
+		# Pool entries can become stale when their parent (a chunk) gets
+		# unloaded and queue_free'd; keep popping past those.
+		var raw: Variant = _pool.pop_back()
+		if not is_instance_valid(raw):
+			continue
+		var p: GPUParticles3D = raw as GPUParticles3D
+		if p == null:
+			continue
+		_configure_runtime(p, amount, extents)
+		return p
 	# Pool exhausted — build a fresh one parented to the caller. Not
 	# returned to the pool (too many simultaneous bursts means the cap
 	# will rebalance naturally on subsequent frames).
@@ -276,35 +290,30 @@ static func get_lava_spark_material() -> StandardMaterial3D:
 static func get_smoke_subparticle_material() -> StandardMaterial3D:
 	if _smoke_subparticle_material != null:
 		return _smoke_subparticle_material
-	# Vanilla-faithful smoke: cycle through the 8-frame smoke strip on
-	# particles.png row 0 (128×16 = 8 frames of 16×16, but our sheet
-	# uses 8×8 tiles so the row is 64 px wide of 8 frames). pi.java
-	# does `b = 7 - age*8/maxAge` — frame index decreases from 7 (dense)
-	# to 0 (wispy) over particle life. BILLBOARD_PARTICLES + the anim
-	# knobs replicate this in Godot via INSTANCE_CUSTOM advancement.
-	# Now safe to re-enable: we're no longer using sub_emitter, which
-	# was the source of the prior horizontal-streak glitch (parent's
-	# INSTANCE_CUSTOM was poisoning sub-particle frame coords).
+	# Vanilla-faithful smoke. AtlasTexture + BILLBOARD_PARTICLES +
+	# particles_anim_* combo was producing horizontally-squished sprites
+	# (the 64×8 strip got stretched onto the 0.4×0.4 quad as if it were
+	# a single frame). Switched to: full particles.png as albedo, UV
+	# transform crops to a single 8×8 smoke frame, no per-particle
+	# animation. Single dense smoke frame is acceptable divergence from
+	# vanilla's 8-frame cycle — frames are visually similar enough that
+	# losing the animation isn't a major fidelity hit.
 	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
-	var atlas := AtlasTexture.new()
-	atlas.atlas = sheet
-	# Full 8-frame smoke row, 64×8 px (cols 0..7, row 0).
-	atlas.region = Rect2(0, 0, 64, 8)
-	atlas.filter_clip = true
 	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = atlas
+	mat.albedo_texture = sheet
+	# Crop UVs to a single 8×8 smoke tile at (0, 0) on the 128×128 sheet.
+	# uv_scale = 8/128 = 0.0625 — only that tile's worth of the texture
+	# samples onto the quad; uv_offset = (0, 0, 0) for top-left tile.
+	mat.uv1_scale = Vector3(8.0 / 128.0, 8.0 / 128.0, 1.0)
+	mat.uv1_offset = Vector3.ZERO
 	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
 	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_PARTICLES
-	mat.particles_anim_h_frames = 8
-	mat.particles_anim_v_frames = 1
-	mat.particles_anim_loop = false
-	# Beta pi.java line 17: `j = k = rand * 0.3` — gray 0..0.3 (dark
-	# gray). Per-particle variation is hard in Godot's ParticleProcessMaterial;
-	# we use 0.3 (the high end of vanilla's range) so smoke reads against
-	# typical backgrounds (grass / lava). 0.15 average was technically
-	# the mean but rendered nearly invisible.
+	# BILLBOARD_ENABLED — full camera-facing, no INSTANCE_CUSTOM animation
+	# dependency. Quad stays square (0.4 × 0.4 m) regardless of texture.
+	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
+	# Beta pi.java `j = k = rand * 0.3` (gray 0..0.3); we use top of range
+	# 0.3 so smoke reads against grass/lava without being washed out.
 	mat.albedo_color = Color(0.3, 0.3, 0.3, 1.0)
 	_smoke_subparticle_material = mat
 	return mat
@@ -482,11 +491,11 @@ static func _spawn_lava_smoke_burst(parent: Node, world_pos: Vector3) -> void:
 	var sct := CurveTexture.new()
 	sct.curve = sc
 	proc.scale_curve = sct
-	# Restore per-particle frame animation (8-frame strip × anim_speed).
-	# Speed = 4 advances ~5.6 frames over a 1.4 s lifetime — particles
-	# cycle through most of the wispy-→-dense → fade-out frames.
-	proc.anim_speed_min = 4.0
-	proc.anim_speed_max = 4.0
+	# Material uses BILLBOARD_ENABLED + UV-transform crop, NOT the
+	# particles_anim_* path. Anim speed irrelevant — keep zero so we
+	# don't accidentally drive INSTANCE_CUSTOM.z toward garbage.
+	proc.anim_speed_min = 0.0
+	proc.anim_speed_max = 0.0
 	proc.particle_flag_align_y = false
 	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
 	smoke.process_material = proc
@@ -521,3 +530,96 @@ static func spawn_fire_smoke(parent: Node, pos: Vector3i) -> void:
 	particles.visible = true
 	particles.restart()
 	_schedule_return(parent, particles)
+
+
+# Vanilla EntityFlameFX (ko.java:23) samples particles.png tile 48 — an
+# 8×8 sprite at pixel (0, 24, 8, 8) on the 128×128 atlas, NOT a solid
+# block. The sprite has a soft yellow-orange flame shape with translucent
+# edges. Solid-yellow billboards read as "yellow boxes" — wrong look.
+static func get_torch_flame_material() -> StandardMaterial3D:
+	if _torch_flame_material != null:
+		return _torch_flame_material
+	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = sheet
+	# Crop UVs to the 8×8 flame tile at (0, 24) on the 128×128 sheet.
+	# uv_scale = 8/128 = 0.0625; uv_offset.y = 24/128 = 0.1875.
+	mat.uv1_scale = Vector3(8.0 / 128.0, 8.0 / 128.0, 1.0)
+	mat.uv1_offset = Vector3(0.0, 24.0 / 128.0, 0.0)
+	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
+	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
+	_torch_flame_material = mat
+	return mat
+
+
+# Torch tip particle — vanilla `bk.b` (BlockTorch.randomDisplayTick)
+# spawns ONE smoke + ONE flame at the torch tip per random-tick roll.
+# We emit just the flame for now: the smoke half wants vanilla's
+# `EntitySmokeFX` (pi.java, ~0.1 m, single 8×8 tile) but our existing
+# pool is wired for `largesmoke` (4× larger) which reads as a small
+# cloud over a torch. Adding a dedicated small-smoke pool is a follow-up.
+#
+# Sizing: vanilla `ko.java` (EntityFlameFX) renders sprite tile 48 at
+# parent default `g ≈ 0.1 × (rand·0.5 + 0.5)` → 0.05-0.15 m visible quad.
+# We render at 0.10 m flat — the tile is solid yellow (no alpha gradient)
+# so we don't need vanilla's parabolic shrink to read the same.
+#
+# Position: floor torches centered; wall torches (meta 1-4) lean toward
+# the supporting wall by 0.27 cells (vanilla bk.b `d4 = 0.27`).
+static func spawn_torch_particles(parent: Node, cell_pos: Vector3i, meta: int) -> void:
+	# Floor: particle at (cx+0.5, cy+0.7, cz+0.5) — just below box top.
+	# Wall: the rotation pipeline places the flame tip at cy+0.95 and
+	# ~0.064 blocks away from the wall in the lean direction. Offsets
+	# derived from tracing the vanilla bk.java rotation pipeline
+	# (Z+1/16, rotX-40°, Y-3/8, rotX+90°, rotY per-meta) through
+	# the top-face center vertex.
+	var tip := Vector3(cell_pos) + Vector3(0.5, 0.85, 0.5)
+	match meta:
+		1:
+			tip.y += 0.18
+		2:
+			tip.y += 0.18
+		3:
+			tip.y += 0.18
+		4:
+			tip.y += 0.18
+	# --- Flame particle (vanilla ko.java / EntityFlameFX) ---
+	# Spawns at exact tip position with zero velocity. Vanilla's ±0.05
+	# position jitter in the constructor is dead code (modifies locals
+	# after super() already set position). Quad size: vanilla base
+	# pp.g ∈ [1.0, 2.0], rendered at 0.1*g per half → full [0.2, 0.4].
+	var flame := _acquire(parent, 1, Vector3.ZERO)
+	var fproc := ParticleProcessMaterial.new()
+	fproc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINT
+	fproc.direction = Vector3.ZERO
+	fproc.spread = 0.0
+	fproc.initial_velocity_min = 0.0
+	fproc.initial_velocity_max = 0.0
+	fproc.gravity = Vector3.ZERO
+	fproc.scale_min = 0.8
+	fproc.scale_max = 1.0
+	fproc.particle_flag_align_y = false
+	fproc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
+	# Vanilla parabolic shrink: g = a * (1 - f8² * 0.5)
+	var sc := Curve.new()
+	for i in range(7):
+		var f8: float = float(i) / 6.0
+		sc.add_point(Vector2(f8, 1.0 - f8 * f8 * 0.5))
+	var sct := CurveTexture.new()
+	sct.curve = sc
+	fproc.scale_curve = sct
+	var fdraw := QuadMesh.new()
+	fdraw.size = Vector2(0.28, 0.28)
+	fdraw.material = get_torch_flame_material()
+	flame.draw_pass_1 = fdraw
+	flame.lifetime = 1.0
+	flame.one_shot = false
+	flame.position = tip
+	flame.visible = true
+	flame.emitting = true
+	flame.process_material = fproc
+	flame.restart()
+	_schedule_return(parent, flame)
+	# TODO: torch smoke particles — removed for now, needs proper tuning.

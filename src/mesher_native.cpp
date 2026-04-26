@@ -9,6 +9,7 @@
 #include <godot_cpp/variant/vector3.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 using namespace godot;
 
@@ -205,6 +206,87 @@ static float fluid_corner_height(const uint8_t *blocks_ptr, const uint8_t *meta_
 	return total_top / float(total_weight);
 }
 
+// Effective fluid level for flow math. Mirrors Mesher._fluid_effective_level
+// and ld.java:c() — returns -1 if the cell isn't this fluid family, 0 for
+// falling cells (meta >= 8, treated as a source for spreading purposes),
+// else the raw meta (1-7).
+static inline int fluid_effective_level(const uint8_t *blocks_ptr, const uint8_t *meta_ptr,
+		const EdgeSlices &edges, int x, int y, int z, bool is_lava) {
+	const int id = read_block(blocks_ptr, edges, x, y, z);
+	const bool same = is_lava ? is_lava_id(id) : is_water_id(id);
+	if (!same) {
+		return -1;
+	}
+	const int lvl = read_meta(meta_ptr, edges, x, y, z);
+	return (lvl >= 8) ? 0 : lvl;
+}
+
+
+// Per-cell horizontal flow vector. Ports vanilla ld.java:91-155 (BlockFluids
+// .getFlowVector). Mirrors Mesher._fluid_flow_vector — keep in sync.
+// Returns a unit vector (or zero) packed into the X/Z lanes of a Vector2.
+// Used by water.gdshader to scroll surface UV along the spreading direction.
+static Vector2 fluid_flow_vector(const uint8_t *blocks_ptr, const uint8_t *meta_ptr,
+		const EdgeSlices &edges, int x, int y, int z, bool is_lava) {
+	const int my_level = fluid_effective_level(blocks_ptr, meta_ptr, edges, x, y, z, is_lava);
+	if (my_level < 0) {
+		return Vector2(0.0f, 0.0f);
+	}
+	float fx = 0.0f;
+	float fz = 0.0f;
+	for (int dir_i = 0; dir_i < 4; dir_i++) {
+		int dx = 0;
+		int dz = 0;
+		switch (dir_i) {
+			case 0: dx = -1; break;
+			case 1: dz = -1; break;
+			case 2: dx = 1; break;
+			case 3: dz = 1; break;
+		}
+		const int nx = x + dx;
+		const int nz = z + dz;
+		int n_level = fluid_effective_level(blocks_ptr, meta_ptr, edges, nx, y, nz, is_lava);
+		if (n_level < 0) {
+			// Same opacity rule used by the cube-face cull elsewhere in
+			// this file — AIR/LEAVES/GLASS/SAPLING/FIRE/TORCH/water/lava
+			// all let flow continue (water can pour off a ledge); only
+			// hard-opaque blocks stop spreading.
+			const int nid = read_block(blocks_ptr, edges, nx, y, nz);
+			const bool n_is_water = (nid == MesherNative::WATER_FLOWING
+					|| nid == MesherNative::WATER_STILL);
+			const bool n_is_lava = (nid == MesherNative::LAVA_FLOWING
+					|| nid == MesherNative::LAVA_STILL);
+			const bool n_opaque = (nid != MesherNative::AIR
+					&& nid != MesherNative::LEAVES
+					&& nid != MesherNative::GLASS
+					&& nid != MesherNative::SAPLING
+					&& nid != MesherNative::FIRE
+					&& nid != MesherNative::TORCH
+					&& !n_is_water && !n_is_lava);
+			if (n_opaque) {
+				continue;
+			}
+			n_level = fluid_effective_level(blocks_ptr, meta_ptr, edges, nx, y - 1, nz, is_lava);
+			if (n_level < 0) {
+				continue;
+			}
+			const int diff_drop = n_level - (my_level - 8);
+			fx += float(dx) * float(diff_drop);
+			fz += float(dz) * float(diff_drop);
+			continue;
+		}
+		const int diff = n_level - my_level;
+		fx += float(dx) * float(diff);
+		fz += float(dz) * float(diff);
+	}
+	if (fx == 0.0f && fz == 0.0f) {
+		return Vector2(0.0f, 0.0f);
+	}
+	const float len = std::sqrt(fx * fx + fz * fz);
+	return Vector2(fx / len, fz / len);
+}
+
+
 // Emit the 6 boundary faces for a fluid cell (water or lava) into the
 // appropriate vertex stream. Shared by both mesh_chunk_data paths — the
 // non-lit and lit variants route the same water/lava arrays since the
@@ -221,7 +303,17 @@ static void emit_fluid_cell(
 		PackedVector3Array &wverts,
 		PackedVector3Array &wnorms,
 		PackedVector2Array &wuvs,
-		PackedInt32Array &windices) {
+		PackedInt32Array &windices,
+		// Lighting-aware variant: when sky_ptr / block_light_ptr are non-null,
+		// per-face sky+block light is sampled at the OPEN neighbor cell and
+		// packed into wcolors as Color(sky/15, block/15, 0, 1). The non-lit
+		// `mesh_chunk_data` entry-point passes nullptr and an unused colors
+		// array — the result then carries an empty water_colors so the
+		// consumer skips ARRAY_COLOR on the resulting ArrayMesh.
+		PackedColorArray *wcolors = nullptr,
+		const uint8_t *sky_ptr = nullptr,
+		const uint8_t *block_light_ptr = nullptr,
+		double light_scale = 0.0) {
 	(void)id;  // passed for future per-level metadata routing
 	const float corner_h[4] = {
 		fluid_corner_height(blocks_ptr, meta_ptr, edges, x, y, z, is_lava),
@@ -229,6 +321,13 @@ static void emit_fluid_cell(
 		fluid_corner_height(blocks_ptr, meta_ptr, edges, x, y, z + 1, is_lava),
 		fluid_corner_height(blocks_ptr, meta_ptr, edges, x + 1, y, z + 1, is_lava),
 	};
+	// Cell-wide flow vector (X/Z), packed into Color.b/.a per-face below.
+	// Computed once per cell since flow is a property of the cell, not
+	// the face. Encoding: -1..1 → 0..1 via `(v * 0.5 + 0.5)` — survives
+	// Color's [0,1] clamp and round-trips losslessly in float32.
+	const Vector2 flow = fluid_flow_vector(blocks_ptr, meta_ptr, edges, x, y, z, is_lava);
+	const float flow_b = float(flow.x) * 0.5f + 0.5f;
+	const float flow_a = float(flow.y) * 0.5f + 0.5f;
 
 	for (int face = 0; face < 6; face++) {
 		const int nx = x + FACE_NEIGHBOR[face][0];
@@ -283,6 +382,36 @@ static void emit_fluid_cell(
 		wuvs.append(Vector2(u0, v0));
 		wuvs.append(Vector2(u1, v0));
 		wuvs.append(Vector2(u1, v1));
+		// Per-face per-vertex light. Mirrors the cube-face rule: sample
+		// the open neighbor cell so the face brightens / darkens with the
+		// air it looks at. OOB neighbors fall back to (sky=15, block=0)
+		// like Chunk.get_sky_light's default.
+		if (wcolors != nullptr && sky_ptr != nullptr && block_light_ptr != nullptr) {
+			int nsky;
+			int nblk;
+			if (nx < 0 || nx >= MesherNative::SIZE_X
+					|| ny < 0 || ny >= MesherNative::SIZE_Y
+					|| nz < 0 || nz >= MesherNative::SIZE_Z) {
+				nsky = 15;
+				nblk = 0;
+			} else {
+				const int nidx = ny * MesherNative::SIZE_X * MesherNative::SIZE_Z
+						+ nz * MesherNative::SIZE_X + nx;
+				nsky = sky_ptr[nidx];
+				nblk = block_light_ptr[nidx];
+			}
+			const float sky_n = float(double(nsky) * light_scale);
+			const float blk_n = float(double(nblk) * light_scale);
+			// R=sky/15, G=block/15 (per-face light), B=flow.x encoded,
+			// A=flow.z encoded. Same flow value across all 6 faces of
+			// this cell — see Mesher._emit_fluid_faces for the shared
+			// convention.
+			const Color face_light(sky_n, blk_n, flow_b, flow_a);
+			wcolors->append(face_light);
+			wcolors->append(face_light);
+			wcolors->append(face_light);
+			wcolors->append(face_light);
+		}
 		windices.append(base);
 		windices.append(base + 2);
 		windices.append(base + 1);
@@ -330,6 +459,11 @@ Dictionary MesherNative::mesh_chunk_data(
 	PackedVector3Array water_verts;
 	PackedVector3Array water_norms;
 	PackedVector2Array water_uvs;
+	// Non-lit path doesn't have sky/block light arrays, so water_colors
+	// stays empty here. chunk_node's "if not water_colors.is_empty()"
+	// guard ensures the resulting ArrayMesh has no ARRAY_COLOR attribute,
+	// and the water shader's lighting term defaults to 1.0 in that case.
+	PackedColorArray water_colors;
 	PackedInt32Array water_indices;
 	// Lava sub-mesh — opaque + emissive, separate material. Same tapered
 	// geometry algorithm as water; kept in its own stream so chunk_node
@@ -337,6 +471,7 @@ Dictionary MesherNative::mesh_chunk_data(
 	PackedVector3Array lava_verts;
 	PackedVector3Array lava_norms;
 	PackedVector2Array lava_uvs;
+	PackedColorArray lava_colors;
 	PackedInt32Array lava_indices;
 
 	const int block_count = SIZE_X * SIZE_Y * SIZE_Z;
@@ -351,10 +486,12 @@ Dictionary MesherNative::mesh_chunk_data(
 		result["water_vertices"] = water_verts;
 		result["water_normals"] = water_norms;
 		result["water_uvs"] = water_uvs;
+		result["water_colors"] = water_colors;
 		result["water_indices"] = water_indices;
 		result["lava_vertices"] = lava_verts;
 		result["lava_normals"] = lava_norms;
 		result["lava_uvs"] = lava_uvs;
+		result["lava_colors"] = lava_colors;
 		result["lava_indices"] = lava_indices;
 		return result;
 	}
@@ -405,6 +542,11 @@ Dictionary MesherNative::mesh_chunk_data(
 							lava_verts, lava_norms, lava_uvs, lava_indices);
 					continue;
 				}
+				// Non-cube blocks are meshed by GDScript's
+				// _append_non_cube_geometry — skip cube face emission.
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR) {
+					continue;
+				}
 
 				for (int face = 0; face < 6; face++) {
 					const int nx = x + FACE_NEIGHBOR[face][0];
@@ -425,8 +567,16 @@ Dictionary MesherNative::mesh_chunk_data(
 							(neighbor_id == WATER_FLOWING || neighbor_id == WATER_STILL);
 					const bool neighbor_is_lava =
 							(neighbor_id == LAVA_FLOWING || neighbor_id == LAVA_STILL);
+					// Mirrors Blocks.is_opaque() — alpha-tested + non-cube blocks
+					// (LEAVES, GLASS, SAPLING, FIRE, TORCH) all let adjacent
+					// faces emit. Without the GLASS/SAPLING/FIRE/TORCH excludes,
+					// e.g. placing a torch on a stone wall culls the stone face
+					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
+									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -500,10 +650,12 @@ Dictionary MesherNative::mesh_chunk_data(
 	result["water_vertices"] = water_verts;
 	result["water_normals"] = water_norms;
 	result["water_uvs"] = water_uvs;
+	result["water_colors"] = water_colors;  // empty in non-lit path
 	result["water_indices"] = water_indices;
 	result["lava_vertices"] = lava_verts;
 	result["lava_normals"] = lava_norms;
 	result["lava_uvs"] = lava_uvs;
+	result["lava_colors"] = lava_colors;  // empty in non-lit path
 	result["lava_indices"] = lava_indices;
 	return result;
 }
@@ -535,17 +687,24 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 	PackedColorArray colors;
 	PackedInt32Array indices;
 	PackedVector3Array collision_faces;
-	// Water sub-mesh stream — water cells never carry per-vertex COLOR
-	// (the water shader ignores it), so no water_colors array here.
+	// Water sub-mesh — translucent material. Now carries per-vertex COLOR
+	// sampled from the open neighbor cell (sky_light/15 in R, block_light/15
+	// in G), so the water shader can dim it at night / in caves the same
+	// way cube blocks dim. Without this, water stayed bright in dark
+	// environments and read as "almost transparent at night."
 	PackedVector3Array water_verts;
 	PackedVector3Array water_norms;
 	PackedVector2Array water_uvs;
+	PackedColorArray water_colors;
 	PackedInt32Array water_indices;
-	// Lava sub-mesh stream — same "no per-vertex COLOR" rule (the lava
-	// shader is emissive + TIME-driven, ignores per-vertex light).
+	// Lava sub-mesh — emissive shader self-illuminates, but mesh still
+	// carries COLOR for parity with water and for the chunk_node ARRAY_COLOR
+	// branch. The lava shader currently ignores it (lava is its own light
+	// source, doesn't dim with the day cycle).
 	PackedVector3Array lava_verts;
 	PackedVector3Array lava_norms;
 	PackedVector2Array lava_uvs;
+	PackedColorArray lava_colors;
 	PackedInt32Array lava_indices;
 
 	const int block_count = SIZE_X * SIZE_Y * SIZE_Z;
@@ -564,10 +723,12 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 		result["water_vertices"] = water_verts;
 		result["water_normals"] = water_norms;
 		result["water_uvs"] = water_uvs;
+		result["water_colors"] = water_colors;
 		result["water_indices"] = water_indices;
 		result["lava_vertices"] = lava_verts;
 		result["lava_normals"] = lava_norms;
 		result["lava_uvs"] = lava_uvs;
+		result["lava_colors"] = lava_colors;
 		result["lava_indices"] = lava_indices;
 		return result;
 	}
@@ -606,17 +767,25 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					continue;
 				}
 				if (id == WATER_FLOWING || id == WATER_STILL) {
-					// Fluids never carry per-vertex COLOR — the water /
-					// lava ShaderMaterials drive off TIME + VERTEX / UV.
+					// Slice-5+water: fluids now carry per-vertex COLOR
+					// sampled from the open neighbor (sky_light/15 in R,
+					// block_light/15 in G), so the water shader dims at
+					// night / in caves like cube blocks. Match the
+					// GDScript Mesher._emit_fluid_faces lit branch.
 					emit_fluid_cell(x, y, z, id, /*is_lava=*/false,
 							blocks_ptr, meta_ptr, edges,
-							water_verts, water_norms, water_uvs, water_indices);
+							water_verts, water_norms, water_uvs, water_indices,
+							&water_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
 				if (id == LAVA_FLOWING || id == LAVA_STILL) {
 					emit_fluid_cell(x, y, z, id, /*is_lava=*/true,
 							blocks_ptr, meta_ptr, edges,
-							lava_verts, lava_norms, lava_uvs, lava_indices);
+							lava_verts, lava_norms, lava_uvs, lava_indices,
+							&lava_colors, sky_ptr, block_light_ptr, light_scale);
+					continue;
+				}
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR) {
 					continue;
 				}
 				for (int face = 0; face < 6; face++) {
@@ -645,8 +814,16 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							(neighbor_id == WATER_FLOWING || neighbor_id == WATER_STILL);
 					const bool neighbor_is_lava =
 							(neighbor_id == LAVA_FLOWING || neighbor_id == LAVA_STILL);
+					// Mirrors Blocks.is_opaque() — alpha-tested + non-cube blocks
+					// (LEAVES, GLASS, SAPLING, FIRE, TORCH) all let adjacent
+					// faces emit. Without the GLASS/SAPLING/FIRE/TORCH excludes,
+					// e.g. placing a torch on a stone wall culls the stone face
+					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
+									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -725,10 +902,12 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 	result["water_vertices"] = water_verts;
 	result["water_normals"] = water_norms;
 	result["water_uvs"] = water_uvs;
+	result["water_colors"] = water_colors;
 	result["water_indices"] = water_indices;
 	result["lava_vertices"] = lava_verts;
 	result["lava_normals"] = lava_norms;
 	result["lava_uvs"] = lava_uvs;
+	result["lava_colors"] = lava_colors;
 	result["lava_indices"] = lava_indices;
 	return result;
 }

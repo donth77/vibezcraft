@@ -59,12 +59,26 @@ TERRAIN_TILES = {
 	"crafting_table_side": (11, 3),
 	"crafting_table_front": (12, 3),
 	"furnace_front_lit": (13, 3),
-	"furnace_top": (14, 3),
+	"door_wood_upper": (1, 5),
+	"door_iron_upper": (2, 5),
+	"door_wood_lower": (1, 6),
+	"door_iron_lower": (2, 6),
+	# `furnace_top` is intentionally NOT here. Vanilla Alpha 1.2.6
+	# BlockFurnace.getBlockTextureFromSide (mj.java:46-52) returns
+	# `nq.t.bg` (= the STONE texture index) for both top (n5=1) and
+	# bottom (n5=0) faces — there's no separate furnace_top tile in
+	# Alpha terrain.png. Earlier this script pointed at (14, 3) which is
+	# empty/magenta in the vendored Alpha atlas. Aliased to "stone"
+	# below; matches vanilla rendering exactly.
 }
 
 # Alpha doesn't have farmland (Beta 1.8 added it with hoes). Dirt stands in.
 TERRAIN_ALIASES = {
 	"farmland": "dirt",
+	# Vanilla Alpha 1.2.6 BlockFurnace renders top + bottom faces with the
+	# STONE texture (mj.java:46-52 returns nq.t.bg). No separate furnace_top
+	# tile exists in Alpha terrain.png — Beta added that later.
+	"furnace_top": "stone",
 }
 
 # items.png — tool tiers at columns (wood, stone, iron, diamond, gold).
@@ -107,6 +121,8 @@ ITEM_TILES = {
 	# helmets at cols 0-4, then flint_and_steel at col 5, flint at col 6,
 	# coal at col 7. Verified by visual inspection of the vendored items.png.
 	"flint_and_steel": (5, 0),
+	"wooden_door": (11, 2),
+	"iron_door": (12, 2),
 	"leather": (7, 5),
 	# Armor: rows 0=helmet, 1=chest, 2=legs, 3=boots; col 2=iron, 3=diamond, 4=gold.
 	"iron_helmet": (2, 0),
