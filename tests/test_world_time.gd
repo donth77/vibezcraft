@@ -92,8 +92,8 @@ func test_sky_factor_intermediate_at_dawn_and_dusk() -> void:
 
 
 func test_sky_color_dawn_is_orange_tinted() -> void:
-	# Phase 0.05 is the documented "dawn peak orange" stop.
-	WorldTime.set_time_ticks(int(0.05 * WorldTime.TICKS_PER_DAY))
+	# Phase 0.01 is within the dawn peak orange plateau (0.00–0.02).
+	WorldTime.set_time_ticks(int(0.01 * WorldTime.TICKS_PER_DAY))
 	var c: Color = WorldTime.sky_color()
 	assert_gt(c.r, c.b, "dawn sky should be redder than blue")
 

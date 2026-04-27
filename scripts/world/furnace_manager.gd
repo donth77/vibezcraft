@@ -31,13 +31,11 @@ var _accum: float = 0.0
 var _chunk_manager: Node
 
 
-func _ready() -> void:
-	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
-
-
 func _process(delta: float) -> void:
 	if _chunk_manager == null:
-		return
+		_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
+		if _chunk_manager == null:
+			return
 	_accum += delta
 	while _accum >= _TICK_INTERVAL:
 		_accum -= _TICK_INTERVAL

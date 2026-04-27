@@ -131,6 +131,7 @@ func _spawn_initial_chunks() -> void:
 		_spawn_chunk_sync(c)
 		loaded += 1
 		initial_chunks_ready.emit(loaded, total)
+	Music.start_music()
 
 
 func _process(_delta: float) -> void:
@@ -575,8 +576,12 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 				_chunks[target].chunk.dirty = true
 	# Gravity — when a block becomes air, settle anything gravity-affected
 	# (sand, gravel) sitting above. Single-pass column scan, no recursion.
+	# Then notify the 6 direct neighbors so gravel floating from worldgen
+	# (air already below it) collapses on the first adjacent break — same
+	# trigger as vanilla BlockFalling.doPhysics neighbor updates.
 	if id == Blocks.AIR:
 		_settle_gravity_above(coord, local_x, world_pos.y, local_z)
+		_notify_gravity_neighbors(world_pos)
 	# Sky-light incremental update — bounded BFS in WORLD coords so it
 	# crosses chunk boundaries cleanly. Mirrors vanilla cy.a(SKY, ...) →
 	# mc.a() relight box (vendor/alpha-1.2.6-src/src/mc.java). Skipped
@@ -708,27 +713,56 @@ func _settle_gravity_above(coord: Vector2i, local_x: int, from_y: int, local_z: 
 	var world_x: int = coord.x * Chunk.SIZE_X + local_x
 	var world_z: int = coord.y * Chunk.SIZE_Z + local_z
 	var scan_y: int = from_y + 1
+	var to_spawn: Array[Vector2i] = []  # (y, block_id) pairs
 	while scan_y < Chunk.SIZE_Y:
 		var here_id: int = chunk.get_block(local_x, scan_y, local_z)
 		if here_id == Blocks.AIR:
 			scan_y += 1
 			continue
 		if not Blocks.has_gravity(here_id):
-			return  # any non-gravity solid stops the cascade upward
-		# Vanilla clears the source on the entity's first tick; same
-		# end state, simpler bookkeeping to do it now.
+			break
 		chunk.set_block(local_x, scan_y, local_z, Blocks.AIR)
-		# Force an immediate remesh of the source chunk. Without this, the
-		# chunk's own _process would pick up `dirty` next frame — but the
-		# FallingBlock entity is added to the scene *this* frame at the exact
-		# center of the just-cleared cell, so both render at the same spot
-		# for one frame and z-fight, which the user sees as a flicker at the
-		# start of the fall. Same issue for sand and gravel — same path.
-		# Sync path because async dispatch reintroduces the 1-frame flicker.
-		var chunk_node: Node3D = _chunks[coord]
-		chunk_node.rebuild_mesh_immediate()
-		_spawn_falling_block(Vector3i(world_x, scan_y, world_z), here_id)
+		to_spawn.append(Vector2i(scan_y, here_id))
 		scan_y += 1
+	if to_spawn.is_empty():
+		return
+	# Single rebuild for the entire column instead of one per block.
+	var chunk_node: Node3D = _chunks[coord]
+	chunk_node.rebuild_mesh_immediate()
+	for pair: Vector2i in to_spawn:
+		_spawn_falling_block(Vector3i(world_x, pair.x, world_z), pair.y)
+
+
+# Vanilla BlockFalling.doPhysics — when any neighbor changes, a gravity
+# block rechecks its own support. We fire this after a block becomes AIR
+# so adjacent gravel/sand that was already floating (worldgen caves) gets
+# its first neighbor update and collapses. Cheap: 6 block lookups + 6
+# below-neighbor lookups.
+func _notify_gravity_neighbors(world_pos: Vector3i) -> void:
+	const OFFSETS: Array[Vector3i] = [
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1),
+	]
+	for offset: Vector3i in OFFSETS:
+		var np: Vector3i = world_pos + offset
+		var nid: int = get_world_block(np)
+		if not Blocks.has_gravity(nid):
+			continue
+		var below_id: int = get_world_block(np + Vector3i(0, -1, 0))
+		if below_id != Blocks.AIR and not Blocks.is_replaceable(below_id):
+			continue
+		var cx: int = int(floor(float(np.x) / float(Chunk.SIZE_X)))
+		var cz: int = int(floor(float(np.z) / float(Chunk.SIZE_Z)))
+		var coord := Vector2i(cx, cz)
+		if not _chunks.has(coord):
+			continue
+		var lx: int = np.x - cx * Chunk.SIZE_X
+		var lz: int = np.z - cz * Chunk.SIZE_Z
+		_settle_gravity_above(coord, lx, np.y - 1, lz)
 
 
 func _spawn_falling_block(world_pos: Vector3i, block_id: int) -> void:

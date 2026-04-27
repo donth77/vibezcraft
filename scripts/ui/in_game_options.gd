@@ -20,6 +20,8 @@ const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
 # VSync is binary here (On/Off) — Adaptive/Mailbox are power-user options
 # left out of the UI to keep it friendly. Advanced users can set
 # graphics.vsync directly in user://settings.cfg.
+var _music_slider: HSlider
+var _music_label: Label
 var _fps_option: OptionButton
 var _vsync_checkbox: CheckBox
 
@@ -69,11 +71,12 @@ func _build_panel() -> void:
 	vbox.offset_left = -360
 	vbox.offset_right = 360
 	vbox.offset_top = 0
-	# 2 rows × 64 px + 1 × 16 separation = 144 px.
-	vbox.offset_bottom = 160
+	# 3 rows × 64 px + 2 × 16 separation = 224 px.
+	vbox.offset_bottom = 240
 	vbox.add_theme_constant_override("separation", 16)
 	add_child(vbox)
 
+	_add_music_row(vbox)
 	_fps_option = _add_option_row(vbox, "Frame rate cap", _FPS_CAP_LABELS)
 	_vsync_checkbox = _add_checkbox_row(vbox, "VSync")
 
@@ -82,8 +85,8 @@ func _build_panel() -> void:
 	var button_col := VBoxContainer.new()
 	button_col.anchor_left = 0.5
 	button_col.anchor_right = 0.5
-	button_col.anchor_top = 0.53
-	button_col.anchor_bottom = 0.53
+	button_col.anchor_top = 0.60
+	button_col.anchor_bottom = 0.60
 	button_col.offset_left = -400
 	button_col.offset_right = 400
 	button_col.offset_top = 0
@@ -184,6 +187,52 @@ func _add_checkbox_row(parent: VBoxContainer, label_text: String) -> CheckBox:
 	return cb
 
 
+func _add_music_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl := Label.new()
+	lbl.text = "Music"
+	lbl.add_theme_font_size_override("font_size", 32)
+	lbl.add_theme_color_override("font_color", Color.WHITE)
+	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
+	lbl.add_theme_constant_override("shadow_offset_x", 3)
+	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lbl.custom_minimum_size = Vector2(0, 64)
+	row.add_child(lbl)
+
+	_music_label = Label.new()
+	_music_label.text = "100%"
+	_music_label.add_theme_font_size_override("font_size", 28)
+	_music_label.add_theme_color_override("font_color", Color.WHITE)
+	_music_label.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_music_label.add_theme_constant_override("shadow_offset_x", 2)
+	_music_label.add_theme_constant_override("shadow_offset_y", 2)
+	_music_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_music_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_music_label.custom_minimum_size = Vector2(80, 64)
+	row.add_child(_music_label)
+
+	_music_slider = HSlider.new()
+	_music_slider.min_value = 0.0
+	_music_slider.max_value = 1.0
+	_music_slider.step = 0.01
+	_music_slider.value = 1.0
+	_music_slider.custom_minimum_size = Vector2(260, 64)
+	_music_slider.value_changed.connect(_on_music_slider_changed)
+	row.add_child(_music_slider)
+
+
+func _on_music_slider_changed(value: float) -> void:
+	if value <= 0.0:
+		_music_label.text = "OFF"
+	else:
+		_music_label.text = "%d%%" % int(value * 100.0)
+
+
 static func _style_popup(popup: PopupMenu) -> void:
 	popup.add_theme_font_size_override("font_size", 28)
 	popup.add_theme_color_override("font_color", Color.WHITE)
@@ -219,12 +268,12 @@ static func _make_option_panel(fill: Color) -> StyleBoxFlat:
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(_SETTINGS_PATH)
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
+	_music_slider.value = music_vol
+	_on_music_slider_changed(music_vol)
 	var fps_cap: int = int(cfg.get_value("graphics", "fps_cap", 90))
 	var vsync_mode: int = int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
 	_fps_option.selected = maxi(_FPS_CAPS.find(fps_cap), 0)
-	# Treat any non-DISABLED saved value as "on" — if a power user had
-	# Adaptive or Mailbox in the cfg, the checkbox shows On and a Save
-	# collapses them to VSYNC_ENABLED. Advanced modes stay hand-editable.
 	_vsync_checkbox.button_pressed = vsync_mode != DisplayServer.VSYNC_DISABLED
 	_vsync_checkbox.text = "On" if _vsync_checkbox.button_pressed else "Off"
 
@@ -240,10 +289,12 @@ func _on_save_pressed() -> void:
 	)
 	cfg.set_value("graphics", "fps_cap", cap)
 	cfg.set_value("graphics", "vsync", vmode)
+	cfg.set_value("audio", "music_volume", _music_slider.value)
 	cfg.save(_SETTINGS_PATH)
-	# Both settings are runtime-safe: apply live and close.
 	Engine.max_fps = cap
 	DisplayServer.window_set_vsync_mode(vmode)
+	if Music != null:
+		Music.set_volume(_music_slider.value)
 	queue_free()
 
 

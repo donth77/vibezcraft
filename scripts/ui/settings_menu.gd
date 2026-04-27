@@ -35,6 +35,8 @@ const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
 # (Godot's native ENABLED default would clamp to display refresh and
 # silently override the cap).
 
+var _music_slider: HSlider
+var _music_label: Label
 var _distance_option: OptionButton
 var _pack_option: OptionButton
 var _cloud_option: OptionButton
@@ -103,11 +105,12 @@ func _build_panel() -> void:
 	vbox.offset_left = -360
 	vbox.offset_right = 360
 	vbox.offset_top = 0
-	# 6 rows × 64 px + 5 × 16 separation = 464. Pad to 480.
-	vbox.offset_bottom = 480
+	# 7 rows × 64 px + 6 × 16 separation = 544. Pad to 560.
+	vbox.offset_bottom = 560
 	vbox.add_theme_constant_override("separation", 16)
 	add_child(vbox)
 
+	_add_music_row(vbox)
 	var dist_labels: Array = []
 	for i in range(_RENDER_DISTANCES.size()):
 		dist_labels.append("%s (%d)" % [_RENDER_DISTANCE_LABELS[i], _RENDER_DISTANCES[i]])
@@ -123,8 +126,8 @@ func _build_panel() -> void:
 	var button_col := VBoxContainer.new()
 	button_col.anchor_left = 0.5
 	button_col.anchor_right = 0.5
-	button_col.anchor_top = 0.72
-	button_col.anchor_bottom = 0.72
+	button_col.anchor_top = 0.80
+	button_col.anchor_bottom = 0.80
 	button_col.offset_left = -400
 	button_col.offset_right = 400
 	button_col.offset_top = 0
@@ -276,6 +279,52 @@ func _on_new_seed_pressed() -> void:
 		_seed_label.text = str(_pending_seed)
 
 
+func _add_music_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl := Label.new()
+	lbl.text = "Music"
+	lbl.add_theme_font_size_override("font_size", 32)
+	lbl.add_theme_color_override("font_color", Color.WHITE)
+	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
+	lbl.add_theme_constant_override("shadow_offset_x", 3)
+	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lbl.custom_minimum_size = Vector2(0, 64)
+	row.add_child(lbl)
+
+	_music_label = Label.new()
+	_music_label.text = "100%"
+	_music_label.add_theme_font_size_override("font_size", 28)
+	_music_label.add_theme_color_override("font_color", Color.WHITE)
+	_music_label.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_music_label.add_theme_constant_override("shadow_offset_x", 2)
+	_music_label.add_theme_constant_override("shadow_offset_y", 2)
+	_music_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_music_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_music_label.custom_minimum_size = Vector2(80, 64)
+	row.add_child(_music_label)
+
+	_music_slider = HSlider.new()
+	_music_slider.min_value = 0.0
+	_music_slider.max_value = 1.0
+	_music_slider.step = 0.01
+	_music_slider.value = 1.0
+	_music_slider.custom_minimum_size = Vector2(260, 64)
+	_music_slider.value_changed.connect(_on_music_slider_changed)
+	row.add_child(_music_slider)
+
+
+func _on_music_slider_changed(value: float) -> void:
+	if value <= 0.0:
+		_music_label.text = "OFF"
+	else:
+		_music_label.text = "%d%%" % int(value * 100.0)
+
+
 static func _style_popup(popup: PopupMenu) -> void:
 	popup.add_theme_font_size_override("font_size", 28)
 	popup.add_theme_color_override("font_color", Color.WHITE)
@@ -332,6 +381,9 @@ static func apply_config(cfg: ConfigFile) -> void:
 	DisplayServer.window_set_vsync_mode(
 		int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
 	)
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
+	if Music != null:
+		Music.set_volume(music_vol)
 
 
 func _load_settings() -> void:
@@ -351,6 +403,9 @@ func _load_settings() -> void:
 	# those modes if they really want them.
 	_vsync_checkbox.button_pressed = vsync_mode != DisplayServer.VSYNC_DISABLED
 	_vsync_checkbox.text = "On" if _vsync_checkbox.button_pressed else "Off"
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
+	_music_slider.value = music_vol
+	_on_music_slider_changed(music_vol)
 	_pending_seed = int(cfg.get_value("world", "seed", 0))
 	if _seed_label != null:
 		_seed_label.text = str(_pending_seed) if _pending_seed != 0 else "(random)"
@@ -369,6 +424,7 @@ func _on_save_pressed() -> void:
 		else DisplayServer.VSYNC_DISABLED
 	)
 	cfg.set_value("graphics", "vsync", vsync_value)
+	cfg.set_value("audio", "music_volume", _music_slider.value)
 	if _pending_seed != 0:
 		cfg.set_value("world", "seed", _pending_seed)
 	cfg.save(_SETTINGS_PATH)

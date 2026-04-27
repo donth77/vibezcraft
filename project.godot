@@ -24,6 +24,7 @@ FurnaceManager="*res://scripts/world/furnace_manager.gd"
 ChestStorage="*res://scripts/world/chest_storage.gd"
 WorldTime="*res://scripts/world/world_time.gd"
 WaterFX="*res://scripts/world/water_fx.gd"
+Music="*res://scripts/audio/music_player.gd"
 
 [display]
 

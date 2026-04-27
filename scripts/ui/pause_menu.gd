@@ -257,6 +257,7 @@ func _on_quit_to_title() -> void:
 	# Bare "Quit to Title" — we don't persist the world yet, so the vanilla
 	# "Save and quit to title" wording would lie to the player. Rename
 	# once phase-7 save/load lands and we can actually flush state to disk.
+	Music.stop_music()
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	get_tree().change_scene_to_file("res://scenes/ui/main_menu.tscn")
@@ -265,4 +266,5 @@ func _on_quit_to_title() -> void:
 func _on_quit_to_desktop() -> void:
 	# Modern convenience — vanilla Alpha only exposed this via the title
 	# screen. Skip world-save hook (same deferred-to-phase-7 story).
+	Music.stop_music()
 	get_tree().quit()

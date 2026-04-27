@@ -379,28 +379,30 @@ func _paint_slot(panel: Panel, stack: ItemStack) -> void:
 
 
 func _update_progress_bars(state: Dictionary) -> void:
-	# Arrow grows left → right. Crop both the AtlasTexture region's width
-	# and the Control's display width to the same ratio so the texture
-	# scales 1:1 with the visible bar.
+	# Arrow grows left → right. Vanilla getCookProgressScaled(24) returns an
+	# integer 0..24 — we mirror that to avoid sub-pixel AtlasTexture jitter.
 	var cook: int = state.cook_time
-	var arrow_ratio: float = clampf(float(cook) / float(Smelting.SMELT_TICKS), 0.0, 1.0)
-	var arrow_native_w: float = arrow_ratio * _ARROW_SIZE.x
-	_arrow_atlas.region = Rect2(176, 14, arrow_native_w, _ARROW_SIZE.y)
-	_arrow_fill.size.x = arrow_native_w * SCALE
+	var arrow_px: int = int(cook * _ARROW_SIZE.x / Smelting.SMELT_TICKS)
+	if arrow_px <= 0:
+		_arrow_fill.visible = false
+	else:
+		_arrow_fill.visible = true
+		_arrow_atlas.region = Rect2(176, 14, arrow_px, _ARROW_SIZE.y)
+		_arrow_fill.size.x = arrow_px * SCALE
 
-	# Flame grows bottom → top. Crop the region from the bottom (origin
-	# Y stays at FLAME_SIZE.y inset, height shrinks toward 0) so the
-	# remaining flame sliver always represents the bottom of the icon.
+	# Flame grows bottom → top. Vanilla getBurnTimeRemainingScaled(14)
+	# returns an integer 0..14.
 	var burn_total: int = state.burn_total
 	var burn_now: int = state.burn_time
-	var flame_ratio: float = (
-		clampf(float(burn_now) / float(burn_total), 0.0, 1.0) if burn_total > 0 else 0.0
-	)
-	var flame_native_h: float = flame_ratio * _FLAME_SIZE.y
-	_flame_atlas.region = Rect2(176, _FLAME_SIZE.y - flame_native_h, _FLAME_SIZE.x, flame_native_h)
-	var flame_px: float = flame_native_h * SCALE
-	_flame_fill.size.y = flame_px
-	_flame_fill.position.y = (_FLAME_POS.y + _FLAME_SIZE.y) * SCALE - flame_px
+	var flame_px: int = int(burn_now * _FLAME_SIZE.y / burn_total) if burn_total > 0 else 0
+	if flame_px <= 0:
+		_flame_fill.visible = false
+	else:
+		_flame_fill.visible = true
+		_flame_atlas.region = Rect2(176, _FLAME_SIZE.y - flame_px, _FLAME_SIZE.x, flame_px)
+		var flame_display: int = flame_px * SCALE
+		_flame_fill.size.y = flame_display
+		_flame_fill.position.y = (_FLAME_POS.y + _FLAME_SIZE.y) * SCALE - flame_display
 
 
 func _refresh_cursor_overlay() -> void:

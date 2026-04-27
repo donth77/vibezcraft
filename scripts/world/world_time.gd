@@ -117,34 +117,35 @@ func sky_factor() -> float:
 # gdlint: disable=max-returns
 func sky_color() -> Color:
 	var p: float = phase()
-	# Stops with explicit plateaus around noon and dusk peaks so the sky
-	# doesn't immediately start lerping the moment the player spawns:
-	#   0.00 - 0.05  night → dawn lerp
-	#   0.05 - 0.10  dawn peak (5% plateau ≈ 60s of orange dawn)
-	#   0.10 - 0.20  dawn → day lerp
-	#   0.20 - 0.30  pure noon plateau (10% = ~120s of stable cyan day)
-	#   0.30 - 0.40  day → dusk lerp
-	#   0.40 - 0.45  dusk peak plateau (5% ≈ 60s)
-	#   0.45 - 0.55  dusk → night lerp
-	#   0.55 - 1.00  pure night
-	# Earlier impl had no plateaus, so noon was a single-point lerp peak —
-	# the sky started transitioning to dusk-pink within seconds of spawn,
-	# giving the world a perpetual "almost sunset" look during the day.
-	if p < 0.05:
-		return _SKY_NIGHT.lerp(_SKY_DAWN, p / 0.05)
-	if p < 0.10:
+	# Vanilla oz.java:80 uses cos(angle*2π)*2+0.5 clamped to [0,1] for sky
+	# brightness — the *2+0.5 holds the clamp at 1.0 for ~49% of the cycle,
+	# giving a long stable blue sky from just after sunrise to just before
+	# sunset. Our piecewise stops approximate that with a 40% day plateau
+	# and quick ~4% dawn/dusk transitions matching vanilla's fast sunrise/set.
+	#
+	#   0.96 - 1.00  night → dawn lerp (pre-dawn glow, ~48s)
+	#   0.00 - 0.02  dawn peak (sunrise orange, ~24s)
+	#   0.02 - 0.05  dawn → day lerp (~36s)
+	#   0.05 - 0.45  pure day plateau (40% = ~480s ≈ 8 min blue sky)
+	#   0.45 - 0.50  day → dusk lerp (~60s)
+	#   0.50 - 0.53  dusk peak (sunset orange, ~36s)
+	#   0.53 - 0.58  dusk → night lerp (~60s)
+	#   0.58 - 0.96  pure night (38% = ~456s ≈ 7.6 min)
+	if p < 0.02:
 		return _SKY_DAWN
-	if p < 0.20:
-		return _SKY_DAWN.lerp(_SKY_DAY, (p - 0.10) / 0.10)
-	if p < 0.30:
-		return _SKY_DAY
-	if p < 0.40:
-		return _SKY_DAY.lerp(_SKY_DUSK, (p - 0.30) / 0.10)
+	if p < 0.05:
+		return _SKY_DAWN.lerp(_SKY_DAY, (p - 0.02) / 0.03)
 	if p < 0.45:
+		return _SKY_DAY
+	if p < 0.50:
+		return _SKY_DAY.lerp(_SKY_DUSK, (p - 0.45) / 0.05)
+	if p < 0.53:
 		return _SKY_DUSK
-	if p < 0.55:
-		return _SKY_DUSK.lerp(_SKY_NIGHT, (p - 0.45) / 0.10)
-	return _SKY_NIGHT
+	if p < 0.58:
+		return _SKY_DUSK.lerp(_SKY_NIGHT, (p - 0.53) / 0.05)
+	if p < 0.96:
+		return _SKY_NIGHT
+	return _SKY_NIGHT.lerp(_SKY_DAWN, (p - 0.96) / 0.04)
 
 
 # Ambient (unshadowed) light tint. Same shape as sky_factor — bright noon,

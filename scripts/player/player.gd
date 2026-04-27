@@ -582,13 +582,7 @@ func _build_held_tool(id: int) -> void:
 		if Items.is_tool_item(id):
 			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
 			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			var px_sign: float = -1.0
-			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
-				_held_tool_tp.rotation.y = PI
-				px_sign = 1.0
-			_held_tool_tp.position = Vector3(
-				px_sign * tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0
-			)
+			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
 		else:
 			var loose_ps: float = tp_ps * 0.6
 			_held_tool_tp.scale = Vector3(loose_ps, loose_ps, loose_ps)
