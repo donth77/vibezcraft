@@ -275,6 +275,12 @@
       "pattern": ["II", "II", "II"],
       "key": {"I": "iron_ingot"},
       "result": {"id": "iron_door", "count": 1}
+    },
+    {
+      "id": "ladder",
+      "pattern": ["S S", "SSS", "S S"],
+      "key": {"S": "stick"},
+      "result": {"id": "ladder", "count": 3}
     }
   ],
   "shapeless": [],

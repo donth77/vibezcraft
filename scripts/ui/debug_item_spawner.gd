@@ -47,6 +47,7 @@ const _BLOCKS: Array = [
 	Blocks.FENCE,
 	Blocks.WOOD_STAIRS,
 	Blocks.COBBLESTONE_STAIRS,
+	Blocks.LADDER,
 ]
 
 const _ITEMS: Array = [

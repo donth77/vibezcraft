@@ -465,7 +465,7 @@ func _material_for(block_id: int) -> String:
 			return "sand"
 		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE, Blocks.TORCH:
 			return "wood"
-		Blocks.CHEST, Blocks.FENCE, Blocks.WOOD_STAIRS, Blocks.WOODEN_DOOR:
+		Blocks.CHEST, Blocks.FENCE, Blocks.WOOD_STAIRS, Blocks.WOODEN_DOOR, Blocks.LADDER:
 			return "wood"
 		Blocks.IRON_DOOR:
 			return "stone"

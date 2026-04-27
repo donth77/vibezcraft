@@ -194,6 +194,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_door_geometry(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_LADDER:
+					_emit_ladder_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -347,6 +351,10 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 				elif ms == Blocks.MESH_SHAPE_DOOR:
 					_emit_door_geometry(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_LADDER:
+					_emit_ladder_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
 					)
 				else:
 					_emit_block_faces(
@@ -642,6 +650,115 @@ static func _emit_stair_geometry(
 	# walk up stairs without jumping (0.5-block step height).
 	_emit_collision_box(collision_faces, box_a_min, box_a_max)
 	_emit_collision_box(collision_faces, box_b_min, box_b_max)
+
+
+# Ladder geometry — flat 2/16-thick slab mounted against a wall face.
+# Vanilla ca.java: metadata 2..5 encodes the support direction (2=+Z,
+# 3=-Z, 4=+X, 5=-X). Two textured quads (front + back) so the ladder
+# is visible from both sides. Collision goes into plant_faces (layer 2)
+# so the player walks through ladders but can target them with the cursor.
+# gdlint: disable=function-arguments-number
+static func _emit_ladder_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	var d: float = 0.0625  # 1/16 — half of 2/16 thickness
+	# Quad corners for each meta — front face winding (CCW for cull_back).
+	# v0..v3 are the 4 corners of the front face; back face reverses order.
+	var v0: Vector3
+	var v1: Vector3
+	var v2: Vector3
+	var v3: Vector3
+	var normal_front: Vector3
+	match meta:
+		3:  # -Z face (support at -Z)
+			v0 = Vector3(fx, fy, fz + d)
+			v1 = Vector3(fx, fy + 1.0, fz + d)
+			v2 = Vector3(fx + 1.0, fy + 1.0, fz + d)
+			v3 = Vector3(fx + 1.0, fy, fz + d)
+			normal_front = Vector3(0, 0, 1)
+		4:  # +X face (support at +X)
+			v0 = Vector3(fx + 1.0 - d, fy, fz)
+			v1 = Vector3(fx + 1.0 - d, fy + 1.0, fz)
+			v2 = Vector3(fx + 1.0 - d, fy + 1.0, fz + 1.0)
+			v3 = Vector3(fx + 1.0 - d, fy, fz + 1.0)
+			normal_front = Vector3(-1, 0, 0)
+		5:  # -X face (support at -X)
+			v0 = Vector3(fx + d, fy, fz + 1.0)
+			v1 = Vector3(fx + d, fy + 1.0, fz + 1.0)
+			v2 = Vector3(fx + d, fy + 1.0, fz)
+			v3 = Vector3(fx + d, fy, fz)
+			normal_front = Vector3(1, 0, 0)
+		_:  # 2 / default: +Z face (support at +Z)
+			v0 = Vector3(fx + 1.0, fy, fz + 1.0 - d)
+			v1 = Vector3(fx + 1.0, fy + 1.0, fz + 1.0 - d)
+			v2 = Vector3(fx, fy + 1.0, fz + 1.0 - d)
+			v3 = Vector3(fx, fy, fz + 1.0 - d)
+			normal_front = Vector3(0, 0, -1)
+	var uv_rect: Rect2 = BlockAtlas.uv_rect("ladder")
+	var u0: float = uv_rect.position.x
+	var v_top: float = uv_rect.position.y
+	var u1: float = uv_rect.position.x + uv_rect.size.x
+	var v_bot: float = uv_rect.position.y + uv_rect.size.y
+	var sky: int = chunk.get_sky_light(x, y, z)
+	var blk: int = chunk.get_block_light(x, y, z)
+	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	# Front face
+	var base: int = verts.size()
+	verts.append(v0)
+	verts.append(v1)
+	verts.append(v2)
+	verts.append(v3)
+	for i in range(4):
+		norms.append(normal_front)
+		colors.append(face_color)
+	uvs.append(Vector2(u0, v_bot))
+	uvs.append(Vector2(u0, v_top))
+	uvs.append(Vector2(u1, v_top))
+	uvs.append(Vector2(u1, v_bot))
+	indices.append(base)
+	indices.append(base + 2)
+	indices.append(base + 1)
+	indices.append(base)
+	indices.append(base + 3)
+	indices.append(base + 2)
+	# Back face (reversed winding)
+	var normal_back: Vector3 = -normal_front
+	base = verts.size()
+	verts.append(v3)
+	verts.append(v2)
+	verts.append(v1)
+	verts.append(v0)
+	for i in range(4):
+		norms.append(normal_back)
+		colors.append(face_color)
+	uvs.append(Vector2(u0, v_bot))
+	uvs.append(Vector2(u0, v_top))
+	uvs.append(Vector2(u1, v_top))
+	uvs.append(Vector2(u1, v_bot))
+	indices.append(base)
+	indices.append(base + 2)
+	indices.append(base + 1)
+	indices.append(base)
+	indices.append(base + 3)
+	indices.append(base + 2)
+	# Selection collision (plant_faces layer 2) — thin AABB matching the slab.
+	var aabb: AABB = Blocks.selection_aabb(Blocks.LADDER, meta)
+	var cmin := Vector3(fx + aabb.position.x, fy + aabb.position.y, fz + aabb.position.z)
+	var cmax := cmin + aabb.size
+	_emit_collision_box(plant_faces, cmin, cmax)
 
 
 # Door geometry — thin 3/16-block slab with 4 orientations × open/closed.

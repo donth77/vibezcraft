@@ -799,6 +799,22 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		SFX.play_place(Blocks.TORCH)
 		inv.consume_one_selected()
 		return true
+	# Vanilla BlockLadder (ca.java) — wall-mount only (no floor/ceiling).
+	# Metadata 2..5 encodes which wall the ladder sits against. Requires an
+	# opaque block on the support side; rejects placement otherwise.
+	if stack.item_id == Blocks.LADDER:
+		var ladder_meta: int = _ladder_meta_from_face(hit.normal_i, place)
+		if ladder_meta == 0:
+			return false
+		var displaced_for_ladder: int = _chunk_manager.get_world_block(place)
+		if displaced_for_ladder != Blocks.AIR:
+			var dd: int = Blocks.drops(displaced_for_ladder)
+			if dd != Blocks.AIR:
+				_spawn_dropped_item(place, dd)
+		_chunk_manager.set_world_block_with_meta(place, Blocks.LADDER, ladder_meta)
+		SFX.play_place(Blocks.LADDER)
+		inv.consume_one_selected()
+		return true
 	# Replacing a non-AIR cell — vanilla Block.dropBlockAsItem fires before
 	# the new block clobbers the old one, so e.g. placing stone over a
 	# sapling drops the sapling as a pickup. Skipped if the cell was AIR.
@@ -1037,6 +1053,47 @@ func _torch_neighbor_solid(pos: Vector3i) -> bool:
 		return false
 	var nb: int = _chunk_manager.get_world_block(pos)
 	return nb != Blocks.AIR and Blocks.is_opaque(nb)
+
+
+# Vanilla ca.java — ladder placement meta from the clicked face normal.
+# Ladders only attach to vertical walls (no floor/ceiling). Meta 2..5
+# encodes the support direction:
+#   normal (0,0,-1) → support at +Z → meta 2
+#   normal (0,0,+1) → support at -Z → meta 3
+#   normal (-1,0,0) → support at +X → meta 4
+#   normal (+1,0,0) → support at -X → meta 5
+# Returns 0 if no valid support exists (rejects placement).
+func _ladder_meta_from_face(normal_i: Vector3i, place: Vector3i) -> int:
+	if normal_i.y != 0:
+		# Clicked top or bottom face — scan for any solid horizontal neighbor.
+		for pair: Array in [
+			[Vector3i(0, 0, 1), 2],
+			[Vector3i(0, 0, -1), 3],
+			[Vector3i(1, 0, 0), 4],
+			[Vector3i(-1, 0, 0), 5]
+		]:
+			if _torch_neighbor_solid(place + pair[0]):
+				return pair[1] as int
+		return 0
+	# Clicked a vertical face — support is opposite the normal.
+	if normal_i.z == -1 and _torch_neighbor_solid(place + Vector3i(0, 0, 1)):
+		return 2
+	if normal_i.z == 1 and _torch_neighbor_solid(place + Vector3i(0, 0, -1)):
+		return 3
+	if normal_i.x == -1 and _torch_neighbor_solid(place + Vector3i(1, 0, 0)):
+		return 4
+	if normal_i.x == 1 and _torch_neighbor_solid(place + Vector3i(-1, 0, 0)):
+		return 5
+	# Clicked face doesn't have a solid support — try any neighbor.
+	for pair: Array in [
+		[Vector3i(0, 0, 1), 2],
+		[Vector3i(0, 0, -1), 3],
+		[Vector3i(1, 0, 0), 4],
+		[Vector3i(-1, 0, 0), 5]
+	]:
+		if _torch_neighbor_solid(place + pair[0]):
+			return pair[1] as int
+	return 0
 
 
 func _set_player_mining(active: bool) -> void:

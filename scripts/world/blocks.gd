@@ -100,6 +100,12 @@ const COBBLESTONE_STAIRS := 32
 # don't open by hand (require redstone, which we don't have yet).
 const WOODEN_DOOR := 33
 const IRON_DOOR := 34
+# Vanilla Alpha BlockLadder (ca.java / nq.aF, id 65). Thin 2/16 slab
+# mounted against one of 4 cardinal walls. Metadata 2..5 encodes facing
+# (2=+Z, 3=-Z, 4=+X, 5=-X — same scheme as torch wall metas). Hardness
+# 0.4, axe-preferred, wood material. Player climbing physics clamp fall
+# speed and allow upward movement when overlapping the ladder cell.
+const LADDER := 35
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -131,6 +137,9 @@ const MESH_SHAPE_STAIRS: int = 5
 # Thin 3/16-block slab with 4 orientations × open/closed from metadata.
 # Two-block tall: lower half renders the bottom texture, upper the top.
 const MESH_SHAPE_DOOR: int = 6
+# Flat 2/16-thick slab mounted against a wall face. 4 orientations via
+# metadata (2..5), same as torch wall variants. Vanilla render type 8.
+const MESH_SHAPE_LADDER: int = 7
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -201,6 +210,7 @@ static func is_opaque(id: int) -> bool:
 		and id != COBBLESTONE_STAIRS
 		and id != WOODEN_DOOR
 		and id != IRON_DOOR
+		and id != LADDER
 	)
 
 
@@ -325,6 +335,7 @@ static func _build_light_opacity_lut() -> void:
 	# Doors: thin slab, light passes around them. gv.java:35 a()=false.
 	_light_opacity_lut[WOODEN_DOOR] = 0
 	_light_opacity_lut[IRON_DOOR] = 0
+	_light_opacity_lut[LADDER] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -404,6 +415,19 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		return AABB(Vector3.ZERO, Vector3(1.0, 1.5, 1.0))
 	if id == WOODEN_DOOR or id == IRON_DOOR:
 		return _door_selection_aabb(meta)
+	if id == LADDER:
+		# Vanilla ca.java — 0.125-thick slab against the support wall.
+		var f: float = 0.125
+		match meta:
+			2:
+				return AABB(Vector3(0, 0, 1.0 - f), Vector3(1, 1, f))
+			3:
+				return AABB(Vector3(0, 0, 0), Vector3(1, 1, f))
+			4:
+				return AABB(Vector3(1.0 - f, 0, 0), Vector3(f, 1, 1))
+			5:
+				return AABB(Vector3(0, 0, 0), Vector3(f, 1, 1))
+		return AABB(Vector3(0, 0, 1.0 - f), Vector3(1, 1, f))
 	return AABB(Vector3.ZERO, Vector3.ONE)
 
 
@@ -447,6 +471,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_STAIRS
 	if id == WOODEN_DOOR or id == IRON_DOOR:
 		return MESH_SHAPE_DOOR
+	if id == LADDER:
+		return MESH_SHAPE_LADDER
 	return MESH_SHAPE_CUBE
 
 
@@ -481,6 +507,8 @@ static func hardness(id: int) -> float:
 			return 0.5
 		GRASS, FARMLAND, GRAVEL:
 			return 0.6
+		LADDER:
+			return 0.4  # ca.java `c(0.4f)` — soft wood, quick break
 		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, COBBLESTONE_STAIRS:
 			# mb.java:14 `this.c(nq2.bi)` — inherits parent hardness (2.0).
 			return 2.0
@@ -528,7 +556,7 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_PICKAXE
 		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
-		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR:
+		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR, LADDER:
 			return Items.TOOL_TYPE_AXE
 		IRON_DOOR:
 			return Items.TOOL_TYPE_PICKAXE
@@ -737,6 +765,8 @@ static func name_of(id: int) -> String:
 			return "wooden_door"
 		IRON_DOOR:
 			return "iron_door"
+		LADDER:
+			return "ladder"
 	return "unknown"
 
 
@@ -850,6 +880,8 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "planks"
 		COBBLESTONE_STAIRS:
 			return "cobblestone"
+		LADDER:
+			return "ladder"
 	return ""
 
 

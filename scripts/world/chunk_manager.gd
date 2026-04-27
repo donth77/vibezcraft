@@ -607,6 +607,11 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	# cell directly above. Cheap: one lookup, one is_valid check.
 	if not Blocks.is_valid_plant_support(id):
 		_drop_plant_if_unsupported(coord, local_x, world_pos.y + 1, local_z)
+	# Ladder / torch neighbor update — when a block becomes non-opaque,
+	# attached ladders and torches on the 4 horizontal faces lose their
+	# support and should pop off (vanilla ca.java:a / ob.java:a).
+	if old_id != id and Blocks.is_opaque(old_id) and not Blocks.is_opaque(id):
+		_drop_unsupported_wall_blocks(world_pos)
 	# Sapling growth queue — when a sapling is placed (player drop or
 	# bonemeal-spawn later), schedule it for a future tree growth tick.
 	if id == Blocks.SAPLING:
@@ -800,6 +805,57 @@ func _drop_plant_if_unsupported(coord: Vector2i, local_x: int, local_y: int, loc
 	var dropped_id: int = Blocks.drops(here_id)
 	if dropped_id != Blocks.AIR:
 		_spawn_dropped_item(plant_pos, dropped_id)
+
+
+# Vanilla ca.java:a / ob.java:a — when a block becomes non-opaque, scan
+# the 4 horizontal neighbors for ladders/torches that used it as their
+# support wall. If found and the support is gone, pop them off as drops.
+func _drop_unsupported_wall_blocks(removed_pos: Vector3i) -> void:
+	# Ladder meta → support offset: meta 2 → +Z, 3 → -Z, 4 → +X, 5 → -X.
+	# Torch meta → support offset: meta 1 → -X, 2 → +X, 3 → -Z, 4 → +Z, 5 → floor.
+	const HORIZ_OFFSETS: Array[Vector3i] = [
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1),
+	]
+	for off: Vector3i in HORIZ_OFFSETS:
+		var np: Vector3i = removed_pos + off
+		var nid: int = get_world_block(np)
+		if nid == Blocks.LADDER:
+			var meta: int = get_world_block_meta(np)
+			var support_off: Vector3i
+			match meta:
+				2:
+					support_off = Vector3i(0, 0, 1)
+				3:
+					support_off = Vector3i(0, 0, -1)
+				4:
+					support_off = Vector3i(1, 0, 0)
+				5:
+					support_off = Vector3i(-1, 0, 0)
+				_:
+					continue
+			if np + support_off == removed_pos:
+				set_world_block(np, Blocks.AIR)
+				_spawn_dropped_item(np, Blocks.LADDER)
+		elif nid == Blocks.TORCH:
+			var meta: int = get_world_block_meta(np)
+			var support_off: Vector3i
+			match meta:
+				1:
+					support_off = Vector3i(-1, 0, 0)
+				2:
+					support_off = Vector3i(1, 0, 0)
+				3:
+					support_off = Vector3i(0, 0, -1)
+				4:
+					support_off = Vector3i(0, 0, 1)
+				_:
+					continue
+			if np + support_off == removed_pos:
+				set_world_block(np, Blocks.AIR)
+				_spawn_dropped_item(np, Blocks.TORCH)
 
 
 # Mirrors interaction.gd._spawn_dropped_item. Local copy here so the

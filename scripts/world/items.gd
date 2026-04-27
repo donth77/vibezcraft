@@ -333,6 +333,8 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.WOOD_STAIRS
 		"cobblestone_stairs":
 			return Blocks.COBBLESTONE_STAIRS
+		"ladder":
+			return Blocks.LADDER
 	return -1
 
 
@@ -492,6 +494,8 @@ static func display_name(item_id: int) -> String:
 			return "Wooden Stairs"
 		Blocks.COBBLESTONE_STAIRS:
 			return "Cobblestone Stairs"
+		Blocks.LADDER:
+			return "Ladder"
 	return ""
 
 

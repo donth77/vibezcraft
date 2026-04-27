@@ -55,8 +55,9 @@ func stop_music() -> void:
 	_active = false
 	if _gap_timer != null:
 		_gap_timer.stop()
-	if _player != null and _player.playing:
+	if _player != null:
 		_player.stop()
+		_player.stream = null
 
 
 func set_volume(linear: float) -> void:

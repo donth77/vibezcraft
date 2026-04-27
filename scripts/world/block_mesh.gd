@@ -23,6 +23,8 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 			_cache[key] = _build_stair(block_id, size)
 		elif block_id == Blocks.WOODEN_DOOR or block_id == Blocks.IRON_DOOR:
 			_cache[key] = _build_door(block_id, size)
+		elif block_id == Blocks.LADDER:
+			_cache[key] = _build_ladder(size)
 		else:
 			_cache[key] = _build(block_id, size)
 	return _cache[key] as ArrayMesh
@@ -429,3 +431,53 @@ static func _emit_torch_face(
 	uvs.append(Vector2(u_right, v_bot))
 	uvs.append(Vector2(u_right, v_top))
 	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
+
+
+static func _build_ladder(size: float) -> ArrayMesh:
+	var s: float = size * 0.5
+	var d: float = size * 0.0625  # 1/16 of size — thin slab
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	var uv_rect: Rect2 = BlockAtlas.uv_rect("ladder")
+	var u0: float = uv_rect.position.x
+	var v0: float = uv_rect.position.y
+	var u1: float = u0 + uv_rect.size.x
+	var v1: float = v0 + uv_rect.size.y
+	# Front face (+Z)
+	var base: int = verts.size()
+	verts.append(Vector3(-s, -s, d))
+	verts.append(Vector3(-s, s, d))
+	verts.append(Vector3(s, s, d))
+	verts.append(Vector3(s, -s, d))
+	for _i in range(4):
+		norms.append(Vector3(0, 0, 1))
+	uvs.append(Vector2(u0, v1))
+	uvs.append(Vector2(u0, v0))
+	uvs.append(Vector2(u1, v0))
+	uvs.append(Vector2(u1, v1))
+	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
+	# Back face (-Z)
+	base = verts.size()
+	verts.append(Vector3(s, -s, -d))
+	verts.append(Vector3(s, s, -d))
+	verts.append(Vector3(-s, s, -d))
+	verts.append(Vector3(-s, -s, -d))
+	for _i in range(4):
+		norms.append(Vector3(0, 0, -1))
+	uvs.append(Vector2(u0, v1))
+	uvs.append(Vector2(u0, v0))
+	uvs.append(Vector2(u1, v0))
+	uvs.append(Vector2(u1, v1))
+	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(0, BlockAtlas.material())
+	return mesh

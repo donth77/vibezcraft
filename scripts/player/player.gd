@@ -20,6 +20,10 @@ const GRAVITY: float = -32.0
 const STEP_HEIGHT: float = 0.6
 const MOUSE_SENSITIVITY: float = 0.002
 const PITCH_LIMIT_DEG: float = 89.0
+# Vanilla ladder climbing (hf.java / EntityLiving.e()). Climb speed
+# 0.1175 blocks/tick × 20 TPS = 2.35 b/s. Max descent 0.15 b/tick = 3 b/s.
+const LADDER_CLIMB_SPEED: float = 2.35
+const LADDER_MAX_DESCENT: float = 3.0
 
 # Vanilla water physics (EntityLiving.e() in Bukkit/mc-dev):
 #   motY *= 0.5
@@ -272,6 +276,11 @@ var _tp_held_tool_position: Vector3 = Vector3(0, -0.75, -0.15)
 var _tp_held_tool_rotation: Vector3 = Vector3(deg_to_rad(-20), deg_to_rad(35), 0)
 var _tp_held_tool_pixel_size: float = 0.035
 
+# Axe-specific TP mesh rotation offset. Axes have a diagonal blade (top-right)
+# that, after the shared orient rotations, points up into the player's face.
+# These offsets apply to _held_tool_tp.rotation when the held item is an axe.
+var _axe_tp_mesh_rotation: Vector3 = Vector3(PI, 0, deg_to_rad(-80))
+
 # "fp" or "tp" — which value set the tuner sliders read/write.
 var _tuner_mode: String = "fp"
 
@@ -455,7 +464,11 @@ func _update_held_item() -> void:
 		# sprite-extruder path. Everything else goes through the held-block
 		# path — BlockMesh.get_cube_mesh special-cases TORCH (pillar),
 		# FENCE (post), and STAIRS (step shape) so they render correctly.
-		var as_sprite: bool = id >= Items.STICK or shape == Blocks.MESH_SHAPE_CROSS
+		var as_sprite: bool = (
+			id >= Items.STICK
+			or shape == Blocks.MESH_SHAPE_CROSS
+			or shape == Blocks.MESH_SHAPE_LADDER
+		)
 		if as_sprite:
 			_build_held_tool(id)
 		else:
@@ -583,6 +596,8 @@ func _build_held_tool(id: int) -> void:
 			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
 			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
 			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
+				_held_tool_tp.rotation = _axe_tp_mesh_rotation
 		else:
 			var loose_ps: float = tp_ps * 0.6
 			_held_tool_tp.scale = Vector3(loose_ps, loose_ps, loose_ps)
@@ -646,6 +661,9 @@ func get_tuner_value(key: String) -> float:
 		"swing_y_deg": _tool_swing_y_deg,
 		"swing_z_deg": _tool_swing_z_deg,
 		"swing_thrust_fwd": _tool_swing_thrust_fwd,
+		"axe_rot_x_deg": rad_to_deg(_axe_tp_mesh_rotation.x),
+		"axe_rot_y_deg": rad_to_deg(_axe_tp_mesh_rotation.y),
+		"axe_rot_z_deg": rad_to_deg(_axe_tp_mesh_rotation.z),
 	}
 	return values.get(key, 0.0)
 
@@ -701,6 +719,15 @@ func _apply_tp_tuner_value(key: String, v: float) -> void:
 			_tp_held_tool_rotation.z = deg_to_rad(v)
 		"pixel_size":
 			_tp_held_tool_pixel_size = v
+		"axe_rot_x_deg":
+			_axe_tp_mesh_rotation.x = deg_to_rad(v)
+			_refresh_axe_tp_rotation()
+		"axe_rot_y_deg":
+			_axe_tp_mesh_rotation.y = deg_to_rad(v)
+			_refresh_axe_tp_rotation()
+		"axe_rot_z_deg":
+			_axe_tp_mesh_rotation.z = deg_to_rad(v)
+			_refresh_axe_tp_rotation()
 
 
 # Pure forward-chop swing for tools — pickaxe head pitches down/forward
@@ -816,10 +843,21 @@ func _refresh_tp_pose() -> void:
 	if _held_tool_tp != null and inventory != null:
 		var ps: float = _tp_held_tool_pixel_size
 		_held_tool_tp.scale = Vector3(ps, ps, ps)
-		var tex: Texture2D = ItemIcons.icon_for(inventory.selected().item_id)
+		var id: int = inventory.selected().item_id
+		var tex: Texture2D = ItemIcons.icon_for(id)
 		if tex != null:
 			var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
 			_held_tool_tp.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
+		if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
+			_held_tool_tp.rotation = _axe_tp_mesh_rotation
+
+
+func _refresh_axe_tp_rotation() -> void:
+	if _held_tool_tp == null or inventory == null:
+		return
+	var id: int = inventory.selected().item_id
+	if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
+		_held_tool_tp.rotation = _axe_tp_mesh_rotation
 
 
 # Original FP-hand / held-block swing — vanilla MC's bare-hand path uses
@@ -1201,8 +1239,14 @@ func _physics_process(delta: float) -> void:
 	_was_in_water = false
 	_swim_distance = 0.0
 
+	var on_ladder: bool = _is_on_ladder()
+
 	if not is_on_floor():
 		velocity.y += GRAVITY * delta
+	if on_ladder:
+		velocity.y = maxf(velocity.y, -LADDER_MAX_DESCENT)
+		if _is_sneaking:
+			velocity.y = maxf(velocity.y, 0.0)
 	if Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 	_update_sneak()
@@ -1220,6 +1264,12 @@ func _physics_process(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, 0, speed)
 		velocity.z = move_toward(velocity.z, 0, speed)
 
+	if on_ladder and not _is_sneaking:
+		var climbing: bool = (
+			Input.is_action_pressed("move_forward") or Input.is_action_pressed("jump")
+		)
+		if climbing:
+			velocity.y = LADDER_CLIMB_SPEED
 	var was_grounded: bool = is_on_floor()
 	var pre_slide_vel: Vector3 = velocity
 	move_and_slide()
@@ -1254,10 +1304,9 @@ func _physics_process(delta: float) -> void:
 		if _held_tool_pivot != null and _held_tool_pivot.visible:
 			_apply_tool_swing(_held_tool_pivot, _held_tool_position, _held_tool_rotation, progress)
 
+	if on_ladder:
+		_fall_peak_y = global_position.y
 	_update_fall_tracking()
-	# Cooldown decrement moved to the top of _physics_process so it runs
-	# for every branch (water, flight, walking). Leaving the comment here
-	# as a breadcrumb.
 	_tick_health_regen(delta)
 
 
@@ -1675,6 +1724,20 @@ func _pushing_into_wall(attempted_vx: float, attempted_vz: float) -> bool:
 	# The 0.3 threshold kills grazing contact where the input is nearly
 	# parallel to the wall.
 	return attempted.normalized().dot(-wall_normal) > 0.3
+
+
+func _is_on_ladder() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	var foot_y: int = int(floor(global_position.y - 0.85))
+	if cm.get_world_block(Vector3i(x, foot_y, z)) == Blocks.LADDER:
+		return true
+	if cm.get_world_block(Vector3i(x, foot_y + 1, z)) == Blocks.LADDER:
+		return true
+	return false
 
 
 # Vanilla's swim-onto-land auto-step. Fires when move_and_slide reports a

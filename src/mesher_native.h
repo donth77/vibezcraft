@@ -74,6 +74,7 @@ public:
 	// GDScript mesher; native path skips cube emission and treats as non-opaque.
 	static constexpr int WOODEN_DOOR = 33;
 	static constexpr int IRON_DOOR = 34;
+	static constexpr int LADDER = 35;
 
 	MesherNative();
 	~MesherNative();

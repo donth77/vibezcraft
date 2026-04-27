@@ -69,6 +69,7 @@ const _LAYOUT := {
 	"door_wood_upper": 35,
 	"door_iron_lower": 36,
 	"door_iron_upper": 37,
+	"ladder": 38,
 }
 
 static var active_pack: String = DEFAULT_PACK

@@ -49,6 +49,12 @@ const _SPECS: Array = [
 	["swing_thrust_fwd", "Swing Thrust Fwd", -0.5, 0.5, 0.005],
 ]
 
+const _AXE_SPECS: Array = [
+	["axe_rot_x_deg", "Axe Rot X (°)", -180.0, 180.0, 1.0],
+	["axe_rot_y_deg", "Axe Rot Y (°)", -180.0, 180.0, 1.0],
+	["axe_rot_z_deg", "Axe Rot Z (°)", -180.0, 180.0, 1.0],
+]
+
 const _ROW_HEIGHT: int = 52
 const _FONT_SIZE: int = 26
 const _PANEL_WIDTH: int = 680
@@ -56,6 +62,7 @@ const _PANEL_WIDTH: int = 680
 var _player: Node  # weak ref; we read/write its tunable vars directly
 var _was_captured: bool = false
 var _rows: Dictionary = {}  # key -> {slider, value_label}
+var _axe_rows: Array[Control] = []  # axe-specific row containers (show/hide with mode)
 var _vanilla_btn: Button
 var _orient_btn: Button
 var _mode_btn: Button
@@ -77,7 +84,7 @@ func _ready() -> void:
 	offset_top = 16
 	offset_right = 16 + _PANEL_WIDTH
 	# +6 rows = title + mode btn + vanilla btn + orient btn + preset btn + padding.
-	offset_bottom = 16 + _ROW_HEIGHT * (_SPECS.size() + 6)
+	offset_bottom = 16 + _ROW_HEIGHT * (_SPECS.size() + _AXE_SPECS.size() + 6)
 
 	var bg := ColorRect.new()
 	bg.color = Color(0, 0, 0, 0.65)
@@ -113,6 +120,12 @@ func _ready() -> void:
 	for spec: Array in _SPECS:
 		var row := _build_row(spec[0], spec[1], spec[2], spec[3], spec[4])
 		vbox.add_child(row)
+
+	for spec: Array in _AXE_SPECS:
+		var row := _build_row(spec[0], spec[1], spec[2], spec[3], spec[4])
+		vbox.add_child(row)
+		_axe_rows.append(row)
+		row.visible = false
 
 	# Vanilla-curves toggle. When ON, _apply_tool_swing on the player uses
 	# verbatim Beta 1.7.3 ItemRenderer math (3-axis sin curves + translate)
@@ -195,7 +208,8 @@ func _on_slider(key: String, v: float) -> void:
 func _pull_values_from_player() -> void:
 	if _player == null:
 		return
-	for spec: Array in _SPECS:
+	var all_specs: Array = _SPECS + _AXE_SPECS
+	for spec: Array in all_specs:
 		var key: String = spec[0]
 		if not _player.has_method("get_tuner_value"):
 			break
@@ -206,6 +220,7 @@ func _pull_values_from_player() -> void:
 	_refresh_vanilla_btn()
 	_refresh_orient_btn()
 	_refresh_mode_btn()
+	_refresh_axe_row_visibility()
 
 
 func _toggle_vanilla(_btn: Button) -> void:
@@ -229,6 +244,7 @@ func _toggle_mode() -> void:
 	var next: String = "tp" if current == "fp" else "fp"
 	_player.set_tuner_mode(next)
 	_pull_values_from_player()  # refreshes sliders + button labels
+	_refresh_axe_row_visibility()
 
 
 # Snaps every slider to the active mode's preset. Forces vanilla curves
@@ -307,3 +323,11 @@ func close() -> void:
 	visible = false
 	if _was_captured:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _refresh_axe_row_visibility() -> void:
+	var show: bool = false
+	if _player != null and _player.has_method("get_tuner_mode"):
+		show = _player.get_tuner_mode() == "tp"
+	for row: Control in _axe_rows:
+		row.visible = show

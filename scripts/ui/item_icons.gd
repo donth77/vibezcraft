@@ -28,6 +28,7 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.GLASS: "glass",
 	Blocks.SAPLING: "sapling",
 	Blocks.TORCH: "torch",
+	Blocks.LADDER: "ladder",
 }
 
 # Item sprite basenames. Resolved at load time: first try

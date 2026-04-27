@@ -544,7 +544,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER) {
 					continue;
 				}
 
@@ -576,7 +576,7 @@ Dictionary MesherNative::mesh_chunk_data(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -785,7 +785,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER) {
 					continue;
 				}
 				for (int face = 0; face < 6; face++) {
@@ -823,7 +823,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
