@@ -16,24 +16,28 @@ Canonical planning docs:
 - `.claude/PLANNING.md` — vision, stack rationale, Alpha mechanics reference
 - `.claude/implementationplan.md` — phase-by-phase execution plan (read this before starting work on a new phase)
 - `.claude/alpha-mechanics.md` — reference for Alpha-faithful numbers (break times, heights, etc.)
-- `optimizations.md` — catalog of higher-risk perf improvements deliberately deferred
+- `.claude/optimizations.md` — catalog of higher-risk perf improvements deliberately deferred
 
 ## Current state
 
-**Phase 5 shipped:** crafting & tools.
+**Phase 6 in progress:** day/night + lighting shipped; mobs not yet started.
 
-- **Worldgen:** 2D Perlin heightmap, stratified bedrock/stone/dirt/grass, oak trees, ore veins (coal/iron/gold/diamond) via a deterministic port of vanilla `WorldGenMinable` (ellipsoid-along-line fill). Each chunk runs 4 decoration passes (own + 3 SW neighbors) to recover vanilla's +8,+8 spillover without cross-chunk writes. Per-chunk ore yields land in [100%, 140%] of vanilla Alpha empirical numbers — see `test_ore_density_matches_vanilla_alpha`.
-- **Blocks:** stone-family + ores + crafting table (IDs 0–16). Hardness, harvest-level, preferred-tool-type, break-time math all vanilla Alpha.
-- **Items & tools:** 11 non-block items (sticks, pickaxes/axes/shovels × wood/stone/iron/diamond, raw materials). Tool speed + tier gating on drops, durability tracked.
+- **Worldgen:** 2D Perlin heightmap, stratified bedrock/stone/dirt/grass, oak trees, caves (`worldgen_caves.gd`), ore veins (coal/iron/gold/diamond) via a deterministic port of vanilla `WorldGenMinable` (ellipsoid-along-line fill). Each chunk runs 4 decoration passes (own + 3 SW neighbors) to recover vanilla's +8,+8 spillover without cross-chunk writes. Per-chunk ore yields land in [100%, 140%] of vanilla Alpha empirical numbers — see `test_ore_density_matches_vanilla_alpha`.
+- **Blocks:** 36 block types (IDs 0–35). Stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors (wood + iron), chests, furnaces (lit/unlit), ladders, flowing water & lava, fire, saplings. Hardness, harvest-level, preferred-tool-type, break-time math all vanilla Alpha.
+- **Items & tools:** 50 items (IDs 100+). Full tool tiers (pickaxe/axe/shovel/sword/hoe × wood/stone/iron/diamond/gold), armor sets (iron/gold/diamond), buckets (empty/water/lava), flint & steel, raw materials (coal, iron ingot, gold ingot, diamond, charcoal, flint, leather, bonemeal). Tool speed + tier gating on drops, durability tracked.
 - **Crafting:** recipe registry (shaped + shapeless) loaded from `data/recipes.json` on boot. Live-updated craft result in `Inventory` (2×2 grid at slots 40–43). Crafting table block opens a 3×3 screen.
-- **Inventory UI:** 45-slot model (9 hotbar + 27 main + 4 armor + 4 craft grid + 1 result). Screens: full inventory, crafting table, pause menu, hotbar. Pre-baked 3D isometric block icons via offscreen SubViewport (one-time cost at boot).
-- **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for first/third-person held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation.
-- **Audio:** footstep cadence tied to horizontal movement (grass/cloth variants, 1.6-block interval).
-- **Dev tools:** `tool_tuner.gd` (runtime FP/TP held-item pose sliders), `debug_stats.gd` (FPS / chunk load overlay), `MC_CLONE_RESOLUTION` env override.
+- **Smelting:** furnace with fuel/input/output slots (`furnace_manager.gd`), burn-time tracking, vanilla smelt times, lit/unlit block state.
+- **Inventory UI:** 45-slot model (9 hotbar + 27 main + 4 armor + 4 craft grid + 1 result). Screens: full inventory, crafting table, furnace, chest, pause menu, hotbar. Pre-baked 3D isometric block icons via offscreen SubViewport (one-time cost at boot).
+- **Day/night cycle:** `world_time.gd` autoload — vanilla 20-minute day (24000-tick cycle), sky color gradient (dawn/day/dusk/night stops), sun direction + energy, sky factor for light scaling. `day_night_driver.gd` applies WorldTime to the scene's DirectionalLight3D + WorldEnvironment.
+- **Lighting:** BFS flood-fill sky light + block light propagation (`lighting.gd`), per-face brightness LUT in `chunk.gdshader`. Torches emit light level 14, furnaces 13.
+- **Fluids:** finite water/lava flow propagation (`block_fluids.gd`), water/lava shaders with UV animation, swim mechanics, bucket place/pickup.
+- **Health & combat:** fall damage, drowning, fire/lava damage, health regeneration, death screen with respawn, damage overlay, armor damage reduction.
+- **Storage:** per-block chest and furnace inventories with dedicated UI screens (`chest_screen.gd`, `furnace_screen.gd`).
+- **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for first/third-person held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation. Axe-specific TP mesh rotation.
+- **Audio:** footstep cadence tied to horizontal movement (grass/cloth/stone/sand/gravel variants), block break/place SFX by material, ambient sounds (`ambient_fx.gd`), C418-style music player (`music_player.gd`).
+- **Dev tools:** `tool_tuner.gd` (runtime FP/TP held-item pose sliders + axe rotation knobs), `debug_stats.gd` (FPS / chunk load overlay), `debug_item_spawner.gd`, `MC_CLONE_RESOLUTION` env override.
 
-Earlier phases: Phase 3 (infinite world with threaded chunk loading, shared-material atlas rendering, pluggable texture packs), Phase 4 (base inventory, hotbar, audio scaffolding, hold-to-break, dropped items, Steve player model).
-
-Next: Phase 6 (day/night cycle, lighting propagation, mobs) per `implementationplan.md`.
+Earlier phases: Phase 3 (infinite world with threaded chunk loading, shared-material atlas rendering, pluggable texture packs), Phase 4 (base inventory, hotbar, audio scaffolding, hold-to-break, dropped items, Steve player model), Phase 5 (crafting & tools).
 
 ## Layout
 
@@ -42,38 +46,70 @@ scripts/
   game.gd                     # autoload — warms BlockAtlas + Worldgen + Recipes on main thread
   input_actions.gd            # InputMap setup
   world/
-    blocks.gd                 # block IDs, hardness, tool gating, drop table, face textures
+    blocks.gd                 # block IDs (0–35), hardness, tool gating, drop table, face textures
     items.gd                  # item IDs (100+), tool data (speed / harvest_level / durability)
     chunk.gd                  # pure block-data container (PackedByteArray, 16×128×16)
     chunk_node.gd             # Node3D wrapper: builds mesh + trimesh collision
     chunk_manager.gd          # streams chunks around player via WorkerThreadPool
     mesher.gd                 # face-culled mesher → ArrayMesh arrays
     worldgen.gd               # heightmap + ore veins (vanilla ellipsoid) + oak trees
+    worldgen_caves.gd         # cave carving pass
     block_atlas.gd            # packs per-block PNGs into one atlas, owns shared ShaderMaterial
+    block_mesh.gd             # non-cube mesh builders (torch, fence, stair, door, ladder)
+    block_fluids.gd           # water/lava finite flow propagation
+    block_fire.gd             # fire spread + extinction logic
+    block_fx.gd               # block break/place particle effects
+    fluid_fx.gd               # water/lava visual effects
+    water_fx.gd               # water surface rendering
+    ambient_fx.gd             # ambient environmental effects
     sprite_extruder.gd        # 2D item sprite → voxelized 3D mesh for held tools
+    world_time.gd             # day/night cycle (24000-tick day, sky factor, sun direction)
+    day_night_driver.gd       # applies WorldTime to scene lighting + environment
+    lighting.gd               # BFS sky light + block light flood fill
+    chest_storage.gd          # per-block chest inventory persistence
+    furnace_manager.gd        # furnace smelting logic (fuel, burn time, output)
+    falling_block.gd          # sand/gravel gravity cascade
+    dropped_item.gd           # item pickup entity
+    leaf_decay.gd             # leaf block decay when disconnected from logs
+    tick_scheduler.gd         # deferred block tick scheduling
+    sky_dome.gd               # sky background rendering
+    java_random.gd            # Java LCG port for vanilla-parity RNG
   crafting/
     recipes.gd                # registry: loads data/recipes.json, matches shaped + shapeless
   player/                     # player.gd, interaction.gd, inventory.gd, item_stack.gd, character_model.gd
-  ui/                         # hotbar_ui, inventory_screen, crafting_table_screen, pause_menu,
-                              #  debug_stats, tool_tuner, item_icons, block_icon_renderer,
-                              #  character_preview
+  entities/                   # chest_node.gd
+  audio/
+    sfx.gd                    # block/tool/step SFX by material type
+    music_player.gd           # C418-style ambient music with random gaps
+  ui/                         # hotbar_ui, inventory_screen, crafting_table_screen, furnace_screen,
+                              #  chest_screen, pause_menu, death_screen, main_menu, settings_menu,
+                              #  debug_stats, tool_tuner, debug_item_spawner, item_icons,
+                              #  block_icon_renderer, character_preview, hp_bar, air_bar,
+                              #  damage_overlay, water_overlay, fire_overlay, durability_bar,
+                              #  loading_screen, in_game_options, vanilla_button, minecraft_font
   dev/                        # pre-commit.sh, install-hooks.sh
 scenes/                       # chunk, chunk_manager, player, ui, entities
 shaders/
-  chunk.gdshader              # cull_back, per-face Notch shading, atlas sampling
+  chunk.gdshader              # cull_back, per-face Notch shading, atlas sampling, brightness LUT
   chunk_overlay.gdshader      # held-block variant (depth_test_disabled, draws on top)
   crack.gdshader              # block-break progress overlay
+  crosshair.gdshader          # vanilla framebuffer-inversion crosshair
   held_item.gdshader          # first-person extruded tool material
   held_item_world.gdshader    # third-person extruded tool material
+  water.gdshader              # animated water surface
+  lava.gdshader               # animated lava surface
 data/recipes.json             # 2×2 / 3×3 crafting recipes (shaped + shapeless)
 tests/                        # GUT tests (test_*.gd)
+src/
+  mesher_native.cpp/.h        # C++ chunk mesher via GDExtension
+  worldgen_native.cpp/.h      # C++ worldgen base terrain via GDExtension
 assets/
-  textures/blocks/packs/{pack}/   # active pack's PNGs (stone, dirt, grass_top, ores, crafting_table, …)
-  textures/gui/                   # inventory, crafting_table, widgets, pause_menu, armor slot placeholders
-  textures/items/                 # sticks, tools (extruded at runtime)
-  audio/sfx/step/                 # footstep variants (grass, cloth)
+  textures/blocks/packs/{pack}/   # active pack's PNGs (38 atlas slots)
+  textures/gui/                   # inventory, crafting_table, furnace, chest, widgets, logo
+  textures/items/                 # sticks, tools, armor, buckets (extruded at runtime)
+  audio/sfx/                      # step, dig, place, liquid, fire, door, chest variants
+  audio/music/                    # ambient background tracks
   fonts/Minecraft.otf             # UI font
-performance_plan.md           # measurement-first perf roadmap (instrumentation + milestones)
 ```
 
 ## Architecture invariants
@@ -132,7 +168,7 @@ Each phase ends in: green test suite, working build, git commit. Don't start the
 
 ## When asked to optimize
 
-Read `optimizations.md` first — the high-leverage wins are already documented there with regression notes. Don't repeat the audit. Confirm whether an item moved from "deferred" to "wanted now" before implementing, since several break existing tests or shipped visual features (per-block edge outlines, exact vertex counts in test_mesher).
+Read `.claude/optimizations.md` first — the high-leverage wins are already documented there with regression notes. Don't repeat the audit. Confirm whether an item moved from "deferred" to "wanted now" before implementing, since several break existing tests or shipped visual features (per-block edge outlines, exact vertex counts in test_mesher).
 
 ## Gotchas
 

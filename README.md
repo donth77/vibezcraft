@@ -1,23 +1,50 @@
-# Minecraft Alpha Clone
+<p align="center">
+  <img src="assets/textures/gui/logo.png" alt="VibezCraft" width="480">
+</p>
 
-A from-scratch, AI-assisted clone of Minecraft Java Edition **Alpha v1.2.6** (late 2010), built in **Godot 4, GDScript, and C++**. The gameplay and scene-graph logic is pure GDScript; the chunk mesher and worldgen base-terrain fill are native C++ via GDExtension (see `src/`). Both native paths are guarded by byte-identical parity tests against pure-GDScript reference implementations — see `tests/test_mesher_native.gd` and `tests/test_worldgen_native.gd`. Overworld only — the Nether is deliberately out of scope.
+<p align="center">
+  <a href="https://godotengine.org"><img src="https://img.shields.io/badge/Godot-4.x-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.x"></a>
+  <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/language-GDScript%20%2B%20C%2B%2B-blue" alt="GDScript + C++"></a>
+  <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/target-Alpha%20v1.2.6-brightgreen" alt="Alpha v1.2.6"></a>
+  <a href="https://claude.ai/code"><img src="https://img.shields.io/badge/built%20with-Claude%20Code-blueviolet?logo=anthropic&logoColor=white" alt="Built with Claude Code"></a>
+</p>
+
+A from-scratch, AI-assisted clone of Minecraft Java Edition **Alpha v1.2.6** (late 2010), built in **Godot 4, GDScript, and C++**. Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base-terrain are native C++ via GDExtension (with byte-identical GDScript fallbacks). Overworld only — the Nether and multiplayer are deliberately out of scope.
+
+## Features
+
+- **Infinite procedural world** — 2D Perlin heightmap, stratified terrain layers, oak trees, caves, ore veins (coal/iron/gold/diamond) via a deterministic port of vanilla `WorldGenMinable`
+- **36 block types** — full stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, ladders, flowing water & lava
+- **50 items** — tools (pickaxe/axe/shovel/sword/hoe) in wood/stone/iron/diamond/gold, armor sets, buckets, flint & steel, raw materials
+- **Crafting** — recipe registry (shaped + shapeless) from `data/recipes.json`, 2x2 inventory grid + 3x3 crafting table
+- **Smelting** — furnace with fuel/input/output slots, burn-time tracking, vanilla smelt times
+- **Day/night cycle** — vanilla 20-minute day, sky color gradient, sun direction, dynamic lighting
+- **Light propagation** — sky light + block light with BFS flood fill, per-face brightness LUT in shader
+- **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement/pickup
+- **Health & damage** — fall damage, drowning, fire/lava, health regeneration, death screen with respawn
+- **Chest & furnace storage** — per-block inventories with dedicated UI screens
+- **Audio** — footstep cadence, block break/place SFX, ambient sounds, C418-style music player
+- **Steve player model** — first-person and third-person with arm/leg animation, held-item rendering
+- **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
+- **Native C++ fast paths** — chunk mesher and worldgen via GDExtension, with GDScript fallback
 
 ## Docs
+
 - [`.claude/PLANNING.md`](./.claude/PLANNING.md) — vision, stack rationale, Alpha mechanics reference
 - [`.claude/implementationplan.md`](./.claude/implementationplan.md) — phase-by-phase execution plan
 - [`CLAUDE.md`](./CLAUDE.md) — working conventions and architecture invariants
-- [`optimizations.md`](./optimizations.md) — catalog of deferred performance work
+- [`.claude/optimizations.md`](./.claude/optimizations.md) — catalog of deferred performance work
 
 ## Build
 
-The game loads against a prebuilt native library (`bin/libmesher_native.*.dylib|so|dll`). When you first clone the repo (or pull changes to anything under `src/`), rebuild:
+The game loads a prebuilt native library (`bin/libmesher_native.*.dylib|so|dll`). When you first clone (or pull changes under `src/`), rebuild:
 
 ```sh
 git submodule update --init --recursive              # fetch godot-cpp
 scons platform=macos target=template_debug -j8       # or platform=linux / windows
 ```
 
-Without the rebuilt library the game still runs — it falls through to the pure-GDScript implementations and logs `[Game] using GDScript Mesher` / `[Game] using GDScript Worldgen` at startup.
+Without the native library the game still runs — it falls through to pure-GDScript implementations and logs `[Game] using GDScript Mesher` / `[Game] using GDScript Worldgen` at startup.
 
 ## Run
 
@@ -33,53 +60,45 @@ godot --path . main.tscn               # run main scene directly
 | Move | **W A S D** |
 | Look | Mouse |
 | Jump | **Space** |
-| Sneak | **Shift** (hold by default; toggle via Player.sneak_toggle export) |
+| Sneak | **Shift** (hold) |
 | Break block | **Left mouse** (hold) |
-| Place block | **Right mouse** |
+| Place block / interact | **Right mouse** |
 | Select hotbar slot | **1**–**9** |
-| Release / re-capture mouse | **Esc**, then click in window |
+| Open inventory | **E** |
+| Drop item | **Q** |
+| Third-person toggle | **F5** |
+| Release mouse | **Esc** |
 
 ### Debug shortcuts
 
-Backtick (`` ` ``) toggles debug mode (top-right shows "DEBUG"). The shortcuts below only work while debug mode is on.
+Backtick (`` ` ``) toggles debug mode. These shortcuts only work while debug mode is on:
 
 | Action | Key |
 |---|---|
 | Toggle debug mode | **`** (backtick) |
-| Toggle Creative mode (instant break, ignores bedrock, no drop-table gating) | **G** *(or Fn + F1 on Mac)* |
-| Fill hotbar with one stack of every block type | **H** *(or Fn + F2 on Mac)* |
+| Toggle Creative mode | **G** |
+| Fill hotbar with all blocks | **H** |
+| Open item spawner | **J** |
+| Tool tuner (held-item pose) | **T** |
+| Fast day cycle (30s) | **N** |
 
-### Configuration env vars
+### Configuration
 
-All vars use this precedence: **shell env > `.env` file > code default**. Copy `.env.example` to `.env` and edit for per-developer overrides (`.env` is gitignored).
+All vars use precedence: **shell env > `.env` file > code default**. Copy `.env.example` to `.env` for per-developer overrides (`.env` is gitignored).
 
-| Var | Values | Default | Effect |
-|---|---|---|---|
-| `MC_CLONE_TEXTURE_PACK` | folder name under `assets/textures/blocks/packs/` | `pixel_perfection` | Active block texture pack |
-| `MC_CLONE_DEBUG_MODE` | `1`/`true`/`yes`/`on` (case-insensitive) → enabled, anything else → disabled | `false` | Whether debug mode is on at launch (backtick still toggles at runtime) |
+| Var | Default | Effect |
+|---|---|---|
+| `MC_CLONE_TEXTURE_PACK` | `pixel_perfection` | Active block texture pack (folder under `assets/textures/blocks/packs/`) |
+| `MC_CLONE_DEBUG_MODE` | `false` | Start with debug mode enabled |
+| `MC_CLONE_RESOLUTION` | `1920x1080` | Window size override (e.g. `2560x1440` for HiDPI) |
 
 ### Texture packs
 
-Block textures live under `assets/textures/blocks/packs/{pack_name}/`. Active pack precedence:
-
-1. `MC_CLONE_TEXTURE_PACK` shell environment variable (highest)
-2. `MC_CLONE_TEXTURE_PACK=...` line in a project-root `.env` file
-3. `texture_pack` `@export` on the Game autoload (set in editor)
+Block textures live under `assets/textures/blocks/packs/{pack_name}/`. Cell size auto-detects from the first loaded PNG.
 
 ```sh
 MC_CLONE_TEXTURE_PACK=programmer_art godot --path . main.tscn
 ```
-
-Or copy `.env.example` to `.env` and edit the value — useful when launching from the editor:
-
-```sh
-cp .env.example .env
-# then edit .env to set your preferred pack
-```
-
-The `.env` file is gitignored.
-
-To add a new pack, drop the 11 named PNGs (`stone`, `cobblestone`, `dirt`, `grass_top`, `grass_side`, `bedrock`, `sand`, `log_top`, `log_side`, `planks`, `leaves`) into `assets/textures/blocks/packs/{your_name}/`. Cell size auto-detects from the first texture.
 
 ## Test
 
@@ -95,7 +114,7 @@ gdformat scripts/ tests/               # apply formatting
 gdlint scripts/ tests/                 # lint
 ```
 
-## First-time setup (per developer)
+## First-time setup
 
 ```sh
 ./scripts/dev/install-hooks.sh         # install git pre-commit hook
