@@ -398,7 +398,8 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		_lava_mesh_instance.mesh = lava_mesh
 	else:
 		_lava_mesh_instance.mesh = null
-	_sync_chest_entities()
+	if chunk.has_chest_blocks or not _chest_nodes.is_empty():
+		_sync_chest_entities()
 	PerfProbe.end("chunk_node.apply", probe_token)
 
 

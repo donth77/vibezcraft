@@ -18,6 +18,8 @@ const CLOUD_QUALITY_FANCY: int = 2
 #   • "programmer_art"   — CC-BY 4.0 from github.com/deathcap/ProgrammerArt
 @export var texture_pack: String = "alpha_vanilla"
 @export_enum("Off", "Fast", "Fancy") var cloud_quality: int = CLOUD_QUALITY_FANCY
+@export var fog_enabled: bool = true
+@export var sfx_enabled: bool = true
 
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.
@@ -141,6 +143,8 @@ func _ready() -> void:
 	# Cloud quality from settings.cfg (set via Main-Menu → Options).
 	# Defaults to the @export value (FANCY) on first launch.
 	cloud_quality = int(cfg.get_value("graphics", "cloud_quality", cloud_quality))
+	fog_enabled = bool(cfg.get_value("graphics", "fog_enabled", fog_enabled))
+	sfx_enabled = bool(cfg.get_value("audio", "sfx_enabled", sfx_enabled))
 	# FPS cap + vsync are independent user settings. Default vsync = Off
 	# (VSYNC_DISABLED) so fps_cap is the actual ceiling out-of-the-box —
 	# Godot's native vsync default of ENABLED would clamp to display

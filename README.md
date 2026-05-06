@@ -5,11 +5,11 @@
 <p align="center">
   <a href="https://godotengine.org"><img src="https://img.shields.io/badge/Godot-4.x-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.x"></a>
   <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/language-GDScript%20%2B%20C%2B%2B-blue" alt="GDScript + C++"></a>
-  <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/target-Alpha%20v1.2.6-brightgreen" alt="Alpha v1.2.6"></a>
-  <a href="https://claude.ai/code"><img src="https://img.shields.io/badge/built%20with-Claude%20Code-blueviolet?logo=anthropic&logoColor=white" alt="Built with Claude Code"></a>
 </p>
 
-A from-scratch, AI-assisted clone of Minecraft Java Edition **Alpha v1.2.6** (late 2010), built in **Godot 4, GDScript, and C++**. Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base-terrain are native C++ via GDExtension (with byte-identical GDScript fallbacks). Overworld only — the Nether and multiplayer are deliberately out of scope.
+A single-player clone of Minecraft Java Edition **Alpha v1.2.6** (late 2010), built in **Godot 4, GDScript, and C++**. 
+
+Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base-terrain are native C++ via GDExtension (with byte-identical GDScript fallbacks). 
 
 ## Features
 
@@ -28,12 +28,7 @@ A from-scratch, AI-assisted clone of Minecraft Java Edition **Alpha v1.2.6** (la
 - **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
 - **Native C++ fast paths** — chunk mesher and worldgen via GDExtension, with GDScript fallback
 
-## Docs
 
-- [`.claude/PLANNING.md`](./.claude/PLANNING.md) — vision, stack rationale, Alpha mechanics reference
-- [`.claude/implementationplan.md`](./.claude/implementationplan.md) — phase-by-phase execution plan
-- [`CLAUDE.md`](./CLAUDE.md) — working conventions and architecture invariants
-- [`.claude/optimizations.md`](./.claude/optimizations.md) — catalog of deferred performance work
 
 ## Build
 
@@ -66,7 +61,7 @@ godot --path . main.tscn               # run main scene directly
 | Select hotbar slot | **1**–**9** |
 | Open inventory | **E** |
 | Drop item | **Q** |
-| Third-person toggle | **F5** |
+| Third-person toggle | **V** / **F5** |
 | Release mouse | **Esc** |
 
 ### Debug shortcuts

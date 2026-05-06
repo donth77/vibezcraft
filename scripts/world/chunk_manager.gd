@@ -89,6 +89,8 @@ var _ambient_scan_accum: float = 0.0
 var _spiral_offsets_cache: Array = []
 var _spiral_offsets_r: int = -1
 var _spawn_queue_set: Dictionary = {}
+var _last_chunk_set_coord: Vector2i = Vector2i(2147483647, 2147483647)
+var _cached_player_chunk: Vector2i = Vector2i.ZERO
 
 
 func _ready() -> void:
@@ -138,6 +140,7 @@ func _process(_delta: float) -> void:
 	if _player == null:
 		return
 	var probe_token := PerfProbe.begin("chunk_mgr.tick")
+	_cached_player_chunk = _player_chunk_coord()
 	_applies_this_frame = 0
 	_update_chunk_set()
 	_update_collision_activity()
@@ -147,7 +150,7 @@ func _process(_delta: float) -> void:
 	_ambient_scan_accum += _delta
 	if _ambient_scan_accum >= 0.1:
 		_ambient_scan_accum = 0.0
-		AmbientFx.tick(self, _player_chunk_coord(), int(floor(_player.global_position.y)))
+		AmbientFx.tick(self, _cached_player_chunk, int(floor(_player.global_position.y)))
 	_tick_leaf_decay()
 	_tick_sapling_growth()
 	# Scheduled block-tick queue — Flow #2 foundation for fluid flow.
@@ -169,7 +172,10 @@ func _process(_delta: float) -> void:
 # via the same worker path — no synchronous mesh hitch — so towers / mines /
 # any block edits survive walking out of render distance and back.
 func _update_chunk_set() -> void:
-	var pc := _player_chunk_coord()
+	var pc := _cached_player_chunk
+	if pc == _last_chunk_set_coord:
+		return
+	_last_chunk_set_coord = pc
 	var needed: Dictionary = {}
 	# Mark the full ring needed, then enqueue misses in nearest-first order
 	# so workers finish the player-ring before chasing far corners.
@@ -282,7 +288,7 @@ func _materialize_one_ready_chunk() -> void:
 		return
 	_pending.erase(coord)
 	# Player may have moved away while the worker was running — drop the result.
-	var pc := _player_chunk_coord()
+	var pc := _cached_player_chunk
 	if absi(coord.x - pc.x) > render_distance or absi(coord.y - pc.y) > render_distance:
 		return
 	if _chunks.has(coord):
@@ -318,7 +324,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	# Set initial collision activity from distance so far-ring chunks
 	# don't waste a trimesh + BVH between materialize and the next
 	# boundary-crossing sweep.
-	var pc := _player_chunk_coord()
+	var pc := _cached_player_chunk
 	var near: bool = (
 		absi(coord.x - pc.x) <= collision_radius and absi(coord.y - pc.y) <= collision_radius
 	)
@@ -480,10 +486,13 @@ func _restore_saved_chunk(coord: Vector2i) -> Chunk:
 		c._height_map_dirty = false
 	else:
 		c._height_map_dirty = true
-	# Rescan non-cube flag + re-enqueue saplings.
+	# Rescan non-cube + chest flags + re-enqueue saplings.
 	var found_non_cube: bool = false
+	var found_chest: bool = false
 	for i in range(c.blocks.size()):
 		var b: int = c.blocks[i]
+		if b == Blocks.CHEST:
+			found_chest = true
 		if Blocks.needs_gdscript_mesher(b):
 			found_non_cube = true
 			if b == Blocks.SAPLING:
@@ -494,6 +503,7 @@ func _restore_saved_chunk(coord: Vector2i) -> Chunk:
 					Vector3i(coord.x * Chunk.SIZE_X + lx, ly, coord.y * Chunk.SIZE_Z + lz)
 				)
 	c.has_non_cube_blocks = found_non_cube
+	c.has_chest_blocks = found_chest
 	# Re-enqueue any pending block ticks harvested when this chunk was
 	# unloaded (fluid spread mid-flow, FIRE burn-out timers, etc.).
 	# Their relative `delay` resumes from current_tick on restore.
@@ -506,7 +516,7 @@ func _restore_saved_chunk(coord: Vector2i) -> Chunk:
 # (Chebyshev / square ring). Skips unless the player actually crossed a
 # chunk boundary, so cost is O(loaded) at most once per crossing.
 func _update_collision_activity() -> void:
-	var pc := _player_chunk_coord()
+	var pc := _cached_player_chunk
 	if pc == _last_collision_center:
 		return
 	_last_collision_center = pc

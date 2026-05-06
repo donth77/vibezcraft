@@ -42,6 +42,8 @@ var _pack_option: OptionButton
 var _cloud_option: OptionButton
 var _fps_option: OptionButton
 var _vsync_checkbox: CheckBox
+var _fog_checkbox: CheckBox
+var _sfx_checkbox: CheckBox
 var _seed_label: Label
 var _pending_seed: int = 0
 # Overlay mode: Done-equivalents (Save/Cancel) queue_free instead of
@@ -83,34 +85,44 @@ func _build_background() -> void:
 
 func _build_panel() -> void:
 	var title := Label.new()
-	title.text = "Options"
+	title.text = "Settings"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.anchor_left = 0.0
 	title.anchor_right = 1.0
-	title.anchor_top = 0.10
-	title.anchor_bottom = 0.10
-	title.offset_bottom = 96
-	title.add_theme_font_size_override("font_size", 64)
+	title.anchor_top = 0.03
+	title.anchor_bottom = 0.03
+	title.offset_bottom = 48
+	title.add_theme_font_size_override("font_size", 48)
 	title.add_theme_color_override("font_color", Color.WHITE)
 	title.add_theme_color_override("font_shadow_color", Color.BLACK)
-	title.add_theme_constant_override("shadow_offset_x", 3)
-	title.add_theme_constant_override("shadow_offset_y", 3)
+	# Bitmap font is 8 px native; shadow offset of font_size/8 = one source
+	# pixel keeps the drop-shadow aligned to the glyph grid (vanilla MC's
+	# 1-px drop-shadow). Non-multiple offsets render at sub-pixel positions
+	# which read as soft / blurry against the crisp glyph pixels.
+	title.add_theme_constant_override("shadow_offset_x", 6)
+	title.add_theme_constant_override("shadow_offset_y", 6)
 	add_child(title)
 
 	var vbox := VBoxContainer.new()
 	vbox.anchor_left = 0.5
 	vbox.anchor_right = 0.5
-	vbox.anchor_top = 0.24
-	vbox.anchor_bottom = 0.24
+	vbox.anchor_top = 0.03
+	vbox.anchor_bottom = 0.03
 	vbox.offset_left = -360
 	vbox.offset_right = 360
-	vbox.offset_top = 0
-	# 7 rows × 64 px + 6 × 16 separation = 544. Pad to 560.
-	vbox.offset_bottom = 560
-	vbox.add_theme_constant_override("separation", 16)
+	# 88 px below the title's anchor — title is 48 px tall, plus a 40 px
+	# breathing gap so the heading reads as a separate block from the rows.
+	vbox.offset_top = 88
+	# 9 rows × 60 px + 8 × 10 separation = 620 px. Row height is 60 (not 52)
+	# because CheckBox + HSlider have intrinsic minimum heights from Godot's
+	# default theme that exceed the controls' explicit custom_minimum_size,
+	# so under-sizing here used to push the bottom rows past the Save button.
+	vbox.offset_bottom = 88 + 620
+	vbox.add_theme_constant_override("separation", 10)
 	add_child(vbox)
 
 	_add_music_row(vbox)
+	_sfx_checkbox = _add_checkbox_row(vbox, "Sound effects")
 	var dist_labels: Array = []
 	for i in range(_RENDER_DISTANCES.size()):
 		dist_labels.append("%s (%d)" % [_RENDER_DISTANCE_LABELS[i], _RENDER_DISTANCES[i]])
@@ -119,19 +131,18 @@ func _build_panel() -> void:
 	_cloud_option = _add_option_row(vbox, "Clouds", _CLOUD_QUALITY_LABELS)
 	_fps_option = _add_option_row(vbox, "Frame rate cap", _FPS_CAP_LABELS)
 	_vsync_checkbox = _add_checkbox_row(vbox, "VSync")
+	_fog_checkbox = _add_checkbox_row(vbox, "Fog")
 	_add_seed_row(vbox)
 
-	# Save + Cancel stacked vertically below the options. VanillaButton
-	# is 800×80; two of them with 16 px separation = 176 px tall.
 	var button_col := VBoxContainer.new()
 	button_col.anchor_left = 0.5
 	button_col.anchor_right = 0.5
-	button_col.anchor_top = 0.80
-	button_col.anchor_bottom = 0.80
+	button_col.anchor_top = 0.03
+	button_col.anchor_bottom = 0.03
 	button_col.offset_left = -400
 	button_col.offset_right = 400
-	button_col.offset_top = 0
-	button_col.offset_bottom = 176
+	button_col.offset_top = 724
+	button_col.offset_bottom = 724 + 176
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
@@ -155,24 +166,24 @@ func _add_option_row(parent: VBoxContainer, label_text: String, options: Array) 
 	lbl.add_theme_font_size_override("font_size", 32)
 	lbl.add_theme_color_override("font_color", Color.WHITE)
 	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
-	lbl.add_theme_constant_override("shadow_offset_x", 3)
-	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.add_theme_constant_override("shadow_offset_x", 4)
+	lbl.add_theme_constant_override("shadow_offset_y", 4)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	lbl.custom_minimum_size = Vector2(0, 64)
+	lbl.custom_minimum_size = Vector2(0, 60)
 	row.add_child(lbl)
 
 	var opt := OptionButton.new()
-	opt.custom_minimum_size = Vector2(360, 64)
-	opt.add_theme_font_size_override("font_size", 30)
+	opt.custom_minimum_size = Vector2(360, 60)
+	opt.add_theme_font_size_override("font_size", 32)
 	opt.add_theme_color_override("font_color", Color.WHITE)
 	opt.add_theme_color_override(
 		"font_hover_color", Color(0xFF / 255.0, 0xFF / 255.0, 0xA0 / 255.0)
 	)
 	opt.add_theme_color_override("font_focus_color", Color.WHITE)
 	opt.add_theme_color_override("font_shadow_color", Color.BLACK)
-	opt.add_theme_constant_override("shadow_offset_x", 2)
-	opt.add_theme_constant_override("shadow_offset_y", 2)
+	opt.add_theme_constant_override("shadow_offset_x", 4)
+	opt.add_theme_constant_override("shadow_offset_y", 4)
 	opt.add_theme_stylebox_override(
 		"normal", _make_option_panel(Color(0x28 / 255.0, 0x28 / 255.0, 0x2C / 255.0))
 	)
@@ -208,25 +219,25 @@ func _add_checkbox_row(parent: VBoxContainer, label_text: String) -> CheckBox:
 	lbl.add_theme_font_size_override("font_size", 32)
 	lbl.add_theme_color_override("font_color", Color.WHITE)
 	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
-	lbl.add_theme_constant_override("shadow_offset_x", 3)
-	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.add_theme_constant_override("shadow_offset_x", 4)
+	lbl.add_theme_constant_override("shadow_offset_y", 4)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	lbl.custom_minimum_size = Vector2(0, 64)
+	lbl.custom_minimum_size = Vector2(0, 60)
 	row.add_child(lbl)
 
 	# CheckBox right-aligned in the same 360-wide slot the dropdowns use
 	# so the column stays visually aligned. Text shows "On" / "Off" next
 	# to the tick so the state is unambiguous at a glance.
 	var cb := CheckBox.new()
-	cb.custom_minimum_size = Vector2(360, 64)
+	cb.custom_minimum_size = Vector2(360, 60)
 	cb.text = "Off"
-	cb.add_theme_font_size_override("font_size", 30)
+	cb.add_theme_font_size_override("font_size", 32)
 	cb.add_theme_color_override("font_color", Color.WHITE)
 	cb.add_theme_color_override("font_hover_color", Color(0xFF / 255.0, 0xFF / 255.0, 0xA0 / 255.0))
 	cb.add_theme_color_override("font_shadow_color", Color.BLACK)
-	cb.add_theme_constant_override("shadow_offset_x", 2)
-	cb.add_theme_constant_override("shadow_offset_y", 2)
+	cb.add_theme_constant_override("shadow_offset_x", 4)
+	cb.add_theme_constant_override("shadow_offset_y", 4)
 	cb.add_theme_constant_override("h_separation", 18)
 	cb.toggled.connect(func(pressed: bool) -> void: cb.text = "On" if pressed else "Off")
 	cb.toggled.connect(func(_pressed: bool) -> void: SFX.play_click())
@@ -244,29 +255,29 @@ func _add_seed_row(parent: VBoxContainer) -> void:
 	lbl.add_theme_font_size_override("font_size", 32)
 	lbl.add_theme_color_override("font_color", Color.WHITE)
 	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
-	lbl.add_theme_constant_override("shadow_offset_x", 3)
-	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.add_theme_constant_override("shadow_offset_x", 4)
+	lbl.add_theme_constant_override("shadow_offset_y", 4)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	lbl.custom_minimum_size = Vector2(0, 64)
+	lbl.custom_minimum_size = Vector2(0, 60)
 	row.add_child(lbl)
 
 	_seed_label = Label.new()
 	_seed_label.text = "(random)"
-	_seed_label.add_theme_font_size_override("font_size", 28)
+	_seed_label.add_theme_font_size_override("font_size", 24)
 	_seed_label.add_theme_color_override("font_color", Color.WHITE)
 	_seed_label.add_theme_color_override("font_shadow_color", Color.BLACK)
-	_seed_label.add_theme_constant_override("shadow_offset_x", 2)
-	_seed_label.add_theme_constant_override("shadow_offset_y", 2)
+	_seed_label.add_theme_constant_override("shadow_offset_x", 3)
+	_seed_label.add_theme_constant_override("shadow_offset_y", 3)
 	_seed_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_seed_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_seed_label.custom_minimum_size = Vector2(200, 64)
+	_seed_label.custom_minimum_size = Vector2(200, 60)
 	row.add_child(_seed_label)
 
 	var new_seed_btn := VanillaButton.new()
 	new_seed_btn.text = "New Seed"
 	new_seed_btn.pressed.connect(_on_new_seed_pressed)
-	new_seed_btn.custom_minimum_size = Vector2(280, 72)
+	new_seed_btn.custom_minimum_size = Vector2(280, 60)
 	row.add_child(new_seed_btn)
 
 
@@ -289,23 +300,23 @@ func _add_music_row(parent: VBoxContainer) -> void:
 	lbl.add_theme_font_size_override("font_size", 32)
 	lbl.add_theme_color_override("font_color", Color.WHITE)
 	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
-	lbl.add_theme_constant_override("shadow_offset_x", 3)
-	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.add_theme_constant_override("shadow_offset_x", 4)
+	lbl.add_theme_constant_override("shadow_offset_y", 4)
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	lbl.custom_minimum_size = Vector2(0, 64)
+	lbl.custom_minimum_size = Vector2(0, 60)
 	row.add_child(lbl)
 
 	_music_label = Label.new()
 	_music_label.text = "100%"
-	_music_label.add_theme_font_size_override("font_size", 28)
+	_music_label.add_theme_font_size_override("font_size", 24)
 	_music_label.add_theme_color_override("font_color", Color.WHITE)
 	_music_label.add_theme_color_override("font_shadow_color", Color.BLACK)
-	_music_label.add_theme_constant_override("shadow_offset_x", 2)
-	_music_label.add_theme_constant_override("shadow_offset_y", 2)
+	_music_label.add_theme_constant_override("shadow_offset_x", 3)
+	_music_label.add_theme_constant_override("shadow_offset_y", 3)
 	_music_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_music_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	_music_label.custom_minimum_size = Vector2(80, 64)
+	_music_label.custom_minimum_size = Vector2(80, 60)
 	row.add_child(_music_label)
 
 	_music_slider = HSlider.new()
@@ -313,7 +324,7 @@ func _add_music_row(parent: VBoxContainer) -> void:
 	_music_slider.max_value = 1.0
 	_music_slider.step = 0.01
 	_music_slider.value = 1.0
-	_music_slider.custom_minimum_size = Vector2(260, 64)
+	_music_slider.custom_minimum_size = Vector2(260, 60)
 	_music_slider.value_changed.connect(_on_music_slider_changed)
 	row.add_child(_music_slider)
 
@@ -326,7 +337,7 @@ func _on_music_slider_changed(value: float) -> void:
 
 
 static func _style_popup(popup: PopupMenu) -> void:
-	popup.add_theme_font_size_override("font_size", 28)
+	popup.add_theme_font_size_override("font_size", 24)
 	popup.add_theme_color_override("font_color", Color.WHITE)
 	popup.add_theme_color_override(
 		"font_hover_color", Color(0xFF / 255.0, 0xFF / 255.0, 0xA0 / 255.0)
@@ -366,6 +377,8 @@ static func load_config() -> ConfigFile:
 		cfg.set_value("graphics", "cloud_quality", Game.CLOUD_QUALITY_FANCY)
 		cfg.set_value("graphics", "fps_cap", 90)
 		cfg.set_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED)
+		cfg.set_value("graphics", "fog_enabled", true)
+		cfg.set_value("audio", "sfx_enabled", true)
 	return cfg
 
 
@@ -381,6 +394,8 @@ static func apply_config(cfg: ConfigFile) -> void:
 	DisplayServer.window_set_vsync_mode(
 		int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
 	)
+	Game.fog_enabled = bool(cfg.get_value("graphics", "fog_enabled", true))
+	Game.sfx_enabled = bool(cfg.get_value("audio", "sfx_enabled", true))
 	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
 	if Music != null:
 		Music.set_volume(music_vol)
@@ -403,6 +418,12 @@ func _load_settings() -> void:
 	# those modes if they really want them.
 	_vsync_checkbox.button_pressed = vsync_mode != DisplayServer.VSYNC_DISABLED
 	_vsync_checkbox.text = "On" if _vsync_checkbox.button_pressed else "Off"
+	var fog_on: bool = bool(cfg.get_value("graphics", "fog_enabled", true))
+	_fog_checkbox.button_pressed = fog_on
+	_fog_checkbox.text = "On" if fog_on else "Off"
+	var sfx_on: bool = bool(cfg.get_value("audio", "sfx_enabled", true))
+	_sfx_checkbox.button_pressed = sfx_on
+	_sfx_checkbox.text = "On" if sfx_on else "Off"
 	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
 	_music_slider.value = music_vol
 	_on_music_slider_changed(music_vol)
@@ -424,6 +445,8 @@ func _on_save_pressed() -> void:
 		else DisplayServer.VSYNC_DISABLED
 	)
 	cfg.set_value("graphics", "vsync", vsync_value)
+	cfg.set_value("graphics", "fog_enabled", _fog_checkbox.button_pressed)
+	cfg.set_value("audio", "sfx_enabled", _sfx_checkbox.button_pressed)
 	cfg.set_value("audio", "music_volume", _music_slider.value)
 	if _pending_seed != 0:
 		cfg.set_value("world", "seed", _pending_seed)

@@ -50,6 +50,7 @@ var has_non_cube_blocks: bool = false
 # MeshInstance3D with the water shader material. Same sticky-only-grows
 # rule as has_non_cube_blocks.
 var has_water_cells: bool = false
+var has_chest_blocks: bool = false
 # Per-(x,z) heightmap, 256 entries indexed `z * SIZE_X + x`. Each cell
 # stores `(y of topmost cell with light_opacity > 0) + 1`. Cells at
 # `y >= height_map[x,z]` are sky-exposed (vanilla canSeeSky semantics).
@@ -91,8 +92,7 @@ func _init() -> void:
 	# today.
 	sky_light = PackedByteArray()
 	sky_light.resize(TOTAL_BLOCKS)
-	for i in range(TOTAL_BLOCKS):
-		sky_light[i] = 15
+	sky_light.fill(15)
 	# Block-light defaults to 0 (no emitters present). PackedByteArray's
 	# resize already zero-fills, so no explicit loop needed.
 	block_light = PackedByteArray()
@@ -109,66 +109,60 @@ func _init() -> void:
 	_height_map_dirty = false
 
 
-# Extract the local-x = local_x plane as a SIZE_Y * SIZE_Z slice, indexed
-# `y * SIZE_Z + z`. Used by chunk_node to hand the NEIGHBOR's far edge
-# to the target chunk's mesher at dispatch time. Companion: _slice_z.
-func _slice_x(local_x: int) -> PackedByteArray:
-	var out := PackedByteArray()
-	out.resize(SIZE_Y * SIZE_Z)
-	var src := blocks
+# Extract the blocks + meta at a constant-x plane in a single pass.
+# Returns [blocks_slice, meta_slice] indexed `y * SIZE_Z + z`. Fuses
+# the two separate 2048-cell loops (_slice_x + _slice_meta_x) into one
+# — halves the iteration count per edge extraction.
+func _edge_slices_x(local_x: int) -> Array:
+	var sz: int = SIZE_Y * SIZE_Z
+	var out_b := PackedByteArray()
+	out_b.resize(sz)
+	var out_m := PackedByteArray()
+	out_m.resize(sz)
+	var src_b := blocks
+	var src_m := block_meta
 	for y in range(SIZE_Y):
+		var base: int = y * SIZE_X * SIZE_Z + local_x
 		for z in range(SIZE_Z):
-			out[y * SIZE_Z + z] = src[index(local_x, y, z)]
-	return out
+			var src_idx: int = base + z * SIZE_X
+			var dst_idx: int = y * SIZE_Z + z
+			out_b[dst_idx] = src_b[src_idx]
+			out_m[dst_idx] = src_m[src_idx]
+	return [out_b, out_m]
 
 
-func _slice_z(local_z: int) -> PackedByteArray:
-	var out := PackedByteArray()
-	out.resize(SIZE_Y * SIZE_X)
-	var src := blocks
+func _edge_slices_z(local_z: int) -> Array:
+	var sz: int = SIZE_Y * SIZE_X
+	var out_b := PackedByteArray()
+	out_b.resize(sz)
+	var out_m := PackedByteArray()
+	out_m.resize(sz)
+	var src_b := blocks
+	var src_m := block_meta
 	for y in range(SIZE_Y):
+		var base: int = y * SIZE_X * SIZE_Z + local_z * SIZE_X
 		for x in range(SIZE_X):
-			out[y * SIZE_X + x] = src[index(x, y, local_z)]
-	return out
+			var src_idx: int = base + x
+			var dst_idx: int = y * SIZE_X + x
+			out_b[dst_idx] = src_b[src_idx]
+			out_m[dst_idx] = src_m[src_idx]
+	return [out_b, out_m]
 
 
-func _slice_meta_x(local_x: int) -> PackedByteArray:
-	var out := PackedByteArray()
-	out.resize(SIZE_Y * SIZE_Z)
-	var src := block_meta
-	for y in range(SIZE_Y):
-		for z in range(SIZE_Z):
-			out[y * SIZE_Z + z] = src[index(local_x, y, z)]
-	return out
-
-
-func _slice_meta_z(local_z: int) -> PackedByteArray:
-	var out := PackedByteArray()
-	out.resize(SIZE_Y * SIZE_X)
-	var src := block_meta
-	for y in range(SIZE_Y):
-		for x in range(SIZE_X):
-			out[y * SIZE_X + x] = src[index(x, y, local_z)]
-	return out
-
-
-# Public: extract the blocks + meta at the chunk's +X face (x = SIZE_X-1).
-# Returns [blocks_slice, meta_slice]. Consumed by a neighbor's west-edge
-# import on the adjacent chunk (neighbor's x=-1 virtual plane).
 func east_edge_slices() -> Array:
-	return [_slice_x(SIZE_X - 1), _slice_meta_x(SIZE_X - 1)]
+	return _edge_slices_x(SIZE_X - 1)
 
 
 func west_edge_slices() -> Array:
-	return [_slice_x(0), _slice_meta_x(0)]
+	return _edge_slices_x(0)
 
 
 func south_edge_slices() -> Array:
-	return [_slice_z(SIZE_Z - 1), _slice_meta_z(SIZE_Z - 1)]
+	return _edge_slices_z(SIZE_Z - 1)
 
 
 func north_edge_slices() -> Array:
-	return [_slice_z(0), _slice_meta_z(0)]
+	return _edge_slices_z(0)
 
 
 # Y-major indexing for cache-friendly vertical scans during meshing/lighting.
@@ -214,6 +208,8 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 		has_non_cube_blocks = true
 	if Blocks.is_water(id):
 		has_water_cells = true
+	if id == Blocks.CHEST:
+		has_chest_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 
@@ -233,6 +229,8 @@ func set_block_with_meta(x: int, y: int, z: int, id: int, meta: int) -> void:
 		has_non_cube_blocks = true
 	if Blocks.is_water(id):
 		has_water_cells = true
+	if id == Blocks.CHEST:
+		has_chest_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 
@@ -255,6 +253,8 @@ func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
 		has_non_cube_blocks = true
 	if Blocks.is_water(id):
 		has_water_cells = true
+	if id == Blocks.CHEST:
+		has_chest_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 

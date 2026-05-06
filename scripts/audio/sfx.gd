@@ -213,6 +213,8 @@ func play_door_toggle() -> void:
 
 # Footstep — picks a random variant for the block's material.
 func play_step(block_id: int) -> void:
+	if not Game.sfx_enabled:
+		return
 	var mat := _step_material_for(block_id)
 	if mat == "":
 		return
@@ -233,6 +235,8 @@ func play_step(block_id: int) -> void:
 # Hoe-till "thump" — vanilla MC plays step.gravel here. Pitch + volume
 # match BlockSoil.stepSound (volume×0.8, pitch averaged at 1.0).
 func play_hoe_till() -> void:
+	if not Game.sfx_enabled:
+		return
 	var path: String = _GRAVEL_STEP_SOUNDS[randi() % _GRAVEL_STEP_SOUNDS.size()]
 	var stream: AudioStream = _stream_cache.get(path)
 	if stream == null:
@@ -263,6 +267,8 @@ func play_player_fall(damage: int) -> void:
 
 
 func _play_one(path: String, volume_db: float, pitch: float) -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(path)
 	if stream == null:
 		stream = load(path) as AudioStream
@@ -304,6 +310,8 @@ func play_swim() -> void:
 # Tool snap — vanilla MC's random/break.ogg, played when a tool's
 # durability hits zero and the stack is consumed.
 func play_tool_break() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_TOOL_BREAK_SOUND)
 	if stream == null:
 		stream = load(_TOOL_BREAK_SOUND) as AudioStream
@@ -322,6 +330,8 @@ func play_tool_break() -> void:
 # (rand - rand) * 0.8` — treat that as a mean near 2.6× with a ±0.8
 # range, same shape we can do with pitch_scale.
 func play_fizz(loud: bool = false) -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_FIZZ_SOUND)
 	if stream == null:
 		stream = load(_FIZZ_SOUND) as AudioStream
@@ -343,6 +353,8 @@ func play_fizz(loud: bool = false) -> void:
 # position of the fire cell so distance-attenuation works via AudioStreamPlayer
 # position (today we use the non-positional pool for simplicity).
 func play_fire_crackle() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_FIRE_CRACKLE_SOUND)
 	if stream == null:
 		stream = load(_FIRE_CRACKLE_SOUND) as AudioStream
@@ -364,6 +376,8 @@ func play_fire_crackle() -> void:
 # with a muted volume + lower pitch so it reads as a bubble rather than a
 # sharp item-pickup cue.
 func play_lava_pop() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
 	if stream == null:
 		stream = load(_PICKUP_SOUND) as AudioStream
@@ -386,6 +400,8 @@ func play_lava_pop() -> void:
 # like a UI button. Swap to a real fire.ignite OGG when a flint-and-
 # steel SFX bundle drops in.
 func play_flint_and_steel() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_CLICK_SOUND)
 	if stream == null:
 		stream = load(_CLICK_SOUND) as AudioStream
@@ -404,6 +420,8 @@ func play_flint_and_steel() -> void:
 # menu button activation. Pitch is fixed (no jitter) in vanilla so repeated
 # clicks read as a single consistent UI cue.
 func play_click() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_CLICK_SOUND)
 	if stream == null:
 		stream = load(_CLICK_SOUND) as AudioStream
@@ -420,6 +438,8 @@ func play_click() -> void:
 
 # Item pickup "pop" — vanilla MC's random/pop.ogg
 func play_pickup() -> void:
+	if not Game.sfx_enabled:
+		return
 	var stream: AudioStream = _stream_cache.get(_PICKUP_SOUND)
 	if stream == null:
 		stream = load(_PICKUP_SOUND) as AudioStream
@@ -434,6 +454,8 @@ func play_pickup() -> void:
 
 
 func _play_random(material: String, base_pitch: float) -> void:
+	if not Game.sfx_enabled:
+		return
 	var paths: Array = _DIG_SOUNDS[material]
 	var path: String = paths[randi() % paths.size()]
 	var stream: AudioStream = _stream_cache.get(path)

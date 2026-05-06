@@ -52,7 +52,7 @@ static func apply_alpha_fog(tree: SceneTree, render_distance_chunks: int) -> voi
 	if env_node == null or env_node.environment == null:
 		return
 	var env: Environment = env_node.environment
-	env.fog_enabled = true
+	env.fog_enabled = Game.fog_enabled
 	env.fog_depth_begin = view_dist_blocks * 0.5
 	env.fog_depth_end = view_dist_blocks
 	env.fog_depth_curve = 1.0
