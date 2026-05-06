@@ -55,6 +55,15 @@ var _ready_results: Dictionary = {}  # Vector2i → {chunk, mesh} (set by worker
 # (PackedByteArray assigns + dirty marks). See `_dispatch_relight`.
 var _pending_relights: Dictionary = {}  # Vector2i → true
 var _relight_results: Dictionary = {}  # Vector2i → result_dict (mutex-guarded)
+# Deferred relight-dispatch queue. _materialize_chunk used to call
+# _dispatch_relight inline, which paid a 1-3 ms snapshot cost
+# (prepare_relight_data: 5 chunks × 4 PackedByteArray.duplicate()) on
+# the same frame as scene instantiate + add_child + 7 child node
+# _ready calls. That stacked the materialize probe to 11-12 ms p95, over
+# the 11.1 ms budget at 90 fps. Queueing the dispatch and popping one
+# per frame from `_process` spreads the cost across consecutive frames.
+var _pending_relight_dispatch: Array[Vector2i] = []
+var _pending_relight_dispatch_set: Dictionary = {}  # dedupe
 # Player-edited chunks compressed on unload, restored on re-entry.
 # Shape: coord → { bytes, block_meta, sky_light, block_light, height_map,
 # max_y, pending_ticks }, all FastLZ-compressed; ~50:1 on above-ground edits.
@@ -146,6 +155,7 @@ func _process(_delta: float) -> void:
 	_update_collision_activity()
 	_dispatch_workers()
 	_materialize_one_ready_chunk()
+	_drain_one_relight_dispatch()
 	_drain_relight_results()
 	_ambient_scan_accum += _delta
 	if _ambient_scan_accum >= 0.1:
@@ -342,7 +352,13 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 		# but the FFI marshalling + per-cell dict writes were a 5-18 ms
 		# main-thread spike on every materialize. The worker reads chunk
 		# snapshots; the result is applied one-per-frame in `_drain_relight_results`.
-		_dispatch_relight(coord)
+		# Queue rather than dispatch inline — `prepare_relight_data` snapshots
+		# 5 chunks × 4 PackedByteArrays which is another 1-3 ms on top of the
+		# scene-instantiate cost here. `_drain_one_relight_dispatch` pops one
+		# per frame so the snapshot lands on a quieter frame.
+		if not _pending_relight_dispatch_set.has(coord):
+			_pending_relight_dispatch.append(coord)
+			_pending_relight_dispatch_set[coord] = true
 	PerfProbe.end("chunk_mgr.materialize", probe_token)
 
 
@@ -371,6 +387,19 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 #     overwritten by the stale worker result. The next edit triggers
 #     `update_*_light_around_world` which repairs the affected cells.
 #     Walking-only (the reported lag-spike case) has no edits.
+# Pop one queued relight per frame from `_pending_relight_dispatch` and
+# run the snapshot + worker dispatch. Chunks that unloaded between
+# materialize and drain are skipped (get_chunk_at_coord returns null).
+func _drain_one_relight_dispatch() -> void:
+	while not _pending_relight_dispatch.is_empty():
+		var coord: Vector2i = _pending_relight_dispatch.pop_front()
+		_pending_relight_dispatch_set.erase(coord)
+		if get_chunk_at_coord(coord) == null:
+			continue
+		_dispatch_relight(coord)
+		return
+
+
 func _dispatch_relight(coord: Vector2i) -> void:
 	if _pending_relights.has(coord):
 		return

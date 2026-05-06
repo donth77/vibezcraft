@@ -101,7 +101,7 @@ func _ready() -> void:
 	vbox.add_child(_scout_button)
 
 	_copy_button = Button.new()
-	_copy_button.text = "Copy stats"
+	_copy_button.text = "Copy stats (F12)"
 	_copy_button.size_flags_horizontal = Control.SIZE_SHRINK_END
 	_copy_button.add_theme_font_size_override("font_size", 20)
 	_copy_button.pressed.connect(_on_copy_pressed)
@@ -162,7 +162,7 @@ func _process(delta: float) -> void:
 	if _copied_flash > 0.0:
 		_copied_flash -= delta
 		if _copied_flash <= 0.0 and _copy_button != null:
-			_copy_button.text = "Copy stats"
+			_copy_button.text = "Copy stats (F12)"
 	_accum += delta
 	if _accum < UPDATE_INTERVAL_SEC:
 		return

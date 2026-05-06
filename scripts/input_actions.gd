@@ -39,11 +39,12 @@ static func register_defaults() -> void:
 	# implemented block & item). Replaces the old per-set hotkeys
 	# (debug_fill_hotbar / _tools / _smelt) that were getting crowded.
 	_add_key("debug_item_spawner", KEY_F4)
-	# F3 toggles the debug stats panel; F9 copies its contents to clipboard.
+	# F3 toggles the debug stats panel; F12 copies its contents to clipboard.
 	# These work independently of debug_toggle — the panel can show even when
-	# full debug mode is off.
+	# full debug mode is off. Avoid F9/F10/F11 — those are Mission Control /
+	# Show Desktop on macOS by default and get eaten before reaching Godot.
 	_add_key("debug_stats_toggle", KEY_F3)
-	_add_key("debug_stats_copy", KEY_F9)
+	_add_key("debug_stats_copy", KEY_F12)
 	# F6 = manual trigger for the 3×3 cave/lava scout scan. Manual-only
 	# (not auto-refreshed) so the 225K-get_block pass doesn't stack onto
 	# dig-frame hitches.
