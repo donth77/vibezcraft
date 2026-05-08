@@ -1,5 +1,6 @@
 #include "worldgen_native.h"
 
+#include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/core/class_db.hpp>
 
 #include <algorithm>
@@ -69,7 +70,10 @@ struct JavaRandom {
 
 // Mirror worldgen_caves.gd constants.
 constexpr int CAVES_RADIUS_CHUNKS = 8;
-constexpr int CAVE_MAX_Y = 120;
+// Must stay in sync with worldgen_caves.gd::_CAVE_MAX_Y. Capped below
+// sea level (SEA_LEVEL - 5 = 59) so caves don't break through ocean
+// floors. Visual cleanup; deviation from vanilla 120.
+constexpr int CAVE_MAX_Y = 59;
 constexpr double CAVE_PI = 3.141592653589793;
 constexpr double CAVE_TAU = 2.0 * CAVE_PI;
 
@@ -448,6 +452,309 @@ Dictionary WorldgenNative::build_base_terrain(
 	return result;
 }
 
+// Slice 3-D: native port of WorldgenDensity.build_density_terrain. The
+// hot inner loop — per-cell trilerp from a 5×17×5 coarse density grid
+// into the full 16×128×16 chunk, plus the density blend (primary +
+// secondary + selector) and Y-bias subtraction.
+//
+// In GDScript this loop is ~32K cells × ~7 lerps each = ~224K function
+// calls. GDScript function-dispatch overhead alone makes that ~50-100ms
+// per chunk — the dominant cost in 3D-density mode. Native does the
+// same math in raw doubles, ~5-10× faster.
+//
+// Caller pre-samples noise grids in GDScript (FastNoiseLite is already
+// fast in Godot's C++) and hands the raw float arrays. This avoids
+// also porting NoiseOctaves to native (would need a separate Perlin
+// implementation that matches FastNoiseLite's gradient table for
+// parity — much bigger scope).
+//
+// Grid layouts:
+//   density_a, density_b, selector: 5*17*5 = 425 doubles, indexed
+//                                   `(gx * GRID_Y + gy) * GRID_Z + gz`
+//   col_target_y, col_amplitude:    5*5    =  25 doubles, indexed
+//                                   `gx * GRID_Z + gz`
+Dictionary WorldgenNative::build_density_terrain(
+		int p_chunk_x,
+		int p_chunk_z,
+		const PackedFloat64Array &p_density_a,
+		const PackedFloat64Array &p_density_b,
+		const PackedFloat64Array &p_selector,
+		const PackedFloat64Array &p_col_target_y,
+		const PackedFloat64Array &p_col_amplitude,
+		float p_stone_bias_factor,
+		float p_air_bias_factor,
+		float p_noise_normalizer,
+		float p_selector_normalizer,
+		int p_top_taper_cells,
+		float p_top_taper_force_air) const {
+	// Mirror WorldgenDensity GDScript constants.
+	constexpr int GRID_X = 5;
+	constexpr int GRID_Y = 17;
+	constexpr int GRID_Z = 5;
+	constexpr int COARSE_STEP_X = 4;
+	constexpr int COARSE_STEP_Y = 8;
+	constexpr int COARSE_STEP_Z = 4;
+	constexpr int GRID_SIZE = GRID_X * GRID_Y * GRID_Z;
+
+	(void)p_chunk_x;  // unused — chunk coords already baked into noise samples
+	(void)p_chunk_z;
+
+	// Bail if any input grid is sized wrong (caller bug).
+	if (p_density_a.size() != GRID_SIZE || p_density_b.size() != GRID_SIZE
+			|| p_selector.size() != GRID_SIZE
+			|| p_col_target_y.size() != GRID_X * GRID_Z
+			|| p_col_amplitude.size() != GRID_X * GRID_Z) {
+		Dictionary err;
+		err["blocks"] = PackedByteArray();
+		err["max_y"] = 0;
+		return err;
+	}
+
+	const double *da = p_density_a.ptr();
+	const double *db = p_density_b.ptr();
+	const double *sel = p_selector.ptr();
+	const double *targets = p_col_target_y.ptr();
+	const double *amps = p_col_amplitude.ptr();
+
+	// Working density grid — local doubles, modified in place. Same
+	// layout as the input grids.
+	double density[GRID_SIZE];
+
+	// Step 1: blend primary + secondary via selector, normalize.
+	// d10 = lerp(d12, d13, clamp((selector/N + 1) / 2, 0, 1))
+	const double sel_inv = 1.0 / static_cast<double>(p_selector_normalizer);
+	const double noise_inv = 1.0 / static_cast<double>(p_noise_normalizer);
+	for (int i = 0; i < GRID_SIZE; i++) {
+		const double d12 = da[i] * noise_inv;
+		const double d13 = db[i] * noise_inv;
+		const double d14 = (sel[i] * sel_inv + 1.0) * 0.5;
+		double t = d14;
+		if (t < 0.0) {
+			t = 0.0;
+		} else if (t > 1.0) {
+			t = 1.0;
+		}
+		density[i] = d12 + (d13 - d12) * t;
+	}
+
+	// Step 2: per-column Y-bias subtraction + top-of-world taper.
+	// Mirrors WorldgenDensity._y_bias_with_target_amp + the top-taper
+	// branch. Asymmetric stone/air bias, divided by per-column amplitude.
+	const int taper_start = GRID_Y - p_top_taper_cells;
+	const double taper_div = static_cast<double>(p_top_taper_cells - 1);
+	for (int gx = 0; gx < GRID_X; gx++) {
+		for (int gy = 0; gy < GRID_Y; gy++) {
+			const double world_y = static_cast<double>(gy * COARSE_STEP_Y);
+			double taper = 0.0;
+			if (gy >= taper_start) {
+				taper = static_cast<double>(gy - taper_start) / taper_div;
+			}
+			for (int gz = 0; gz < GRID_Z; gz++) {
+				const int col_idx = gx * GRID_Z + gz;
+				const double col_target = targets[col_idx];
+				const double col_amp = amps[col_idx];
+				const double diff = world_y - col_target;
+				double y_bias = 0.0;
+				if (diff < 0.0) {
+					y_bias = diff * static_cast<double>(p_stone_bias_factor) / col_amp;
+				} else {
+					y_bias = diff * static_cast<double>(p_air_bias_factor) / col_amp;
+				}
+				const int idx = (gx * GRID_Y + gy) * GRID_Z + gz;
+				double biased = density[idx] - y_bias;
+				if (taper > 0.0) {
+					biased = biased * (1.0 - taper)
+							+ static_cast<double>(p_top_taper_force_air) * taper;
+				}
+				density[idx] = biased;
+			}
+		}
+	}
+
+	// Step 3: trilerp density grid into per-cell threshold → STONE/AIR.
+	// 8 corner densities define each coarse cube; sub-cell loop walks
+	// the COARSE_STEP_X × COARSE_STEP_Y × COARSE_STEP_Z cells inside.
+	PackedByteArray blocks;
+	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
+	blocks.resize(volume);
+	uint8_t *blocks_ptr = blocks.ptrw();
+	for (int i = 0; i < volume; i++) {
+		blocks_ptr[i] = AIR;
+	}
+	int max_y = 0;
+	for (int gx = 0; gx < GRID_X - 1; gx++) {
+		for (int gz = 0; gz < GRID_Z - 1; gz++) {
+			for (int gy = 0; gy < GRID_Y - 1; gy++) {
+				const double d000 = density[(gx * GRID_Y + gy) * GRID_Z + gz];
+				const double d001 = density[(gx * GRID_Y + gy) * GRID_Z + gz + 1];
+				const double d010 = density[(gx * GRID_Y + (gy + 1)) * GRID_Z + gz];
+				const double d011 = density[(gx * GRID_Y + (gy + 1)) * GRID_Z + gz + 1];
+				const double d100 = density[((gx + 1) * GRID_Y + gy) * GRID_Z + gz];
+				const double d101 = density[((gx + 1) * GRID_Y + gy) * GRID_Z + gz + 1];
+				const double d110 = density[((gx + 1) * GRID_Y + (gy + 1)) * GRID_Z + gz];
+				const double d111 = density[((gx + 1) * GRID_Y + (gy + 1)) * GRID_Z + gz + 1];
+				for (int sy = 0; sy < COARSE_STEP_Y; sy++) {
+					const double ty = static_cast<double>(sy) / static_cast<double>(COARSE_STEP_Y);
+					const double d00 = d000 + (d010 - d000) * ty;
+					const double d01 = d001 + (d011 - d001) * ty;
+					const double d10 = d100 + (d110 - d100) * ty;
+					const double d11 = d101 + (d111 - d101) * ty;
+					const int world_y = gy * COARSE_STEP_Y + sy;
+					if (world_y >= SIZE_Y) {
+						continue;
+					}
+					for (int sx = 0; sx < COARSE_STEP_X; sx++) {
+						const double tx = static_cast<double>(sx) / static_cast<double>(COARSE_STEP_X);
+						const double d0 = d00 + (d10 - d00) * tx;
+						const double d1 = d01 + (d11 - d01) * tx;
+						const int local_x = gx * COARSE_STEP_X + sx;
+						for (int sz = 0; sz < COARSE_STEP_Z; sz++) {
+							const double tz = static_cast<double>(sz) / static_cast<double>(COARSE_STEP_Z);
+							const double d = d0 + (d1 - d0) * tz;
+							if (d > 0.0) {
+								const int local_z = gz * COARSE_STEP_Z + sz;
+								const int idx = world_y * SIZE_X * SIZE_Z + local_z * SIZE_X + local_x;
+								blocks_ptr[idx] = STONE;
+								if (world_y > max_y) {
+									max_y = world_y;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	Dictionary result;
+	result["blocks"] = blocks;
+	result["max_y"] = max_y;
+	return result;
+}
+
+// Slice 3-D2: native port of WorldgenDensity.apply_surface_layer.
+// After build_density_terrain fills the chunk with raw STONE/AIR, this
+// pass converts the topmost STONE per column → GRASS (or DIRT below
+// sea level — vanilla `px.java:130-148` rule), the next 3 STONE cells
+// → DIRT, then runs the deterministic bedrock pass at y=0..4 using
+// the same hash3 the GDScript `is_bedrock_at` uses.
+//
+// 16×16 columns × ~128-cell scan top-down was ~16ms in GDScript.
+// Native version is ~1ms — column scan is just byte reads in a flat
+// array.
+PackedByteArray WorldgenNative::apply_surface_layer(
+		int p_chunk_x,
+		int p_chunk_z,
+		const PackedByteArray &p_blocks) const {
+	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
+	if (p_blocks.size() != volume) {
+		return p_blocks;
+	}
+	PackedByteArray blocks = p_blocks;
+	uint8_t *blocks_ptr = blocks.ptrw();
+	for (int x = 0; x < SIZE_X; x++) {
+		for (int z = 0; z < SIZE_Z; z++) {
+			const int world_x = p_chunk_x * SIZE_X + x;
+			const int world_z = p_chunk_z * SIZE_Z + z;
+			// Walk top-down to find the topmost STONE in this column.
+			int top_stone_y = -1;
+			for (int y = SIZE_Y - 1; y >= 0; y--) {
+				const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+				if (blocks_ptr[idx] == STONE) {
+					top_stone_y = y;
+					break;
+				}
+			}
+			if (top_stone_y >= 0) {
+				// Top cell: GRASS if at/above sea level, DIRT otherwise
+				// (ocean floor — water fill will cover it). Vanilla
+				// `px.java:130-148` does the same.
+				const int top_idx = top_stone_y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+				blocks_ptr[top_idx] = (top_stone_y >= SEA_LEVEL) ? GRASS : DIRT;
+				// Next 3 STONE cells → DIRT.
+				for (int dy = 1; dy < 4; dy++) {
+					const int y = top_stone_y - dy;
+					if (y < 0) {
+						break;
+					}
+					const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+					if (blocks_ptr[idx] == STONE) {
+						blocks_ptr[idx] = DIRT;
+					}
+				}
+			}
+			// Bedrock pass at y=0..4 — probabilistic per the same hash
+			// `is_bedrock_at` the GDScript path uses, so byte-for-byte
+			// parity holds.
+			for (int y = 0; y < 5; y++) {
+				if (is_bedrock_at(world_x, y, world_z)) {
+					const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+					blocks_ptr[idx] = BEDROCK;
+				}
+			}
+		}
+	}
+	return blocks;
+}
+
+// Slice 3-D3: native port of NoiseOctaves.sample_3d_grid. The caller
+// passes the same Array<Ref<FastNoiseLite>> that GDScript uses (one
+// configured Perlin per octave), and we run the reverse-FBM accumulation
+// loop in C++. Because the underlying FastNoiseLite instances are SHARED
+// between GDScript and native paths, the noise output at any (x,y,z) is
+// byte-identical — so the grid we produce here matches the GDScript
+// fallback exactly.
+//
+// Per-call cost: ~10ms in GDScript (Variant dispatch overhead per
+// `get_noise_3d` call) → ~1ms native (direct C++ method call). Three
+// noise grids per chunk × 16-octave reverse-FBM = ~20K Perlin samples,
+// so this matters during chunk gen.
+PackedFloat64Array WorldgenNative::sample_noise_grid_3d(
+		const Array &p_octaves,
+		double p_base_x,
+		double p_base_y,
+		double p_base_z,
+		int p_size_x,
+		int p_size_y,
+		int p_size_z,
+		double p_scale_x,
+		double p_scale_y,
+		double p_scale_z) const {
+	PackedFloat64Array out;
+	const int total = p_size_x * p_size_y * p_size_z;
+	out.resize(total);
+	double *out_ptr = out.ptrw();
+	for (int i = 0; i < total; i++) {
+		out_ptr[i] = 0.0;
+	}
+	const int octave_count = p_octaves.size();
+	double amp = 1.0;
+	for (int octave = 0; octave < octave_count; octave++) {
+		Ref<FastNoiseLite> noise = p_octaves[octave];
+		if (noise.is_null()) {
+			amp /= 2.0;
+			continue;
+		}
+		const double fx_scale = p_scale_x * amp;
+		const double fy_scale = p_scale_y * amp;
+		const double fz_scale = p_scale_z * amp;
+		const double inv_amp = 1.0 / amp;
+		for (int x = 0; x < p_size_x; x++) {
+			const double sx = (p_base_x + static_cast<double>(x)) * fx_scale;
+			for (int y = 0; y < p_size_y; y++) {
+				const double sy = (p_base_y + static_cast<double>(y)) * fy_scale;
+				for (int z = 0; z < p_size_z; z++) {
+					const double sz = (p_base_z + static_cast<double>(z)) * fz_scale;
+					const int idx = (x * p_size_y + y) * p_size_z + z;
+					out_ptr[idx] += noise->get_noise_3d(sx, sy, sz) * inv_amp;
+				}
+			}
+		}
+		amp /= 2.0;
+	}
+	return out;
+}
+
 // Deterministic port of Worldgen._place_vein_ellipsoid, which is itself a
 // port of vanilla WorldGenMinable.generate (df.java). Traces a short line
 // (d0..d1, d4..d5, d2..d3) and fills a radius-varying ellipsoid at b+1
@@ -611,12 +918,16 @@ PackedByteArray WorldgenNative::scatter_ores(
 // so only the target chunk mutates; seed-chunk iterations that produce
 // worms entirely outside the target run their PRNG stream for
 // determinism but emit no carves.
-PackedByteArray WorldgenNative::scatter_caves(
+Dictionary WorldgenNative::scatter_caves(
 		int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const {
 	PackedByteArray out = p_blocks;
+	Dictionary result;
+	result["blocks"] = out;
+	result["has_non_cube"] = false;
+	result["has_water"] = false;
 	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
 	if (out.size() < volume) {
-		return out;
+		return result;
 	}
 	uint8_t *blocks_ptr = out.ptrw();
 
@@ -636,13 +947,98 @@ PackedByteArray WorldgenNative::scatter_caves(
 			spawn_from_seed_chunk(rng, blocks_ptr, p_chunk_x, p_chunk_z, seed_cx, seed_cz);
 		}
 	}
-	return out;
+
+	// Sync the chunk-state flags that GDScript's `set_block_unchecked`
+	// would have updated cell-by-cell. The native base-terrain + caves
+	// paths bypass that helper (they write blocks_ptr directly), so
+	// without this scan the GDScript-side `chunk.has_water_cells` /
+	// `has_non_cube_blocks` flags stay stale → mesher dispatch chooses
+	// the wrong path and chunk-state diverges from the GDScript reference
+	// (test_mesher_native parity catches this).
+	//
+	// Single linear pass over 32K cells in C++ — replaces the GDScript
+	// `_post_process_native_caves` loop that cost ~10-15 ms/chunk and
+	// dominated the cave probe time. Mesh-shape and water predicates are
+	// inlined here to keep the loop hot.
+	bool has_non_cube = false;
+	bool has_water = false;
+	for (int i = 0; i < volume; i++) {
+		const uint8_t id = blocks_ptr[i];
+		if (!has_non_cube) {
+			// Mirrors Blocks.needs_gdscript_mesher / mesh_shape() — any
+			// id whose mesh shape isn't CUBE. Listed by ID; keep in sync
+			// with scripts/world/blocks.gd if new non-cube blocks land.
+			switch (id) {
+				case SAPLING:  // 22
+				case FIRE:  // 27
+				case TORCH:  // 28
+				case FENCE:  // 30
+				case WOOD_STAIRS:  // 31
+				case COBBLESTONE_STAIRS:  // 32
+				case WOODEN_DOOR:  // 33
+				case IRON_DOOR:  // 34
+				case LADDER:  // 35
+				case FLOWER_RED:  // 37
+				case FLOWER_YELLOW:  // 38
+				case MUSHROOM_BROWN:  // 39
+				case MUSHROOM_RED:  // 40
+					has_non_cube = true;
+					break;
+				default:
+					break;
+			}
+		}
+		if (!has_water && (id == WATER_STILL || id == WATER_FLOWING)) {
+			has_water = true;
+		}
+		if (has_non_cube && has_water) {
+			break;  // both set, nothing more to detect
+		}
+	}
+	result["blocks"] = out;
+	result["has_non_cube"] = has_non_cube;
+	result["has_water"] = has_water;
+	return result;
 }
 
 void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("build_base_terrain", "chunk_x", "chunk_z", "heightmap"),
 			&WorldgenNative::build_base_terrain);
+	ClassDB::bind_method(
+			D_METHOD(
+					"build_density_terrain",
+					"chunk_x",
+					"chunk_z",
+					"density_a",
+					"density_b",
+					"selector",
+					"col_target_y",
+					"col_amplitude",
+					"stone_bias_factor",
+					"air_bias_factor",
+					"noise_normalizer",
+					"selector_normalizer",
+					"top_taper_cells",
+					"top_taper_force_air"),
+			&WorldgenNative::build_density_terrain);
+	ClassDB::bind_method(
+			D_METHOD("apply_surface_layer", "chunk_x", "chunk_z", "blocks"),
+			&WorldgenNative::apply_surface_layer);
+	ClassDB::bind_method(
+			D_METHOD(
+					"sample_noise_grid_3d",
+					"octaves",
+					"base_x",
+					"base_y",
+					"base_z",
+					"size_x",
+					"size_y",
+					"size_z",
+					"scale_x",
+					"scale_y",
+					"scale_z"),
+			&WorldgenNative::sample_noise_grid_3d);
 	ClassDB::bind_method(
 			D_METHOD("scatter_ores", "chunk_x", "chunk_z", "blocks", "ore_configs"),
 			&WorldgenNative::scatter_ores);

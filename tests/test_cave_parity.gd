@@ -29,7 +29,12 @@ func _carve_through_native(coord_x: int, coord_z: int) -> Chunk:
 	var c := Chunk.new()
 	Worldgen._build_base_terrain_native(c, coord_x, coord_z)
 	Worldgen._scatter_ores(c, coord_x, coord_z)
-	c.blocks = Worldgen._native_worldgen.call("scatter_caves", coord_x, coord_z, c.blocks)
+	# scatter_caves returns Dictionary { blocks, has_non_cube, has_water }
+	# since the inline-flag-scan refactor — extract `blocks` for parity.
+	var result: Dictionary = Worldgen._native_worldgen.call(
+		"scatter_caves", coord_x, coord_z, c.blocks
+	)
+	c.blocks = result["blocks"]
 	return c
 
 

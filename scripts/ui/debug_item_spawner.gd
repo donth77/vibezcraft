@@ -48,6 +48,10 @@ const _BLOCKS: Array = [
 	Blocks.WOOD_STAIRS,
 	Blocks.COBBLESTONE_STAIRS,
 	Blocks.LADDER,
+	Blocks.FLOWER_RED,
+	Blocks.FLOWER_YELLOW,
+	Blocks.MUSHROOM_BROWN,
+	Blocks.MUSHROOM_RED,
 ]
 
 const _ITEMS: Array = [

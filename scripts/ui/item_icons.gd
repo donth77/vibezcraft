@@ -29,6 +29,10 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.SAPLING: "sapling",
 	Blocks.TORCH: "torch",
 	Blocks.LADDER: "ladder",
+	Blocks.FLOWER_RED: "flower_red",
+	Blocks.FLOWER_YELLOW: "flower_yellow",
+	Blocks.MUSHROOM_BROWN: "mushroom_brown",
+	Blocks.MUSHROOM_RED: "mushroom_red",
 }
 
 # Item sprite basenames. Resolved at load time: first try
@@ -82,6 +86,9 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# version that introduced the dye system). Sprite is unchanged in
 	# every later version, so this is the canonical look.
 	Items.BONEMEAL: "bonemeal",
+	# Gunpowder — canonical Alpha 1.2.6 sprite at items.png (7,8). Used in
+	# the TNT recipe; sourced via debug spawner only until creepers ship.
+	Items.GUNPOWDER: "gunpowder",
 	# Flint and steel — canonical Alpha 1.2.6 sprite at items.png (5,0),
 	# extracted by scripts/dev/extract_alpha_pack.py into the alpha_vanilla
 	# pack. Other packs fall through to the placeholder color until they

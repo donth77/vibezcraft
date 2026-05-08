@@ -1,7 +1,12 @@
 class_name Blocks
 extends RefCounted
 
+# gdlint: disable=max-file-lines
 # Block IDs (Uint8 0-255). IDs are stable — append to the end, never renumber.
+# File length cap is intentionally lifted: this is the canonical block
+# registry — IDs, hardness, drops, light opacity, atlas-face mapping, and
+# break-time math all live here so adding a block touches one file. Splitting
+# would just trade a single source-of-truth for indirection across N files.
 
 const AIR := 0
 const BEDROCK := 1
@@ -106,6 +111,28 @@ const IRON_DOOR := 34
 # 0.4, axe-preferred, wood material. Player climbing physics clamp fall
 # speed and allow upward movement when overlapping the ladder cell.
 const LADDER := 35
+# Vanilla Alpha BlockTNT (v.java, id 46). Hardness 0 = instant break, drops
+# itself (NOT primed-TNT-on-mine — vanilla a(Random)=0 only suppresses the
+# random drop when the block is broken by an explosion shockwave). Right-
+# click with flint and steel ignites: replace block with kr (EntityTNTPrimed),
+# 80-tick fuse → explosion power 4 at the entity position. Faces use 3
+# distinct atlas tiles (top fuse plate, side TNT lettering, plain red bottom)
+# extracted from the Alpha terrain.png at row 0 cols 8-10.
+const TNT := 36
+# Vanilla Alpha BlockFlowers (mr.java) — red poppy (nq.ad, id 37) and yellow
+# dandelion (nq.ae, id 38). Cross-quad render like SAPLING. Hardness 0,
+# light_opacity 0, valid plant support required (grass/dirt/farmland).
+# Vanilla populate (px.java:388-399) places 2× poppy attempts/chunk always
+# + 1× dandelion attempt at 1/2 probability.
+const FLOWER_RED := 37
+const FLOWER_YELLOW := 38
+# Vanilla Alpha BlockMushroom (nq.af = brown, id 39; nq.ag = red, id 40).
+# Same cross-quad shape as flowers; vanilla restricts to dim light + opaque
+# block-below, but for the first decoration slice we treat them like flowers
+# (grass/dirt support, no light gate). Vanilla populate gates them at 1/4
+# (brown) and 1/8 (red) per chunk.
+const MUSHROOM_BROWN := 39
+const MUSHROOM_RED := 40
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -211,14 +238,22 @@ static func is_opaque(id: int) -> bool:
 		and id != WOODEN_DOOR
 		and id != IRON_DOOR
 		and id != LADDER
+		# Flowers + mushrooms render as cross-quads like saplings — opaque
+		# treatment would cull the dirt/grass face below them, leaving a
+		# punch-through hole when the cross shader discards the corners.
+		and id != FLOWER_RED
+		and id != FLOWER_YELLOW
+		and id != MUSHROOM_BROWN
+		and id != MUSHROOM_RED
 	)
 
 
-# True if fire will consume this block — PLANKS, LOG, LEAVES per vanilla
-# BlockFire.setBurnProperties (qh.java:13-18). Wool/tnt/bookshelf would
-# also be flammable but we don't have those blocks yet.
+# True if fire will consume this block — PLANKS, LOG, LEAVES, TNT per
+# vanilla BlockFire.setBurnProperties (qh.java:13-18). TNT's burn rate
+# matches wool's 30/60 in vanilla; ignition by adjacent fire calls the
+# same flint-and-steel branch (auto-prime via BlockTNT.onBlockBurnt).
 static func is_flammable(id: int) -> bool:
-	return id == LOG or id == PLANKS or id == LEAVES
+	return id == LOG or id == PLANKS or id == LEAVES or id == TNT
 
 
 # True for either water variant. Used by mesher (skip meshing until the
@@ -278,6 +313,10 @@ static func is_replaceable(id: int) -> bool:
 		or id == LAVA_FLOWING
 		or id == LAVA_STILL
 		or id == FIRE
+		or id == FLOWER_RED
+		or id == FLOWER_YELLOW
+		or id == MUSHROOM_BROWN
+		or id == MUSHROOM_RED
 	)
 
 
@@ -336,6 +375,13 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[WOODEN_DOOR] = 0
 	_light_opacity_lut[IRON_DOOR] = 0
 	_light_opacity_lut[LADDER] = 0
+	# Flowers + mushrooms — cross-quad blocks pass light through, same as
+	# SAPLING. Vanilla mr.java extends ok which extends nq with no opacity
+	# override → defaults to 0 (transparent).
+	_light_opacity_lut[FLOWER_RED] = 0
+	_light_opacity_lut[FLOWER_YELLOW] = 0
+	_light_opacity_lut[MUSHROOM_BROWN] = 0
+	_light_opacity_lut[MUSHROOM_RED] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -369,8 +415,12 @@ static func light_emission(id: int) -> int:
 # Block.canPlaceAt; for plants this delegates to BlockPlant.j(world,...).
 # Cubes have no support requirement (return true unconditionally).
 static func can_place_at(id: int, support_id: int) -> bool:
-	if id == SAPLING:
+	if id == SAPLING or id == FLOWER_RED or id == FLOWER_YELLOW:
 		return is_valid_plant_support(support_id)
+	if id == MUSHROOM_BROWN or id == MUSHROOM_RED:
+		# Vanilla mushrooms accept opaque-cube support too (so they grow on
+		# stone in caves). Keep the same valid-plant check + opaque fallback.
+		return is_valid_plant_support(support_id) or is_opaque(support_id)
 	return true
 
 
@@ -385,6 +435,12 @@ static func can_place_at(id: int, support_id: int) -> bool:
 static func selection_aabb(id: int, meta: int = 0) -> AABB:
 	if id == SAPLING:
 		return AABB(Vector3(0.1, 0.0, 0.1), Vector3(0.8, 0.8, 0.8))
+	# Vanilla BlockFlowers / BlockMushroom — both pass `f=0.2` to the
+	# super(int, int) ctor that calls `setBlockBounds(0.5-f, 0, 0.5-f,
+	# 0.5+f, f*2, 0.5+f)`. So the wireframe AABB is (0.3,0,0.3)..(0.7,
+	# 0.4,0.7) — a 0.4-wide, 0.4-tall box hugging the cell's bottom center.
+	if id == FLOWER_RED or id == FLOWER_YELLOW or id == MUSHROOM_BROWN or id == MUSHROOM_RED:
+		return AABB(Vector3(0.3, 0.0, 0.3), Vector3(0.4, 0.4, 0.4))
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -459,7 +515,14 @@ static func _door_facing(meta: int) -> int:
 # non-cube blocks need to override. Branched on per-block in
 # Mesher._emit_block_faces.
 static func mesh_shape(id: int) -> int:
-	if id == SAPLING or id == FIRE:
+	if (
+		id == SAPLING
+		or id == FIRE
+		or id == FLOWER_RED
+		or id == FLOWER_YELLOW
+		or id == MUSHROOM_BROWN
+		or id == MUSHROOM_RED
+	):
 		return MESH_SHAPE_CROSS
 	if id == TORCH:
 		return MESH_SHAPE_TORCH
@@ -484,6 +547,40 @@ static func needs_gdscript_mesher(id: int) -> bool:
 	return mesh_shape(id) != MESH_SHAPE_CUBE
 
 
+# Vanilla `Block.getExplosionResistance` — how much a block resists the
+# blast wave from TNT / creepers. The explosion ray loses
+# `(resistance + 0.3) × 0.225` intensity per 0.3-block step, so a 4.0-power
+# TNT blast (initial ~3 intensity per ray) breaks ~3 blocks of stone deep
+# but ~0 blocks of cobblestone (cobble's resistance 30 is a vanilla
+# anomaly — the recipe is faster to mine but tougher to explode). Bedrock
+# and obsidian use absurd values so they're effectively immune to TNT.
+# Numbers come from Bukkit/mc-dev (Beta-faithful; Alpha used the same
+# values for the few blocks it had).
+static func explosion_resistance(id: int) -> float:
+	match id:
+		BEDROCK:
+			return 6000000.0
+		OBSIDIAN:
+			return 2000.0
+		COBBLESTONE, COBBLESTONE_STAIRS:
+			return 30.0
+		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL:
+			return 500.0
+		IRON_DOOR:
+			return 25.0
+		STONE, BRICK, FURNACE, LIT_FURNACE, IRON_ORE, COAL_ORE, GOLD_ORE, DIAMOND_ORE:
+			return 6.0
+		WOODEN_DOOR:
+			return 15.0
+		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER:
+			return 2.5
+	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
+	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
+	# so a TNT cell offers no shielding to the next chained TNT — keeps
+	# stack chain reactions punchy.
+	return 0.0
+
+
 # Block hardness — base for all break-time math. Vanilla MC values, in
 # "block-hardness units" not seconds. Final time = hardness × multiplier
 # (1.5 if correct tool, 5.0 if wrong/no tool) ÷ tool speed.
@@ -501,7 +598,7 @@ static func hardness(id: int) -> float:
 			return 0.0
 		LEAVES, GLASS:
 			return 0.2
-		SAPLING, TORCH:
+		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
 			return 0.5
@@ -509,6 +606,8 @@ static func hardness(id: int) -> float:
 			return 0.6
 		LADDER:
 			return 0.4  # ca.java `c(0.4f)` — soft wood, quick break
+		TNT:
+			return 0.0  # v.java `c(0.0f)` — instant break (still drops the block)
 		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, COBBLESTONE_STAIRS:
 			# mb.java:14 `this.c(nq2.bi)` — inherits parent hardness (2.0).
 			return 2.0
@@ -676,6 +775,8 @@ static func drops(id: int) -> int:
 			return AIR  # vanilla: glass shatters when broken, drops nothing
 		SAPLING:
 			return SAPLING  # drops itself when broken
+		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
+			return id  # plants drop themselves
 		BEDROCK:
 			return AIR
 		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
@@ -767,6 +868,16 @@ static func name_of(id: int) -> String:
 			return "iron_door"
 		LADDER:
 			return "ladder"
+		TNT:
+			return "tnt"
+		FLOWER_RED:
+			return "flower_red"
+		FLOWER_YELLOW:
+			return "flower_yellow"
+		MUSHROOM_BROWN:
+			return "mushroom_brown"
+		MUSHROOM_RED:
+			return "mushroom_red"
 	return "unknown"
 
 
@@ -882,6 +993,22 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "cobblestone"
 		LADDER:
 			return "ladder"
+		TNT:
+			match face:
+				"top":
+					return "tnt_top"
+				"bottom":
+					return "tnt_bottom"
+				_:
+					return "tnt_side"
+		FLOWER_RED:
+			return "flower_red"
+		FLOWER_YELLOW:
+			return "flower_yellow"
+		MUSHROOM_BROWN:
+			return "mushroom_brown"
+		MUSHROOM_RED:
+			return "mushroom_red"
 	return ""
 
 

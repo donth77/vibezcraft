@@ -332,6 +332,13 @@ var _tool_tuner: Control  # debug-only slider panel; toggled with T
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Search ONLY within the spawn chunk (0..15 on X/Z) for a column
+	# above sea level. Bounded scope means the chunk loader still has
+	# the spawn chunk in its initial-load set — no chunk-load lag, no
+	# infinite-fall regression. If the entire spawn chunk is ocean we
+	# accept the water spawn (rare with the new ELEVATION_LAND_BIAS).
+	var safe: Vector2i = _find_safe_spawn_in_chunk()
+	global_position = Vector3(float(safe.x) + 0.5, 100.0, float(safe.y) + 0.5)
 	inventory = Inventory.new()
 	inventory.changed.connect(_update_held_item)
 	inventory.changed.connect(_update_armor_overlay)
@@ -1885,3 +1892,27 @@ func _update_sneak() -> void:
 			_is_sneaking = not _is_sneaking
 	else:
 		_is_sneaking = Input.is_action_pressed("sneak")
+
+
+# Scan the 16×16 spawn chunk for the first column whose surface is
+# comfortably above sea level. If none found, fall back to the highest
+# column we saw (best of bad options — might still be water but
+# shallowest spot). Bounded to chunk (0,0) so we never move the player
+# beyond the chunk loader's initial-load radius.
+func _find_safe_spawn_in_chunk() -> Vector2i:
+	var min_land_y: int = Worldgen.SEA_LEVEL + 2
+	var fallback: Vector2i = Vector2i(8, 8)
+	var best_y: int = 0
+	for x in range(0, 16):
+		for z in range(0, 16):
+			var surface_y: int
+			if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
+				surface_y = int(WorldgenDensity.estimate_target_y(x, z))
+			else:
+				surface_y = Worldgen.surface_height(x, z)
+			if surface_y >= min_land_y:
+				return Vector2i(x, z)
+			if surface_y > best_y:
+				best_y = surface_y
+				fallback = Vector2i(x, z)
+	return fallback

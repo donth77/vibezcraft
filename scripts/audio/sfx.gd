@@ -49,6 +49,20 @@ const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
 const _TOOL_BREAK_SOUND: String = "res://assets/audio/sfx/tool_break.ogg"
 # Alpha 1.2.6 `sound3/random/click.ogg` — UI click for menu buttons.
 const _CLICK_SOUND: String = "res://assets/audio/sfx/click.ogg"
+# Alpha 1.2.6 `sound3/random/fuse.ogg` — TNT/creeper fuse hiss. Played once
+# at ignition (vanilla v.java line 45 `cy.a(kr2, "random.fuse", 1.0f, 1.0f)`),
+# NOT looped during the 4-second fuse — the audio is a one-shot crackle.
+const _FUSE_SOUND: String = "res://assets/audio/sfx/random/fuse.ogg"
+# Alpha 1.2.6 `sound3/random/explode{1..4}.ogg` — vanilla picks one
+# uniformly per detonation. ks.java::b() pitch jitter envelope is
+# `(1 + (rand-rand) × 0.2) × 0.7` ≈ 0.7 ± 0.14, giving the explosion a
+# bassy thump rather than the raw clip's mid-range.
+const _EXPLODE_SOUNDS: Array = [
+	"res://assets/audio/sfx/random/explode1.ogg",
+	"res://assets/audio/sfx/random/explode2.ogg",
+	"res://assets/audio/sfx/random/explode3.ogg",
+	"res://assets/audio/sfx/random/explode4.ogg",
+]
 # Alpha 1.2.6 `sound3/random/glass{1,2,3}.ogg` — sharp shatter that BlockGlass
 # emits on break (StepSoundC.soundOnDestroyed override). The step / place
 # sound stays "stone" via _material_for since vanilla glass uses Material.glass
@@ -437,6 +451,53 @@ func play_click() -> void:
 
 
 # Item pickup "pop" — vanilla MC's random/pop.ogg
+# TNT fuse hiss — vanilla one-shot at ignition. Pitch jitter ±10% to match
+# the random.* family envelope; `loud` controls volume (chained primed-TNT
+# in close succession would drown the player's ears at full volume each).
+func play_fuse(loud: bool = true) -> void:
+	if not Game.sfx_enabled:
+		return
+	var stream: AudioStream = _stream_cache.get(_FUSE_SOUND)
+	if stream == null:
+		stream = load(_FUSE_SOUND) as AudioStream
+		_stream_cache[_FUSE_SOUND] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = 0.0 if loud else -8.0
+	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.play()
+
+
+# TNT/creeper detonation — vanilla picks 1 of 4 explode variants. Pitch
+# envelope `(1 + (rand-rand) × 0.2) × 0.7` per ks.java::b() drops the
+# clip an octave-ish so the bassy boom reads correctly. `pos` is the
+# detonation world coord (unused today; positional 3D audio lands when
+# the SFX system sprouts an AudioStreamPlayer3D pool).
+func play_explode(_pos: Vector3 = Vector3.ZERO) -> void:
+	if not Game.sfx_enabled:
+		return
+	var path: String = _EXPLODE_SOUNDS[randi() % _EXPLODE_SOUNDS.size()]
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	# Vanilla volume 4.0 — louder than every other random.* sound (which
+	# is exactly the drama you want from TNT). Cap at +6 dB so the player's
+	# speakers don't clip on a chain detonation.
+	player.volume_db = 6.0
+	# `(1 + (rand-rand) × 0.2) × 0.7` averages ~0.7 with ±0.14 jitter.
+	player.pitch_scale = (1.0 + (randf() - randf()) * 0.2) * 0.7
+	player.play()
+
+
 func play_pickup() -> void:
 	if not Game.sfx_enabled:
 		return
@@ -482,6 +543,8 @@ func _material_for(block_id: int) -> String:
 		Blocks.DIAMOND_ORE, Blocks.FURNACE, Blocks.LIT_FURNACE, Blocks.GLASS:
 			return "stone"
 		Blocks.DIRT, Blocks.GRASS, Blocks.LEAVES, Blocks.SAPLING:
+			return "grass"
+		Blocks.FLOWER_RED, Blocks.FLOWER_YELLOW, Blocks.MUSHROOM_BROWN, Blocks.MUSHROOM_RED:
 			return "grass"
 		Blocks.SAND:
 			return "sand"

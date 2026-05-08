@@ -75,6 +75,14 @@ public:
 	static constexpr int WOODEN_DOOR = 33;
 	static constexpr int IRON_DOOR = 34;
 	static constexpr int LADDER = 35;
+	// Decoration slice 1 — flowers + mushrooms. Cross-quad blocks like
+	// SAPLING. Native mesher must skip cube emission for these AND treat
+	// them as non-opaque for neighbor culling so adjacent grass/dirt faces
+	// stay visible. The GDScript appendix emits the cross-quad geometry.
+	static constexpr int FLOWER_RED = 37;
+	static constexpr int FLOWER_YELLOW = 38;
+	static constexpr int MUSHROOM_BROWN = 39;
+	static constexpr int MUSHROOM_RED = 40;
 
 	MesherNative();
 	~MesherNative();

@@ -205,9 +205,49 @@ func _ready() -> void:
 				% [str(debug_mining), str(debug_lighting), str(debug_mesh), str(debug_worldgen)]
 			)
 		)
+	# Terrain mode toggle — `MC_CLONE_TERRAIN_MODE` env var picks between
+	# the 2D heightmap (legacy/fallback) and the vanilla-faithful 3D
+	# density path. Default is 3D density for runtime since the user
+	# wants to A/B-test it in-game; tests keep their static-var default
+	# of MODE_2D_HEIGHTMAP for byte-equality stability. Accepted values
+	# (case-insensitive): `3d_density` or `2d_heightmap`. Unrecognized
+	# values fall through to the runtime default with a warning.
+	var terrain_mode_raw: String = _resolve_str("MC_CLONE_TERRAIN_MODE", "3d_density")
+	var terrain_mode_lower: String = terrain_mode_raw.to_lower()
+	if terrain_mode_lower == "2d_heightmap":
+		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_2D_HEIGHTMAP
+	elif terrain_mode_lower == "3d_density":
+		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
+	else:
+		push_warning(
+			(
+				"[Game] MC_CLONE_TERRAIN_MODE expected '3d_density' or '2d_heightmap', got: %s"
+				% terrain_mode_raw
+			)
+		)
+		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
+	print("[Game] terrain_mode=%s" % terrain_mode_lower)
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
+	# Warm the 3D-density noise stack on the main thread. Without this,
+	# the first chunk gen on a worker thread would call FastNoiseLite.new()
+	# inside NoiseOctaves.create, which triggers a /root propagate_notification
+	# Godot forbids from non-main threads → chunks fail to mesh.
+	if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
+		WorldgenDensity.warm_main_thread()
+	# Worldgen audit dump — `MC_CLONE_WORLDGEN_AUDIT=1` prints a per-chunk
+	# block / surface / decoration breakdown vs vanilla expected values
+	# right after init. Useful for catching tuning regressions (e.g.,
+	# sand-mid-forest, missing mountains) without screenshots. Generates
+	# a fresh 5×5 chunk sample (slow — ~half a second) so do NOT enable
+	# in normal play; it's a dev tool.
+	var audit_flag: String = _resolve_str("MC_CLONE_WORLDGEN_AUDIT", "0")
+	if audit_flag == "1" or audit_flag.to_lower() == "true":
+		# Radius 5 = 11×11 chunks ≈ 176 blocks; bigger than the
+		# elevation-modulator wavelength (~250 blocks) so the sample
+		# spans at least one continental high/low transition.
+		WorldgenAudit.print_report(0, 0, 5)
 	# Opt in to the native mesher + worldgen base-terrain fill (GDExtension).
 	# Silently falls back to GDScript if the extension isn't loaded.
 	# Parity enforced by tests/test_mesher_native.gd and

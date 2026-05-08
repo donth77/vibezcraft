@@ -1,3 +1,4 @@
+# gdlint: disable=max-file-lines
 class_name Worldgen
 extends RefCounted
 
@@ -19,30 +20,69 @@ extends RefCounted
 # borders so the 5×5 canopy never spills into a neighbor (avoids the cross-
 # chunk decoration problem until we add a proper structure-start system).
 
+# --- Terrain mode toggle (slice 3-B) ---
+# Toggles between the 2D-heightmap path (continental + detail noise →
+# single Y per column → bedrock/stone/dirt/grass layering) and the 3D
+# density path (vanilla-faithful: noise + Y-bias → per-cell stone/air →
+# surface conversion).
+#
+# Keep MODE_2D_HEIGHTMAP as the default while 3D density bakes in. Flip
+# to MODE_3D_DENSITY at runtime via `Worldgen.terrain_mode = ...` to
+# A/B test in-game; chunks generated under different modes look
+# obviously different at the seam (vertical cliff at the boundary), so
+# don't toggle mid-session unless you want to see that.
+enum TerrainMode { MODE_2D_HEIGHTMAP, MODE_3D_DENSITY }
+
 # Alpha 1.2.6 sea level = 64 (vendor/alpha-1.2.6-src/src/px.java:103,
 # `int n4 = 64`). Surface terrain peaks ~SEA_LEVEL+amplitude, leaving
 # ~60 blocks of stone below for caving/ore generation.
 const SEA_LEVEL: int = 64
-# Mountains (phase 6c): peak amplitude per octave. With FBM and gain=0.5
-# the practical max rise over 4 octaves is ~1.875× this value, so
-# HEIGHT_AMPLITUDE=22 yields a working range of roughly SEA_LEVEL ± 41
-# (y≈22..104) — close to Beta-era vanilla's 55..100 surface range. Earlier
-# single-octave value (10) produced flat-with-dips terrain; the FBM stack
-# adds the iconic rolling hills and occasional tall peaks.
-const HEIGHT_AMPLITUDE: int = 22
-const NOISE_FREQUENCY: float = 0.018
-# FBM stack. Vanilla Alpha's ChunkProviderGenerate instantiates several
-# NoiseGeneratorOctaves (Bukkit/mc-dev `ChunkProviderGenerate.java:40-46`):
-#   j, k = new NoiseGeneratorOctaves(rand, 16)    // main density, 16 octaves
-#   l    = new NoiseGeneratorOctaves(rand, 8)     // biome/terrain selector
-#   a    = new NoiseGeneratorOctaves(rand, 10)
-# Vanilla stacks octaves with freq doubling and amplitude halving, feeding
-# a 3D density field that's thresholded for the surface — a much richer
-# shape than our 2D heightmap. We use the same FBM building block but only
-# 4 octaves since a 2D heightmap doesn't benefit from vanilla's deeper
-# stack (octaves beyond ~4 produce sub-block detail that gets floor()'d
-# away when converted to integer cell heights). Lacunarity 2.0 / gain 0.5
-# are FastNoiseLite defaults and match vanilla's per-octave scaling.
+# Continental + detail noise stack (slice 2 of the worldgen reshape —
+# see `.claude/worldgen-deferred.md` for context). The 2D heightmap
+# combines two noise samples per (x, z):
+#
+#   1. Continental noise: low-freq (~333 block wavelength = ~21 chunks),
+#      2 octaves, amplitude ±CONTINENTAL_AMPLITUDE. Shifts the BASELINE
+#      per region — positive in "land regions", negative in "ocean
+#      regions". With this layer dominating, the surface only crosses
+#      sea level at the boundaries between land/ocean regions instead
+#      of every ~30-50 blocks (the symptom of the islandy/excessive-
+#      beaches feel — see `worldgen-deferred.md` for the analysis).
+#
+#   2. Detail noise: higher freq (~83 block wavelength = ~5 chunks),
+#      4-octave FBM, amplitude ±DETAIL_AMPLITUDE. Local variation that
+#      rides on top of the continental baseline.
+#
+# Plus a BASELINE_BIAS of +4 that shifts the overall mean above sea
+# level, so most of the world is land (vanilla's 3D density field has
+# the same effect via Y-bias in the threshold).
+#
+# Practical range: SEA_LEVEL + BASELINE_BIAS ± (CONTINENTAL_AMPLITUDE +
+# DETAIL_AMPLITUDE) = 64 + 4 ± 24 = [44, 92]. Most of the world clusters
+# around y=68 (continental ≈ 0); ocean basins where continental is
+# strongly negative; mountain peaks where both noises align positive.
+const CONTINENTAL_FREQUENCY: float = 0.003
+const CONTINENTAL_AMPLITUDE: int = 14
+const CONTINENTAL_OCTAVES: int = 2
+const NOISE_FREQUENCY: float = 0.012
+const DETAIL_AMPLITUDE: int = 10
+# Loose upper bound for `test_surface_height_in_expected_range`. Equal to
+# CONTINENTAL_AMPLITUDE + DETAIL_AMPLITUDE + abs(BASELINE_BIAS) = 28, so
+# the range check covers the worst-case excursion in either direction.
+const HEIGHT_AMPLITUDE: int = 28
+# Vertical offset added to every column. Positive bias lifts the world
+# mean above SEA_LEVEL, so most land is above water without forcing a
+# specific noise distribution. Tweakable; +4 keeps the mean at y=68
+# while still allowing ocean basins to dip to y~44.
+const BASELINE_BIAS: int = 4
+# FBM stack for the detail noise (continental noise has its own setup
+# in `_get_continental_noise`). Vanilla Alpha's ChunkProviderGenerate
+# instantiates several NoiseGeneratorOctaves (Bukkit/mc-dev
+# `ChunkProviderGenerate.java:40-46`) feeding a 3D density field; we
+# emulate the LARGE-FEATURE-DOMINATES outcome via the continental layer
+# above rather than vanilla's reverse-FBM. Standard FBM (gain 0.5) is
+# fine for the detail layer since the continental layer carries the
+# big-feature shape.
 const NOISE_OCTAVES: int = 4
 const NOISE_LACUNARITY: float = 2.0
 const NOISE_GAIN: float = 0.5
@@ -54,15 +94,40 @@ const NOISE_GAIN: float = 0.5
 # shelf just below. Outside this band, hills keep grass and deep ocean
 # floors keep dirt (lake beds remain gray-brown, not bleached sand).
 #
-# Band bounds mirror BiomeBase.b() in Bukkit/mc-dev:
-#   `if (l1 >= 59 && l1 <= 64) { block = this.ai; ... }`
-# which is SEA_LEVEL-4 .. SEA_LEVEL+1 with SEA_LEVEL=63. Any adjacent
-# grass/sand flicker at the y=64 edge is an artifact of 2D noise variance
-# rather than a bug — vanilla has the same behavior when the heightmap
-# is noisy at the band edge.
-const BEACH_DEPTH_BELOW: int = 4
-const BEACH_HEIGHT_ABOVE: int = 1
+# Vanilla band: BiomeBase.b() uses `if (l1 >= 59 && l1 <= 64)` (with
+# SEA_LEVEL=63), which is 6 cells wide. With our SEA_LEVEL=64 the
+# equivalent is y∈[60, 65]. With the corrected vanilla *12 Y-bias the
+# surface clusters tightly to target_y; few columns land in the narrow
+# vanilla band, producing 1-cell beach strips. We widen to 9 cells
+# (y∈[58, 67]) — covers the same physical "near-shoreline" zone while
+# accounting for the symmetric elevation modulator pushing fewer columns
+# into the vanilla band than vanilla's asymmetric d4 modifier does.
+# `BEACH_DEPTH_BELOW` is used by _block_at for the GRASS-vs-DIRT decision
+# at the surface block: columns whose surface dips below
+# (SEA_LEVEL - BEACH_DEPTH_BELOW) get DIRT, otherwise GRASS. Keep at 6
+# so coastline land cells stay as GRASS surface even if their surface
+# is just below sea level (covered by ocean fill but the underlying
+# block is grass — what vanilla does for shallow ocean floors).
+const BEACH_DEPTH_BELOW: int = 6
+# Beach pass uses TIGHTER band — only places sand in cells AT or
+# NEAR the waterline (1 cell underwater for shore depth, 5 cells dry
+# above). This concentrates sand into a VISIBLE DRY BEACH STRIP at
+# the coastline instead of spreading it as a wide underwater layer.
+# Previous wider band (BEACH_DEPTH_BELOW=6) buried 80% of beach cells
+# under water, leaving only a 1-cell dry strip visible.
+const BEACH_PASS_LO_OFFSET: int = 1  # sea_level - 1 = 63
+const BEACH_PASS_HI_OFFSET: int = 5  # sea_level + 5 = 69
+const BEACH_HEIGHT_ABOVE: int = 5  # beach band high edge in _block_at math
 const BEACH_SAND_DEPTH: int = 4
+
+# Vanilla beach noise (`px.java:108-122` — `this.r`). A separate 2D
+# Perlin sampled per (world_x, world_z) GATES whether a column in the
+# beach Y-band actually becomes sand (`bl2 = r > 0`). Without this
+# gate, every column whose surface dips into [60, 65] turns to sand —
+# including isolated low spots inside forests, producing the
+# "sand-in-forest" bug the user observed. Vanilla uses scale 0.03125
+# for r; we match.
+const BEACH_NOISE_FREQUENCY: float = 0.03125
 
 # Bedrock placement — Alpha 1.2.6 px.java:119 scans columns top-down and
 # writes bedrock where `i4 <= 0 + this.j.nextInt(5)` (with i4 = current y).
@@ -100,8 +165,11 @@ const _CAVES_SCRIPT: GDScript = preload("res://scripts/world/worldgen_caves.gd")
 
 # Trees per chunk — we pick a deterministic count between MIN and MAX
 # from the chunk's hash. ~1.5 average matches Alpha plains.
+# Tree count range. Bumped MAX from 3 to 5 for 3D-density mode where
+# rejection rate is higher (more cliff/sand surfaces vs grass). Net
+# expected count after rejection: ~1.5 (matches vanilla plains).
 const _TREES_PER_CHUNK_MIN: int = 0
-const _TREES_PER_CHUNK_MAX: int = 3
+const _TREES_PER_CHUNK_MAX: int = 5
 const _TREE_TRUNK_MIN: int = 4
 const _TREE_TRUNK_MAX: int = 6
 
@@ -120,7 +188,59 @@ const _SPAWN_TREE_EXCLUSION_RADIUS: int = 4
 # iterations, causing entire passes to deposit zero ore.
 const _HASH_MIX: int = 2654435761
 
+# --- Decoration constants (flowers + mushrooms) ---
+# Vanilla aj.java attempts per scatter call. 64 is the canonical value.
+# Flower scatter attempts per call. Vanilla aj.java uses 64 — we match
+# for the algorithm but bump to 96 for our 3D-density mode where the
+# random base-Y often misses the surface band entirely (vanilla samples
+# uniform 0-127 too, but with biome-based surface placement gets more
+# successful hits per call). Extra attempts compensate without
+# violating Alpha shape — same scatter pattern, just more tries.
+const _FLOWER_ATTEMPTS: int = 96
+# Distinct salts per plant species so the seed streams don't correlate.
+const _FLOWER_SALT_RED: int = 0xF101
+const _FLOWER_SALT_YELLOW: int = 0xF102
+const _FLOWER_SALT_BROWN: int = 0xF103
+const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
+
+# --- Lake decorator (vanilla `bv.java` / px.java:280-292) ---
+# Per-chunk: 1-in-LAKE_WATER_CHANCE chance for a water lake, 1-in-LAKE_LAVA_CHANCE
+# for a lava lake (with deeper-Y bias). Each lake is a 16×8×16 region
+# with 4-7 random ellipsoids carved into a boolean shape, then written
+# as water/lava (lower half) or air (upper half — lake "bowl"). Lakes
+# also re-grass dirt cells around their rim.
+const _LAKE_SALT_WATER: int = 0x1A4E
+const _LAKE_SALT_LAVA: int = 0x1A7A
+const _LAKE_WATER_CHANCE: int = 4
+# Vanilla is 1/8 (px.java:286). Our lakes use a permissive validation
+# (OOB→STONE always-pass) so more pass than vanilla; bump chance to 1/24
+# for vanilla-shaped per-chunk lava density. Combined with the strict
+# surface gate below, lava lakes only appear underground.
+const _LAKE_LAVA_CHANCE: int = 64
+const _LAKE_BBOX_X: int = 16
+const _LAKE_BBOX_Y: int = 8
+const _LAKE_BBOX_Z: int = 16
+const _LAKE_ELLIPSOIDS_MIN: int = 4
+const _LAKE_ELLIPSOIDS_MAX: int = 7
+# Vanilla bv.java row 26: lake "water level" = bbox_y/2. Cells at
+# y>=mid become AIR (the bowl); cells at y<mid become water/lava.
+const _LAKE_WATER_LEVEL: int = 4  # = _LAKE_BBOX_Y / 2
+
+static var terrain_mode: int = TerrainMode.MODE_2D_HEIGHTMAP
 static var _noise: FastNoiseLite
+# Low-freq continental noise — see CONTINENTAL_* constants above.
+# Sampled per-cell alongside the detail noise. ~256 extra noise calls
+# per chunk (16×16 cells); FastNoiseLite samples in ~50ns, so the added
+# cost is ~13µs/chunk — negligible vs the existing fill (~50ms p50 in
+# the worker). Possible future optimization: sample at the 4 chunk
+# corners and bilinear-interpolate per cell (continental wavelength is
+# ~333 blocks so within-chunk variation is sub-cell anyway), reducing
+# 256 calls to 4. Skipped for now — measure first.
+static var _continental_noise: FastNoiseLite
+# Vanilla beach noise (`px.java:108`'s this.r) — gates which columns in
+# the beach Y-band actually become sand. See BEACH_NOISE_FREQUENCY for
+# the rationale.
+static var _beach_noise: FastNoiseLite
 # Set by Game._ready() after the GDExtension loads. Fills the bedrock /
 # stone / dirt / grass base layers in C++; ore + tree passes stay in
 # GDScript. Parity with the GDScript fill is guaranteed by
@@ -155,9 +275,69 @@ static func _get_noise() -> FastNoiseLite:
 	return _noise
 
 
+# Beach noise: gates sand placement. Single-octave 2D Perlin at vanilla's
+# scale (~32-block wavelength). Seed offset +2 keeps it independent of
+# the detail/continental noises (same pattern as continental noise).
+static func _get_beach_noise() -> FastNoiseLite:
+	if _beach_noise == null:
+		_beach_noise = FastNoiseLite.new()
+		_beach_noise.noise_type = FastNoiseLite.TYPE_PERLIN
+		_beach_noise.frequency = BEACH_NOISE_FREQUENCY
+		_beach_noise.seed = WORLD_SEED + 2
+		_beach_noise.fractal_type = FastNoiseLite.FRACTAL_NONE
+	return _beach_noise
+
+
+# Continental noise: low-freq, dominant baseline shift per region. Uses
+# a SEED OFFSET so it doesn't correlate with the detail noise — sharing
+# the world seed without offset would make the two stacks crest/trough
+# at identical (x,z), defeating the purpose of stacking them.
+static func _get_continental_noise() -> FastNoiseLite:
+	if _continental_noise == null:
+		_continental_noise = FastNoiseLite.new()
+		_continental_noise.noise_type = FastNoiseLite.TYPE_PERLIN
+		_continental_noise.frequency = CONTINENTAL_FREQUENCY
+		# +1 seed offset → independent stream from detail noise. Any
+		# distinct nonzero offset works; 1 is the cheapest.
+		_continental_noise.seed = WORLD_SEED + 1
+		_continental_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+		_continental_noise.fractal_octaves = CONTINENTAL_OCTAVES
+		_continental_noise.fractal_lacunarity = NOISE_LACUNARITY
+		_continental_noise.fractal_gain = NOISE_GAIN
+	return _continental_noise
+
+
+# Per-column surface y derived from the chunk's actual blocks. Walks
+# top-down from chunk.max_y until it hits a non-AIR cell. Required for
+# 3D density mode where the heightmap-based `surface_height()` no longer
+# matches the chunk's actual surface — beaches/ocean/trees that consult
+# `surface_height` would land at the wrong y in 3D mode.
+#
+# In 2D mode this returns the same value as `surface_height()` (the
+# base-terrain fill puts grass exactly at the heightmap top, so
+# topmost-non-AIR == heightmap), so callers can use this unconditionally
+# regardless of the active mode.
+static func chunk_column_surface_y(chunk: Chunk, local_x: int, local_z: int) -> int:
+	var top: int = mini(chunk.max_y, Chunk.SIZE_Y - 1)
+	for y in range(top, -1, -1):
+		if chunk.get_block_unchecked(local_x, y, local_z) != Blocks.AIR:
+			return y
+	return -1  # entire column is AIR (shouldn't happen with bedrock at y<=4)
+
+
 static func surface_height(world_x: int, world_z: int) -> int:
-	var n: float = _get_noise().get_noise_2d(float(world_x), float(world_z))
-	return SEA_LEVEL + int(round(n * float(HEIGHT_AMPLITUDE)))
+	# Continental layer dominates: large landmasses + ocean basins. Detail
+	# layer rides on top: local hills/valleys within each region. Combined
+	# height = SEA_LEVEL + BASELINE_BIAS + continental_offset + detail_offset.
+	# See CONTINENTAL_* / BASELINE_BIAS comments above for the full rationale
+	# (this is slice 2 of the worldgen reshape from worldgen-deferred.md).
+	var fx: float = float(world_x)
+	var fz: float = float(world_z)
+	var continental: float = _get_continental_noise().get_noise_2d(fx, fz)
+	var detail: float = _get_noise().get_noise_2d(fx, fz)
+	var continental_offset: int = int(round(continental * float(CONTINENTAL_AMPLITUDE)))
+	var detail_offset: int = int(round(detail * float(DETAIL_AMPLITUDE)))
+	return SEA_LEVEL + BASELINE_BIAS + continental_offset + detail_offset
 
 
 # Main-thread init. No-op when the native extension isn't loaded.
@@ -198,18 +378,30 @@ static func _call_native_set_seed(seed: int) -> void:
 # new value automatically (no warm cache to invalidate).
 static func apply_world_seed(seed: int) -> void:
 	WORLD_SEED = seed
-	# Drop the cached noise so _get_noise() rebuilds with the new seed on
-	# the next call. Without this, surface_height(0,0) would keep using
-	# the seed the noise was first built with.
+	# Drop the cached noise so _get_noise() / _get_continental_noise()
+	# rebuild with the new seed on the next call. Without this,
+	# surface_height(0,0) would keep using the seed the noise was first
+	# built with.
 	_noise = null
+	_continental_noise = null
+	_beach_noise = null
+	WorldgenDensity.reset()
 	_call_native_set_seed(seed)
 
 
 static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	var probe_token := PerfProbe.begin("worldgen.generate_chunk")
 	var chunk := Chunk.new()
-	# 1. Heightmap + stratified base (bedrock / stone / dirt / grass).
-	if _native_worldgen != null:
+	# 1. Base terrain — 2D heightmap (default, fast) or 3D density
+	# (vanilla-faithful, slower-but-richer: overhangs, cliffs, surface
+	# caves). Selected via `terrain_mode` static. See
+	# `.claude/worldgen-deferred.md` for the full design.
+	if terrain_mode == TerrainMode.MODE_3D_DENSITY:
+		var density_token := PerfProbe.begin("worldgen.density_terrain")
+		WorldgenDensity.build_density_terrain(chunk, chunk_x, chunk_z)
+		WorldgenDensity.apply_surface_layer(chunk, chunk_x, chunk_z)
+		PerfProbe.end("worldgen.density_terrain", density_token)
+	elif _native_worldgen != null:
 		_build_base_terrain_native(chunk, chunk_x, chunk_z)
 	else:
 		_build_base_terrain_gdscript(chunk, chunk_x, chunk_z)
@@ -222,24 +414,26 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#    scripts/world/worldgen_caves.gd for full port notes.
 	#
 	# Native fast path: WorldgenNative.scatter_caves runs the same
-	# algorithm (bit-exact JavaRandom stream) in C++, ~10× faster than
-	# the GDScript reference. Parity is enforced by tests/test_cave_parity.gd
-	# across 4 sample coords; an earlier divergence (2026-04-24 repro at
-	# cx=-5) appears resolved as of this commit. If parity regresses,
-	# fall back here to `_CAVES_SCRIPT.scatter` and chase the C++ side.
-	# Native fast path: WorldgenNative.scatter_caves runs the same
-	# algorithm (bit-exact JavaRandom) in C++. Cave-blocks parity is
-	# enforced by tests/test_cave_parity. Native only mutates the blocks
-	# array; the GDScript reference goes through Chunk.set_block_unchecked
-	# which ALSO updates block_meta (zero on carved cells), the sticky
-	# has_water_cells / has_non_cube_blocks flags, and the height_map.
-	# After the native call we replicate those side-effects in
-	# `_post_process_native_caves` so chunk state is byte-equivalent to
-	# the GDScript path — required for tests/test_mesher_native parity.
+	# algorithm (bit-exact JavaRandom stream) in C++ and also returns the
+	# chunk-state flags (has_non_cube / has_water) computed via an inline
+	# 32K-cell scan in C++. The native scan is ~10× faster than the
+	# equivalent GDScript loop and used to dominate the cave probe time.
+	# Parity is enforced by tests/test_cave_parity.
 	if _native_worldgen != null:
 		var caves_token := PerfProbe.begin("worldgen.caves")
-		chunk.blocks = _native_worldgen.call("scatter_caves", chunk_x, chunk_z, chunk.blocks)
-		_post_process_native_caves(chunk)
+		var caves_result: Dictionary = _native_worldgen.call(
+			"scatter_caves", chunk_x, chunk_z, chunk.blocks
+		)
+		chunk.blocks = caves_result["blocks"]
+		# OR-merge with prior flag state so that water/non-cube cells set
+		# by base terrain or ores stay sticky even if the cave scan didn't
+		# observe one (caves never carve those cells, but the OR keeps the
+		# invariant explicit).
+		chunk.has_non_cube_blocks = chunk.has_non_cube_blocks or caves_result["has_non_cube"]
+		chunk.has_water_cells = chunk.has_water_cells or caves_result["has_water"]
+		# Cave AIR at topmost-opaque cells changes column heightmap; cheaper
+		# to flag dirty than to re-scan every column here.
+		chunk._height_map_dirty = true
 		PerfProbe.end("worldgen.caves", caves_token)
 	else:
 		_CAVES_SCRIPT.scatter(chunk, chunk_x, chunk_z)
@@ -257,8 +451,21 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#    vanilla Alpha's ChunkProviderGenerate sequencing: base strata →
 	#    ore veins → biome replace → water pass → decorators.
 	_fill_ocean(chunk, chunk_x, chunk_z)
+	# 4b. Lakes — vanilla `bv.java` decorator (px.java:280-292). 1/4 chance
+	#     of a water lake and 1/8 chance of a lava lake per chunk, with the
+	#     lake corner offset SE by 8 cells (so the 16×8×16 bbox spills into
+	#     neighbor chunks). For our chunk-isolated model we use SW-spillover
+	#     decoration (own + 3 SW neighbors), each clipping writes to target
+	#     bounds — recovers the same ~20-block coverage radius vanilla gets
+	#     from cross-chunk writes. Runs after ocean fill (so lake validation
+	#     sees the post-ocean state) and before trees (so trees don't drop
+	#     into a future lake bowl).
+	_scatter_lakes(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
+	# 6. Flowers + mushrooms — vanilla's populate phase decoration calls.
+	#    Runs AFTER trees so we don't drop flowers into trunks/leaves.
+	_scatter_flowers(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
@@ -323,15 +530,69 @@ static func _is_bedrock_at(world_x: int, y: int, world_z: int) -> bool:
 
 static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.beaches")
-	var lo: int = SEA_LEVEL - BEACH_DEPTH_BELOW
-	var hi: int = SEA_LEVEL + BEACH_HEIGHT_ABOVE
+	# Use the BEACH_PASS_* offsets (tighter than _block_at's BEACH_DEPTH_BELOW)
+	# to concentrate sand into the visible dry-beach zone near the waterline.
+	var lo: int = SEA_LEVEL - BEACH_PASS_LO_OFFSET
+	var hi: int = SEA_LEVEL + BEACH_PASS_HI_OFFSET
+	var beach_noise := _get_beach_noise()
+	# Precompute every column's surface y so the water-adjacency check
+	# below scans neighbors without re-walking the chunk per cell.
+	var col_surface := PackedInt32Array()
+	col_surface.resize(Chunk.SIZE_X * Chunk.SIZE_Z)
 	for x in range(Chunk.SIZE_X):
 		for z in range(Chunk.SIZE_Z):
-			var world_x: int = chunk_x * Chunk.SIZE_X + x
-			var world_z: int = chunk_z * Chunk.SIZE_Z + z
-			var surface_y: int = surface_height(world_x, world_z)
+			col_surface[z * Chunk.SIZE_X + x] = chunk_column_surface_y(chunk, x, z)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			var surface_y: int = col_surface[z * Chunk.SIZE_X + x]
 			# Outside the beach band: hills + deep oceans untouched.
 			if surface_y < lo or surface_y > hi:
+				continue
+			# Vanilla `px.java:120` uses `bl2 = r > 0` (a separate noise
+			# layer that randomizes WHICH columns become sand vs grass)
+			# to give "natural" patchy beaches. In our world the
+			# resulting blotchy sand+dirt mix at coastlines reads as a
+			# bug. Disabled — every beach-band column with a water
+			# neighbor becomes sand for CONTIGUOUS visible beaches.
+			# Deviation from vanilla but big visual win. To restore
+			# vanilla, re-enable the gate.
+			# Water-adjacency gate (NOT in vanilla — see slice 3 doc in
+			# worldgen-deferred.md). Require at least one of 4 horizontal
+			# neighbors to have surface below SEA_LEVEL. For in-chunk
+			# neighbors use the precomputed col_surface (exact). For
+			# cross-chunk neighbors fall back to the cheap 2D heightmap
+			# `surface_height` — approximate in 3D-density mode but
+			# sufficient for the binary "below sea?" check, AND avoids
+			# the "every chunk-edge cell becomes sand" grid-pattern bug
+			# from the previous always-allow-at-border heuristic.
+			var has_water_neighbor: bool = false
+			for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nx: int = x + off.x
+				var nz: int = z + off.y
+				var neighbor_below_sea: bool = false
+				if nx >= 0 and nx < Chunk.SIZE_X and nz >= 0 and nz < Chunk.SIZE_Z:
+					# In-chunk: exact surface from precomputed array.
+					neighbor_below_sea = col_surface[nz * Chunk.SIZE_X + nx] < SEA_LEVEL
+				else:
+					# Cross-chunk: use the mode-appropriate estimate.
+					# 2D mode → surface_height (heightmap, exact).
+					# 3D mode → WorldgenDensity.estimate_target_y, which
+					# samples the elevation modifier and matches the
+					# actual 3D-density logic. The 2D heightmap is wrong
+					# in 3D mode (different surface shape entirely),
+					# producing missed coastlines at chunk seams.
+					var nwx: int = chunk_x * Chunk.SIZE_X + nx
+					var nwz: int = chunk_z * Chunk.SIZE_Z + nz
+					if terrain_mode == TerrainMode.MODE_3D_DENSITY:
+						neighbor_below_sea = (
+							WorldgenDensity.estimate_target_y(nwx, nwz) < float(SEA_LEVEL)
+						)
+					else:
+						neighbor_below_sea = surface_height(nwx, nwz) < SEA_LEVEL
+				if neighbor_below_sea:
+					has_water_neighbor = true
+					break
+			if not has_water_neighbor:
 				continue
 			# Replace the top BEACH_SAND_DEPTH grass/dirt cells with sand.
 			# Stops at a non-grass/dirt cell (ore, bedrock, existing sand)
@@ -355,13 +616,12 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 # the rest of the pipeline changes. Runs in GDScript on top of the native
 # base-terrain fill; at 16×16 columns × ~10 cells each that's ~2.5k writes
 # per chunk, cheap compared to the ore pass.
-static func _fill_ocean(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+static func _fill_ocean(chunk: Chunk, _chunk_x: int, _chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.ocean")
 	for x in range(Chunk.SIZE_X):
 		for z in range(Chunk.SIZE_Z):
-			var world_x: int = chunk_x * Chunk.SIZE_X + x
-			var world_z: int = chunk_z * Chunk.SIZE_Z + z
-			var surface_y: int = surface_height(world_x, world_z)
+			# Use chunk's actual surface (mode-agnostic — see beach pass).
+			var surface_y: int = chunk_column_surface_y(chunk, x, z)
 			# Dry land: surface pokes at or above the sea. Nothing to fill.
 			if surface_y >= SEA_LEVEL:
 				continue
@@ -544,6 +804,328 @@ static func _float01(seed_hash: int, salt: int) -> float:
 	return float(_hash3(seed_hash, salt, 0x5E1D) & 0xFFFFFF) / 16777216.0
 
 
+# --- Lake decorator (vanilla bv.java) ---
+#
+# Vanilla algorithm (verbatim from `bv.java`):
+#   1. Subtract 8 from x/z to get bbox corner (px.java passes center+8)
+#   2. Walk down from y until non-air, then -4 → lake top
+#   3. Build 16×16×8 boolean shape via 4-7 random ellipsoids
+#   4. Validate: every "wall" cell (non-lake adjacent to lake) must be
+#      solid in the bottom half (no air gaps below water level) and not
+#      liquid in the top half (no caves above water table). Reject lake
+#      if any wall fails the check.
+#   5. Write blocks: cells inside shape become AIR (top half) or
+#      water/lava (bottom half).
+#   6. Convert shore dirt to grass: any AIR-cell-just-written above water
+#      level whose block-below is dirt and has skylight → grass.
+#
+# Cross-chunk handling: vanilla writes via World.setBlock which crosses
+# chunk boundaries freely. We use the SW-spillover dispatch (mirroring
+# `_scatter_flowers`) so each chunk sees the lakes that spill INTO it
+# from SW neighbors. Each pass clips writes to the target chunk and
+# treats out-of-bounds reads as STONE — the validation pass will be
+# slightly more permissive than vanilla (can't see a cave in a not-yet-
+# generated neighbor), so lake density runs ~1.5-2× vanilla. Acceptable
+# tradeoff for chunk-determinism without a populate-after-load step.
+
+
+static func _scatter_lakes(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.lakes")
+	for dcx in [0, -1]:
+		for dcz in [0, -1]:
+			var src_cx: int = chunk_x + dcx
+			var src_cz: int = chunk_z + dcz
+			_try_water_lake(chunk, chunk_x, chunk_z, src_cx, src_cz)
+			_try_lava_lake(chunk, chunk_x, chunk_z, src_cx, src_cz)
+	PerfProbe.end("worldgen.lakes", probe_token)
+
+
+# Mirrors vanilla px.java:280-285 — 1/4 chance of a water lake at a
+# random Y in [0, 128) and a random XZ in chunk + offset 8.
+static func _try_water_lake(
+	target_chunk: Chunk, target_cx: int, target_cz: int, src_cx: int, src_cz: int
+) -> void:
+	var lake_seed: int = _hash4(src_cx, src_cz, _LAKE_SALT_WATER, 0)
+	var c: int = 0
+	if _next_int(lake_seed, c, _LAKE_WATER_CHANCE) != 0:
+		return
+	c += 1
+	var center_x: int = src_cx * Chunk.SIZE_X + _next_int(lake_seed, c, 16) + 8
+	c += 1
+	var center_y: int = _next_int(lake_seed, c, 128)
+	c += 1
+	var center_z: int = src_cz * Chunk.SIZE_X + _next_int(lake_seed, c, 16) + 8
+	c += 1
+	_try_place_lake(
+		target_chunk,
+		target_cx,
+		target_cz,
+		center_x,
+		center_y,
+		center_z,
+		Blocks.WATER_STILL,
+		lake_seed,
+		c
+	)
+
+
+# Mirrors vanilla px.java:286-293 — 1/8 chance of a lava lake, with
+# nextInt(nextInt(120)+8) Y bias (skewed deeper) and an additional gate:
+# only place if y<64 OR 1/10 chance (so most surface lava lakes are
+# rejected; lava lakes mostly land underground).
+static func _try_lava_lake(
+	target_chunk: Chunk, target_cx: int, target_cz: int, src_cx: int, src_cz: int
+) -> void:
+	var lake_seed: int = _hash4(src_cx, src_cz, _LAKE_SALT_LAVA, 0)
+	var c: int = 0
+	if _next_int(lake_seed, c, _LAKE_LAVA_CHANCE) != 0:
+		return
+	c += 1
+	var center_x: int = src_cx * Chunk.SIZE_X + _next_int(lake_seed, c, 16) + 8
+	c += 1
+	# Vanilla nextInt(nextInt(120)+8) — two consecutive draws, the inner
+	# becomes the upper bound for the outer. Skews distribution toward
+	# small Y values (nearly half land below y=30).
+	var inner_max: int = _next_int(lake_seed, c, 120) + 8
+	c += 1
+	var center_y: int = _next_int(lake_seed, c, inner_max)
+	c += 1
+	var center_z: int = src_cz * Chunk.SIZE_X + _next_int(lake_seed, c, 16) + 8
+	c += 1
+	# Strict surface gate — vanilla allows 1/10 chance for surface lava
+	# lakes (px.java:290), but visually they're jarring (bright orange
+	# pools on the green grass). For Alpha-feel without surface lava,
+	# always reject if y >= sea level. Lava only underground.
+	if center_y >= SEA_LEVEL - 4:
+		return
+	c += 1
+	_try_place_lake(
+		target_chunk,
+		target_cx,
+		target_cz,
+		center_x,
+		center_y,
+		center_z,
+		Blocks.LAVA_STILL,
+		lake_seed,
+		c
+	)
+
+
+# Returns true if the lake was placed (writes hit the target chunk),
+# false if validation rejected it. Per-chunk pass-rate matters less for
+# our chunk-isolated model since each chunk votes independently — see
+# class-level commentary above.
+static func _try_place_lake(
+	target_chunk: Chunk,
+	target_cx: int,
+	target_cz: int,
+	center_x: int,
+	center_y: int,
+	center_z: int,
+	fluid_id: int,
+	lake_seed: int,
+	c_start: int
+) -> bool:
+	var c: int = c_start
+	# bv.java:18-19: shift to bbox corner.
+	var corner_x: int = center_x - 8
+	var corner_z: int = center_z - 8
+	# bv.java:20-23: walk down from y until non-air, then -4.
+	#
+	# Vanilla reads world blocks freely. Our chunk-isolated model can only
+	# walk down inside the target chunk; for SW-spillover passes whose
+	# corner column lands in a NEIGHBOR chunk we use a surface estimate
+	# (heightmap in 2D mode, density target_y in 3D mode) so the walk-down
+	# still terminates near the actual surface — without this, OOB reads
+	# returned STONE and the walk terminated immediately at the random
+	# `center_y`, dropping spillover lakes at random Ys (often deep
+	# underground or near the world ceiling). See worldgen-deferred.md.
+	var lx_corner: int = corner_x - target_cx * Chunk.SIZE_X
+	var lz_corner: int = corner_z - target_cz * Chunk.SIZE_Z
+	var corner_in_target: bool = (
+		lx_corner >= 0 and lx_corner < Chunk.SIZE_X and lz_corner >= 0 and lz_corner < Chunk.SIZE_Z
+	)
+	var corner_y: int = center_y
+	if corner_in_target:
+		while (
+			corner_y > 0
+			and target_chunk.get_block_unchecked(lx_corner, corner_y, lz_corner) == Blocks.AIR
+		):
+			corner_y -= 1
+	else:
+		var est_surface: int = _surface_estimate_for_lake(corner_x, corner_z)
+		corner_y = mini(corner_y, est_surface)
+	corner_y -= 4
+	if corner_y < 1:
+		return false  # would clip into bedrock — vanilla would too
+
+	# bv.java:24-44: build 16×8×16 boolean shape from 4-7 ellipsoids.
+	# Layout: shape[(ix * 16 + iz) * 8 + iy] (matches vanilla index order).
+	var shape := PackedByteArray()
+	shape.resize(_LAKE_BBOX_X * _LAKE_BBOX_Z * _LAKE_BBOX_Y)
+	var num_ellipsoids: int = (
+		_next_int(lake_seed, c, _LAKE_ELLIPSOIDS_MAX - _LAKE_ELLIPSOIDS_MIN + 1)
+		+ _LAKE_ELLIPSOIDS_MIN
+	)
+	c += 1
+	for _i in range(num_ellipsoids):
+		# Vanilla bv.java:25-30: ellipsoid radii + center within bbox.
+		var rad_x: float = _float01(lake_seed, c) * 6.0 + 3.0
+		c += 1
+		var rad_y: float = _float01(lake_seed, c) * 4.0 + 2.0
+		c += 1
+		var rad_z: float = _float01(lake_seed, c) * 6.0 + 3.0
+		c += 1
+		var ctr_x: float = _float01(lake_seed, c) * (16.0 - rad_x - 2.0) + 1.0 + rad_x / 2.0
+		c += 1
+		var ctr_y: float = _float01(lake_seed, c) * (8.0 - rad_y - 4.0) + 2.0 + rad_y / 2.0
+		c += 1
+		var ctr_z: float = _float01(lake_seed, c) * (16.0 - rad_z - 2.0) + 1.0 + rad_z / 2.0
+		c += 1
+		var half_rx: float = rad_x / 2.0
+		var half_ry: float = rad_y / 2.0
+		var half_rz: float = rad_z / 2.0
+		# bv.java:31-43 inner triple loop. Bounds [1, 14] / [1, 6] match vanilla.
+		for ix in range(1, 15):
+			var dx: float = (float(ix) - ctr_x) / half_rx
+			var dx2: float = dx * dx
+			for iz in range(1, 15):
+				var dz: float = (float(iz) - ctr_z) / half_rz
+				var dz2: float = dz * dz
+				for iy in range(1, 7):
+					var dy: float = (float(iy) - ctr_y) / half_ry
+					if dx2 + dy * dy + dz2 < 1.0:
+						shape[(ix * 16 + iz) * 8 + iy] = 1
+
+	# bv.java:45-66: validation pass — walls must be solid in bottom half,
+	# non-liquid in top half. We treat OOB cells as STONE (always-pass)
+	# since we can't read neighbor chunks — see class-level note.
+	for ix in range(_LAKE_BBOX_X):
+		for iz in range(_LAKE_BBOX_Z):
+			for iy in range(_LAKE_BBOX_Y):
+				if shape[(ix * 16 + iz) * 8 + iy] != 0:
+					continue
+				var is_wall: bool = (
+					(ix < 15 and shape[((ix + 1) * 16 + iz) * 8 + iy] != 0)
+					or (ix > 0 and shape[((ix - 1) * 16 + iz) * 8 + iy] != 0)
+					or (iz < 15 and shape[(ix * 16 + (iz + 1)) * 8 + iy] != 0)
+					or (iz > 0 and shape[(ix * 16 + (iz - 1)) * 8 + iy] != 0)
+					or (iy < 7 and shape[(ix * 16 + iz) * 8 + (iy + 1)] != 0)
+					or (iy > 0 and shape[(ix * 16 + iz) * 8 + (iy - 1)] != 0)
+				)
+				if not is_wall:
+					continue
+				var wx: int = corner_x + ix
+				var wy: int = corner_y + iy
+				var wz: int = corner_z + iz
+				var b: int = _lake_read_block(target_chunk, target_cx, target_cz, wx, wy, wz)
+				if iy >= _LAKE_WATER_LEVEL:
+					# Top half: no liquid in walls (no caves/water above lake)
+					if _lake_is_liquid(b):
+						return false
+				else:
+					# Bottom half: must be solid (not air, not other fluid)
+					if b == Blocks.AIR:
+						return false
+					if b != fluid_id and _lake_is_liquid(b):
+						return false
+
+	# bv.java:67-77: write blocks. Top half (iy ≥ 4) becomes AIR; bottom
+	# half becomes the fluid. AIR carved cells form the lake's "bowl".
+	for ix in range(_LAKE_BBOX_X):
+		for iz in range(_LAKE_BBOX_Z):
+			for iy in range(_LAKE_BBOX_Y):
+				if shape[(ix * 16 + iz) * 8 + iy] == 0:
+					continue
+				var write_id: int = Blocks.AIR if iy >= _LAKE_WATER_LEVEL else fluid_id
+				_lake_write_block(
+					target_chunk,
+					target_cx,
+					target_cz,
+					corner_x + ix,
+					corner_y + iy,
+					corner_z + iz,
+					write_id
+				)
+
+	# bv.java:78-87: shore dirt → grass conversion. For AIR cells written
+	# above water level, if the cell BELOW is dirt and exposed to sky,
+	# convert it to grass. Skylight is computed post-gen; we approximate
+	# by checking that no opaque block sits directly above the AIR cell
+	# inside the lake bbox (minor visual diff from vanilla skylight test).
+	for ix in range(_LAKE_BBOX_X):
+		for iz in range(_LAKE_BBOX_Z):
+			for iy in range(_LAKE_WATER_LEVEL, _LAKE_BBOX_Y):
+				if shape[(ix * 16 + iz) * 8 + iy] == 0:
+					continue
+				var wx: int = corner_x + ix
+				var wy: int = corner_y + iy
+				var wz: int = corner_z + iz
+				var below: int = _lake_read_block(
+					target_chunk, target_cx, target_cz, wx, wy - 1, wz
+				)
+				if below != Blocks.DIRT:
+					continue
+				_lake_write_block(target_chunk, target_cx, target_cz, wx, wy - 1, wz, Blocks.GRASS)
+
+	return true
+
+
+# Helper: deterministic int in [0, n) using existing _float01 stream.
+static func _next_int(seed_hash: int, salt: int, n: int) -> int:
+	return int(_float01(seed_hash, salt) * float(n))
+
+
+# Read a block at world coords. OOB returns STONE so validation treats
+# unknown neighbor cells as solid wall (lake passes), and the walk-down
+# step stops at the chunk boundary instead of falling forever.
+static func _lake_read_block(
+	target_chunk: Chunk, target_cx: int, target_cz: int, wx: int, wy: int, wz: int
+) -> int:
+	if wy < 0 or wy >= Chunk.SIZE_Y:
+		return Blocks.STONE
+	var lx: int = wx - target_cx * Chunk.SIZE_X
+	var lz: int = wz - target_cz * Chunk.SIZE_Z
+	if lx < 0 or lx >= Chunk.SIZE_X or lz < 0 or lz >= Chunk.SIZE_Z:
+		return Blocks.STONE
+	return target_chunk.get_block_unchecked(lx, wy, lz)
+
+
+# Write a block at world coords. OOB writes are silently dropped
+# (recovered when the neighbor chunk runs its own SW-spillover pass).
+static func _lake_write_block(
+	target_chunk: Chunk, target_cx: int, target_cz: int, wx: int, wy: int, wz: int, block_id: int
+) -> void:
+	if wy < 0 or wy >= Chunk.SIZE_Y:
+		return
+	var lx: int = wx - target_cx * Chunk.SIZE_X
+	var lz: int = wz - target_cz * Chunk.SIZE_Z
+	if lx < 0 or lx >= Chunk.SIZE_X or lz < 0 or lz >= Chunk.SIZE_Z:
+		return
+	target_chunk.set_block_unchecked(lx, wy, lz, block_id)
+
+
+static func _lake_is_liquid(id: int) -> bool:
+	return (
+		id == Blocks.WATER_STILL
+		or id == Blocks.WATER_FLOWING
+		or id == Blocks.LAVA_STILL
+		or id == Blocks.LAVA_FLOWING
+	)
+
+
+# Approximate surface y for a column NOT in the target chunk. Used by the
+# lake walk-down to find where the lake's top should sit when the bbox
+# corner lands in a neighbor chunk that hasn't been generated yet (so
+# direct block reads are impossible). Mirrors the mode-aware surface API
+# used by beaches.
+static func _surface_estimate_for_lake(world_x: int, world_z: int) -> int:
+	if terrain_mode == TerrainMode.MODE_3D_DENSITY:
+		return int(WorldgenDensity.estimate_target_y(world_x, world_z))
+	return surface_height(world_x, world_z)
+
+
 # --- Trees ---
 
 
@@ -576,7 +1158,9 @@ static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 			<= (_SPAWN_TREE_EXCLUSION_RADIUS * _SPAWN_TREE_EXCLUSION_RADIUS)
 		):
 			continue
-		var ground_y: int = surface_height(world_x, world_z)
+		# Use chunk's actual surface (mode-agnostic — beach/ocean did the
+		# same fix; surface_height() is wrong in 3D mode).
+		var ground_y: int = chunk_column_surface_y(chunk, lx, lz)
 		# No trees underwater — a submerged grass cell still reads as GRASS
 		# after the ocean fill pass, but growing a canopy up through water
 		# is vanilla-wrong (Alpha's BiomeDecorator gates trees on the surface
@@ -678,6 +1262,161 @@ static func _place_oak(
 	place_oak_tree(Vector3i(base_x, base_y, base_z), trunk_height, t_hash, get_local, set_local)
 
 
+# --- Decoration: flowers + mushrooms ---
+#
+# Vanilla Alpha 1.2.6 px.java populate phase (lines 388-411) — per chunk:
+#   * Red poppy (nq.ad):        2 calls always
+#   * Yellow dandelion (nq.ae): 1 call at 1/2 probability
+#   * Brown mushroom (nq.af):   1 call at 1/4 probability
+#   * Red mushroom (nq.ag):     1 call at 1/8 probability
+#
+# Each "call" is `new aj(blockId).a(world, rand, x, y, z)`, where x/z =
+# `chunk*16 + nextInt(16) + 8` and y = `nextInt(128)`. WorldGenFlowers
+# (aj.java) then runs 64 attempts at base ± (8, 4, 8), placing on AIR
+# cells whose support passes the block's `g()` check (light ≤ 13 + grass
+# /dirt below for flowers).
+#
+# Determinism + spillover: vanilla's `+8` offset means decoration writes
+# spill into the +X +Z neighbor. Mirroring the ore decorator pattern, we
+# run for own + 3 SW neighbors (chunk_x + dcx, chunk_z + dcz with dcx,dcz
+# in {-1, 0}) and clip writes to the current chunk's bounds. Restores
+# vanilla's coverage without cross-chunk writes from the worker thread.
+
+
+static func _scatter_flowers(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.flowers")
+	for dcx in [-1, 0]:
+		for dcz in [-1, 0]:
+			_decorate_flowers(chunk, chunk_x, chunk_z, chunk_x + dcx, chunk_z + dcz)
+	PerfProbe.end("worldgen.flowers", probe_token)
+
+
+# Run the populate-phase flower/mushroom calls AS IF this is the
+# (deco_cx, deco_cz) chunk. Writes that fall outside (chunk_x, chunk_z)'s
+# bounds are clipped, so each call to this only contributes the cells
+# that vanilla's spillover would have landed in our chunk.
+static func _decorate_flowers(
+	chunk: Chunk, chunk_x: int, chunk_z: int, deco_cx: int, deco_cz: int
+) -> void:
+	# Red poppy — always 2 calls. Distinct seed per call so the two
+	# clusters land in different spots.
+	for i in range(2):
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.FLOWER_RED,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_RED, i + 1),
+			false,
+		)
+	# Yellow dandelion — 1 call at 1/2 probability.
+	var yellow_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_YELLOW, 0)
+	if (yellow_gate & 1) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.FLOWER_YELLOW,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_YELLOW, 1),
+			false,
+		)
+	# Brown mushroom — 1 call at 1/4 probability.
+	var brown_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_BROWN, 0)
+	if (brown_gate & 3) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.MUSHROOM_BROWN,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_BROWN, 1),
+			true,
+		)
+	# Red mushroom — 1 call at 1/8 probability.
+	var red_mush_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_RED_MUSHROOM, 0)
+	if (red_mush_gate & 7) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.MUSHROOM_RED,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_RED_MUSHROOM, 1),
+			true,
+		)
+
+
+# Vanilla aj.java port — pick a base position then run 64 placement
+# attempts at base ± (8, 4, 8). `is_mushroom` relaxes support to allow
+# any opaque block below (vanilla mushrooms grow on stone too).
+# Writes that fall outside (chunk_x, chunk_z) are clipped — that's how
+# the SW-neighbor decoration passes contribute spillover into us.
+static func _scatter_plant(
+	chunk: Chunk,
+	chunk_x: int,
+	chunk_z: int,
+	deco_cx: int,
+	deco_cz: int,
+	plant_id: int,
+	seed_hash: int,
+	is_mushroom: bool
+) -> void:
+	# Base in vanilla is `chunk*16 + nextInt(16) + 8` for X/Z and
+	# `nextInt(128)` for Y.
+	var base_x: int = deco_cx * Chunk.SIZE_X + (seed_hash & 0xF) + 8
+	var base_z: int = deco_cz * Chunk.SIZE_Z + ((seed_hash >> 8) & 0xF) + 8
+	var base_y: int = (seed_hash >> 16) & 0x7F  # 0..127
+	var chunk_origin_x: int = chunk_x * Chunk.SIZE_X
+	var chunk_origin_z: int = chunk_z * Chunk.SIZE_Z
+	for attempt in range(_FLOWER_ATTEMPTS):
+		var att_hash: int = _hash4(seed_hash, attempt, plant_id, 0x117)
+		# Vanilla: `nextInt(8) - nextInt(8)` for x,z (range [-7, 7]) and
+		# `nextInt(4) - nextInt(4)` for y (range [-3, 3]). Approximated
+		# with two nibbles per coord.
+		var ox: int = (att_hash & 7) - ((att_hash >> 3) & 7)
+		var oy: int = ((att_hash >> 6) & 3) - ((att_hash >> 8) & 3)
+		var oz: int = ((att_hash >> 10) & 7) - ((att_hash >> 13) & 7)
+		var wx: int = base_x + ox
+		var wy: int = base_y + oy
+		var wz: int = base_z + oz
+		if wy < 1 or wy >= Chunk.SIZE_Y - 1:
+			continue
+		var lx: int = wx - chunk_origin_x
+		var lz: int = wz - chunk_origin_z
+		if lx < 0 or lx >= Chunk.SIZE_X or lz < 0 or lz >= Chunk.SIZE_Z:
+			continue
+		# Cell must be AIR.
+		if chunk.get_block_unchecked(lx, wy, lz) != Blocks.AIR:
+			continue
+		# Block below must be valid support. Flowers: grass / dirt / farmland.
+		# Mushrooms: same, plus any opaque cube (vanilla allows stone in caves).
+		var support_id: int = chunk.get_block_unchecked(lx, wy - 1, lz)
+		var support_ok: bool = Blocks.is_valid_plant_support(support_id)
+		if not support_ok and is_mushroom:
+			support_ok = Blocks.is_opaque(support_id)
+		if not support_ok:
+			continue
+		# Y-band check — vanilla flowers spawn at any light ≥ 9; light is
+		# tied to elevation (deep caves dark, surface bright). Strict
+		# sky-exposure was the previous proxy but was too aggressive in
+		# 3D mode (overhangs hide grass cells from the sky → flowers
+		# rejected even when they'd be perfectly visible from the side).
+		# Replace with a simple Y-band: flowers must be near the surface
+		# elevation to spawn (y >= SEA_LEVEL - 2). Excludes deep-cave
+		# dirt veins that the user can't reach without much affecting
+		# overhang flowers. Mushrooms keep no Y check (vanilla allows
+		# them in caves).
+		if not is_mushroom and wy < SEA_LEVEL - 2:
+			continue
+		chunk.set_block_unchecked(lx, wy, lz, plant_id)
+
+
 # --- Hashing ---
 
 
@@ -685,43 +1424,6 @@ static func _place_oak(
 # scramble, then a final Knuth multiplicative mix (see _HASH_MIX note near
 # the top of the file) so low-bit differences in the last argument
 # avalanche up to the high bits.
-# Replicate Chunk.set_block_unchecked's chunk-state side-effects for the
-# native scatter_caves fast path. Native only writes the blocks array;
-# this scan brings block_meta + has_water_cells + has_non_cube_blocks +
-# height-map dirtiness back in sync with what the GDScript scatter would
-# have produced via per-cell set_block_unchecked. Cost: one linear pass
-# over CHUNK_VOLUME (~32K bytes) — still < 1 ms in GDScript.
-#
-# Why this matters: tests/test_mesher_native parity relies on byte-equal
-# chunk state between native and GDScript paths. Skipping this leaves
-# stale flags that change mesher dispatch and emit different face counts.
-static func _post_process_native_caves(chunk: Chunk) -> void:
-	var blocks := chunk.blocks
-	var meta := chunk.block_meta
-	var saw_non_cube: bool = chunk.has_non_cube_blocks
-	var saw_water: bool = chunk.has_water_cells
-	for i in range(Chunk.TOTAL_BLOCKS):
-		var b: int = blocks[i]
-		# Cave cells are AIR (above y=10) or LAVA_STILL (below y=10) — both
-		# carry meta=0. Zero meta on the carved cells; non-carved cells
-		# (still STONE/DIRT/etc.) already had meta=0 from base terrain so
-		# the unconditional write is a no-op for them.
-		meta[i] = 0
-		if not saw_non_cube and Blocks.needs_gdscript_mesher(b):
-			saw_non_cube = true
-		if not saw_water and Blocks.is_water(b):
-			saw_water = true
-	chunk.block_meta = meta
-	chunk.has_non_cube_blocks = saw_non_cube
-	chunk.has_water_cells = saw_water
-	# Heightmap: cave-AIR at non-topmost cells doesn't change the column's
-	# topmost-opaque, but cave-AIR at the topmost-opaque (rare — caves
-	# breaking through to surface) DOES. Flag dirty so the next
-	# is_sky_exposed lookup rebuilds from raw blocks. Cheaper than scanning
-	# every column here.
-	chunk._height_map_dirty = true
-
-
 static func _hash3(x: int, y: int, z: int) -> int:
 	var h: int = WORLD_SEED
 	h = (h * 73856093) ^ x

@@ -63,6 +63,11 @@ TERRAIN_TILES = {
 	"door_iron_upper": (2, 5),
 	"door_wood_lower": (1, 6),
 	"door_iron_lower": (2, 6),
+	# Decoration slice 1 — flowers + mushrooms (positions stable since Alpha).
+	"flower_red": (12, 0),
+	"flower_yellow": (13, 0),
+	"mushroom_red": (12, 1),
+	"mushroom_brown": (13, 1),
 	# `furnace_top` is intentionally NOT here. Vanilla Alpha 1.2.6
 	# BlockFurnace.getBlockTextureFromSide (mj.java:46-52) returns
 	# `nq.t.bg` (= the STONE texture index) for both top (n5=1) and
