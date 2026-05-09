@@ -26,6 +26,14 @@ const _SAPLING_GROW_MAX_SEC: float = 300.0
 const _SAPLING_GROW_RETRY_SEC: float = 30.0
 const _SAPLING_GROW_MAX_PER_TICK: int = 4
 
+# Workers that don't return within this many ms are considered crashed
+# and the coord is re-dispatched. Catches the "missing chunk hole" bug
+# where a worker silently fails (uncaught exception, propagate_notification
+# race on a Node-creating noise constructor, etc.) and never writes
+# `_ready_results` → coord stays in `_pending` forever → chunk never
+# materializes. 30 seconds is generous (typical chunk gen ~30 ms).
+const _PENDING_TIMEOUT_MS: int = 30000
+
 @export var render_distance: int = 8
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
@@ -43,7 +51,7 @@ var chunks_generated_total: int = 0
 
 var _player: Node3D
 var _chunks: Dictionary = {}  # Vector2i → Node3D (ChunkNode)
-var _pending: Dictionary = {}  # Vector2i → true (currently being computed)
+var _pending: Dictionary = {}  # Vector2i → dispatch_time_ms (currently being computed)
 var _spawn_queue: Array = []  # Vector2i FIFO of chunks to enqueue for workers
 var _result_mutex := Mutex.new()
 var _ready_results: Dictionary = {}  # Vector2i → {chunk, mesh} (set by workers)
@@ -244,12 +252,24 @@ func _update_chunk_set() -> void:
 # infrequent) and pass the restored Chunk to the worker — saves the worker
 # from running worldgen and keeps `_saved_chunks` access main-thread-only.
 func _dispatch_workers() -> void:
+	# Reap stale pending entries (worker crashed silently, no _ready_results).
+	# Without this, a single failed chunk leaves a permanent "hole" in the
+	# world (visible in screenshots as a 16×16 black void). Collect-then-erase
+	# to avoid mutating the dict while iterating its keys (undefined in GDScript).
+	var now_ms: int = Time.get_ticks_msec()
+	var stale: Array[Vector2i] = []
+	for coord: Vector2i in _pending.keys():
+		if now_ms - int(_pending[coord]) > _PENDING_TIMEOUT_MS:
+			stale.append(coord)
+	for coord: Vector2i in stale:
+		push_warning("[chunk_mgr] reaping stale pending chunk %s — worker likely crashed" % coord)
+		_pending.erase(coord)
 	while not _spawn_queue.is_empty() and _pending.size() < max_concurrent_jobs:
 		var coord: Vector2i = _spawn_queue.pop_front()
 		_spawn_queue_set.erase(coord)
 		if _chunks.has(coord) or _pending.has(coord):
 			continue
-		_pending[coord] = true
+		_pending[coord] = now_ms
 		var saved_chunk: Chunk = _restore_saved_chunk(coord)  # null if not saved
 		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_chunk))
 

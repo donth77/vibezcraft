@@ -146,12 +146,7 @@ const TARGET_Y: int = 66
 # vanilla's d4 coefficients were tuned for THIS noise's variance shape,
 # not the smooth Perlin we had before.
 const ELEVATION_NOISE_OCTAVES: int = 16
-# Vanilla scale=200 (px.java:190) gives 200-block features. Lowering
-# to 1/400 doubles wavelength → wider continents and more gradual
-# coast transitions → multi-cell visible beaches instead of thin strips.
-# Vanilla compensates with multi-noise variance we don't have, so we
-# need wider features to get gradual surface gradients at coastlines.
-const ELEVATION_NOISE_FREQUENCY: float = 1.0 / 400.0
+const ELEVATION_NOISE_FREQUENCY: float = 1.0 / 400.0  # 400-block features
 # Our NoiseOctaves.sample_2d already produces output in vanilla's
 # post-/8000 range (~±4) directly — no extra normalization needed.
 # Vanilla samples a flat 16-octave reverse-FBM that returns raw output
@@ -513,18 +508,18 @@ static func build_density_terrain(chunk: Chunk, chunk_x: int, chunk_z: int) -> v
 			)
 			var d4: Dictionary = _apply_d4_modifier(raw_h / ELEVATION_NOISE_NORMALIZER)
 			column_target_y[gx * GRID_Z + gz] = float(TARGET_Y) + d4["target_y_offset"]
-			if d4["force_tight"]:
-				# Vanilla `d8 = 0.0` then +0.5 → tight bias = ocean
-				# surface clusters tightly to deeply-shifted target_y.
-				column_amplitude[gx * GRID_Z + gz] = 0.5
-			else:
-				# Vanilla mountain branch: g-noise amp in [0.5, 1.5].
-				# Loose amp gives mountains craggy variance.
-				var raw_amp: float = amp_noise.sample_2d(
-					wx * AMPLITUDE_NOISE_FREQUENCY, wz * AMPLITUDE_NOISE_FREQUENCY
-				)
-				var clamped: float = clampf(raw_amp / AMPLITUDE_NOISE_NORMALIZER, -1.0, 1.0)
-				column_amplitude[gx * GRID_Z + gz] = clamped * 0.5 + 1.0  # → [0.5, 1.5]
+			# Per-column amplitude varies naturally [0.5, 1.5] for BOTH
+			# ocean and land — gives ocean depth variation (some basins
+			# tight, some loose) and natural surface texture on land.
+			# Force-tight on ocean was producing FLAT UNIFORM oceans,
+			# which user reported as "ocean depth way too uniform".
+			# Letting amp vary matches vanilla's px.java behavior on
+			# non-clobbered columns.
+			var raw_amp: float = amp_noise.sample_2d(
+				wx * AMPLITUDE_NOISE_FREQUENCY, wz * AMPLITUDE_NOISE_FREQUENCY
+			)
+			var clamped: float = clampf(raw_amp / AMPLITUDE_NOISE_NORMALIZER, -1.0, 1.0)
+			column_amplitude[gx * GRID_Z + gz] = clamped * 0.5 + 1.0  # → [0.5, 1.5]
 	# Native fast-path — does the density blend + Y-bias + trilerp +
 	# threshold in C++. ~5-10× faster than the GDScript inner loop
 	# below (which is dominated by `lerp()` function-call overhead in
