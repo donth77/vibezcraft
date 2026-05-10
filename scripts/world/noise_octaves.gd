@@ -49,7 +49,9 @@ extends RefCounted
 const _PERLIN_BASE_FREQUENCY: float = 1.0
 
 var _octaves: Array[FastNoiseLite] = []
+var _vanilla_octaves: Array[NoisePerlin] = []  # populated when create_vanilla() used
 var _octave_count: int = 0
+var _is_vanilla: bool = false
 
 
 # Construct a NoiseOctaves with `octave_count` Perlin layers, all derived
@@ -63,6 +65,7 @@ var _octave_count: int = 0
 static func create(base_seed: int, octave_count: int) -> NoiseOctaves:
 	var n := NoiseOctaves.new()
 	n._octave_count = octave_count
+	n._is_vanilla = false
 	n._octaves.resize(octave_count)
 	for i in range(octave_count):
 		var perlin := FastNoiseLite.new()
@@ -80,6 +83,28 @@ static func create(base_seed: int, octave_count: int) -> NoiseOctaves:
 	return n
 
 
+# Vanilla `nf.java` constructor pattern — all octaves share ONE JavaRandom.
+# Each NoisePerlin constructor pulls 256+3 random doubles from the SAME
+# Random instance, so each octave's gradient table is a deterministic
+# continuation of the prior. This is what gives vanilla its distinctive
+# noise distribution (correlated octaves with specific bit-relationships)
+# vs our FastNoiseLite-based approach (independent per-octave seeds).
+#
+# Use this when you need vanilla-shape noise output (wider variance,
+# proper reverse-FBM tail behavior). The trade is ~2× slower per sample
+# than FastNoiseLite (GDScript Perlin vs C++ FastNoiseLite).
+static func create_vanilla(world_seed: int, octave_count: int) -> NoiseOctaves:
+	var n := NoiseOctaves.new()
+	n._octave_count = octave_count
+	n._is_vanilla = true
+	n._vanilla_octaves.resize(octave_count)
+	# All octaves consume from the same Random — vanilla nf.java pattern.
+	var rng := JavaRandom.new(world_seed)
+	for i in range(octave_count):
+		n._vanilla_octaves[i] = NoisePerlin.new(rng)
+	return n
+
+
 # Vanilla nf.a(double, double) — 2D sample. Returns the summed reverse-FBM
 # value. Output range: roughly [-2^N, 2^N] where N = octave_count, since
 # each Perlin returns ~[-1, 1] and the last octave's contribution is
@@ -91,6 +116,11 @@ func sample_2d(x: float, z: float) -> float:
 	# coords get multiplied by `amp` (smaller frequency per octave); the
 	# result gets divided by `amp` (larger amplitude per octave).
 	var amp: float = 1.0
+	if _is_vanilla:
+		for i in range(_octave_count):
+			sum += _vanilla_octaves[i].sample_2d(x * amp, z * amp) / amp
+			amp /= 2.0
+		return sum
 	for i in range(_octave_count):
 		sum += _octaves[i].get_noise_2d(x * amp, z * amp) / amp
 		amp /= 2.0
@@ -120,6 +150,31 @@ func sample_3d_grid(
 	scale_y: float,
 	scale_z: float
 ) -> void:
+	# Vanilla noise path: per-octave NoisePerlin's bulk grid fill (vanilla
+	# z.java:88 pattern). Each call accumulates additively — pre-zero
+	# the buffer first.
+	if _is_vanilla:
+		out.fill(0.0)
+		var amp_v: float = 1.0
+		for i in range(_octave_count):
+			# Vanilla nf.java:39 passes (scale * d8, ..., d8); z.java
+			# uses 1/d8 as the per-cell multiplier internally. So the
+			# 10th argument is the AMP itself (not 1/amp).
+			_vanilla_octaves[i].sample_3d_grid_additive(
+				out,
+				base_x,
+				base_y,
+				base_z,
+				size_x,
+				size_y,
+				size_z,
+				scale_x * amp_v,
+				scale_y * amp_v,
+				scale_z * amp_v,
+				amp_v
+			)
+			amp_v /= 2.0
+		return
 	# Native fast path — same FastNoiseLite instances are passed to
 	# C++, so noise output is byte-identical to the GDScript loop below.
 	# ~10× faster (Variant dispatch overhead per get_noise_3d call is

@@ -227,6 +227,13 @@ const _LAKE_ELLIPSOIDS_MAX: int = 7
 const _LAKE_WATER_LEVEL: int = 4  # = _LAKE_BBOX_Y / 2
 
 static var terrain_mode: int = TerrainMode.MODE_2D_HEIGHTMAP
+
+# Biome system toggle. When true, surface block selection (top + filler)
+# is biome-driven via BiomeClimate.biome_at(). When false, every column
+# uses the legacy SEA_LEVEL-based GRASS/DIRT split. Set by Game._ready
+# from MC_CLONE_BIOMES env var. Orthogonal to terrain_mode — biomes
+# work with both 2D heightmap and 3D density.
+static var biomes_enabled: bool = false
 static var _noise: FastNoiseLite
 # Low-freq continental noise — see CONTINENTAL_* constants above.
 # Sampled per-cell alongside the detail noise. ~256 extra noise calls
@@ -391,6 +398,7 @@ static func apply_world_seed(seed: int) -> void:
 	_continental_noise = null
 	_beach_noise = null
 	WorldgenDensity.reset()
+	BiomeClimate.reset()
 	_call_native_set_seed(seed)
 
 
@@ -406,7 +414,11 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		WorldgenDensity.build_density_terrain(chunk, chunk_x, chunk_z)
 		WorldgenDensity.apply_surface_layer(chunk, chunk_x, chunk_z)
 		PerfProbe.end("worldgen.density_terrain", density_token)
-	elif _native_worldgen != null:
+	elif _native_worldgen != null and not biomes_enabled:
+		# Native fast-path doesn't yet know about biomes — fall through to
+		# GDScript when biomes are on so surface block selection runs the
+		# biome-aware _block_at. Slice 4 of the biome plan ports the biome
+		# decision into native; until then accept the GDScript path cost.
 		_build_base_terrain_native(chunk, chunk_x, chunk_z)
 	else:
 		_build_base_terrain_gdscript(chunk, chunk_x, chunk_z)
@@ -509,17 +521,26 @@ static func _block_at(world_x: int, y: int, world_z: int, surface_y: int) -> int
 	if y <= 4 and _is_bedrock_at(world_x, y, world_z):
 		return Blocks.BEDROCK
 	if y == surface_y:
-		# Vanilla BiomeBase.b() applies the biome's surface block (`this.ai`).
-		# BiomeOcean uses ai = DIRT, BiomePlains uses GRASS. Without biomes,
-		# the rule is simple: any column whose top is BELOW SEA_LEVEL is
-		# ocean floor → DIRT. At or above SEA_LEVEL → GRASS. Don't subtract
-		# BEACH_DEPTH_BELOW here — that constant is for the beach pass's
-		# sand-band, not the GRASS/DIRT line. Doing so put GRASS underwater
-		# at depths -1..-(BEACH_DEPTH_BELOW-1).
+		# With biomes ON: biome.top always wins, even underwater. Vanilla
+		# Plains has GRASS at ocean floor; Desert has SAND. Ocean fill
+		# pass writes WATER above the surface separately. This matches
+		# vanilla px.java:130-148 directly.
+		if biomes_enabled:
+			return Biomes.top_block(BiomeClimate.biome_at(world_x, world_z))
+		# Without biomes: simple rule — underwater = DIRT, above sea =
+		# GRASS. This was the workaround for "grass-underwater" before
+		# biomes existed; with biomes the issue disappears in non-Plains
+		# biomes (Desert columns are SAND, not grass).
 		if surface_y < SEA_LEVEL:
 			return Blocks.DIRT
 		return Blocks.GRASS
 	if y >= surface_y - 3:
+		# Filler block — next 3 cells below the surface. Biome-aware:
+		# Desert/Ice-Desert use SAND filler so the column is sand all
+		# the way down (no grass/dirt revealed where caves cut through).
+		# Vanilla px.java:130-148 sets `by3 = biome.p` for the filler.
+		if biomes_enabled:
+			return Biomes.filler_block(BiomeClimate.biome_at(world_x, world_z))
 		return Blocks.DIRT
 	return Blocks.STONE
 

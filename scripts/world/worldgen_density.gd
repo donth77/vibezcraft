@@ -63,7 +63,7 @@ const NOISE_OCTAVES: int = 16
 # this brings practical density values into ~±64 — comparable to our
 # previous 8-octave non-normalized range, so existing Y-bias factors
 # stay tuned without drastic recalibration.
-const NOISE_NORMALIZER: float = 512.0
+const NOISE_NORMALIZER: float = 512.0  # vanilla px.java:233 — /512
 
 # Density-noise spatial scale. Tuning history:
 #   * 0.0625 → dominant octave wavelength ~2000 blocks. WAY too coarse:
@@ -155,6 +155,15 @@ const ELEVATION_NOISE_FREQUENCY: float = 1.0 / 400.0  # 400-block features
 # verified: noise output for 400 samples spans [-4.5, +4.1] with mean
 # ~0.2, exactly matching vanilla's expected d4 input distribution.
 const ELEVATION_NOISE_NORMALIZER: float = 1.0
+# When vanilla noise is enabled, raw output is much larger (~±5000-10000
+# vs FastNoiseLite's ~±4). Vanilla's d4 expects /8000 to bring `h` into
+# the [-4, 4] range its formula was designed for.
+# Tuning: transitions abruptly from "all land" (/1000) to "all ocean"
+# (/2000) — vanilla d4's threshold-jump character + the LAND_BIAS=1.0
+# tuned for FastNoiseLite. Default to /1500 as a starting mid-point;
+# expect to keep iterating LAND_BIAS in vanilla-noise mode separately.
+const ELEVATION_NOISE_NORMALIZER_VANILLA: float = 1500.0
+
 # Per-seed LAND BIAS — shifts the d4 input distribution toward the
 # mountain branch so most seeds produce playable land/ocean mixes
 # instead of all-ocean or all-land worlds. With 16-octave noise the
@@ -165,7 +174,12 @@ const ELEVATION_NOISE_NORMALIZER: float = 1.0
 # mountain-branch coverage from ~26% baseline to ~55-60% on average,
 # matching vanilla's audit and giving the user-visible win of
 # "land somewhere near spawn, every time."
-const ELEVATION_LAND_BIAS: float = 0.0
+# Vanilla d4 chain compresses both branches heavily (ocean max -11.4,
+# mountain max +4 cells), so without bias most columns hover near 0
+# offset → 25% above sea (way oceanic). LAND_BIAS=1.0 pushes the
+# distribution toward the mountain branch enough to land near vanilla
+# 60% above sea. Tuned with d4 chain restored to vanilla.
+const ELEVATION_LAND_BIAS: float = 1.0
 
 # Amplitude modulator (vanilla `px.java:200` `d8` from `this.g` noise) —
 # port slice 3-B option B. A separate 2D noise sampled per coarse column
@@ -234,6 +248,13 @@ const _SIZE_Z: int = 16  # = Chunk.SIZE_Z
 
 # Cached density noise generator. Built once per session via
 # get_density_noise() — re-init only on apply_world_seed.
+# When true, all NoiseOctaves singletons are created via the vanilla
+# `nf.java` pattern (NoisePerlin per octave, sharing one JavaRandom)
+# instead of the FastNoiseLite-based default. Vanilla noise has wider
+# variance + correlated octaves, producing terrain shapes closer to
+# Alpha. Toggled via MC_CLONE_VANILLA_NOISE env var (game.gd reads it).
+static var vanilla_noise_enabled: bool = false
+
 static var _density_noise: NoiseOctaves
 # Secondary density noise (vanilla `f`) — same parameters as primary,
 # different seed. Selector noise blends between the two per cell,
@@ -282,7 +303,7 @@ static func reset() -> void:
 # base_seed+1 for detail/continental respectively).
 static func _get_density_noise() -> NoiseOctaves:
 	if _density_noise == null:
-		_density_noise = NoiseOctaves.create(Worldgen.WORLD_SEED + 101, NOISE_OCTAVES)
+		_density_noise = _make_noise(Worldgen.WORLD_SEED + 101, NOISE_OCTAVES)
 	return _density_noise
 
 
@@ -310,7 +331,7 @@ static func estimate_target_y(world_x: int, world_z: int) -> float:
 		)
 	)
 	# Vanilla d4 = h / 8000; we use ELEVATION_NOISE_NORMALIZER for our scale.
-	var d4: Dictionary = _apply_d4_modifier(raw_h / ELEVATION_NOISE_NORMALIZER)
+	var d4: Dictionary = _apply_d4_modifier(raw_h / _elevation_normalizer())
 	return float(TARGET_Y) + d4["target_y_offset"]
 
 
@@ -335,53 +356,49 @@ static func estimate_target_y(world_x: int, world_z: int) -> float:
 #   target_y_offset: float in [-32, +12] world cells, relative to TARGET_Y
 #   force_tight: bool — if true, column's amplitude (d8) becomes 0.5.
 static func _apply_d4_modifier(h_normalized: float) -> Dictionary:
-	# Vanilla `d4` modifier — exact port from px.java:212-227.
+	# Exact vanilla `d4` modifier port from px.java:212-227.
 	# Input: `h_normalized` is the reverse-FBM elevation noise sample
 	# divided by ELEVATION_NOISE_NORMALIZER (matches vanilla's /8000).
 	# Output: target_y_offset in WORLD cells + force_tight flag for amp.
 	#
-	# Vanilla source (px.java:212-227):
-	#   if ((d4 = h / 8000.0) < 0.0)        d4 = -d4 * 0.3
+	# Vanilla source:
+	#   if ((d4 = h / 8000.0) < 0.0)         d4 = -d4 * 0.3
 	#   if ((d4 = d4 * 3.0 - 2.0) < 0.0)
 	#       d4 /= 2.0; if (d4 < -1.0) d4 = -1.0; d4 /= 1.4; d4 /= 2.0
 	#       d8 = 0.0  # force tight amplitude
 	#   else
 	#       if (d4 > 1.0) d4 = 1.0; d4 /= 8.0
-	#   d9 = n6/2 + d4 * 4    (in coarse-Y units; n6=17, COARSE_Y=8)
+	#   d9 = n6/2 + d4 * 4    (coarse-Y; n6=17, COARSE_Y=8)
 	# Per WORLD-Y: world_target_y_offset = d4 * 32.
-	# Smooth asymmetric piecewise — replaces vanilla's threshold-jump d4
-	# (which snaps from ocean to mountain branch at raw_h≈0.667 and
-	# produces 2-cell-wide coast transitions). The smooth curve makes
-	# target_y vary continuously through the beach band, giving wide
-	# coastlines and visible dry beaches.
 	#
-	# Tuning history: tried vanilla's exact /2/1.4/2 chain — produces
-	# vanilla-shape STATISTICS but visually creates sharp coastlines
-	# because the threshold jump at d4=0 is geometrically abrupt. The
-	# smooth piecewise below has the same SPIRIT (asymmetric) but with
-	# continuous derivative — surface clusters can flow through the
-	# beach Y band naturally over 5+ horizontal cells.
-	var biased: float = h_normalized + ELEVATION_LAND_BIAS
+	# Tuning history: we tried a smooth piecewise variant (mountain
+	# h*4 / ocean h*8 with no threshold jump) hoping to fix the
+	# 1-cell-beach issue. Net effect was different artifacts, not
+	# improvement — vanilla's chain is the actual reference behavior
+	# even if it has its own sharp-coastline character. Restored to
+	# match vanilla exactly so biome layer (next) can be evaluated
+	# against the real Alpha terrain shape.
+	var d4: float = h_normalized + ELEVATION_LAND_BIAS
+	if d4 < 0.0:
+		d4 = -d4 * 0.3
+	d4 = d4 * 3.0 - 2.0
 	var force_tight: bool = false
-	var offset: float
-	if biased >= 0.0:
-		# MOUNTAIN: linear with cap. biased typically [0, 4] → offset [0, 16].
-		offset = minf(biased, 4.0) * 4.0  # cap at +16 cells
-	else:
-		# OCEAN: steeper slope (×8) so even moderate-h ocean columns
-		# reach deep basin Ys. biased ∈ [-4, 0] → offset [-32, 0]. With
-		# typical h~-1.5: offset -12 → target_y 56, surface ~51 → 13
-		# cells of water depth. Vanilla-feel oceans, not ponds.
-		offset = maxf(biased, -4.0) * 8.0  # cap at -32 cells
+	if d4 < 0.0:
+		d4 /= 2.0
+		d4 = maxf(d4, -1.0)
+		d4 /= 1.4
+		d4 /= 2.0
 		force_tight = true
-	return {"target_y_offset": offset, "force_tight": force_tight}
+	else:
+		d4 = minf(d4, 1.0) / 8.0
+	return {"target_y_offset": d4 * 32.0, "force_tight": force_tight}
 
 
 # Secondary density noise (vanilla `f`). Same parameters as primary,
 # different seed offset (+102) so the two are independent.
 static func _get_density_noise_2() -> NoiseOctaves:
 	if _density_noise_2 == null:
-		_density_noise_2 = NoiseOctaves.create(Worldgen.WORLD_SEED + 102, NOISE_OCTAVES)
+		_density_noise_2 = _make_noise(Worldgen.WORLD_SEED + 102, NOISE_OCTAVES)
 	return _density_noise_2
 
 
@@ -390,7 +407,7 @@ static func _get_density_noise_2() -> NoiseOctaves:
 # (+102), elevation (+103), amplitude (+107).
 static func _get_selector_noise() -> NoiseOctaves:
 	if _selector_noise == null:
-		_selector_noise = NoiseOctaves.create(Worldgen.WORLD_SEED + 109, SELECTOR_NOISE_OCTAVES)
+		_selector_noise = _make_noise(Worldgen.WORLD_SEED + 109, SELECTOR_NOISE_OCTAVES)
 	return _selector_noise
 
 
@@ -400,8 +417,27 @@ static func _get_selector_noise() -> NoiseOctaves:
 # heightmap (+0, +1, +2), and elevation (+103) noises.
 static func _get_amplitude_noise() -> NoiseOctaves:
 	if _amplitude_noise == null:
-		_amplitude_noise = NoiseOctaves.create(Worldgen.WORLD_SEED + 107, AMPLITUDE_NOISE_OCTAVES)
+		_amplitude_noise = _make_noise(Worldgen.WORLD_SEED + 107, AMPLITUDE_NOISE_OCTAVES)
 	return _amplitude_noise
+
+
+# Noise factory — dispatches to vanilla NoisePerlin path or FastNoiseLite
+# default based on `vanilla_noise_enabled`. All five worldgen noises route
+# through this so flipping the flag affects the entire density pipeline.
+static func _make_noise(seed: int, octaves: int) -> NoiseOctaves:
+	if vanilla_noise_enabled:
+		return NoiseOctaves.create_vanilla(seed, octaves)
+	return NoiseOctaves.create(seed, octaves)
+
+
+# Pick the right elevation normalizer based on noise mode. Vanilla noise
+# output is ~thousands of units (16-octave reverse-FBM) so divide by
+# ~1500 to bring into d4's expected ±4 input range. FastNoiseLite mode
+# already produces ~±4 directly so /1.0 is correct there.
+static func _elevation_normalizer() -> float:
+	return (
+		ELEVATION_NOISE_NORMALIZER_VANILLA if vanilla_noise_enabled else ELEVATION_NOISE_NORMALIZER
+	)
 
 
 # Per-column elevation modulator. 16-octave reverse-FBM matching vanilla
@@ -409,7 +445,7 @@ static func _get_amplitude_noise() -> NoiseOctaves:
 # stay independent of density noise (+101) and heightmap noises (+0/1/2).
 static func _get_elevation_noise() -> NoiseOctaves:
 	if _elevation_noise == null:
-		_elevation_noise = NoiseOctaves.create(Worldgen.WORLD_SEED + 103, ELEVATION_NOISE_OCTAVES)
+		_elevation_noise = _make_noise(Worldgen.WORLD_SEED + 103, ELEVATION_NOISE_OCTAVES)
 	return _elevation_noise
 
 
@@ -506,7 +542,7 @@ static func build_density_terrain(chunk: Chunk, chunk_x: int, chunk_z: int) -> v
 			var raw_h: float = elev_noise.sample_2d(
 				wx * ELEVATION_NOISE_FREQUENCY, wz * ELEVATION_NOISE_FREQUENCY
 			)
-			var d4: Dictionary = _apply_d4_modifier(raw_h / ELEVATION_NOISE_NORMALIZER)
+			var d4: Dictionary = _apply_d4_modifier(raw_h / _elevation_normalizer())
 			column_target_y[gx * GRID_Z + gz] = float(TARGET_Y) + d4["target_y_offset"]
 			# Per-column amplitude varies naturally [0.5, 1.5] for BOTH
 			# ocean and land — gives ocean depth variation (some basins
@@ -644,7 +680,9 @@ static func apply_surface_layer(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 	# Native fast-path — does the column scan + grass/dirt/bedrock
 	# conversion in C++. ~16ms in GDScript → ~1ms native. Result is
 	# byte-identical; parity guarded by tests/test_density_native_parity.
-	if Worldgen._native_worldgen != null:
+	# Disabled when biomes are on — native path doesn't know about
+	# biome.top/filler decisions yet (slice 4 of biomes-plan.md).
+	if Worldgen._native_worldgen != null and not Worldgen.biomes_enabled:
 		chunk.blocks = Worldgen._native_worldgen.call(
 			"apply_surface_layer", chunk_x, chunk_z, chunk.blocks
 		)
@@ -661,21 +699,26 @@ static func apply_surface_layer(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 					break
 			if top_stone_y < 0:
 				continue  # entire column was air
-			# Top cell: GRASS if above sea level (will be land), DIRT if at
-			# or below (ocean floor — water fill will cover it). Vanilla
-			# `px.java:130-148` does the same: by2 (top block) is set to
-			# GRASS for the biome surface only when in the beach band or
-			# above; below-band columns get DIRT, then water fills above.
-			# Without this guard we leave GRASS visible through the water,
-			# which the player can spot as "underwater grass blocks".
-			var top_block: int = Blocks.GRASS if top_stone_y >= Worldgen.SEA_LEVEL else Blocks.DIRT
+			# Top + filler block selection. Vanilla px.java:130-148 uses
+			# biome.top + biome.filler regardless of underwater status.
+			# Plains underwater is GRASS, Desert underwater is SAND.
+			# Ocean fill pass writes WATER above the surface separately.
+			var top_block: int = Blocks.GRASS
+			var filler_block: int = Blocks.DIRT
+			if Worldgen.biomes_enabled:
+				var biome: int = BiomeClimate.biome_at(world_x, world_z)
+				top_block = Biomes.top_block(biome)
+				filler_block = Biomes.filler_block(biome)
+			elif top_stone_y < Worldgen.SEA_LEVEL:
+				# No-biomes legacy: underwater = DIRT (workaround pre-biomes).
+				top_block = Blocks.DIRT
 			chunk.set_block_unchecked(x, top_stone_y, z, top_block)
 			for dy in range(1, 4):
 				var dy_y: int = top_stone_y - dy
 				if dy_y < 0:
 					break
 				if chunk.get_block_unchecked(x, dy_y, z) == Blocks.STONE:
-					chunk.set_block_unchecked(x, dy_y, z, Blocks.DIRT)
+					chunk.set_block_unchecked(x, dy_y, z, filler_block)
 			# Bedrock pass — probabilistic per vanilla. Use the same
 			# deterministic hash pattern as Worldgen._is_bedrock_at to keep
 			# bedrock placement reproducible per (seed, world_x, y, world_z).

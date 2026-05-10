@@ -481,13 +481,21 @@ func test_beach_band_columns_match_beach_noise_gate() -> void:
 						continue
 					if surface == Blocks.SAND:
 						any_sand = true
-						assert_true(
-							surface_y >= lo and surface_y <= hi,
-							(
-								"sand at (%d,%d,%d) outside beach band [%d,%d]"
-								% [world_x, surface_y, world_z, lo, hi]
+						# Biomes-on: Desert / Ice-Desert biomes have SAND
+						# surface anywhere (not just beach band). Skip the
+						# band check for those columns.
+						var in_sand_biome: bool = false
+						if Worldgen.biomes_enabled:
+							var biome: int = BiomeClimate.biome_at(world_x, world_z)
+							in_sand_biome = Biomes.is_sand_biome(biome)
+						if not in_sand_biome:
+							assert_true(
+								surface_y >= lo and surface_y <= hi,
+								(
+									"sand at (%d,%d,%d) outside beach band [%d,%d]"
+									% [world_x, surface_y, world_z, lo, hi]
+								)
 							)
-						)
 					elif surface_y >= lo and surface_y <= hi and surface == Blocks.GRASS:
 						any_band_grass = true
 					elif surface_y > hi and surface == Blocks.GRASS:

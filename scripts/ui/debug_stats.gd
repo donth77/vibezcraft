@@ -198,6 +198,17 @@ func _format_stats() -> String:
 		var p: Vector3 = _player.global_position
 		lines.append("Pos: %.1f, %.1f, %.1f" % [p.x, p.y, p.z])
 		lines.append("Block: %d, %d, %d" % [int(floor(p.x)), int(floor(p.y)), int(floor(p.z))])
+		# Biome readout — only when biomes_enabled (else BiomeClimate
+		# hasn't warmed its noise stack and lookup would lazy-init from
+		# the main thread which is fine but pointless).
+		if Worldgen.biomes_enabled:
+			var bx: int = int(floor(p.x))
+			var bz: int = int(floor(p.z))
+			var biome: int = BiomeClimate.biome_at(bx, bz)
+			var climate: Vector2 = BiomeClimate.climate_at(bx, bz)
+			lines.append(
+				"Biome: %s (temp %.2f rain %.2f)" % [Biomes.name_of(biome), climate.x, climate.y]
+			)
 	var mem_mb: float = float(OS.get_static_memory_usage()) / 1048576.0
 	lines.append("Mem: %.1f MB" % mem_mb)
 	return "\n".join(lines)

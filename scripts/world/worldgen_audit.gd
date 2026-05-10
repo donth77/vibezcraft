@@ -82,6 +82,8 @@ static func print_report(center_cx: int = 0, center_cz: int = 0, radius: int = 2
 	_print_surface_section(stats)
 	_print_block_section(stats, chunks.size())
 	_print_decoration_section(stats, chunks.size())
+	if Worldgen.biomes_enabled:
+		_print_biome_section(chunks)
 	_print_footer()
 
 
@@ -289,6 +291,32 @@ static func _classify(observed: float, vanilla: float) -> String:
 	if observed > hi:
 		return "HIGH (%.0f%% of vanilla)" % (observed / vanilla * 100.0)
 	return "OK (%.0f%%)" % (observed / vanilla * 100.0)
+
+
+# Sample biome at every chunk's center column and report the
+# distribution. Confirms climate noise produces all 11 biomes and
+# their relative frequencies match expectation. Vanilla audit
+# baseline for biome distribution: ~30% Plains, ~20% Forest,
+# ~10% each of Desert/Taiga/Tundra/Swamp, smaller slices for the
+# rest. Concrete numbers vary per noise implementation.
+static func _print_biome_section(chunks: Array) -> void:
+	var counts: Array[int] = []
+	counts.resize(Biomes.COUNT)
+	counts.fill(0)
+	for entry: Dictionary in chunks:
+		var coord: Vector2i = entry["coord"]
+		# Sample center of chunk (8, 8 in local coords).
+		var wx: int = coord.x * Chunk.SIZE_X + 8
+		var wz: int = coord.y * Chunk.SIZE_Z + 8
+		var biome: int = BiomeClimate.biome_at(wx, wz)
+		counts[biome] += 1
+	print("")
+	print("--- Biome Distribution (chunk centers) ---")
+	for i in range(Biomes.COUNT):
+		if counts[i] == 0:
+			continue
+		var pct: float = 100.0 * float(counts[i]) / float(chunks.size())
+		print("  %-18s %4d  (%5.1f%%)" % [Biomes.name_of(i), counts[i], pct])
 
 
 static func _print_footer() -> void:

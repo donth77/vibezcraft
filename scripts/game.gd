@@ -227,6 +227,21 @@ func _ready() -> void:
 		)
 		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
 	print("[Game] terrain_mode=%s" % terrain_mode_lower)
+	# Biome system toggle — orthogonal to terrain mode. When enabled,
+	# surface block selection becomes biome-driven (Desert columns are
+	# SAND, Plains are GRASS, etc.). Recommended combo for Alpha parity:
+	# MC_CLONE_TERRAIN_MODE=3d_density MC_CLONE_BIOMES=1.
+	var biomes_raw: String = _resolve_str("MC_CLONE_BIOMES", "0")
+	Worldgen.biomes_enabled = biomes_raw == "1" or biomes_raw.to_lower() == "true"
+	print("[Game] biomes_enabled=%s" % Worldgen.biomes_enabled)
+	# Vanilla noise toggle — replaces our FastNoiseLite-based per-octave
+	# noise with the proper Java-Random Perlin port (vanilla nf.java +
+	# z.java pattern). Wider variance + correlated octaves produce
+	# vanilla-shape terrain. Trade: ~2× slower per noise sample (GDScript
+	# Perlin vs C++ FastNoiseLite). Only affects 3D density mode.
+	var vnoise_raw: String = _resolve_str("MC_CLONE_VANILLA_NOISE", "0")
+	WorldgenDensity.vanilla_noise_enabled = (vnoise_raw == "1" or vnoise_raw.to_lower() == "true")
+	print("[Game] vanilla_noise_enabled=%s" % WorldgenDensity.vanilla_noise_enabled)
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
@@ -236,6 +251,10 @@ func _ready() -> void:
 	# Godot forbids from non-main threads → chunks fail to mesh.
 	if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
 		WorldgenDensity.warm_main_thread()
+	# Same warming pattern for biome climate noise — 3 FastNoiseLite
+	# constructors that workers can't safely create.
+	if Worldgen.biomes_enabled:
+		BiomeClimate.warm_main_thread()
 	# Worldgen audit dump — `MC_CLONE_WORLDGEN_AUDIT=1` prints a per-chunk
 	# block / surface / decoration breakdown vs vanilla expected values
 	# right after init. Useful for catching tuning regressions (e.g.,
