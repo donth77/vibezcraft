@@ -150,6 +150,7 @@ func _spawn_initial_chunks() -> void:
 		_spawn_chunk_sync(c)
 		loaded += 1
 		initial_chunks_ready.emit(loaded, total)
+	SFX.ready_to_play = true
 	Music.start_music()
 
 

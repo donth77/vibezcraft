@@ -5,8 +5,11 @@ extends PanelContainer
 # don't churn the label every frame. Visibility tracks Game.debug_enabled.
 
 const UPDATE_INTERVAL_SEC: float = 0.25
-const _FONT_SIZE: int = 36
-const _PERF_FONT_SIZE: int = 18
+# Reduced from 36 → 18 — at 36, the panel content (10+ stat lines plus
+# perf probes plus optional scout output) overflowed off the bottom of
+# 1080p displays. 18 keeps the panel well above half-screen height.
+const _FONT_SIZE: int = 18
+const _PERF_FONT_SIZE: int = 12
 # Cave scout is a 9-chunk × 16×16×54-cell scan (~225K get_block_unchecked
 # calls ≈ 10-15 ms on the main thread). Auto-refresh even at 2 s interval
 # was still stacking onto dig-frames that already eat 90-260 ms for the
@@ -45,10 +48,10 @@ func _ready() -> void:
 	anchor_top = 0.0
 	anchor_right = 1.0
 	anchor_bottom = 0.0
-	offset_left = -560
-	offset_top = 56
+	offset_left = -340
+	offset_top = 16
 	offset_right = -16
-	offset_bottom = 56  # container will expand downward as needed
+	offset_bottom = 16  # container will expand downward as needed
 	size_flags_horizontal = Control.SIZE_SHRINK_END
 	size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 

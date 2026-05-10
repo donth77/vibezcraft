@@ -61,6 +61,10 @@ static func register_defaults() -> void:
 	# combined). Used to diagnose lighting fill vs mesher packing — see
 	# `chunk.gdshader` debug_view uniform.
 	_add_key("debug_lighting_view", KEY_F8)
+	# Hold R while flying in creative to boost speed — useful for surveying
+	# distant biomes. Vanilla doesn't have this but our render distance
+	# means biomes can sit hundreds of blocks apart.
+	_add_key("creative_boost", KEY_R)
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:

@@ -206,13 +206,13 @@ func _ready() -> void:
 			)
 		)
 	# Terrain mode toggle — `MC_CLONE_TERRAIN_MODE` env var picks between
-	# the 2D heightmap (legacy/fallback) and the vanilla-faithful 3D
-	# density path. Default is 3D density for runtime since the user
-	# wants to A/B-test it in-game; tests keep their static-var default
-	# of MODE_2D_HEIGHTMAP for byte-equality stability. Accepted values
-	# (case-insensitive): `3d_density` or `2d_heightmap`. Unrecognized
-	# values fall through to the runtime default with a warning.
-	var terrain_mode_raw: String = _resolve_str("MC_CLONE_TERRAIN_MODE", "3d_density")
+	# the 2D heightmap and the 3D density path. 2026-05-10: defaulted
+	# to 2D heightmap because 3D density has known shape issues (visible
+	# chunk seams, missing mountains, narrow beaches) that several rounds
+	# of empirical tuning haven't resolved. 2D mode produces a working
+	# Minecraft-like world today. 3D opt-in via env var while we figure
+	# out the structural fix.
+	var terrain_mode_raw: String = _resolve_str("MC_CLONE_TERRAIN_MODE", "2d_heightmap")
 	var terrain_mode_lower: String = terrain_mode_raw.to_lower()
 	if terrain_mode_lower == "2d_heightmap":
 		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_2D_HEIGHTMAP
@@ -225,7 +225,7 @@ func _ready() -> void:
 				% terrain_mode_raw
 			)
 		)
-		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
+		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_2D_HEIGHTMAP
 	print("[Game] terrain_mode=%s" % terrain_mode_lower)
 	# Biome system toggle — orthogonal to terrain mode. When enabled,
 	# surface block selection becomes biome-driven (Desert columns are

@@ -17,45 +17,35 @@ const _STATUS_HIGH: String = "HIGH"
 const _STATUS_LOW: String = "LOW"
 const _TOLERANCE_MULTIPLIER: float = 0.4  # ±40% counts as OK
 
-# Vanilla expected per-chunk averages (16×128×16 cell chunk). Numbers are
-# the midpoint of the typical vanilla range; the OK band is mid * (1 ± tolerance).
+# Vanilla expected per-chunk averages — MEASURED 2026-05-10 from two
+# real Alpha 1.2.6 worlds (886 + 635 chunks). See
+# .claude/vanilla-alpha-real-baselines.md for raw histograms. Previous
+# numbers here were guesses and were sending tuning in the wrong
+# direction (target mean 68, beach 8%, sand 40 — actual is mean 64,
+# beach 38-47%, sand 200-280).
 const _VANILLA_EXPECTED: Dictionary = {
-	# Block counts (per chunk = 32768 cells total). Calibrated against
-	# vanilla Alpha 1.2.6 numbers AND empirical observation of working
-	# terrain. Round numbers — ±40% tolerance covers seed/coverage noise.
-	"air_avg": 14000,  # huge variance with cave + ocean coverage; rough
-	"stone_avg": 13500,
-	# DIRT: surface 3 cells × ~200 land columns = ~600, plus the dirt-vein
-	# ore decorator (20 × ~32 = up to 640). Total typical: 1000-1800.
-	"dirt_avg": 1400,
-	"grass_avg": 200,  # 256 columns minus sand/water/cliffs that strip the top
-	# SAND: vanilla beach band ~8% × beach-noise gate ~50% × 4 cells
-	# deep × 256 columns ≈ 41. Earlier 30/75 were both wrong (30 too
-	# low, 75 too high). Real vanilla typically lands 30-60 depending
-	# on ocean coverage.
-	"sand_avg": 40,
-	# BEDROCK: vanilla y=0 always (256), y=1 4/5 (~205), y=2 3/5 (~154),
-	# y=3 2/5 (~102), y=4 1/5 (~51). Total ~768 per chunk.
+	"air_avg": 16100,
+	"stone_avg": 13000,
+	"dirt_avg": 1378,
+	"grass_avg": 100,  # vanilla actually averages 100/chunk, not 200
+	"sand_avg": 240,  # MEASURED — was 40 (6× too low)
 	"bedrock_avg": 768,
-	# WATER: 40% ocean coverage × ~10 cells avg fill above floor = ~1000.
-	# With deeper oceans, can exceed.
-	"water_avg": 1200,
-	# Trees: ~1.5 oaks per chunk × ~5 trunk cells = 7.5 logs
-	# × ~30 leaf cells per canopy = 45 leaves.
+	"water_avg": 465,  # MEASURED — was 1200 (way too high)
 	"log_avg": 8,
-	"leaves_avg": 45,
-	"coal_ore_avg": 111,  # vanilla empirical baseline
+	"leaves_avg": 56,
+	"coal_ore_avg": 130,
 	"iron_ore_avg": 77,
 	"gold_ore_avg": 8.5,
 	"diamond_ore_avg": 3.5,
-	# Surface stats.
-	"surface_y_mean": 68,  # vanilla plains biome surface mean (sea_level + 4)
-	"surface_y_min": 30,  # deep ocean trenches (3D-density only)
-	"surface_y_max": 95,  # mountain peaks
-	"above_sea_frac": 0.6,  # ~60% of plains-biome columns are land
-	"beach_band_frac": 0.08,  # ~8% of columns are TRUE beaches (excl. ocean tops)
-	# Decorations.
-	"flower_avg": 4,  # ~3 calls × ~1-2 successful placements
+	# Surface stats — measured median 63, mean 64-67 (varies by seed),
+	# max varies wildly seed-to-seed (96 in W1, 116 in W2). Beach band
+	# is the BIG one — vanilla packs 38-47% of all columns into y=60-65.
+	"surface_y_mean": 64,
+	"surface_y_min": 49,
+	"surface_y_max": 100,  # rare peaks reach 95-115; 100 is a fair midpoint
+	"above_sea_frac": 0.45,  # vanilla 41-48%, was 60% (way too land-heavy)
+	"beach_band_frac": 0.42,  # MEASURED 38-47% — was 8% (5x too low)
+	"flower_avg": 4,
 	"mushroom_avg": 1.5,
 	"tree_avg": 1.5,
 }
@@ -224,8 +214,8 @@ static func _print_surface_section(stats: Dictionary) -> void:
 		)
 	)
 	print("  Ocean        %d/%d (%.1f%%)" % [stats.ocean_count, col_total, ocean_frac * 100.0])
-	print("    (NOTE: vanilla beach band % is for plains biome only — high beach % means")
-	print("     surface clusters in y∈[60,65], producing the sand-in-forest bug)")
+	print("    (NOTE: real vanilla averages 38-47% beach band — surface")
+	print("     clusters tightly near sea level. Low % = our terrain too tall.)")
 
 
 static func _print_block_section(stats: Dictionary, chunk_count: int) -> void:

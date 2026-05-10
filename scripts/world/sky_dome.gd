@@ -15,9 +15,15 @@ extends Node3D
 # ~0.6 m/s above the world (~y = SIZE_Y - 8). World-position offset, no
 # parallax — vanilla matches this.
 
-const _SUN_DISTANCE: float = 90.0  # far enough to be behind any chunk in render distance
-const _SUN_SIZE: float = 30.0  # ~30° angular size at distance 90
-const _MOON_SIZE: float = 25.0  # vanilla moon is slightly smaller than sun
+# At render_distance=8, the rendered terrain extends ~180 blocks from
+# the player at the diagonal. With depth_test ON (no_depth_test caused
+# a different bug), the sun/moon must sit BEYOND any terrain distance
+# or trees clip in front of them at sunset/moonrise. 350 covers up to
+# render_distance=20 chunks. Sizes scale proportionally so apparent
+# angular size stays the same as the old 90-distance / 30-size pair.
+const _SUN_DISTANCE: float = 350.0
+const _SUN_SIZE: float = 117.0  # = 30 × (350/90)
+const _MOON_SIZE: float = 97.0  # = 25 × (350/90); moon stays slightly smaller
 # Vanilla Alpha cloud altitude (f.java:652 `f9 = 108.0f - f6 + 0.33f`) —
 # absolute world y = 108. Our old value of SIZE_Y-1+12=139 put clouds too
 # high, shrinking their apparent size and making the cell grid more visible

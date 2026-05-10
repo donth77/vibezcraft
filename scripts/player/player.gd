@@ -58,6 +58,9 @@ const WATER_MOVE_SPEED: float = WALK_SPEED * 0.5
 # creative toggles off.
 const FLY_SPEED: float = 10.89
 const FLY_VERTICAL_SPEED: float = 7.5
+# Hold R while flying for a 5× boost — exploration speed for surveying
+# distant biomes. Not vanilla; pragmatic for our render distance.
+const FLY_BOOST_MULTIPLIER: float = 5.0
 # Max seconds between two jump presses that still count as a double-tap.
 # Vanilla uses ~0.3 s; shorter feels sluggish, longer triggers accidentally.
 const FLY_DOUBLE_TAP_SEC: float = 0.3
@@ -1876,12 +1879,17 @@ func _update_flight_physics() -> void:
 		"move_left", "move_right", "move_forward", "move_back"
 	)
 	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
-	velocity.x = direction.x * FLY_SPEED
-	velocity.z = direction.z * FLY_SPEED
+	var speed: float = FLY_SPEED
+	var v_speed: float = FLY_VERTICAL_SPEED
+	if Input.is_action_pressed("creative_boost"):
+		speed *= FLY_BOOST_MULTIPLIER
+		v_speed *= FLY_BOOST_MULTIPLIER
+	velocity.x = direction.x * speed
+	velocity.z = direction.z * speed
 	if Input.is_action_pressed("jump"):
-		velocity.y = FLY_VERTICAL_SPEED
+		velocity.y = v_speed
 	elif Input.is_action_pressed("sneak") or Input.is_action_pressed("fly_down"):
-		velocity.y = -FLY_VERTICAL_SPEED
+		velocity.y = -v_speed
 	else:
 		velocity.y = 0.0
 
@@ -1894,25 +1902,33 @@ func _update_sneak() -> void:
 		_is_sneaking = Input.is_action_pressed("sneak")
 
 
-# Scan the 16×16 spawn chunk for the first column whose surface is
-# comfortably above sea level. If none found, fall back to the highest
-# column we saw (best of bad options — might still be water but
-# shallowest spot). Bounded to chunk (0,0) so we never move the player
-# beyond the chunk loader's initial-load radius.
+# Scan the spawn chunk first — if any column above sea level, use it.
+# Otherwise widen to a 5×5 chunk square (still well within the chunk
+# loader's initial-load radius of 8) and pick the highest column we
+# find. Last-resort fallback is the highest column we saw, even if
+# below sea level.
 func _find_safe_spawn_in_chunk() -> Vector2i:
 	var min_land_y: int = Worldgen.SEA_LEVEL + 2
 	var fallback: Vector2i = Vector2i(8, 8)
 	var best_y: int = 0
-	for x in range(0, 16):
-		for z in range(0, 16):
-			var surface_y: int
-			if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
-				surface_y = int(WorldgenDensity.estimate_target_y(x, z))
-			else:
-				surface_y = Worldgen.surface_height(x, z)
-			if surface_y >= min_land_y:
-				return Vector2i(x, z)
-			if surface_y > best_y:
-				best_y = surface_y
-				fallback = Vector2i(x, z)
+	# Widen out one chunk-ring at a time so we prefer the closest land.
+	for ring in range(0, 3):
+		for cx in range(-ring, ring + 1):
+			for cz in range(-ring, ring + 1):
+				if maxi(absi(cx), absi(cz)) != ring:
+					continue  # already scanned in a tighter ring
+				for x in range(0, 16, 2):
+					for z in range(0, 16, 2):
+						var wx: int = cx * 16 + x
+						var wz: int = cz * 16 + z
+						var surface_y: int
+						if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
+							surface_y = int(WorldgenDensity.estimate_target_y(wx, wz))
+						else:
+							surface_y = Worldgen.surface_height(wx, wz)
+						if surface_y >= min_land_y:
+							return Vector2i(wx, wz)
+						if surface_y > best_y:
+							best_y = surface_y
+							fallback = Vector2i(wx, wz)
 	return fallback

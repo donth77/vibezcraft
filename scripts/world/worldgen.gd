@@ -635,6 +635,13 @@ static func _place_beaches_2d(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.beaches")
 	var lo: int = SEA_LEVEL - BEACH_DEPTH_BELOW
 	var hi: int = SEA_LEVEL + BEACH_HEIGHT_ABOVE
+	# Vanilla approach (px.java BiomeBase.b): any beach-band column where
+	# beach noise > 0 becomes sand. NO water-adjacency requirement — that
+	# was our addition to suppress sand-in-forest, but it produced 1-cell
+	# beach strips at coastlines (only the column directly adjacent to
+	# water converts). Beach noise (0.03125 freq) provides natural soft
+	# patches that look like Alpha beaches.
+	var beach_noise := _get_beach_noise()
 	for x in range(Chunk.SIZE_X):
 		for z in range(Chunk.SIZE_Z):
 			var world_x: int = chunk_x * Chunk.SIZE_X + x
@@ -642,18 +649,7 @@ static func _place_beaches_2d(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 			var surface_y: int = surface_height(world_x, world_z)
 			if surface_y < lo or surface_y > hi:
 				continue
-			# Water-adjacency: column must have a 4-cardinal neighbor
-			# below sea level. Catches actual coastlines while letting
-			# inland flat areas (in the beach Y band but far from water)
-			# stay as grass — replaces vanilla's biome-based suppression.
-			var has_water_neighbor: bool = false
-			for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-				var nwx: int = world_x + off.x
-				var nwz: int = world_z + off.y
-				if surface_height(nwx, nwz) < SEA_LEVEL:
-					has_water_neighbor = true
-					break
-			if not has_water_neighbor:
+			if beach_noise.get_noise_2d(float(world_x), float(world_z)) <= 0.0:
 				continue
 			for dy in range(BEACH_SAND_DEPTH):
 				var y: int = surface_y - dy
