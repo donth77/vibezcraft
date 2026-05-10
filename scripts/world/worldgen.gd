@@ -62,19 +62,19 @@ const SEA_LEVEL: int = 64
 # around y=68 (continental ≈ 0); ocean basins where continental is
 # strongly negative; mountain peaks where both noises align positive.
 const CONTINENTAL_FREQUENCY: float = 0.003
-const CONTINENTAL_AMPLITUDE: int = 14
+const CONTINENTAL_AMPLITUDE: int = 40  # deep oceans (down to y~30) + tall hills (~95)
 const CONTINENTAL_OCTAVES: int = 2
-const NOISE_FREQUENCY: float = 0.012
-const DETAIL_AMPLITUDE: int = 10
+const NOISE_FREQUENCY: float = 0.018  # pre-3D value (commit 20739fc)
+const DETAIL_AMPLITUDE: int = 8
 # Loose upper bound for `test_surface_height_in_expected_range`. Equal to
 # CONTINENTAL_AMPLITUDE + DETAIL_AMPLITUDE + abs(BASELINE_BIAS) = 28, so
 # the range check covers the worst-case excursion in either direction.
-const HEIGHT_AMPLITUDE: int = 28
+const HEIGHT_AMPLITUDE: int = 22  # pre-3D value (commit 20739fc)
 # Vertical offset added to every column. Positive bias lifts the world
 # mean above SEA_LEVEL, so most land is above water without forcing a
 # specific noise distribution. Tweakable; +4 keeps the mean at y=68
 # while still allowing ocean basins to dip to y~44.
-const BASELINE_BIAS: int = 4
+const BASELINE_BIAS: int = 0  # mean at sea level → ~50/50 land/ocean — vanilla Alpha shape
 # FBM stack for the detail noise (continental noise has its own setup
 # in `_get_continental_noise`). Vanilla Alpha's ChunkProviderGenerate
 # instantiates several NoiseGeneratorOctaves (Bukkit/mc-dev
@@ -102,23 +102,23 @@ const NOISE_GAIN: float = 0.5
 # (y∈[58, 67]) — covers the same physical "near-shoreline" zone while
 # accounting for the symmetric elevation modulator pushing fewer columns
 # into the vanilla band than vanilla's asymmetric d4 modifier does.
-# `BEACH_DEPTH_BELOW` is used by _block_at for the GRASS-vs-DIRT decision
-# at the surface block: columns whose surface dips below
-# (SEA_LEVEL - BEACH_DEPTH_BELOW) get DIRT, otherwise GRASS. Keep at 6
-# so coastline land cells stay as GRASS surface even if their surface
-# is just below sea level (covered by ocean fill but the underlying
-# block is grass — what vanilla does for shallow ocean floors).
-const BEACH_DEPTH_BELOW: int = 6
-# Beach pass uses TIGHTER band — only places sand in cells AT or
-# NEAR the waterline (1 cell underwater for shore depth, 5 cells dry
-# above). This concentrates sand into a VISIBLE DRY BEACH STRIP at
-# the coastline instead of spreading it as a wide underwater layer.
-# Previous wider band (BEACH_DEPTH_BELOW=6) buried 80% of beach cells
-# under water, leaving only a 1-cell dry strip visible.
-const BEACH_PASS_LO_OFFSET: int = 1  # sea_level - 1 = 63
-const BEACH_PASS_HI_OFFSET: int = 5  # sea_level + 5 = 69
-const BEACH_HEIGHT_ABOVE: int = 5  # beach band high edge in _block_at math
-const BEACH_SAND_DEPTH: int = 4
+# Pre-3D values (used by 2D heightmap mode beach pass). Vanilla
+# Alpha BiomeBase.b() band: y∈[59, 64] = 6 cells with SEA_LEVEL=63;
+# our SEA_LEVEL=64 equivalent is y∈[60, 65] = BEACH_DEPTH_BELOW=4
+# below + BEACH_HEIGHT_ABOVE=1 above. Keeping these at vanilla values
+# so 2D mode produces the original beach pattern (audit: ~8% beach
+# columns instead of the 40% we hit when these were bumped to 6/5).
+const BEACH_DEPTH_BELOW: int = 4
+const BEACH_HEIGHT_ABOVE: int = 1
+# Vanilla beach sand depth varies 0-4 cells via the `t`-noise (px.java:113).
+# Without noise, we use a flat 2 cells = vanilla average. 4 cells produced
+# 1000% sand counts; 2 cells lands in vanilla range (~40 cells/chunk).
+const BEACH_SAND_DEPTH: int = 2
+# 3D-mode-only band offsets — separate from BEACH_DEPTH_BELOW above so
+# 2D mode stays at vanilla [60, 65]. The 3D-mode beach pass uses these
+# wider offsets to compensate for the 3D surface staircasing more.
+const BEACH_PASS_LO_OFFSET: int = 1  # 3D mode: sea_level - 1 = 63
+const BEACH_PASS_HI_OFFSET: int = 5  # 3D mode: sea_level + 5 = 69
 
 # Vanilla beach noise (`px.java:108-122` — `this.r`). A separate 2D
 # Perlin sampled per (world_x, world_z) GATES whether a column in the
@@ -326,11 +326,16 @@ static func chunk_column_surface_y(chunk: Chunk, local_x: int, local_z: int) -> 
 
 
 static func surface_height(world_x: int, world_z: int) -> int:
-	# Continental layer dominates: large landmasses + ocean basins. Detail
-	# layer rides on top: local hills/valleys within each region. Combined
-	# height = SEA_LEVEL + BASELINE_BIAS + continental_offset + detail_offset.
-	# See CONTINENTAL_* / BASELINE_BIAS comments above for the full rationale
-	# (this is slice 2 of the worldgen reshape from worldgen-deferred.md).
+	# Continental + detail noise stack. The continental layer creates
+	# large coherent landmasses (low freq, big amplitude); the detail
+	# layer rides on top with small hills/valleys. BASELINE_BIAS lifts
+	# the mean above sea so the world averages land instead of water.
+	#
+	# This was originally tuned to fix the "too islandy with excessive
+	# beaches" feel of pre-pre-improvement 2D mode (which used a single
+	# FBM layer at high freq → many small hills → many sand-edged
+	# islands). With continental layer the world has BIG landmasses
+	# separated by BIG oceans — proper continental shape.
 	var fx: float = float(world_x)
 	var fz: float = float(world_z)
 	var continental: float = _get_continental_noise().get_noise_2d(fx, fz)
@@ -451,16 +456,15 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#    vanilla Alpha's ChunkProviderGenerate sequencing: base strata →
 	#    ore veins → biome replace → water pass → decorators.
 	_fill_ocean(chunk, chunk_x, chunk_z)
-	# 4b. Lakes — vanilla `bv.java` decorator (px.java:280-292). 1/4 chance
-	#     of a water lake and 1/8 chance of a lava lake per chunk, with the
-	#     lake corner offset SE by 8 cells (so the 16×8×16 bbox spills into
-	#     neighbor chunks). For our chunk-isolated model we use SW-spillover
-	#     decoration (own + 3 SW neighbors), each clipping writes to target
-	#     bounds — recovers the same ~20-block coverage radius vanilla gets
-	#     from cross-chunk writes. Runs after ocean fill (so lake validation
-	#     sees the post-ocean state) and before trees (so trees don't drop
-	#     into a future lake bowl).
-	_scatter_lakes(chunk, chunk_x, chunk_z)
+	# 4b. Lakes — vanilla `bv.java` decorator (px.java:280-292). Skipped
+	#     in 2D heightmap mode because pre-3D 2D mode had no lakes, and
+	#     adding them produces visible "small water pools surrounded by
+	#     sand" anomalies (the beach pass treats lake water as ocean →
+	#     adjacent columns become beach → lake gets a sand ring around
+	#     it). Lakes work better in 3D mode where the surface is more
+	#     varied.
+	if terrain_mode == TerrainMode.MODE_3D_DENSITY:
+		_scatter_lakes(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla's populate phase decoration calls.
@@ -506,11 +510,13 @@ static func _block_at(world_x: int, y: int, world_z: int, surface_y: int) -> int
 		return Blocks.BEDROCK
 	if y == surface_y:
 		# Vanilla BiomeBase.b() applies the biome's surface block (`this.ai`).
-		# BiomeOcean overrides ai = DIRT, BiomePlains uses GRASS. Without
-		# biomes, columns that peak below the beach band are "ocean floor"
-		# and should use DIRT — grass underwater reads as a bug. Beaches
-		# handle the SEA_LEVEL ± beach-band substitution separately.
-		if surface_y < SEA_LEVEL - BEACH_DEPTH_BELOW:
+		# BiomeOcean uses ai = DIRT, BiomePlains uses GRASS. Without biomes,
+		# the rule is simple: any column whose top is BELOW SEA_LEVEL is
+		# ocean floor → DIRT. At or above SEA_LEVEL → GRASS. Don't subtract
+		# BEACH_DEPTH_BELOW here — that constant is for the beach pass's
+		# sand-band, not the GRASS/DIRT line. Doing so put GRASS underwater
+		# at depths -1..-(BEACH_DEPTH_BELOW-1).
+		if surface_y < SEA_LEVEL:
 			return Blocks.DIRT
 		return Blocks.GRASS
 	if y >= surface_y - 3:
@@ -529,6 +535,15 @@ static func _is_bedrock_at(world_x: int, y: int, world_z: int) -> bool:
 
 
 static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	# 2D heightmap mode uses the pre-3D beach pass: heightmap surface,
+	# no water-adjacency, narrow vanilla [SEA_LEVEL-4, SEA_LEVEL+1] band.
+	# All the 3D-era complications (chunk_column_surface_y reads, wider
+	# band, water-adjacency search) were added to handle 3D-mode-specific
+	# issues (steep coastlines, surface-vs-heightmap divergence) and
+	# WORSEN 2D mode behavior (sand blotches from radius search, etc.).
+	if terrain_mode == TerrainMode.MODE_2D_HEIGHTMAP:
+		_place_beaches_2d(chunk, chunk_x, chunk_z)
+		return
 	var probe_token := PerfProbe.begin("worldgen.beaches")
 	# Use the BEACH_PASS_* offsets (tighter than _block_at's BEACH_DEPTH_BELOW)
 	# to concentrate sand into the visible dry-beach zone near the waterline.
@@ -548,39 +563,19 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 			# Outside the beach band: hills + deep oceans untouched.
 			if surface_y < lo or surface_y > hi:
 				continue
-			# Vanilla `px.java:120` uses `bl2 = r > 0` (a separate noise
-			# layer that randomizes WHICH columns become sand vs grass)
-			# to give "natural" patchy beaches. In our world the
-			# resulting blotchy sand+dirt mix at coastlines reads as a
-			# bug. Disabled — every beach-band column with a water
-			# neighbor becomes sand for CONTIGUOUS visible beaches.
-			# Deviation from vanilla but big visual win. To restore
-			# vanilla, re-enable the gate.
-			# Water-adjacency gate (NOT in vanilla — see slice 3 doc in
-			# worldgen-deferred.md). Require at least one of 4 horizontal
-			# neighbors to have surface below SEA_LEVEL. For in-chunk
-			# neighbors use the precomputed col_surface (exact). For
-			# cross-chunk neighbors fall back to the cheap 2D heightmap
-			# `surface_height` — approximate in 3D-density mode but
-			# sufficient for the binary "below sea?" check, AND avoids
-			# the "every chunk-edge cell becomes sand" grid-pattern bug
-			# from the previous always-allow-at-border heuristic.
+			# Strict 1-cell water-adjacency. Wider radius (4) was creating
+			# sand-blotch circles around isolated lakes mid-grass. The
+			# real fix for "1-cell wide beaches at staircases" is the
+			# smooth elevation noise gradient, not blasting sand into
+			# every column near water.
 			var has_water_neighbor: bool = false
 			for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 				var nx: int = x + off.x
 				var nz: int = z + off.y
 				var neighbor_below_sea: bool = false
 				if nx >= 0 and nx < Chunk.SIZE_X and nz >= 0 and nz < Chunk.SIZE_Z:
-					# In-chunk: exact surface from precomputed array.
 					neighbor_below_sea = col_surface[nz * Chunk.SIZE_X + nx] < SEA_LEVEL
 				else:
-					# Cross-chunk: use the mode-appropriate estimate.
-					# 2D mode → surface_height (heightmap, exact).
-					# 3D mode → WorldgenDensity.estimate_target_y, which
-					# samples the elevation modifier and matches the
-					# actual 3D-density logic. The 2D heightmap is wrong
-					# in 3D mode (different surface shape entirely),
-					# producing missed coastlines at chunk seams.
 					var nwx: int = chunk_x * Chunk.SIZE_X + nx
 					var nwz: int = chunk_z * Chunk.SIZE_Z + nz
 					if terrain_mode == TerrainMode.MODE_3D_DENSITY:
@@ -597,6 +592,48 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 			# Replace the top BEACH_SAND_DEPTH grass/dirt cells with sand.
 			# Stops at a non-grass/dirt cell (ore, bedrock, existing sand)
 			# so we don't scrub through embedded stone veins near the coast.
+			for dy in range(BEACH_SAND_DEPTH):
+				var y: int = surface_y - dy
+				if y <= 0:
+					break
+				var existing: int = chunk.get_block_unchecked(x, y, z)
+				if existing != Blocks.GRASS and existing != Blocks.DIRT:
+					break
+				chunk.set_block_unchecked(x, y, z, Blocks.SAND)
+	PerfProbe.end("worldgen.beaches", probe_token)
+
+
+# Pre-3D-era beach pass — 2D heightmap mode only. Mostly identical to
+# commit 20739fc (the last pre-3D beach pass) but with a STRICT 1-cell
+# water-adjacency check added — without it, FLAT seeds produce huge
+# sand fields (entire chunks in the beach Y band become sand) which
+# was pre-3D's actual complaint. The water-adjacency check uses the
+# heightmap directly (no chunk reads needed in 2D mode), so it's free
+# performance-wise.
+static func _place_beaches_2d(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.beaches")
+	var lo: int = SEA_LEVEL - BEACH_DEPTH_BELOW
+	var hi: int = SEA_LEVEL + BEACH_HEIGHT_ABOVE
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			var world_x: int = chunk_x * Chunk.SIZE_X + x
+			var world_z: int = chunk_z * Chunk.SIZE_Z + z
+			var surface_y: int = surface_height(world_x, world_z)
+			if surface_y < lo or surface_y > hi:
+				continue
+			# Water-adjacency: column must have a 4-cardinal neighbor
+			# below sea level. Catches actual coastlines while letting
+			# inland flat areas (in the beach Y band but far from water)
+			# stay as grass — replaces vanilla's biome-based suppression.
+			var has_water_neighbor: bool = false
+			for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var nwx: int = world_x + off.x
+				var nwz: int = world_z + off.y
+				if surface_height(nwx, nwz) < SEA_LEVEL:
+					has_water_neighbor = true
+					break
+			if not has_water_neighbor:
+				continue
 			for dy in range(BEACH_SAND_DEPTH):
 				var y: int = surface_y - dy
 				if y <= 0:

@@ -58,11 +58,9 @@ public:
 	static int64_t world_seed;
 	static constexpr int SEA_LEVEL = 64;
 	// Must stay in sync with scripts/world/worldgen.gd::BEACH_DEPTH_BELOW.
-	// Used by block_at() to choose DIRT (ocean floor) vs GRASS (land surface)
-	// when the column's surface y is below the beach band. Mismatch → native
-	// vs GDScript chunks diverge at coastline columns; test_worldgen_native
-	// parity catches it.
-	static constexpr int BEACH_DEPTH_BELOW = 6;
+	// (No longer used by block_at — that decision is now SEA_LEVEL-based —
+	// but kept for any future code that needs the beach Y-band lower bound.)
+	static constexpr int BEACH_DEPTH_BELOW = 4;
 
 	WorldgenNative();
 	~WorldgenNative();

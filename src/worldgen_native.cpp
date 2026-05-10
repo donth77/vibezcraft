@@ -384,13 +384,10 @@ int WorldgenNative::block_at(int world_x, int y, int world_z, int surface_y) {
 		return BEDROCK;
 	}
 	if (y == surface_y) {
-		// Ocean-floor columns get DIRT at surface to match BiomeOcean's
-		// ai=DIRT override in vanilla BiomeBase.b(). Mirrors
-		// Worldgen._block_at in scripts/world/worldgen.gd — if this
-		// diverges, the parity test (tests/test_worldgen_native.gd) will
-		// catch it. Constants duplicated from Worldgen consts; see
-		// worldgen_native.h for mapping.
-		if (surface_y < SEA_LEVEL - BEACH_DEPTH_BELOW) {
+		// Below sea = DIRT (ocean floor); at/above sea = GRASS. Mirrors
+		// Worldgen._block_at — must NOT subtract BEACH_DEPTH_BELOW here
+		// (that's the beach-band constant, not the grass/dirt line).
+		if (surface_y < SEA_LEVEL) {
 			return DIRT;
 		}
 		return GRASS;
