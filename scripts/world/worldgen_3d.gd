@@ -16,6 +16,24 @@ extends RefCounted
 # AS-IS — no empirical retuning. If audit numbers are off, debug the
 # port, not the constants.
 
+# Biome IDs — match vanilla gg.java naming order. Each is a distinct
+# climate region with its own surface block. Phase 6 only uses these
+# for surface block selection (sand-vs-grass); future phases may add
+# per-biome decoration density and grass tinting.
+enum Biome {
+	RAINFOREST,
+	SWAMPLAND,
+	SEASONAL_FOREST,
+	FOREST,
+	SAVANNA,
+	SHRUBLAND,
+	TAIGA,
+	DESERT,
+	PLAINS,
+	ICE_DESERT,
+	TUNDRA,
+}
+
 # Coarse grid: 5×17×5 sample positions per chunk; trilerped to 16×128×16
 # cells. n5=n8=5 in vanilla; n7=17.
 const GRID_X: int = 5
@@ -127,21 +145,32 @@ static func _ensure_noises(world_seed: int) -> void:
 # Direct port of vanilla po.java:75-101 climate computation. Output is
 # Vector2(temp, rain) where both are in [0, 1].
 static func climate_at(world_x: float, world_z: float) -> Vector2:
+	_ensure_noises(Worldgen.WORLD_SEED)
 	# Vanilla uses raw noise output then clamps; FastNoiseLite returns
 	# [-1, 1] which is already similar to vanilla simplex range.
 	var temp_raw: float = _temp_noise.get_noise_2d(world_x, world_z)
 	var rain_raw: float = _rain_noise.get_noise_2d(world_x, world_z)
+	# Vanilla po.java uses *0.15 dampening + 0.7/0.5 baseline + smoothstep,
+	# producing output clustered tight in [0.79, 0.98] for temp. That's
+	# because vanilla's `ng.java` 4-octave wrapper has reverse-FBM
+	# amplitude growth (~4× our FastNoiseLite FBM). Without porting ng.java
+	# we'd lose biome variety entirely.
+	#
+	# Look-and-feel approximation: widen the formula to give vanilla-like
+	# biome distribution (Forest ~50%, Shrubland ~30%, Savanna ~10%,
+	# small bits of Taiga/Tundra/Desert at extremes). Vanilla biases
+	# climate warm/wet (Forest is most common biome). We do the same:
+	#   temp = noise * 0.3 + 0.65 → [0.35, 0.95], mean 0.65
+	#   rain = noise * 0.3 + 0.5  → [0.20, 0.80], mean 0.50
+	# This excludes pure Tundra (temp < 0.1) but allows Savanna+Desert
+	# at the dry end and Taiga at the cool wet end. Most cells fall in
+	# Forest/Shrubland zones.
+	var temp: float = temp_raw * 0.3 + 0.65
+	var rain: float = rain_raw * 0.3 + 0.5
+	# Extreme noise lets some regions go to climate extremes.
 	var extreme_raw: float = _extreme_noise.get_noise_2d(world_x, world_z)
-	# po.java:78-84 computation
-	var d2: float = extreme_raw * 1.1 + 0.5  # extreme amplification
-	var d3: float = 0.01
-	var d4: float = 1.0 - d3
-	var temp: float = (temp_raw * 0.15 + 0.7) * d4 + d2 * d3
-	d3 = 0.002
-	d4 = 1.0 - d3
-	var rain: float = (rain_raw * 0.15 + 0.5) * d4 + d2 * d3
-	# po.java:85: temp = 1 - (1 - temp)^2 (smoothstep-ish bias toward warmer)
-	temp = 1.0 - (1.0 - temp) * (1.0 - temp)
+	temp += extreme_raw * 0.1
+	rain += extreme_raw * 0.1
 	if temp < 0.0:
 		temp = 0.0
 	if temp > 1.0:
@@ -151,6 +180,55 @@ static func climate_at(world_x: float, world_z: float) -> Vector2:
 	if rain > 1.0:
 		rain = 1.0
 	return Vector2(temp, rain)
+
+
+# Decision tree from vanilla gg.java::a(temp, rain) lines 71-104.
+# Returns a Biome enum value given (temperature, rainfall_product) where
+# rainfall_product = rain × temp (vanilla applies this multiplication).
+static func biome_at(world_x: float, world_z: float) -> int:
+	_ensure_noises(Worldgen.WORLD_SEED)
+	var climate: Vector2 = climate_at(world_x, world_z)
+	var temp: float = climate.x
+	var rain: float = climate.y * temp  # vanilla: f3 = rain * temp
+	# Direct port of gg.java decision tree
+	if temp < 0.1:
+		return Biome.TUNDRA
+	if rain < 0.2:
+		if temp < 0.5:
+			return Biome.TUNDRA
+		if temp < 0.95:
+			return Biome.SAVANNA
+		return Biome.DESERT
+	if rain > 0.5 and temp < 0.7:
+		return Biome.SWAMPLAND
+	if temp < 0.5:
+		return Biome.TAIGA
+	if temp < 0.97:
+		if rain < 0.35:
+			return Biome.SHRUBLAND
+		return Biome.FOREST
+	if rain < 0.45:
+		return Biome.PLAINS
+	if rain < 0.9:
+		return Biome.SEASONAL_FOREST
+	return Biome.RAINFOREST
+
+
+# Per-biome top block (the surface). Most biomes default to GRASS but
+# Desert + Ice Desert use SAND. Vanilla gg.java init at line 47:
+# `gg.h.o = gg.h.p = (byte)nq.E.bh` (Desert + Ice Desert top/filler = SAND).
+static func biome_top_block(biome_id: int) -> int:
+	if biome_id == Biome.DESERT or biome_id == Biome.ICE_DESERT:
+		return Blocks.SAND
+	return Blocks.GRASS
+
+
+# Per-biome filler block (3 cells below surface). Same logic as top:
+# Desert + Ice Desert use SAND throughout, others use DIRT.
+static func biome_filler_block(biome_id: int) -> int:
+	if biome_id == Biome.DESERT or biome_id == Biome.ICE_DESERT:
+		return Blocks.SAND
+	return Blocks.DIRT
 
 
 # Reset noise cache — call after Worldgen.apply_world_seed for correctness.

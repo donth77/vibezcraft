@@ -350,16 +350,27 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 					break
 			if top_stone_y < 0:
 				continue
-			# Top: GRASS if at/above sea level, DIRT otherwise.
-			var top_block: int = Blocks.GRASS if top_stone_y >= SEA_LEVEL else Blocks.DIRT
+			# Per-biome top + filler. Desert/Ice Desert → SAND, others →
+			# GRASS/DIRT. Underwater columns get the filler regardless of
+			# biome (vanilla seabeds are usually dirt/sand mix; we
+			# approximate with the biome's filler).
+			var world_x: int = chunk_x * Chunk.SIZE_X + x
+			var world_z: int = chunk_z * Chunk.SIZE_Z + z
+			var biome_id: int = Worldgen3D.biome_at(float(world_x), float(world_z))
+			var top_block: int
+			if top_stone_y >= SEA_LEVEL:
+				top_block = Worldgen3D.biome_top_block(biome_id)
+			else:
+				top_block = Worldgen3D.biome_filler_block(biome_id)
 			chunk.set_block_unchecked(x, top_stone_y, z, top_block)
-			# Next 3 STONE cells below → DIRT.
+			# Next 3 STONE cells below → biome filler (DIRT or SAND).
+			var filler: int = Worldgen3D.biome_filler_block(biome_id)
 			for dy in range(1, 4):
 				var y: int = top_stone_y - dy
 				if y < 0:
 					break
 				if chunk.get_block_unchecked(x, y, z) == Blocks.STONE:
-					chunk.set_block_unchecked(x, y, z, Blocks.DIRT)
+					chunk.set_block_unchecked(x, y, z, filler)
 
 	# Bedrock band (y=0 always; y=1..4 probabilistic per Alpha hash).
 	# Same logic as _block_at uses for the 2D path — extracted here so 3D
