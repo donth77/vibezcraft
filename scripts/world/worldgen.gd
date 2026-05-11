@@ -1,6 +1,7 @@
 class_name Worldgen
 extends RefCounted
 
+# gdlint: disable=max-file-lines
 # Phase 5 worldgen: 2D Perlin heightmap + stratified layering, plus
 # ore veins and oak trees. Generation is deterministic per (seed, x, z)
 # — the same chunk coords always produce the same blocks.
@@ -123,6 +124,11 @@ const _FLOWER_SALT_RED: int = 0xF101
 const _FLOWER_SALT_YELLOW: int = 0xF102
 const _FLOWER_SALT_BROWN: int = 0xF103
 const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
+
+# Sugar cane scatter — vanilla BlockReed placement runs as part of biome
+# decoration. Per chunk: 10 placement attempts at random (x, z).
+const _SUGAR_CANE_ATTEMPTS: int = 10
+const _SUGAR_CANE_SALT: int = 0xC4ED
 
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
 # differences in the last argument avalanche into high bits. Without this,
@@ -303,6 +309,10 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
 	# placement so plant_support checks see the final top blocks.
 	_scatter_flowers(chunk, chunk_x, chunk_z)
+	# 7. Sugar cane — places 1-3 stacked SUGAR_CANE blocks on grass/dirt/
+	# sand surfaces directly adjacent to water. Vanilla BlockReed
+	# placement requires water-adjacency at the base.
+	_scatter_sugar_cane(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
@@ -970,3 +980,53 @@ static func _scatter_plant(
 		if not is_mushroom and wy < SEA_LEVEL - 2:
 			continue
 		chunk.set_block_unchecked(lx, wy, lz, plant_id)
+
+
+static func _scatter_sugar_cane(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.sugar_cane")
+	for attempt in range(_SUGAR_CANE_ATTEMPTS):
+		var seed_h: int = _hash4(chunk_x, chunk_z, _SUGAR_CANE_SALT, attempt)
+		var lx: int = seed_h & 0xF
+		var lz: int = (seed_h >> 4) & 0xF
+		# Find topmost surface block in this column
+		var sy: int = -1
+		for y in range(Chunk.SIZE_Y - 1, 0, -1):
+			var b: int = chunk.get_block_unchecked(lx, y, lz)
+			if b != Blocks.AIR and b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
+				sy = y
+				break
+		if sy < 0 or sy >= Chunk.SIZE_Y - 3:
+			continue
+		# Surface must be grass/dirt/sand
+		var surface_id: int = chunk.get_block_unchecked(lx, sy, lz)
+		if surface_id != Blocks.GRASS and surface_id != Blocks.DIRT and surface_id != Blocks.SAND:
+			continue
+		# Cell directly above must be air
+		if chunk.get_block_unchecked(lx, sy + 1, lz) != Blocks.AIR:
+			continue
+		# Water adjacency at the surface y (vanilla BlockReed gate).
+		# Check cardinal neighbors WITHIN this chunk only — cross-chunk
+		# water counts visually but not for this initial scatter pass
+		# (skips border columns, acceptable for first ship).
+		var has_water: bool = false
+		for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var nx: int = lx + off.x
+			var nz: int = lz + off.y
+			if nx < 0 or nx >= Chunk.SIZE_X or nz < 0 or nz >= Chunk.SIZE_Z:
+				continue
+			var n_id: int = chunk.get_block_unchecked(nx, sy, nz)
+			if n_id == Blocks.WATER_STILL or n_id == Blocks.WATER_FLOWING:
+				has_water = true
+				break
+		if not has_water:
+			continue
+		# Place 1-3 stacked sugar cane blocks above surface.
+		var stack_height: int = 1 + ((seed_h >> 8) % 3)
+		for dy in range(stack_height):
+			var py: int = sy + 1 + dy
+			if py >= Chunk.SIZE_Y - 1:
+				break
+			if chunk.get_block_unchecked(lx, py, lz) != Blocks.AIR:
+				break
+			chunk.set_block_unchecked(lx, py, lz, Blocks.SUGAR_CANE)
+	PerfProbe.end("worldgen.sugar_cane", probe_token)

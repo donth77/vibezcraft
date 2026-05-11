@@ -52,6 +52,7 @@ const _BLOCKS: Array = [
 	Blocks.FLOWER_YELLOW,
 	Blocks.MUSHROOM_BROWN,
 	Blocks.MUSHROOM_RED,
+	Blocks.SUGAR_CANE,
 ]
 
 const _ITEMS: Array = [
@@ -70,6 +71,7 @@ const _ITEMS: Array = [
 	Items.FLINT_AND_STEEL,
 	Items.WOODEN_DOOR,
 	Items.IRON_DOOR,
+	Items.SUGAR_CANE,
 	Items.WOODEN_PICKAXE,
 	Items.WOODEN_AXE,
 	Items.WOODEN_SHOVEL,

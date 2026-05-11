@@ -546,6 +546,8 @@ func _material_for(block_id: int) -> String:
 			return "grass"
 		Blocks.FLOWER_RED, Blocks.FLOWER_YELLOW, Blocks.MUSHROOM_BROWN, Blocks.MUSHROOM_RED:
 			return "grass"
+		Blocks.SUGAR_CANE:
+			return "grass"
 		Blocks.SAND:
 			return "sand"
 		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE, Blocks.TORCH:

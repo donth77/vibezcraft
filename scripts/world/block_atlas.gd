@@ -80,6 +80,9 @@ const _LAYOUT := {
 	"flower_yellow": 43,
 	"mushroom_brown": 44,
 	"mushroom_red": 45,
+	# Sugar cane (vanilla "reeds"). Cross-quad like flowers. Vanilla
+	# terrain.png cell (9, 4).
+	"sugar_cane": 46,
 }
 
 static var active_pack: String = DEFAULT_PACK

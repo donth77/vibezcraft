@@ -773,6 +773,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# a two-block-tall door block. Route through a dedicated handler.
 	if stack.item_id == Items.WOODEN_DOOR or stack.item_id == Items.IRON_DOOR:
 		return _try_place_door(hit, stack)
+	# Sugar cane item → SUGAR_CANE block placement. Item and block IDs
+	# differ but the placement check uses block id; route via dedicated
+	# handler that performs the support check + block write.
+	if stack.item_id == Items.SUGAR_CANE:
+		return _try_place_sugar_cane(hit, stack)
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
@@ -1019,6 +1024,57 @@ func _try_place_door(hit: Dictionary, stack: ItemStack) -> bool:
 	_chunk_manager.set_world_block_with_meta(place, block_id, n6)
 	_chunk_manager.set_world_block_with_meta(above, block_id, n6 + 8)
 	SFX.play_place(block_id)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Sugar cane placement: requires a valid support (grass/dirt/sand or
+# another sugar cane below) AND water adjacent at the base. Vanilla
+# BlockReed.canPlace checks both. Place the SUGAR_CANE block; consume
+# one item.
+func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	# Determine target cell — replace if hit cell is replaceable, else
+	# place into the neighbor in the hit's normal direction.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var place: Vector3i
+	if Blocks.is_replaceable(hit_id):
+		place = hit.block_pos
+	else:
+		place = hit.block_pos + hit.normal_i
+	# Target cell must be empty.
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# Support check: grass/dirt/sand below, OR another sugar cane.
+	var support_id: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
+	if not Blocks.can_place_at(Blocks.SUGAR_CANE, support_id):
+		return false
+	# Water-adjacency check (vanilla BlockReed: at least one cardinal
+	# neighbor at the BASE Y must be water). Skip if support is another
+	# sugar cane (stacking on existing).
+	if support_id != Blocks.SUGAR_CANE:
+		var has_water: bool = false
+		for off: Vector3i in [
+			Vector3i(1, -1, 0), Vector3i(-1, -1, 0), Vector3i(0, -1, 1), Vector3i(0, -1, -1)
+		]:
+			var n_id: int = _chunk_manager.get_world_block(place + off)
+			if n_id == Blocks.WATER_STILL or n_id == Blocks.WATER_FLOWING:
+				has_water = true
+				break
+		if not has_water:
+			return false
+	# Player occupancy guard.
+	var player: Node3D = get_parent()
+	var pp := player.global_position
+	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
+	if place == player_block or place == player_block + Vector3i(0, 1, 0):
+		return false
+	_chunk_manager.set_world_block(place, Blocks.SUGAR_CANE)
+	SFX.play_place(Blocks.SUGAR_CANE)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()

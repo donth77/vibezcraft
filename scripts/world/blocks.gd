@@ -133,6 +133,12 @@ const FLOWER_YELLOW := 38
 # (brown) and 1/8 (red) per chunk.
 const MUSHROOM_BROWN := 39
 const MUSHROOM_RED := 40
+# Sugar cane (vanilla "reeds", introduced Alpha v1.0.4). Multi-block tall
+# plant placed on grass/dirt/sand directly adjacent to water. Cross-quad
+# mesh like flowers/mushrooms. Drops itself as ITEM (Items.SUGAR_CANE)
+# when broken. Vanilla block ID is 83; ours is 41 because our IDs are
+# sequential from 0 (see CLAUDE.md "block IDs are stable" note).
+const SUGAR_CANE := 41
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -245,6 +251,7 @@ static func is_opaque(id: int) -> bool:
 		and id != FLOWER_YELLOW
 		and id != MUSHROOM_BROWN
 		and id != MUSHROOM_RED
+		and id != SUGAR_CANE
 	)
 
 
@@ -317,6 +324,7 @@ static func is_replaceable(id: int) -> bool:
 		or id == FLOWER_YELLOW
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
+		or id == SUGAR_CANE
 	)
 
 
@@ -382,6 +390,7 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[FLOWER_YELLOW] = 0
 	_light_opacity_lut[MUSHROOM_BROWN] = 0
 	_light_opacity_lut[MUSHROOM_RED] = 0
+	_light_opacity_lut[SUGAR_CANE] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -421,6 +430,17 @@ static func can_place_at(id: int, support_id: int) -> bool:
 		# Vanilla mushrooms accept opaque-cube support too (so they grow on
 		# stone in caves). Keep the same valid-plant check + opaque fallback.
 		return is_valid_plant_support(support_id) or is_opaque(support_id)
+	if id == SUGAR_CANE:
+		# Vanilla sugar cane: grass/dirt/sand below + water adjacent at the
+		# base. Placement just checks the support; water-adjacency is the
+		# worldgen scatter's responsibility (and a future tick check). Also
+		# allow stacking on another sugar cane (multi-tall placement).
+		return (
+			support_id == GRASS
+			or support_id == DIRT
+			or support_id == SAND
+			or support_id == SUGAR_CANE
+		)
 	return true
 
 
@@ -441,6 +461,10 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 	# 0.4,0.7) — a 0.4-wide, 0.4-tall box hugging the cell's bottom center.
 	if id == FLOWER_RED or id == FLOWER_YELLOW or id == MUSHROOM_BROWN or id == MUSHROOM_RED:
 		return AABB(Vector3(0.3, 0.0, 0.3), Vector3(0.4, 0.4, 0.4))
+	if id == SUGAR_CANE:
+		# Vanilla BlockReed setBlockBounds(0.125, 0, 0.125, 0.875, 1.0, 0.875)
+		# — taller than flowers and slightly wider, hugs the full cell height.
+		return AABB(Vector3(0.125, 0.0, 0.125), Vector3(0.75, 1.0, 0.75))
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -522,6 +546,7 @@ static func mesh_shape(id: int) -> int:
 		or id == FLOWER_YELLOW
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
+		or id == SUGAR_CANE
 	):
 		return MESH_SHAPE_CROSS
 	if id == TORCH:
@@ -598,7 +623,7 @@ static func hardness(id: int) -> float:
 			return 0.0
 		LEAVES, GLASS:
 			return 0.2
-		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
+		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
 			return 0.5
@@ -777,6 +802,8 @@ static func drops(id: int) -> int:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
 			return id  # plants drop themselves
+		SUGAR_CANE:
+			return Items.SUGAR_CANE  # drops as ITEM (re-place via item)
 		BEDROCK:
 			return AIR
 		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
@@ -878,6 +905,8 @@ static func name_of(id: int) -> String:
 			return "mushroom_brown"
 		MUSHROOM_RED:
 			return "mushroom_red"
+		SUGAR_CANE:
+			return "sugar_cane"
 	return "unknown"
 
 
@@ -1009,6 +1038,8 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "mushroom_brown"
 		MUSHROOM_RED:
 			return "mushroom_red"
+		SUGAR_CANE:
+			return "sugar_cane"
 	return ""
 
 
