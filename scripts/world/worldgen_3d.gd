@@ -323,6 +323,15 @@ static func fill_chunk(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 							var local_z: int = i3 * 4 + i7
 							if density > 0.0:
 								chunk.set_block_unchecked(local_x, local_y, local_z, Blocks.STONE)
+							elif local_y < SEA_LEVEL:
+								# Vanilla px.java:78-86: cells with negative
+								# density (would be air) at y < sea_level
+								# become WATER. This handles overhangs and
+								# isolated air pockets that the column-based
+								# _fill_ocean pass misses.
+								chunk.set_block_unchecked(
+									local_x, local_y, local_z, Blocks.WATER_STILL
+								)
 							# else: leave as AIR (chunk init is zeroed)
 							d17 += d18
 
