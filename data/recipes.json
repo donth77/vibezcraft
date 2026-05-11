@@ -281,6 +281,12 @@
       "pattern": ["S S", "SSS", "S S"],
       "key": {"S": "stick"},
       "result": {"id": "ladder", "count": 3}
+    },
+    {
+      "id": "tnt",
+      "pattern": ["GSG", "SGS", "GSG"],
+      "key": {"G": "gunpowder", "S": "sand"},
+      "result": {"id": "tnt", "count": 1}
     }
   ],
   "shapeless": [],

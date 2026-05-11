@@ -320,49 +320,20 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 						lava_indices
 					)
 					continue
-				# Shape dispatch — cube hot path stays inline; non-cube
-				# shapes branch out. TORCH uses a meta-aware cross-quad
-				# variant that offsets the geometry toward the support wall
-				# per vanilla ob.java meta (1 = -X support … 5 = floor).
-				var ms: int = Blocks.mesh_shape(id)
-				if ms == Blocks.MESH_SHAPE_CROSS:
-					_emit_cross_quads(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_TORCH:
-					_emit_torch_quads(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_EXTERNAL:
-					# Externally-rendered block (e.g. CHEST → ChestNode entity).
-					# Emit full-cube collision so the player can't walk through
-					# the cell, but skip every visual face — the entity owns
-					# the visible geometry. Same fallthrough applies if anyone
-					# else opts in to MESH_SHAPE_EXTERNAL later.
-					_emit_external_collision(x, y, z, collision_faces)
-				elif ms == Blocks.MESH_SHAPE_FENCE:
-					_emit_fence_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_STAIRS:
-					_emit_stair_geometry(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_DOOR:
-					_emit_door_geometry(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_LADDER:
-					_emit_ladder_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				else:
-					_emit_block_faces(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
-					)
+				# Cube hot path stays inline. Non-cube shapes (CROSS / TORCH
+				# / EXTERNAL / FENCE / STAIRS / DOOR / LADDER) are deferred
+				# to `_append_non_cube_geometry` below so the GDScript
+				# reference produces the same vertex order as the production
+				# path (`mesh_chunk_fast` = native cubes + appendix). Without
+				# this split the parity test fails on chunks that contain a
+				# mix of cubes and non-cubes (e.g. flowers in worldgen).
+				if Blocks.needs_gdscript_mesher(id):
+					continue
+				_emit_block_faces(
+					chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+				)
 
-	PerfProbe.end("mesher.mesh_chunk", probe_token)
-	return {
+	var result: Dictionary = {
 		"vertices": verts,
 		"normals": norms,
 		"uvs": uvs,
@@ -381,6 +352,13 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 		"lava_colors": lava_colors,
 		"lava_indices": lava_indices,
 	}
+	# Append non-cube geometry (cross-quads, torches, doors, fence, stairs,
+	# ladders) after all cubes — same order as `mesh_chunk_fast` does in
+	# production via `_append_non_cube_geometry`.
+	if chunk.has_non_cube_blocks:
+		_append_non_cube_geometry(chunk, result)
+	PerfProbe.end("mesher.mesh_chunk", probe_token)
+	return result
 
 
 static func _emit_block_faces(
@@ -1210,15 +1188,19 @@ static func _emit_cross_quads(
 		indices.append_array(
 			[base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array
 		)
-		# Selection collision soup — one winding only (physics raycasts
-		# don't back-face cull, so duplicating both sides would just bloat
-		# the shape with no benefit).
-		plant_faces.append(v0)
-		plant_faces.append(v2)
-		plant_faces.append(v1)
-		plant_faces.append(v0)
-		plant_faces.append(v3)
-		plant_faces.append(v2)
+	# Selection collision — emit an AABB-box triangle soup, not the
+	# cross-quad sheets. Cross-quad triangles are vertical planes with
+	# zero thickness in Y, so a player aiming straight down at the cell
+	# casts a ray nearly parallel to both sheets and misses entirely.
+	# Vanilla MC uses Block.selection_aabb (a box) for cursor targeting
+	# regardless of the block's render shape (af.java RenderItem hits a
+	# 3D bbox, not the rendered cross), so the box-soup matches that.
+	# Box dimensions come from Blocks.selection_aabb so each plant gets
+	# its vanilla-tuned hitbox (sapling 0.8 cube; flowers/mushrooms a
+	# tighter 0.4 box). Emit ONCE per cell, outside the per-quad loop.
+	var aabb: AABB = Blocks.selection_aabb(id)
+	var box_min := Vector3(x, y, z) + aabb.position
+	_emit_collision_box(plant_faces, box_min, box_min + aabb.size)
 
 
 # Vanilla bk.java:673-715 (RenderBlocks.renderTorchAtAngle), dispatched

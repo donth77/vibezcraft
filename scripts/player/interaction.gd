@@ -513,6 +513,12 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	var stack: ItemStack = inv.selected()
 	if stack.is_empty() or stack.item_id != Items.FLINT_AND_STEEL:
 		return false
+	# TNT branch — vanilla v.java::b(world, x, y, z, meta) fires from the
+	# right-click handler on the BLOCK itself, not the adjacent face. So
+	# clicking directly on a TNT cube replaces the block with a primed
+	# entity instead of dropping fire on top of it.
+	if hit_id == Blocks.TNT:
+		return _ignite_tnt(hit.block_pos, inv)
 	# Need a solid (opaque) target so there's a face to ignite against;
 	# clicking sky / leaves shouldn't drop a free-floating fire.
 	if not Blocks.is_opaque(hit_id):
@@ -529,6 +535,25 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	# strike). Click-at-low-pitch is the closest tactile substitute we
 	# have without bundling a dedicated fire.ignite OGG.
 	SFX.play_flint_and_steel()
+	if inv.damage_selected_tool():
+		SFX.play_tool_break()
+	return true
+
+
+# Replace a TNT block with a primed-TNT entity at the cell center. Mirrors
+# vanilla v.java::b() — the block becomes air, an EntityTNTPrimed spawns
+# with the default 80-tick (4-second) fuse, and `random.fuse` plays once.
+# Costs 1 durability per ignition same as fire-placing.
+func _ignite_tnt(target: Vector3i, inv: Inventory) -> bool:
+	_chunk_manager.set_world_block(target, Blocks.AIR)
+	var primed = PrimedTNT.new()
+	_chunk_manager.add_child(primed)
+	primed.global_position = Vector3(target) + Vector3(0.5, 0.5, 0.5)
+	primed.setup()
+	# Tool durability — vanilla loses 1 per ignition (BlockTNT path uses
+	# the same ItemFlintAndSteel.a() handler as fire placement, which
+	# consumes durability unconditionally). Don't play the click cue —
+	# the fuse hiss already plays from the primed entity's _ready.
 	if inv.damage_selected_tool():
 		SFX.play_tool_break()
 	return true

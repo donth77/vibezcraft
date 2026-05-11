@@ -59,6 +59,14 @@ func _mesh_both(chunk: Chunk) -> Array:
 		empty,
 		empty
 	)
+	# Append non-cube geometry (cross-quads, torches, doors, fence, stairs)
+	# the same way `mesh_chunk_fast` does in production. The native path
+	# only emits cubes; non-cube shapes (saplings, flowers, mushrooms,
+	# torches, …) come from `_append_non_cube_geometry` running on top.
+	# Without this, any chunk containing a non-cube block diverges from
+	# the GDScript reference simply because the appendix wasn't called.
+	if chunk.has_non_cube_blocks:
+		Mesher._append_non_cube_geometry(chunk, nat)
 	return [gds, nat]
 
 

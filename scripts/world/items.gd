@@ -98,6 +98,11 @@ const FLINT_AND_STEEL: int = 145
 # by player yaw. Wood door opens/closes on RMB; iron requires redstone.
 const WOODEN_DOOR: int = 146
 const IRON_DOOR: int = 147
+# Vanilla Alpha gunpowder (`ItemGunpowder` doesn't exist as a class — it's a
+# bare `Item` registered as nq.aV at id 289). Drops from creepers (1×) on
+# death; the only other source is debug spawning until creepers ship. Used
+# in the TNT recipe (4 sand + 5 gunpowder in a 3×3 checkerboard).
+const GUNPOWDER: int = 148
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -281,6 +286,10 @@ static func id_from_name(item_name: String) -> int:
 			return WOODEN_DOOR
 		"iron_door":
 			return IRON_DOOR
+		"gunpowder":
+			return GUNPOWDER
+		"tnt":
+			return Blocks.TNT
 		"air":
 			return Blocks.AIR
 		"bedrock":
@@ -440,6 +449,10 @@ static func display_name(item_id: int) -> String:
 			return "Wooden Door"
 		IRON_DOOR:
 			return "Iron Door"
+		GUNPOWDER:
+			return "Gunpowder"
+		Blocks.TNT:
+			return "TNT"
 		Blocks.AIR:
 			return ""
 		Blocks.BEDROCK:

@@ -113,6 +113,17 @@ const _SPAWN_X: int = 8
 const _SPAWN_Z: int = 8
 const _SPAWN_TREE_EXCLUSION_RADIUS: int = 4
 
+# Vanilla aj.java flower/mushroom decoration. Per chunk runs 2 red poppy
+# calls (always), 1 yellow dandelion (1/2 chance), 1 brown mushroom (1/4),
+# 1 red mushroom (1/8). Each call picks a base position then runs 64
+# placement attempts at base±(8,4,8). We bumped attempts to 96 to stay
+# in vanilla's per-chunk yield range with our stricter support checks.
+const _FLOWER_ATTEMPTS: int = 96
+const _FLOWER_SALT_RED: int = 0xF101
+const _FLOWER_SALT_YELLOW: int = 0xF102
+const _FLOWER_SALT_BROWN: int = 0xF103
+const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
+
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
 # differences in the last argument avalanche into high bits. Without this,
 # callers that vary only one hash argument (like the 28-attempts-per-pass
@@ -259,6 +270,9 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	_fill_ocean(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
+	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
+	# placement so plant_support checks see the final top blocks.
+	_scatter_flowers(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
@@ -740,3 +754,125 @@ static func _hash4(a: int, b: int, c: int, d: int) -> int:
 	h = (h * 49979693) ^ d
 	h = h * _HASH_MIX
 	return absi(h)
+
+
+# --- Flowers + mushrooms (vanilla aj.java port) ---
+
+
+# Run flower scatter passes for own chunk + 3 SW neighbors so vanilla's
+# +8,+8 spillover lands in our chunk too (mirrors `_scatter_ores`).
+static func _scatter_flowers(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	var probe_token := PerfProbe.begin("worldgen.flowers")
+	for dcx in [-1, 0]:
+		for dcz in [-1, 0]:
+			_decorate_flowers(chunk, chunk_x, chunk_z, chunk_x + dcx, chunk_z + dcz)
+	PerfProbe.end("worldgen.flowers", probe_token)
+
+
+# Run the populate-phase flower/mushroom calls AS IF this is the
+# (deco_cx, deco_cz) chunk. Writes that fall outside (chunk_x, chunk_z)'s
+# bounds are clipped, so each call to this only contributes the cells
+# that vanilla's spillover would have landed in our chunk.
+static func _decorate_flowers(
+	chunk: Chunk, chunk_x: int, chunk_z: int, deco_cx: int, deco_cz: int
+) -> void:
+	# Red poppy — always 2 calls. Distinct seed per call so the two
+	# clusters land in different spots.
+	for i in range(2):
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.FLOWER_RED,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_RED, i + 1),
+			false,
+		)
+	# Yellow dandelion — 1 call at 1/2 probability.
+	var yellow_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_YELLOW, 0)
+	if (yellow_gate & 1) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.FLOWER_YELLOW,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_YELLOW, 1),
+			false,
+		)
+	# Brown mushroom — 1 call at 1/4 probability.
+	var brown_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_BROWN, 0)
+	if (brown_gate & 3) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.MUSHROOM_BROWN,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_BROWN, 1),
+			true,
+		)
+	# Red mushroom — 1 call at 1/8 probability.
+	var red_mush_gate: int = _hash4(deco_cx, deco_cz, _FLOWER_SALT_RED_MUSHROOM, 0)
+	if (red_mush_gate & 7) == 0:
+		_scatter_plant(
+			chunk,
+			chunk_x,
+			chunk_z,
+			deco_cx,
+			deco_cz,
+			Blocks.MUSHROOM_RED,
+			_hash4(deco_cx, deco_cz, _FLOWER_SALT_RED_MUSHROOM, 1),
+			true,
+		)
+
+
+# Vanilla aj.java port — pick a base position then run 64 placement
+# attempts at base ± (8, 4, 8). `is_mushroom` relaxes support to allow
+# any opaque block below (vanilla mushrooms grow on stone too).
+static func _scatter_plant(
+	chunk: Chunk,
+	chunk_x: int,
+	chunk_z: int,
+	deco_cx: int,
+	deco_cz: int,
+	plant_id: int,
+	seed_hash: int,
+	is_mushroom: bool
+) -> void:
+	var base_x: int = deco_cx * Chunk.SIZE_X + (seed_hash & 0xF) + 8
+	var base_z: int = deco_cz * Chunk.SIZE_Z + ((seed_hash >> 8) & 0xF) + 8
+	var base_y: int = (seed_hash >> 16) & 0x7F  # 0..127
+	var chunk_origin_x: int = chunk_x * Chunk.SIZE_X
+	var chunk_origin_z: int = chunk_z * Chunk.SIZE_Z
+	for attempt in range(_FLOWER_ATTEMPTS):
+		var att_hash: int = _hash4(seed_hash, attempt, plant_id, 0x117)
+		var ox: int = (att_hash & 7) - ((att_hash >> 3) & 7)
+		var oy: int = ((att_hash >> 6) & 3) - ((att_hash >> 8) & 3)
+		var oz: int = ((att_hash >> 10) & 7) - ((att_hash >> 13) & 7)
+		var wx: int = base_x + ox
+		var wy: int = base_y + oy
+		var wz: int = base_z + oz
+		if wy < 1 or wy >= Chunk.SIZE_Y - 1:
+			continue
+		var lx: int = wx - chunk_origin_x
+		var lz: int = wz - chunk_origin_z
+		if lx < 0 or lx >= Chunk.SIZE_X or lz < 0 or lz >= Chunk.SIZE_Z:
+			continue
+		if chunk.get_block_unchecked(lx, wy, lz) != Blocks.AIR:
+			continue
+		var support_id: int = chunk.get_block_unchecked(lx, wy - 1, lz)
+		var support_ok: bool = Blocks.is_valid_plant_support(support_id)
+		if not support_ok and is_mushroom:
+			support_ok = Blocks.is_opaque(support_id)
+		if not support_ok:
+			continue
+		# Y-band check — flowers must be near the surface (excludes deep-
+		# cave dirt veins). Mushrooms have no Y check (vanilla allows
+		# them in caves).
+		if not is_mushroom and wy < SEA_LEVEL - 2:
+			continue
+		chunk.set_block_unchecked(lx, wy, lz, plant_id)

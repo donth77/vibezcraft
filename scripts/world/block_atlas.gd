@@ -70,6 +70,16 @@ const _LAYOUT := {
 	"door_iron_lower": 36,
 	"door_iron_upper": 37,
 	"ladder": 38,
+	"tnt_top": 39,
+	"tnt_side": 40,
+	"tnt_bottom": 41,
+	# Decoration slice 1 — flowers + mushrooms. Cross-quad blocks like
+	# sapling. Vanilla terrain.png positions: flower_red (12,0),
+	# flower_yellow (13,0), mushroom_red (12,1), mushroom_brown (13,1).
+	"flower_red": 42,
+	"flower_yellow": 43,
+	"mushroom_brown": 44,
+	"mushroom_red": 45,
 }
 
 static var active_pack: String = DEFAULT_PACK
