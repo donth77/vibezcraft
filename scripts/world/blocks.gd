@@ -153,6 +153,12 @@ const SNOW_BLOCK := 43
 # 14/16 width cube (gap on each side). Damages player on touch.
 # Only places on SAND. Cannot have non-air blocks adjacent to its sides.
 const CACTUS := 44
+# Snow layer (vanilla BlockSnowLayer id 78). Thin 2/16-tall slab at the
+# bottom of the cell; sits on top of grass/dirt/stone in cold biomes.
+# Player walks through it (no collision) — vanilla treats it as a
+# decoration block. Drops nothing for now (vanilla drops snowball,
+# which we don't have).
+const SNOW_LAYER := 45
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -187,6 +193,9 @@ const MESH_SHAPE_DOOR: int = 6
 # Flat 2/16-thick slab mounted against a wall face. 4 orientations via
 # metadata (2..5), same as torch wall variants. Vanilla render type 8.
 const MESH_SHAPE_LADDER: int = 7
+# Thin 2/16-tall slab on the floor — used by snow_layer. Bottom face
+# hugs the supporting block below; top face + 4 sides at y=2/16.
+const MESH_SHAPE_SNOW_LAYER: int = 8
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -236,6 +245,7 @@ static func is_opaque(id: int) -> bool:
 		and id != GLASS
 		and id != ICE
 		and id != CACTUS
+		and id != SNOW_LAYER
 		and id != SAPLING
 		and id != WATER_FLOWING
 		and id != WATER_STILL
@@ -370,6 +380,7 @@ static func _build_light_opacity_lut() -> void:
 	# Cactus — non-cube (14/16 width with side gaps); pass light through
 	# at the gap. Vanilla returns 0 from getOpacity.
 	_light_opacity_lut[CACTUS] = 0
+	_light_opacity_lut[SNOW_LAYER] = 0
 	_light_opacity_lut[SAPLING] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
 	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
@@ -494,6 +505,10 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# Vanilla BlockReed setBlockBounds(0.125, 0, 0.125, 0.875, 1.0, 0.875)
 		# — taller than flowers and slightly wider, hugs the full cell height.
 		return AABB(Vector3(0.125, 0.0, 0.125), Vector3(0.75, 1.0, 0.75))
+	if id == SNOW_LAYER:
+		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
+		# — full-width slab, 2/16 tall.
+		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -590,6 +605,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_DOOR
 	if id == LADDER:
 		return MESH_SHAPE_LADDER
+	if id == SNOW_LAYER:
+		return MESH_SHAPE_SNOW_LAYER
 	return MESH_SHAPE_CUBE
 
 
@@ -658,6 +675,8 @@ static func hardness(id: int) -> float:
 			return 0.2  # vanilla BlockSnowBlock — soft, shovel-preferred
 		CACTUS:
 			return 0.4  # vanilla BlockCactus hardness
+		SNOW_LAYER:
+			return 0.1  # vanilla BlockSnowLayer instant break
 		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
@@ -839,6 +858,8 @@ static func drops(id: int) -> int:
 			return SNOW_BLOCK  # vanilla drops 4 snowballs; we drop the block until snowballs ship
 		CACTUS:
 			return CACTUS  # drops itself
+		SNOW_LAYER:
+			return AIR  # vanilla drops snowball; defer until snowball item exists
 		SAPLING:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
@@ -915,6 +936,8 @@ static func name_of(id: int) -> String:
 		ICE:
 			return "ice"
 		SNOW_BLOCK:
+			return "snow"
+		SNOW_LAYER:
 			return "snow"
 		CACTUS:
 			return "cactus_side"  # 1-arg fallback; per-face uses get_texture_for_face_string
@@ -1033,6 +1056,8 @@ static func get_face_texture(id: int, face: String) -> String:
 		ICE:
 			return "ice"
 		SNOW_BLOCK:
+			return "snow"
+		SNOW_LAYER:
 			return "snow"
 		CACTUS:
 			match face:

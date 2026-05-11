@@ -56,6 +56,7 @@ const _BLOCKS: Array = [
 	Blocks.ICE,
 	Blocks.SNOW_BLOCK,
 	Blocks.CACTUS,
+	Blocks.SNOW_LAYER,
 ]
 
 const _ITEMS: Array = [

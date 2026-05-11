@@ -407,6 +407,16 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 				# the visible "snowcap" effect.
 				if top_stone_y >= 75 and top_block == Blocks.GRASS:
 					chunk.set_block_unchecked(x, top_stone_y, z, Blocks.SNOW_BLOCK)
+				# Cold low-altitude (sea level..74): place SNOW_LAYER on
+				# top of grass. Vanilla puts a thin snow layer on every
+				# grass block in cold biomes; the air cell directly above
+				# becomes SNOW_LAYER (a 2/16 slab).
+				elif (
+					top_block == Blocks.GRASS
+					and top_stone_y < Chunk.SIZE_Y - 1
+					and chunk.get_block_unchecked(x, top_stone_y + 1, z) == Blocks.AIR
+				):
+					chunk.set_block_unchecked(x, top_stone_y + 1, z, Blocks.SNOW_LAYER)
 
 	# Bedrock band (y=0 always; y=1..4 probabilistic per Alpha hash).
 	# Same logic as _block_at uses for the 2D path — extracted here so 3D

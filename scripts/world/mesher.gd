@@ -198,6 +198,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_ladder_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_SNOW_LAYER:
+					_emit_snow_layer_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -794,6 +798,36 @@ static func _emit_door_geometry(
 # base+3, base+2]`) so cull_back keeps outward sides. UVs are V-flipped
 # the same way as the cube path so the planks pattern reads upright.
 # gdlint: disable=function-arguments-number
+# Snow layer — 2/16-tall slab at the floor (matches vanilla's
+# `0..2/16` Y bounds). Renders the 5 visible faces (top + 4 sides);
+# the bottom is hidden against the support block. Uses the snow texture
+# for all faces. Light comes from the snow_layer cell itself, not the
+# block beneath.
+static func _emit_snow_layer_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	_plant_faces: PackedVector3Array,
+) -> void:
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	var slab_height: float = 0.125  # 2/16
+	var mn := Vector3(fx, fy, fz)
+	var mx := Vector3(fx + 1.0, fy + slab_height, fz + 1.0)
+	var rect: Rect2 = BlockAtlas.uv_rect("snow")
+	var sky: int = chunk.get_sky_light(x, y, z)
+	var blk: int = chunk.get_block_light(x, y, z)
+	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
+
+
 static func _emit_box(
 	verts: PackedVector3Array,
 	norms: PackedVector3Array,

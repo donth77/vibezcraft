@@ -87,6 +87,7 @@ public:
 	static constexpr int ICE = 42;
 	static constexpr int SNOW_BLOCK = 43;
 	static constexpr int CACTUS = 44;
+	static constexpr int SNOW_LAYER = 45;
 
 	MesherNative();
 	~MesherNative();
