@@ -289,6 +289,15 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#    inside 3D overhangs.
 	if not terrain_3d_enabled:
 		_fill_ocean(chunk, chunk_x, chunk_z)
+	else:
+		# 3D mode: caves can carve through stone below sea level, leaving
+		# AIR pockets in the seabed (visible as bubble-holes underwater).
+		# Convert any AIR cell at y < SEA_LEVEL back to WATER. Vanilla-
+		# equivalent: vanilla's px.java density loop writes water for ALL
+		# cells with negative density at sub-sea. We mostly do that in
+		# Worldgen3D.fill_chunk, but cave gen runs after and overwrites
+		# stone with air. Quick sweep to restore.
+		_fill_underwater_air_3d(chunk)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
@@ -430,6 +439,19 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 # the rest of the pipeline changes. Runs in GDScript on top of the native
 # base-terrain fill; at 16×16 columns × ~10 cells each that's ~2.5k writes
 # per chunk, cheap compared to the ore pass.
+# 3D-mode-only: fill AIR cells at y < SEA_LEVEL with WATER_STILL. Runs
+# AFTER caves to undo cave-carved underwater air pockets while leaving
+# above-water cave openings + below-y=10 lava intact.
+static func _fill_underwater_air_3d(chunk: Chunk) -> void:
+	var probe_token := PerfProbe.begin("worldgen.underwater_air_3d")
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(SEA_LEVEL):
+				if chunk.get_block_unchecked(x, y, z) == Blocks.AIR:
+					chunk.set_block_unchecked(x, y, z, Blocks.WATER_STILL)
+	PerfProbe.end("worldgen.underwater_air_3d", probe_token)
+
+
 static func _fill_ocean(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.ocean")
 	for x in range(Chunk.SIZE_X):
