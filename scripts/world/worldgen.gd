@@ -282,7 +282,13 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#    BEFORE trees (so the tree pass can gate on "dry land"). Matches
 	#    vanilla Alpha's ChunkProviderGenerate sequencing: base strata →
 	#    ore veins → biome replace → water pass → decorators.
-	_fill_ocean(chunk, chunk_x, chunk_z)
+	#    SKIP in 3D mode — Worldgen3D.fill_chunk already filled water at
+	#    the density-pipeline level (per-cell, handles overhangs). Running
+	#    _fill_ocean on top would use 2D heightmap's surface_height which
+	#    doesn't match 3D's actual surface, producing "floating water"
+	#    inside 3D overhangs.
+	if not terrain_3d_enabled:
+		_fill_ocean(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
