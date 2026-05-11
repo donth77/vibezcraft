@@ -11,6 +11,20 @@ extends GutTest
 # generate_chunk output (including ores/trees on top of the fill) is
 # what we compare. That exercises the whole pipeline end-to-end.
 
+# Pin to 2D heightmap mode — the native fast path is bypassed entirely
+# in 3D density mode (Worldgen3D.fill_chunk replaces it), so these
+# parity tests only make sense against the 2D pipeline.
+var _terrain_3d_was: bool
+
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
+
 
 func _generate_with_native(chunk_x: int, chunk_z: int) -> Chunk:
 	# Safety guard: only run if the extension actually loaded. Otherwise

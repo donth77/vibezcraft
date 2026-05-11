@@ -1,6 +1,23 @@
 # gdlint: disable=max-public-methods
 extends GutTest
 
+# Worldgen tests assert 2D-heightmap-mode invariants (grass-on-top,
+# water-fills-to-sea-level, beach-band coverage). The 3D density path
+# produces different per-cell results — biome surface blocks (sand-
+# deserts, snow), 3D-density water filling, etc. — which is by design.
+# Pin tests to the 2D path so the assertions remain meaningful;
+# Worldgen3D-mode behavior is asserted by tests/test_worldgen_3d.gd.
+var _terrain_3d_was: bool
+
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
+
 
 func test_surface_height_is_deterministic() -> void:
 	var h1 := Worldgen.surface_height(42, 17)

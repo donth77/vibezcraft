@@ -198,6 +198,18 @@ func _format_stats() -> String:
 		var p: Vector3 = _player.global_position
 		lines.append("Pos: %.1f, %.1f, %.1f" % [p.x, p.y, p.z])
 		lines.append("Block: %d, %d, %d" % [int(floor(p.x)), int(floor(p.y)), int(floor(p.z))])
+		# Biome readout — only meaningful in 3D-density mode (2D path
+		# has no biome system). Shows climate values (temp, rain) plus
+		# the selected biome name from gg.java's decision tree.
+		var mode: String = "3D" if Worldgen.terrain_3d_enabled else "2D"
+		lines.append("Terrain: %s" % mode)
+		if Worldgen.terrain_3d_enabled:
+			var climate: Vector2 = Worldgen3D.climate_at(p.x, p.z)
+			var biome_id: int = Worldgen3D.biome_at(p.x, p.z)
+			var biome_name: String = Worldgen3D.Biome.keys()[biome_id]
+			lines.append(
+				"Biome: %s  T=%.2f R=%.2f" % [biome_name.capitalize(), climate.x, climate.y]
+			)
 	var mem_mb: float = float(OS.get_static_memory_usage()) / 1048576.0
 	lines.append("Mem: %.1f MB" % mem_mb)
 	return "\n".join(lines)
@@ -277,6 +289,19 @@ func _scout_chunks_around_player() -> Dictionary:
 				sqrt(float(nearest_lava_dist_sq)),
 			]
 		)
+	# Biome distribution scan — sample 9×9 chunks (~144×144 blocks)
+	# centered on player. Reports counts per biome so you can verify
+	# whether the climate noise is producing variety or clustering.
+	# Only meaningful in 3D-density mode (2D path doesn't run biome
+	# selection); skipped otherwise to keep the readout uncluttered.
+	var biome_counts: Dictionary = {}
+	if Worldgen.terrain_3d_enabled:
+		for cdx in range(-4, 5):
+			for cdz in range(-4, 5):
+				var wx: float = float((pcx + cdx) * 16 + 8)
+				var wz: float = float((pcz + cdz) * 16 + 8)
+				var bid: int = Worldgen3D.biome_at(wx, wz)
+				biome_counts[bid] = int(biome_counts.get(bid, 0)) + 1
 	return {
 		"subsurf_air": subsurf_air,
 		"deep_air": deep_air,
@@ -284,6 +309,7 @@ func _scout_chunks_around_player() -> Dictionary:
 		"nearest_lava": nearest_lava_str,
 		"chunks_scanned": chunks_scanned,
 		"chunks_with_caves": chunks_with_caves,
+		"biome_counts": biome_counts,
 	}
 
 
@@ -316,6 +342,15 @@ func _format_perf() -> String:
 						% [scout.chunks_with_caves, scout.chunks_scanned]
 					)
 				)
+			var bcounts: Dictionary = scout.get("biome_counts", {})
+			if not bcounts.is_empty():
+				var sorted_ids: Array = bcounts.keys()
+				sorted_ids.sort_custom(func(a, b): return bcounts[a] > bcounts[b])
+				var parts: Array[String] = []
+				for bid: int in sorted_ids:
+					var bname: String = Worldgen3D.Biome.keys()[bid].capitalize()
+					parts.append("%s=%d" % [bname, bcounts[bid]])
+				lines.append("Biomes (9×9 chunks): %s" % " ".join(parts))
 	var snap: Dictionary = PerfProbe.snapshot()
 	if not snap.is_empty():
 		# p50/p95/max — max catches the lag spike that p95 averages away.

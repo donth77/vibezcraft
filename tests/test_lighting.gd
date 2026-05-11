@@ -5,6 +5,21 @@ extends GutTest
 # Bukkit/mc-dev `Chunk.java` init-lighting loop (~line 160) for the
 # column pass and World.b(EnumSkyBlock, ...) for lateral propagation.
 
+# Pin to 2D heightmap mode — 3D density produces overhangs that block
+# sky light differently and would invalidate the "high above surface =
+# full daylight" assertions that test against a known max_y.
+var _terrain_3d_was: bool
+
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
+
+
 # --- Block opacity ---
 
 
