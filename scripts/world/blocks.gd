@@ -144,6 +144,15 @@ const SUGAR_CANE := 41
 # flows back in vanilla). Worldgen converts WATER_STILL → ICE for
 # surface cells in Tundra/Taiga/Ice Desert biomes.
 const ICE := 42
+# Snow block (vanilla BlockSnowBlock id 80). Full opaque white cube.
+# Generated naturally on cold mountain peaks (Tundra/Taiga/Ice Desert
+# at high altitude). Drops 4 snowballs in vanilla; we drop nothing for
+# now since snowballs aren't an item yet.
+const SNOW_BLOCK := 43
+# Cactus (vanilla BlockCactus id 81). Multi-block tall plant in deserts.
+# 14/16 width cube (gap on each side). Damages player on touch.
+# Only places on SAND. Cannot have non-air blocks adjacent to its sides.
+const CACTUS := 44
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -226,6 +235,7 @@ static func is_opaque(id: int) -> bool:
 		and id != LEAVES
 		and id != GLASS
 		and id != ICE
+		and id != CACTUS
 		and id != SAPLING
 		and id != WATER_FLOWING
 		and id != WATER_STILL
@@ -356,6 +366,10 @@ static func _build_light_opacity_lut() -> void:
 	# Ice — semi-transparent like glass; vanilla BlockIce returns 3 from
 	# getOpacity (slight light dampening for the underwater volume below).
 	_light_opacity_lut[ICE] = 3
+	# Snow block — fully opaque white cube; default opacity (15) is right.
+	# Cactus — non-cube (14/16 width with side gaps); pass light through
+	# at the gap. Vanilla returns 0 from getOpacity.
+	_light_opacity_lut[CACTUS] = 0
 	_light_opacity_lut[SAPLING] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
 	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
@@ -450,6 +464,12 @@ static func can_place_at(id: int, support_id: int) -> bool:
 			or support_id == SAND
 			or support_id == SUGAR_CANE
 		)
+	if id == CACTUS:
+		# Vanilla BlockCactus.canPlace: SAND only, OR another CACTUS for
+		# multi-tall stacking. Vanilla also requires NO solid block on
+		# any of the 4 cardinal sides — that side-block check is a
+		# placement-time concern handled in interaction.gd if needed.
+		return support_id == SAND or support_id == CACTUS
 	return true
 
 
@@ -634,6 +654,10 @@ static func hardness(id: int) -> float:
 			return 0.2
 		ICE:
 			return 0.5  # vanilla BlockIce hardness
+		SNOW_BLOCK:
+			return 0.2  # vanilla BlockSnowBlock — soft, shovel-preferred
+		CACTUS:
+			return 0.4  # vanilla BlockCactus hardness
 		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
@@ -811,6 +835,10 @@ static func drops(id: int) -> int:
 			return AIR  # vanilla: glass shatters when broken, drops nothing
 		ICE:
 			return AIR  # vanilla: ice melts to water on break (handled in interaction)
+		SNOW_BLOCK:
+			return SNOW_BLOCK  # vanilla drops 4 snowballs; we drop the block until snowballs ship
+		CACTUS:
+			return CACTUS  # drops itself
 		SAPLING:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
@@ -886,6 +914,10 @@ static func name_of(id: int) -> String:
 			return "glass"
 		ICE:
 			return "ice"
+		SNOW_BLOCK:
+			return "snow"
+		CACTUS:
+			return "cactus_side"  # 1-arg fallback; per-face uses get_texture_for_face_string
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING:
@@ -1000,6 +1032,16 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "glass"
 		ICE:
 			return "ice"
+		SNOW_BLOCK:
+			return "snow"
+		CACTUS:
+			match face:
+				"top":
+					return "cactus_top"
+				"bottom":
+					return "cactus_bottom"
+				_:
+					return "cactus_side"
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING, WATER_STILL:

@@ -129,6 +129,10 @@ const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
 # decoration. Per chunk: 10 placement attempts at random (x, z).
 const _SUGAR_CANE_ATTEMPTS: int = 10
 const _SUGAR_CANE_SALT: int = 0xC4ED
+# Cactus scatter — Desert biome only. Vanilla rate is roughly 1-2 cacti
+# per desert chunk; we attempt 8 placements with high reject rate.
+const _CACTUS_ATTEMPTS: int = 8
+const _CACTUS_SALT: int = 0xCAC7
 
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
 # differences in the last argument avalanche into high bits. Without this,
@@ -313,6 +317,9 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# sand surfaces directly adjacent to water. Vanilla BlockReed
 	# placement requires water-adjacency at the base.
 	_scatter_sugar_cane(chunk, chunk_x, chunk_z)
+	# 8. Cactus — places 1-3 stacked CACTUS blocks on SAND in Desert
+	# biomes only. Vanilla BlockCactus placement.
+	_scatter_cactus(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
@@ -394,6 +401,12 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 					if chunk.get_block_unchecked(x, y + 1, z) == Blocks.AIR:
 						chunk.set_block_unchecked(x, y, z, Blocks.ICE)
 						break
+				# Cold mountain peaks (y >= 75): top GRASS → SNOW_BLOCK.
+				# Vanilla generates snow on high cold terrain regardless of
+				# whether snow_layer also accumulates — full snow blocks are
+				# the visible "snowcap" effect.
+				if top_stone_y >= 75 and top_block == Blocks.GRASS:
+					chunk.set_block_unchecked(x, top_stone_y, z, Blocks.SNOW_BLOCK)
 
 	# Bedrock band (y=0 always; y=1..4 probabilistic per Alpha hash).
 	# Same logic as _block_at uses for the 2D path — extracted here so 3D
@@ -1052,3 +1065,61 @@ static func _scatter_sugar_cane(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 				break
 			chunk.set_block_unchecked(lx, py, lz, Blocks.SUGAR_CANE)
 	PerfProbe.end("worldgen.sugar_cane", probe_token)
+
+
+# Cactus scatter — only fires in Desert biomes. Per chunk: 8 attempts at
+# random (x, z). Each attempt looks for a SAND surface with no solid
+# blocks adjacent to the side, then stacks 1-3 CACTUS above.
+static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	if not terrain_3d_enabled:
+		return
+	var probe_token := PerfProbe.begin("worldgen.cactus")
+	# Sample biome at chunk center — cactus only spawns in Desert.
+	var center_x: float = float(chunk_x * Chunk.SIZE_X + 8)
+	var center_z: float = float(chunk_z * Chunk.SIZE_Z + 8)
+	var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
+	if biome_id != Worldgen3D.Biome.DESERT and biome_id != Worldgen3D.Biome.ICE_DESERT:
+		PerfProbe.end("worldgen.cactus", probe_token)
+		return
+	for attempt in range(_CACTUS_ATTEMPTS):
+		var seed_h: int = _hash4(chunk_x, chunk_z, _CACTUS_SALT, attempt)
+		var lx: int = seed_h & 0xF
+		var lz: int = (seed_h >> 4) & 0xF
+		# Find topmost surface block in this column
+		var sy: int = -1
+		for y in range(Chunk.SIZE_Y - 1, 0, -1):
+			var b: int = chunk.get_block_unchecked(lx, y, lz)
+			if b != Blocks.AIR and b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
+				sy = y
+				break
+		if sy < 0 or sy >= Chunk.SIZE_Y - 4:
+			continue
+		# Surface must be SAND
+		if chunk.get_block_unchecked(lx, sy, lz) != Blocks.SAND:
+			continue
+		# Cell directly above must be air
+		if chunk.get_block_unchecked(lx, sy + 1, lz) != Blocks.AIR:
+			continue
+		# Side-block check: vanilla BlockCactus rejects placement if any
+		# cardinal neighbor at the placement Y is a solid (non-air) block.
+		# Skip border columns (can't check cross-chunk).
+		if lx <= 0 or lx >= Chunk.SIZE_X - 1 or lz <= 0 or lz >= Chunk.SIZE_Z - 1:
+			continue
+		var has_side_block: bool = false
+		for off: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var n_id: int = chunk.get_block_unchecked(lx + off.x, sy + 1, lz + off.y)
+			if n_id != Blocks.AIR:
+				has_side_block = true
+				break
+		if has_side_block:
+			continue
+		# Place 1-3 stacked cactus blocks above
+		var stack_height: int = 1 + ((seed_h >> 8) % 3)
+		for dy in range(stack_height):
+			var py: int = sy + 1 + dy
+			if py >= Chunk.SIZE_Y - 1:
+				break
+			if chunk.get_block_unchecked(lx, py, lz) != Blocks.AIR:
+				break
+			chunk.set_block_unchecked(lx, py, lz, Blocks.CACTUS)
+	PerfProbe.end("worldgen.cactus", probe_token)

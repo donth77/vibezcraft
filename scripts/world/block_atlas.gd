@@ -83,6 +83,16 @@ const _LAYOUT := {
 	# Sugar cane (vanilla "reeds"). Cross-quad like flowers. Vanilla
 	# terrain.png cell (9, 4).
 	"sugar_cane": 46,
+	# Ice (vanilla terrain.png cell (3, 4)). Semi-transparent cube.
+	"ice": 47,
+	# Snow block (vanilla terrain.png cell (2, 4)). Same texture as
+	# snow layer; opaque white.
+	"snow": 48,
+	# Cactus — three faces (top, side, bottom) at vanilla terrain.png
+	# cells (5..7, 4).
+	"cactus_top": 49,
+	"cactus_side": 50,
+	"cactus_bottom": 51,
 }
 
 static var active_pack: String = DEFAULT_PACK

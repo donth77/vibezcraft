@@ -54,6 +54,8 @@ const _BLOCKS: Array = [
 	Blocks.MUSHROOM_RED,
 	Blocks.SUGAR_CANE,
 	Blocks.ICE,
+	Blocks.SNOW_BLOCK,
+	Blocks.CACTUS,
 ]
 
 const _ITEMS: Array = [
