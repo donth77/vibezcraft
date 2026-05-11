@@ -99,10 +99,14 @@ const _ORE_CONFIGS: Array = [
 # (the caves module references Worldgen._hash4 / surface_height).
 const _CAVES_SCRIPT: GDScript = preload("res://scripts/world/worldgen_caves.gd")
 
-# Trees per chunk — we pick a deterministic count between MIN and MAX
-# from the chunk's hash. ~1.5 average matches Alpha plains.
-const _TREES_PER_CHUNK_MIN: int = 0
-const _TREES_PER_CHUNK_MAX: int = 3
+# Base trees-per-chunk before biome scaling. Vanilla averages 150-300
+# LEAVES/chunk (5-world baseline), and one oak places ~33 LEAVES, so
+# the cross-world mean is ~5-9 oaks/chunk. With biome multipliers in
+# [0, 6], a base of 1..4 (avg 2.5) hits ~5 oaks in plains and ~15 in
+# rainforest — close to vanilla. Earlier 0..3 gave us 6.6 LEAVES/chunk
+# vs the 150-300 baseline (paired with the surface-Y bug in 3D mode).
+const _TREES_PER_CHUNK_MIN: int = 1
+const _TREES_PER_CHUNK_MAX: int = 4
 const _TREE_TRUNK_MIN: int = 4
 const _TREE_TRUNK_MAX: int = 6
 
@@ -189,6 +193,21 @@ static func _get_noise() -> FastNoiseLite:
 static func surface_height(world_x: int, world_z: int) -> int:
 	var n: float = _get_noise().get_noise_2d(float(world_x), float(world_z))
 	return SEA_LEVEL + int(round(n * float(HEIGHT_AMPLITUDE)))
+
+
+# Topmost non-air, non-water cell in a column of the given chunk. Used by
+# decorators (beaches, trees, sugar cane) that need to know the actual
+# surface AFTER terrain generation — in 3D-density mode the 2D heightmap
+# `surface_height()` doesn't match the real chunk surface, so decorators
+# that used it were placing at the wrong Y and almost always failing
+# their GRASS/SAND surface gate (silent — count just dropped). Returns
+# -1 if the column is entirely AIR.
+static func _column_surface_y(chunk: Chunk, lx: int, lz: int) -> int:
+	for y in range(Chunk.SIZE_Y - 1, -1, -1):
+		var b: int = chunk.get_block_unchecked(lx, y, lz)
+		if b != Blocks.AIR and b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
+			return y
+	return -1
 
 
 # Main-thread init. No-op when the native extension isn't loaded.
@@ -384,9 +403,15 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 			else:
 				top_block = Worldgen3D.biome_filler_block(biome_id)
 			chunk.set_block_unchecked(x, top_stone_y, z, top_block)
-			# Next 3 STONE cells below → biome filler (DIRT or SAND).
+			# Next N STONE cells below → biome filler (DIRT or SAND).
+			# Vanilla: `1 + this.b.nextInt(4)` per column (1..4, mean 2.5).
+			# We hash the column for a deterministic 1..4 depth — earlier
+			# fixed depth of 3 produced ~3× the vanilla DIRT baseline
+			# (1689/chunk vs ~600).
 			var filler: int = Worldgen3D.biome_filler_block(biome_id)
-			for dy in range(1, 4):
+			var depth_hash: int = _hash3(world_x, 0, world_z)
+			var filler_depth: int = 1 + (depth_hash & 3)  # 1..4
+			for dy in range(1, filler_depth + 1):
 				var y: int = top_stone_y - dy
 				if y < 0:
 					break
@@ -474,7 +499,13 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 		for z in range(Chunk.SIZE_Z):
 			var world_x: int = chunk_x * Chunk.SIZE_X + x
 			var world_z: int = chunk_z * Chunk.SIZE_Z + z
-			var surface_y: int = surface_height(world_x, world_z)
+			# 3D mode: walk the chunk for the real surface (heightmap is
+			# 2D-only). 2D mode keeps the heightmap fast path.
+			var surface_y: int
+			if terrain_3d_enabled:
+				surface_y = _column_surface_y(chunk, x, z)
+			else:
+				surface_y = surface_height(world_x, world_z)
 			# Outside the beach band: hills + deep oceans untouched.
 			if surface_y < lo or surface_y > hi:
 				continue
@@ -754,7 +785,15 @@ static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 			<= (_SPAWN_TREE_EXCLUSION_RADIUS * _SPAWN_TREE_EXCLUSION_RADIUS)
 		):
 			continue
-		var ground_y: int = surface_height(world_x, world_z)
+		# In 3D-density mode the 2D heightmap doesn't match the actual
+		# chunk surface (overhangs + density-driven peaks). Walk the
+		# chunk to find the real top cell. 2D mode falls back to the
+		# heightmap (cheaper + bit-equivalent for that path).
+		var ground_y: int
+		if terrain_3d_enabled:
+			ground_y = _column_surface_y(chunk, lx, lz)
+		else:
+			ground_y = surface_height(world_x, world_z)
 		# No trees underwater — a submerged grass cell still reads as GRASS
 		# after the ocean fill pass, but growing a canopy up through water
 		# is vanilla-wrong (Alpha's BiomeDecorator gates trees on the surface

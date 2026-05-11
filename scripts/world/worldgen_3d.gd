@@ -238,28 +238,33 @@ static func biome_is_cold(biome_id: int) -> bool:
 	return biome_id == Biome.TUNDRA or biome_id == Biome.TAIGA or biome_id == Biome.ICE_DESERT
 
 
-# Per-biome tree density multiplier (0.0 = no trees, 1.0 = baseline,
-# 2.0 = double). Vanilla biomes have very different tree counts:
-# Forest/Rainforest dense, Taiga moderate, Plains sparse, Desert/Ice
-# Desert none. Worldgen tree pass multiplies its base attempt count.
+# Per-biome tree density multiplier on Worldgen's base 1..4 trees/chunk
+# attempt count. Vanilla LEAVES baseline (per
+# .claude/vanilla-alpha-real-baselines.md, measured across 1521 chunks
+# of two real worlds) is **56 leaves/chunk** averaged across all
+# biomes, ~33 leaves per oak → ~1.7 oaks/chunk overall mean. Most
+# chunks are sparse-biome; dense-biome chunks compensate. Tuned so
+# the cross-biome mean lands near vanilla's ~1.7 oaks/chunk.
 static func biome_tree_density(biome_id: int) -> float:
 	match biome_id:
 		Biome.RAINFOREST:
-			return 3.0  # vanilla densest
+			return 3.0  # densest, ~7 oaks
 		Biome.FOREST:
-			return 2.0
+			return 2.0  # ~5 oaks
 		Biome.SEASONAL_FOREST:
 			return 1.5
 		Biome.TAIGA:
-			return 1.5  # snowy forest, moderately dense
+			return 1.2  # snowy forest, moderate
 		Biome.SWAMPLAND:
-			return 0.8
+			return 1.0
 		Biome.SHRUBLAND:
-			return 0.6
+			return 0.7
 		Biome.SAVANNA:
-			return 0.3  # mostly grass, sparse trees
-		Biome.PLAINS, Biome.TUNDRA:
-			return 0.1  # very sparse
+			return 0.4  # mostly grass, sparse trees
+		Biome.PLAINS:
+			return 0.4  # vanilla plains has occasional trees
+		Biome.TUNDRA:
+			return 0.2  # very sparse
 		Biome.DESERT, Biome.ICE_DESERT:
 			return 0.0  # no trees
 		_:

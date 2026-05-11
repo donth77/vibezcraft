@@ -24,7 +24,11 @@ func _init() -> void:
 
 	# Warm + apply seed to all generators (must be on main thread).
 	BlockAtlas.build()
-	Worldgen.terrain_3d_enabled = OS.has_environment("MC_CLONE_TERRAIN_3D")
+	# 3D mode follows the same default as the game: ON unless explicitly
+	# disabled with MC_CLONE_TERRAIN_3D=0. (Previously this read
+	# has_environment(), which was an opt-in check that no longer matches
+	# the runtime default.)
+	Worldgen.terrain_3d_enabled = OS.get_environment("MC_CLONE_TERRAIN_3D") != "0"
 	Worldgen.apply_world_seed(seed)
 	Worldgen.surface_height(0, 0)  # forces noise warm
 
