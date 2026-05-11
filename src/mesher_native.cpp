@@ -574,7 +574,7 @@ Dictionary MesherNative::mesh_chunk_data(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE
 									&& !neighbor_is_water && !neighbor_is_lava);
@@ -821,7 +821,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE
 									&& !neighbor_is_water && !neighbor_is_lava);

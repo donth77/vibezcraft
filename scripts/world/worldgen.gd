@@ -381,6 +381,19 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 					break
 				if chunk.get_block_unchecked(x, y, z) == Blocks.STONE:
 					chunk.set_block_unchecked(x, y, z, filler)
+			# Cold biomes: convert WATER_STILL surface cells to ICE.
+			# Only top-of-water (where water meets air) becomes ice — the
+			# water below stays water.
+			if Worldgen3D.biome_is_cold(biome_id):
+				# Walk up from top_stone_y looking for the highest WATER_STILL
+				# with AIR above (= surface of the water column).
+				for y in range(top_stone_y + 1, Chunk.SIZE_Y - 1):
+					var b: int = chunk.get_block_unchecked(x, y, z)
+					if b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
+						break
+					if chunk.get_block_unchecked(x, y + 1, z) == Blocks.AIR:
+						chunk.set_block_unchecked(x, y, z, Blocks.ICE)
+						break
 
 	# Bedrock band (y=0 always; y=1..4 probabilistic per Alpha hash).
 	# Same logic as _block_at uses for the 2D path — extracted here so 3D
@@ -671,6 +684,15 @@ static func _scatter_trees(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var count_hash: int = _hash4(chunk_x, chunk_z, 999983, 0)
 	var span: int = _TREES_PER_CHUNK_MAX - _TREES_PER_CHUNK_MIN + 1
 	var tree_count: int = _TREES_PER_CHUNK_MIN + (count_hash % span)
+	# In 3D mode with biomes, scale tree count by per-biome density (samples
+	# climate at chunk center). Forest/Rainforest get 2-3× baseline, Desert
+	# gets 0, etc. See Worldgen3D.biome_tree_density.
+	if terrain_3d_enabled:
+		var center_x: float = float(chunk_x * Chunk.SIZE_X + 8)
+		var center_z: float = float(chunk_z * Chunk.SIZE_Z + 8)
+		var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
+		var density: float = Worldgen3D.biome_tree_density(biome_id)
+		tree_count = int(round(float(tree_count) * density))
 	# Keep tree centers away from chunk edges so the 5×5 canopy fits.
 	var margin: int = 2
 	var range_x: int = Chunk.SIZE_X - margin * 2

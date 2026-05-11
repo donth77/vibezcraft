@@ -34,6 +34,7 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.MUSHROOM_BROWN: "mushroom_brown",
 	Blocks.MUSHROOM_RED: "mushroom_red",
 	Blocks.SUGAR_CANE: "sugar_cane",
+	Blocks.ICE: "ice",
 }
 
 # Item sprite basenames. Resolved at load time: first try

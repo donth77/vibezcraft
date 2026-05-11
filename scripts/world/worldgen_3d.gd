@@ -231,6 +231,41 @@ static func biome_filler_block(biome_id: int) -> int:
 	return Blocks.DIRT
 
 
+# Is this biome cold enough to freeze water surfaces? Used by the surface
+# pass to convert WATER_STILL → ICE. Vanilla's "cold" biomes are Tundra,
+# Taiga, Ice Desert (anything with temp < ~0.15).
+static func biome_is_cold(biome_id: int) -> bool:
+	return biome_id == Biome.TUNDRA or biome_id == Biome.TAIGA or biome_id == Biome.ICE_DESERT
+
+
+# Per-biome tree density multiplier (0.0 = no trees, 1.0 = baseline,
+# 2.0 = double). Vanilla biomes have very different tree counts:
+# Forest/Rainforest dense, Taiga moderate, Plains sparse, Desert/Ice
+# Desert none. Worldgen tree pass multiplies its base attempt count.
+static func biome_tree_density(biome_id: int) -> float:
+	match biome_id:
+		Biome.RAINFOREST:
+			return 3.0  # vanilla densest
+		Biome.FOREST:
+			return 2.0
+		Biome.SEASONAL_FOREST:
+			return 1.5
+		Biome.TAIGA:
+			return 1.5  # snowy forest, moderately dense
+		Biome.SWAMPLAND:
+			return 0.8
+		Biome.SHRUBLAND:
+			return 0.6
+		Biome.SAVANNA:
+			return 0.3  # mostly grass, sparse trees
+		Biome.PLAINS, Biome.TUNDRA:
+			return 0.1  # very sparse
+		Biome.DESERT, Biome.ICE_DESERT:
+			return 0.0  # no trees
+		_:
+			return 1.0
+
+
 # Reset noise cache — call after Worldgen.apply_world_seed for correctness.
 static func reset() -> void:
 	_e_noise = null

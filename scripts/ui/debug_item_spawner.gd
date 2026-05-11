@@ -53,6 +53,7 @@ const _BLOCKS: Array = [
 	Blocks.MUSHROOM_BROWN,
 	Blocks.MUSHROOM_RED,
 	Blocks.SUGAR_CANE,
+	Blocks.ICE,
 ]
 
 const _ITEMS: Array = [

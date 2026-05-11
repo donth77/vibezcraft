@@ -139,6 +139,11 @@ const MUSHROOM_RED := 40
 # when broken. Vanilla block ID is 83; ours is 41 because our IDs are
 # sequential from 0 (see CLAUDE.md "block IDs are stable" note).
 const SUGAR_CANE := 41
+# Ice (vanilla BlockIce, id 79). Frozen water surface in cold biomes.
+# Semi-transparent, slightly slippery. Drops nothing when broken (water
+# flows back in vanilla). Worldgen converts WATER_STILL → ICE for
+# surface cells in Tundra/Taiga/Ice Desert biomes.
+const ICE := 42
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -220,6 +225,7 @@ static func is_opaque(id: int) -> bool:
 		id != AIR
 		and id != LEAVES
 		and id != GLASS
+		and id != ICE
 		and id != SAPLING
 		and id != WATER_FLOWING
 		and id != WATER_STILL
@@ -347,6 +353,9 @@ static func _build_light_opacity_lut() -> void:
 		_light_opacity_lut[i] = 15
 	_light_opacity_lut[AIR] = 0
 	_light_opacity_lut[GLASS] = 0
+	# Ice — semi-transparent like glass; vanilla BlockIce returns 3 from
+	# getOpacity (slight light dampening for the underwater volume below).
+	_light_opacity_lut[ICE] = 3
 	_light_opacity_lut[SAPLING] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
 	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
@@ -623,6 +632,8 @@ static func hardness(id: int) -> float:
 			return 0.0
 		LEAVES, GLASS:
 			return 0.2
+		ICE:
+			return 0.5  # vanilla BlockIce hardness
 		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
@@ -798,6 +809,8 @@ static func drops(id: int) -> int:
 			return AIR  # Alpha leaves dropped 0 or 1 sapling — no saplings yet
 		GLASS:
 			return AIR  # vanilla: glass shatters when broken, drops nothing
+		ICE:
+			return AIR  # vanilla: ice melts to water on break (handled in interaction)
 		SAPLING:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
@@ -871,6 +884,8 @@ static func name_of(id: int) -> String:
 			return "lit_furnace"
 		GLASS:
 			return "glass"
+		ICE:
+			return "ice"
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING:
@@ -983,6 +998,8 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "furnace_front_lit"
 		GLASS:
 			return "glass"
+		ICE:
+			return "ice"
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING, WATER_STILL:

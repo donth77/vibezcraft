@@ -84,6 +84,7 @@ public:
 	static constexpr int MUSHROOM_BROWN = 39;
 	static constexpr int MUSHROOM_RED = 40;
 	static constexpr int SUGAR_CANE = 41;
+	static constexpr int ICE = 42;
 
 	MesherNative();
 	~MesherNative();
