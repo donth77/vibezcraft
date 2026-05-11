@@ -24,10 +24,13 @@ func _init() -> void:
 
 	# Warm + apply seed to all generators (must be on main thread).
 	BlockAtlas.build()
+	Worldgen.terrain_3d_enabled = OS.has_environment("MC_CLONE_TERRAIN_3D")
 	Worldgen.apply_world_seed(seed)
 	Worldgen.surface_height(0, 0)  # forces noise warm
 
 	var chunk: Chunk = Worldgen.generate_chunk(cx, cz)
+	if Worldgen.terrain_3d_enabled:
+		print("[export] using 3D density terrain")
 
 	# Vanilla layout: Blocks[(x*16 + z)*128 + y]
 	# Our layout: blocks[y*16*16 + z*16 + x]
