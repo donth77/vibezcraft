@@ -558,6 +558,12 @@ func _material_for(block_id: int) -> String:
 			return "stone"
 		Blocks.GRAVEL, Blocks.FARMLAND:
 			return "gravel"
+		Blocks.ICE:
+			return "stone"  # vanilla: glass-like shatter; closest in our set
+		Blocks.SNOW_BLOCK, Blocks.SNOW_LAYER:
+			return "sand"  # vanilla snow uses 'cloth' but sand is closest crunch
+		Blocks.CACTUS:
+			return "grass"  # vanilla: cloth/grass-like
 	return ""
 
 

@@ -515,6 +515,16 @@ static func display_name(item_id: int) -> String:
 			return "Cobblestone Stairs"
 		Blocks.LADDER:
 			return "Ladder"
+		Blocks.SUGAR_CANE:
+			return "Sugar Cane"
+		Blocks.ICE:
+			return "Ice"
+		Blocks.SNOW_BLOCK:
+			return "Snow Block"
+		Blocks.SNOW_LAYER:
+			return "Snow Layer"
+		Blocks.CACTUS:
+			return "Cactus"
 	return ""
 
 
