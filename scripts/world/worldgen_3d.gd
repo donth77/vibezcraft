@@ -54,6 +54,14 @@ static var _soil_noise: NoiseOctaves  # px.java this.o (4-octave 2D, unused in P
 static var _amplitude_noise: NoiseOctaves  # px.java this.a (10-octave 2D)
 static var _depth_noise: NoiseOctaves  # px.java this.b (16-octave 2D)
 static var _forest_noise: NoiseOctaves  # px.java this.c (8-octave 2D, unused in Phase 3)
+# Phase 4: climate noises matching vanilla po.java (WorldChunkManager).
+# Vanilla uses Simplex (aw.java) via 4-octave ng.java; we use FastNoiseLite
+# Simplex for speed/simplicity. Output is approximate-vanilla, not exact.
+# Scales match vanilla po.java:50-52 (temperature 0.025, rainfall 0.05,
+# extreme 0.25 per-coord step). Each gets its own seed offset.
+static var _temp_noise: FastNoiseLite
+static var _rain_noise: FastNoiseLite
+static var _extreme_noise: FastNoiseLite
 static var _cached_seed: int = 0  # tracks which seed the noises were built with
 
 
@@ -90,7 +98,59 @@ static func _ensure_noises(world_seed: int) -> void:
 	_amplitude_noise = NoiseOctaves.create_vanilla(world_seed + 5, 10)
 	_depth_noise = NoiseOctaves.create_vanilla(world_seed + 6, 16)
 	_forest_noise = NoiseOctaves.create_vanilla(world_seed + 7, 8)
+	# Climate noises (Phase 4). Frequencies from vanilla po.java:
+	# temperature uses 0.025/cell, rainfall 0.05/cell, extreme 0.25/cell.
+	# Vanilla seed multipliers: 9871 (temp), 39811 (rain), 543321 (extreme).
+	# We pass through hash to fit FastNoiseLite's 32-bit seed.
+	_temp_noise = FastNoiseLite.new()
+	_temp_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_temp_noise.frequency = 0.025
+	_temp_noise.seed = (world_seed * 9871) & 0x7FFFFFFF
+	_temp_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_temp_noise.fractal_octaves = 4
+	_rain_noise = FastNoiseLite.new()
+	_rain_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_rain_noise.frequency = 0.05
+	_rain_noise.seed = (world_seed * 39811) & 0x7FFFFFFF
+	_rain_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_rain_noise.fractal_octaves = 4
+	_extreme_noise = FastNoiseLite.new()
+	_extreme_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_extreme_noise.frequency = 0.25
+	_extreme_noise.seed = (world_seed * 543321) & 0x7FFFFFFF
+	_extreme_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	_extreme_noise.fractal_octaves = 2
 	_cached_seed = world_seed
+
+
+# Compute (temperature, rainfall) for a single (world_x, world_z) cell.
+# Direct port of vanilla po.java:75-101 climate computation. Output is
+# Vector2(temp, rain) where both are in [0, 1].
+static func climate_at(world_x: float, world_z: float) -> Vector2:
+	# Vanilla uses raw noise output then clamps; FastNoiseLite returns
+	# [-1, 1] which is already similar to vanilla simplex range.
+	var temp_raw: float = _temp_noise.get_noise_2d(world_x, world_z)
+	var rain_raw: float = _rain_noise.get_noise_2d(world_x, world_z)
+	var extreme_raw: float = _extreme_noise.get_noise_2d(world_x, world_z)
+	# po.java:78-84 computation
+	var d2: float = extreme_raw * 1.1 + 0.5  # extreme amplification
+	var d3: float = 0.01
+	var d4: float = 1.0 - d3
+	var temp: float = (temp_raw * 0.15 + 0.7) * d4 + d2 * d3
+	d3 = 0.002
+	d4 = 1.0 - d3
+	var rain: float = (rain_raw * 0.15 + 0.5) * d4 + d2 * d3
+	# po.java:85: temp = 1 - (1 - temp)^2 (smoothstep-ish bias toward warmer)
+	temp = 1.0 - (1.0 - temp) * (1.0 - temp)
+	if temp < 0.0:
+		temp = 0.0
+	if temp > 1.0:
+		temp = 1.0
+	if rain < 0.0:
+		rain = 0.0
+	if rain > 1.0:
+		rain = 1.0
+	return Vector2(temp, rain)
 
 
 # Reset noise cache — call after Worldgen.apply_world_seed for correctness.
@@ -103,6 +163,9 @@ static func reset() -> void:
 	_amplitude_noise = null
 	_depth_noise = null
 	_forest_noise = null
+	_temp_noise = null
+	_rain_noise = null
+	_extreme_noise = null
 
 
 # Build the 5×17×5 coarse density grid for a chunk. Direct port of
@@ -187,17 +250,24 @@ static func density_grid(chunk_x: int, chunk_z: int) -> PackedFloat64Array:
 	var density_idx: int = 0  # iterates x,y,z in vanilla order
 	var column_idx: int = 0  # iterates 2D x,z
 
+	# Vanilla samples climate at the CENTER of each coarse cell (px.java:198-202):
+	#   n10 = 16 / GRID_X = 3 (integer)
+	#   n11 = i2 * 3 + 1 = {1, 4, 7, 10, 13}
+	# We compute climate at world coords (chunk_x*16 + n11, chunk_z*16 + n12).
+	const _CLIMATE_OFFSETS: Array = [1, 4, 7, 10, 13]
+
 	for ix in range(GRID_X):
+		var center_x: float = float(chunk_x * 16 + _CLIMATE_OFFSETS[ix])
 		for iz in range(GRID_Z):
-			# Climate = 0.5 constant for Phase 3 (Phase 4 ports cy.java
-			# biome temp/rain). d7 calc with t=0.5, r=0.5: t*r=0.25,
-			# (1-0.25)^4 = 0.316, d7 = 1-0.316 = 0.684.
-			var d5: float = 0.5  # temperature
-			var d6: float = 0.5 * d5  # rain × temp = 0.25
+			var center_z: float = float(chunk_z * 16 + _CLIMATE_OFFSETS[iz])
+			# Climate from FastNoiseLite-based vanilla po.java port.
+			var climate: Vector2 = climate_at(center_x, center_z)
+			var d5: float = climate.x  # temperature
+			var d6: float = climate.y * d5  # rain × temp (px.java:202)
 			var d7: float = 1.0 - d6
 			d7 *= d7
 			d7 *= d7
-			d7 = 1.0 - d7  # ≈ 0.684 with constant climate
+			d7 = 1.0 - d7  # = 1 - (1 - temp×rain)^4
 
 			# d8 — amplitude (px.java:208-211)
 			var d8: float = (g_grid[column_idx] + AMPLITUDE_OFFSET) / AMPLITUDE_DIVISOR
