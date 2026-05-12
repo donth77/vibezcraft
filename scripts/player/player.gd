@@ -1139,16 +1139,15 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-spawn safety: while the budget window is active, check every
-	# 10 ticks if the player is in water, and relocate immediately if so.
-	# Window starts after loading completes, lasts ~1.5 s. The 10-tick
-	# spacing avoids per-frame teleport jitter; firing immediately on
-	# water (instead of waiting for the budget to expire) handles the
-	# case where the player landed in water and would otherwise float
-	# until the delay.
+	# Post-spawn safety: check EVERY tick (no gating) while the budget is
+	# open. _relocate_if_unsafe_spawn sets ticks_remaining = 0 on success
+	# so we can't loop; on failure (no safe column in 32-cell radius) we
+	# retry next tick. Earlier "every 10 ticks" gating let the player be
+	# visible underwater for ~170 ms after loading finished and before the
+	# first check fired — produced the "saw myself underwater" flicker.
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
-		if _spawn_check_ticks_remaining % 10 == 0 and _is_in_water():
+		if _is_in_water():
 			if _relocate_if_unsafe_spawn():
 				_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
@@ -1964,8 +1963,12 @@ func _relocate_if_unsafe_spawn() -> bool:
 				var above2: int = cm.get_world_block(Vector3i(x, sy + 2, z))
 				if above1 != Blocks.AIR or above2 != Blocks.AIR:
 					continue
-				# Found a dry land column — teleport here.
-				global_position = Vector3(float(x) + 0.5, float(sy) + 1.5, float(z) + 0.5)
+				# Found a dry land column — teleport here. Player capsule
+				# centre needs to sit at sy+2.0 so feet (centre - 0.9) land
+				# at sy+1.1, just above the solid surface block at sy. The
+				# old `sy + 1.5` put feet at sy+0.5 — INSIDE the surface
+				# block — and the CharacterBody3D got wedged.
+				global_position = Vector3(float(x) + 0.5, float(sy) + 2.0, float(z) + 0.5)
 				velocity = Vector3.ZERO
 				_fall_immune_next_landing = true
 				return true
