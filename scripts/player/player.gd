@@ -1139,16 +1139,17 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-load spawn relocate. Spawn / respawn places the player at a
-	# fixed (x, z) but the actual chunk surface (in 3D mode) may not
-	# match the 2D heightmap, OR the chunk may not even be loaded yet
-	# (respawn after walking far). Run the relocate check for ~30 ticks
-	# after spawn so a chunk that loads on tick 5 still gets the player
-	# placed safely.
+	# Post-spawn safety: if the player landed in water after the initial
+	# fall, teleport to nearest dry land. Only fires ONCE, after they've
+	# touched the floor (so we're not interrupting the spawn fall or
+	# normal mid-air gameplay). Window expires after 30 ticks even if
+	# they never land (corner case: spawn over a deep cave).
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
-		if _relocate_if_unsafe_spawn():
-			# Successfully placed on dry land — stop checking.
+		# Only relocate AFTER landing AND only if in water. Avoids
+		# teleporting during the spawn fall or interrupting jumps.
+		if is_on_floor() and _is_in_water():
+			_relocate_if_unsafe_spawn()
 			_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
