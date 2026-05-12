@@ -129,9 +129,12 @@ const _FLOWER_SALT_YELLOW: int = 0xF102
 const _FLOWER_SALT_BROWN: int = 0xF103
 const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
 
-# Sugar cane scatter — vanilla BlockReed placement runs as part of biome
-# decoration. Per chunk: 10 placement attempts at random (x, z).
-const _SUGAR_CANE_ATTEMPTS: int = 10
+# Sugar cane scatter — vanilla Beta BlockReed runs 10 attempts/chunk
+# but our success rate is higher (water-adjacency check passes more
+# often with our terrain), so the visible density was too dense.
+# Dialed down to 4 attempts. User reported 'higher amount of naturally
+# occurring sugarcane than vanilla' 2026-05-12.
+const _SUGAR_CANE_ATTEMPTS: int = 4
 const _SUGAR_CANE_SALT: int = 0xC4ED
 # Cactus scatter — Desert biome only. Vanilla rate is roughly 1-2 cacti
 # per desert chunk; we attempt 8 placements with high reject rate.
