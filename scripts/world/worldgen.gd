@@ -279,8 +279,11 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 			# + _soil_noise for sand/gravel/dirt-depth) has them ready.
 			Worldgen3D._ensure_noises(WORLD_SEED)
 			chunk.blocks = _native_worldgen.call("fill_chunk_3d", chunk_x, chunk_z)
-			# Recompute max_y (chunk init is zeroed, fill_chunk wrote the
-			# blocks but didn't track max_y).
+			# Native fill_chunk_3d writes raw bytes — it doesn't update the
+			# Chunk's bookkeeping (max_y, height_map, has_water_cells).
+			# Without these, the lighting pass treats every column as
+			# 'sky covered above y=0' → entire world appears in shadow,
+			# water doesn't get the water-shader pass, etc.
 			var my: int = 0
 			for x in range(Chunk.SIZE_X):
 				for z in range(Chunk.SIZE_Z):
@@ -290,6 +293,10 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 								my = y
 							break
 			chunk.max_y = my
+			# fill_chunk_3d writes WATER_STILL for under-sea AIR cells.
+			chunk.has_water_cells = true
+			# Heightmap is stale — rebuild on next is_sky_exposed query.
+			chunk._height_map_dirty = true
 		else:
 			Worldgen3D.fill_chunk(chunk, chunk_x, chunk_z)
 		PerfProbe.end("worldgen.3d.fill_chunk", fill_token)
