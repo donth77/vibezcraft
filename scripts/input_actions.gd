@@ -61,6 +61,12 @@ static func register_defaults() -> void:
 	# combined). Used to diagnose lighting fill vs mesher packing — see
 	# `chunk.gdshader` debug_view uniform.
 	_add_key("debug_lighting_view", KEY_F8)
+	# B = biome / surface scan. Dumps a 32×32 ASCII biome map + per-chunk
+	# top-block composition for the chunks around the player to the console
+	# stdout. Useful for diagnosing biome boundaries and scatter density
+	# (e.g. 'why is there snow in this forest?'). Console-output rather
+	# than panel UI to keep the F3 readout uncluttered.
+	_add_key("debug_biome_scan", KEY_B)
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:

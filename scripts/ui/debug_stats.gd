@@ -147,6 +147,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		var label: String = ["normal", "sky_light", "block_light", "combined"][_light_view]
 		print("[debug] chunk light heatmap = %d (%s)" % [_light_view, label])
 		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("debug_biome_scan") and Game.debug_enabled:
+		_dump_biome_scan()
+		get_viewport().set_input_as_handled()
 
 
 func _on_scout_pressed() -> void:
@@ -311,6 +314,137 @@ func _scout_chunks_around_player() -> Dictionary:
 		"chunks_with_caves": chunks_with_caves,
 		"biome_counts": biome_counts,
 	}
+
+
+# B-key handler — dump diagnostic info for the area around the player to
+# stdout. Three sections: an ASCII biome map (32×32 around player),
+# surface-block composition for the player's chunk, and current biome
+# climate readings. Console output (not panel) so the F3 readout stays
+# uncluttered. Only runs in 3D mode + when debug_enabled.
+func _dump_biome_scan() -> void:
+	if _player == null:
+		print("[biome-scan] no player ref")
+		return
+	if not Worldgen.terrain_3d_enabled:
+		print("[biome-scan] 3D mode is off — biome system inactive")
+		return
+	var p: Vector3 = _player.global_position
+	var px: int = int(floor(p.x))
+	var pz: int = int(floor(p.z))
+	var pcx: int = int(floor(p.x / 16.0))
+	var pcz: int = int(floor(p.z / 16.0))
+
+	print("=== BIOME SCAN @ (%d, %d) chunk (%d, %d) ===" % [px, pz, pcx, pcz])
+	# Climate at player
+	var climate: Vector2 = Worldgen3D.climate_at(float(px), float(pz))
+	var bid: int = Worldgen3D.biome_at(float(px), float(pz))
+	print(
+		(
+			"climate: temp=%.3f rain=%.3f → biome=%s (cold=%s)"
+			% [
+				climate.x,
+				climate.y,
+				Worldgen3D.Biome.keys()[bid],
+				str(Worldgen3D.biome_is_cold(bid)),
+			]
+		)
+	)
+
+	# 32×32 biome map centered on player (16 cells in each direction)
+	# Each char is one cell. Legend: F=Forest H=Shrubland V=Savanna
+	# C=Cold(Tundra/Taiga/IceDesert) D=Desert P=Plains R=Rainforest
+	# S=SeasonalForest W=Swampland @ =player position
+	var legend: Dictionary = {
+		Worldgen3D.Biome.RAINFOREST: "R",
+		Worldgen3D.Biome.SWAMPLAND: "W",
+		Worldgen3D.Biome.SEASONAL_FOREST: "S",
+		Worldgen3D.Biome.FOREST: "F",
+		Worldgen3D.Biome.SAVANNA: "V",
+		Worldgen3D.Biome.SHRUBLAND: "H",
+		Worldgen3D.Biome.TAIGA: "T",
+		Worldgen3D.Biome.DESERT: "D",
+		Worldgen3D.Biome.PLAINS: "P",
+		Worldgen3D.Biome.ICE_DESERT: "I",
+		Worldgen3D.Biome.TUNDRA: "U"
+	}
+	print("biome map (32×32 cells, centered on player @, T/U/I = cold biomes):")
+	for dz in range(-16, 16):
+		var line: String = ""
+		for dx in range(-16, 16):
+			if dx == 0 and dz == 0:
+				line += "@"
+			else:
+				var b: int = Worldgen3D.biome_at(float(px + dx), float(pz + dz))
+				line += legend.get(b, "?")
+		print("  " + line)
+
+	# Surface block composition for the player's chunk (and 8 neighbors)
+	if _chunk_manager == null:
+		print("(no chunk manager — skipping surface block dump)")
+		return
+	var chunks_dict: Dictionary = _chunk_manager.get("_chunks")
+	if chunks_dict == null:
+		return
+	var counts_surf: Dictionary = {}
+	var counts_above: Dictionary = {}
+	var n_cols: int = 0
+	for dcx in range(-1, 2):
+		for dcz in range(-1, 2):
+			var key := Vector2i(pcx + dcx, pcz + dcz)
+			if not chunks_dict.has(key):
+				continue
+			var node = chunks_dict[key]
+			if node == null or not ("chunk" in node):
+				continue
+			var chunk: Chunk = node.chunk
+			if chunk == null:
+				continue
+			for x in range(16):
+				for z in range(16):
+					n_cols += 1
+					var sy: int = -1
+					for y in range(127, -1, -1):
+						var b: int = chunk.get_block_unchecked(x, y, z)
+						if (
+							b != Blocks.AIR
+							and b != Blocks.WATER_STILL
+							and b != Blocks.WATER_FLOWING
+						):
+							sy = y
+							break
+					if sy < 0:
+						continue
+					var b_surf: int = chunk.get_block_unchecked(x, sy, z)
+					counts_surf[b_surf] = int(counts_surf.get(b_surf, 0)) + 1
+					if sy < 127:
+						var b_above: int = chunk.get_block_unchecked(x, sy + 1, z)
+						if b_above != Blocks.AIR:
+							counts_above[b_above] = int(counts_above.get(b_above, 0)) + 1
+	if n_cols == 0:
+		print("(player's 3×3 chunks not loaded — fly closer + retry)")
+		return
+	print("surface blocks across 3×3 loaded chunks (%d columns):" % n_cols)
+	var keys: Array = counts_surf.keys()
+	keys.sort_custom(func(a, b): return counts_surf[a] > counts_surf[b])
+	for k: int in keys:
+		print(
+			(
+				"  %3d %s: %d (%.1f%%)"
+				% [k, Blocks.name_of(k), counts_surf[k], 100.0 * counts_surf[k] / n_cols]
+			)
+		)
+	if not counts_above.is_empty():
+		print("on-top of surface (plants / decorations):")
+		var keys2: Array = counts_above.keys()
+		keys2.sort_custom(func(a, b): return counts_above[a] > counts_above[b])
+		for k: int in keys2:
+			print(
+				(
+					"  %3d %s: %d (%.1f%%)"
+					% [k, Blocks.name_of(k), counts_above[k], 100.0 * counts_above[k] / n_cols]
+				)
+			)
+	print("=== END BIOME SCAN ===")
 
 
 # PerfProbe p50/p95 (in µs) per instrumented site. Shown in a small font
