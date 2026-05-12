@@ -1075,6 +1075,21 @@ struct Climate {
 	double rain;
 };
 
+// Biome enum mirroring Worldgen3D.Biome (for biome_at_native).
+enum BiomeId {
+	BIOME_RAINFOREST = 0,
+	BIOME_SWAMPLAND = 1,
+	BIOME_SEASONAL_FOREST = 2,
+	BIOME_FOREST = 3,
+	BIOME_SAVANNA = 4,
+	BIOME_SHRUBLAND = 5,
+	BIOME_TAIGA = 6,
+	BIOME_DESERT = 7,
+	BIOME_PLAINS = 8,
+	BIOME_ICE_DESERT = 9,
+	BIOME_TUNDRA = 10
+};
+
 Climate climate_at_native(double world_x, double world_z) {
 	const double temp_raw = simplex_octaves_sample_2d(g_w3d_noise.temp, world_x, world_z, 0.025, 0.25);
 	const double rain_raw = simplex_octaves_sample_2d(g_w3d_noise.rain, world_x, world_z, 0.05, 0.3333333333333333);
@@ -1088,6 +1103,39 @@ Climate climate_at_native(double world_x, double world_z) {
 	if (rain < 0.0) rain = 0.0;
 	if (rain > 1.0) rain = 1.0;
 	return {temp, rain};
+}
+
+// Mirror Worldgen3D.biome_at — gg.java decision tree port.
+int biome_at_native(double world_x, double world_z) {
+	const Climate c = climate_at_native(world_x, world_z);
+	const double temp = c.temp;
+	const double rain = c.rain * temp;
+	if (temp < 0.1) return BIOME_TUNDRA;
+	if (rain < 0.2) {
+		if (temp < 0.5) return BIOME_TUNDRA;
+		if (temp < 0.95) return BIOME_SAVANNA;
+		return BIOME_DESERT;
+	}
+	if (rain > 0.5 && temp < 0.7) return BIOME_SWAMPLAND;
+	if (temp < 0.5) return BIOME_TAIGA;
+	if (temp < 0.97) {
+		if (rain < 0.35) return BIOME_SHRUBLAND;
+		return BIOME_FOREST;
+	}
+	if (rain < 0.45) return BIOME_PLAINS;
+	if (rain < 0.9) return BIOME_SEASONAL_FOREST;
+	return BIOME_RAINFOREST;
+}
+
+// Mirror Worldgen3D.biome_top_block / biome_filler_block.
+int biome_top_block_native(int biome) {
+	if (biome == BIOME_DESERT || biome == BIOME_ICE_DESERT) return WorldgenNative::SAND;
+	return WorldgenNative::GRASS;
+}
+
+int biome_filler_block_native(int biome) {
+	if (biome == BIOME_DESERT || biome == BIOME_ICE_DESERT) return WorldgenNative::SAND;
+	return WorldgenNative::DIRT;
 }
 
 }  // anonymous namespace
@@ -1244,6 +1292,120 @@ PackedByteArray WorldgenNative::fill_chunk_3d(int p_chunk_x, int p_chunk_z) cons
 	return out;
 }
 
+// Native port of Worldgen._apply_surface_layer_3d (vanilla px.java::a).
+// Walks each column top-down with shared JavaRandom: bedrock band,
+// sand/gravel beach overlay, dirt-depth filler, biome top block. Bit-
+// exact with the GDScript port (same RNG sequence).
+PackedByteArray WorldgenNative::apply_surface_layer_3d(
+		int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const {
+	if (!g_w3d_noise.valid || g_w3d_noise.cached_seed != world_seed) {
+		g_w3d_noise.rebuild(world_seed);
+	}
+	PackedByteArray out = p_blocks;
+	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
+	if (out.size() < volume) return out;
+	uint8_t *blocks = out.ptrw();
+
+	// Vanilla px.java:169 seed pattern.
+	JavaRandom rng(int64_t(p_chunk_x) * 341873128712LL +
+				   int64_t(p_chunk_z) * 132897987541LL);
+
+	// Sample r/s/t noise grids (16x16) using cached beach/soil noises.
+	// r = sand band: this.n.a(r, x*16, z*16, 0, 16,16,1, 1/32, 1/32, 1)
+	// s = gravel band: this.n.a(s, z*16, 109.0134, x*16, 16,1,16, 1/32, 1, 1/32) — note swap!
+	// t = dirt depth: this.o.a(t, x*16, z*16, 0, 16,16,1, 1/16, 1/16, 1/16)
+	double r_noise[256];
+	double s_noise[256];
+	double t_noise[256];
+	std::fill(r_noise, r_noise + 256, 0.0);
+	std::fill(s_noise, s_noise + 256, 0.0);
+	std::fill(t_noise, t_noise + 256, 0.0);
+	double amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.beach) {
+		o.sample_3d_grid_additive(r_noise, double(p_chunk_x * 16), double(p_chunk_z * 16), 0.0,
+				16, 16, 1, 0.03125 * amp_v, 0.03125 * amp_v, 1.0 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+	amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.beach) {
+		o.sample_3d_grid_additive(s_noise, double(p_chunk_z * 16), 109.0134, double(p_chunk_x * 16),
+				16, 1, 16, 0.03125 * amp_v, 1.0 * amp_v, 0.03125 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+	amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.soil) {
+		o.sample_3d_grid_additive(t_noise, double(p_chunk_x * 16), double(p_chunk_z * 16), 0.0,
+				16, 16, 1, 0.0625 * amp_v, 0.0625 * amp_v, 0.0625 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+
+	const int sea = W3D_SEA_LEVEL;  // 64
+
+	for (int x = 0; x < SIZE_X; x++) {
+		for (int z = 0; z < SIZE_Z; z++) {
+			const double world_x_d = double(p_chunk_x * SIZE_X + x);
+			const double world_z_d = double(p_chunk_z * SIZE_Z + z);
+			const int biome = biome_at_native(world_x_d, world_z_d);
+			const int biome_top = biome_top_block_native(biome);
+			const int biome_filler = biome_filler_block_native(biome);
+			const int ni = x + z * 16;
+			const bool bl_sand = r_noise[ni] + rng.next_double() * 0.2 > 0.0;
+			const bool bl_gravel = s_noise[ni] + rng.next_double() * 0.2 > 3.0;
+			const int n5 = static_cast<int>(t_noise[ni] / 3.0 + 3.0 + rng.next_double() * 0.25);
+			int n6 = -1;
+			int by2 = biome_top;
+			int by3 = biome_filler;
+			for (int y = SIZE_Y - 1; y >= 0; y--) {
+				const int br = rng.next_int_bounded(5);
+				const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+				if (y <= br) {
+					blocks[idx] = static_cast<uint8_t>(BEDROCK);
+					continue;
+				}
+				const int existing = blocks[idx];
+				if (existing == AIR) {
+					n6 = -1;
+					continue;
+				}
+				if (existing != STONE) {
+					continue;
+				}
+				if (n6 == -1) {
+					if (n5 <= 0) {
+						by2 = AIR;
+						by3 = STONE;
+					} else if (y >= sea - 4 && y <= sea + 1) {
+						by2 = biome_top;
+						by3 = biome_filler;
+						if (bl_gravel) {
+							by2 = AIR;
+							by3 = GRAVEL;
+						}
+						if (bl_sand) {
+							by2 = SAND;
+							by3 = SAND;
+						}
+					}
+					if (y < sea && by2 == AIR) {
+						by2 = WATER_STILL;
+					}
+					n6 = n5;
+					if (y >= sea - 1) {
+						blocks[idx] = static_cast<uint8_t>(by2);
+					} else {
+						blocks[idx] = static_cast<uint8_t>(by3);
+					}
+					continue;
+				}
+				if (n6 <= 0) continue;
+				n6--;
+				blocks[idx] = static_cast<uint8_t>(by3);
+			}
+		}
+	}
+	return out;
+}
+
 void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("build_base_terrain", "chunk_x", "chunk_z", "heightmap"),
@@ -1257,6 +1419,9 @@ void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("fill_chunk_3d", "chunk_x", "chunk_z"),
 			&WorldgenNative::fill_chunk_3d);
+	ClassDB::bind_method(
+			D_METHOD("apply_surface_layer_3d", "chunk_x", "chunk_z", "blocks"),
+			&WorldgenNative::apply_surface_layer_3d);
 	// Static class method exposed as instance-callable so GDScript can
 	// invoke `_native_worldgen.set_world_seed(N)` symmetrically with the
 	// other native APIs. The static keyword in the header keeps the

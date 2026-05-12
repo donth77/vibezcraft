@@ -301,7 +301,19 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 			Worldgen3D.fill_chunk(chunk, chunk_x, chunk_z)
 		PerfProbe.end("worldgen.3d.fill_chunk", fill_token)
 		var surf_token := PerfProbe.begin("worldgen.3d.surface_layer")
-		_apply_surface_layer_3d(chunk, chunk_x, chunk_z)
+		# Native fast path: WorldgenNative.apply_surface_layer_3d ports the
+		# px.java::a column walk to C++. ~30 ms savings per chunk.
+		if _native_worldgen != null and _native_worldgen.has_method("apply_surface_layer_3d"):
+			chunk.blocks = _native_worldgen.call(
+				"apply_surface_layer_3d", chunk_x, chunk_z, chunk.blocks
+			)
+			# Surface walk wrote BEDROCK at low Y + sand/dirt at surface;
+			# none of it changes max_y (still bounded above by what
+			# fill_chunk_3d wrote). Mark heightmap dirty just in case
+			# bedrock placement broke the previous topmost-cell.
+			chunk._height_map_dirty = true
+		else:
+			_apply_surface_layer_3d(chunk, chunk_x, chunk_z)
 		PerfProbe.end("worldgen.3d.surface_layer", surf_token)
 	elif _native_worldgen != null:
 		_build_base_terrain_native(chunk, chunk_x, chunk_z)

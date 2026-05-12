@@ -33,6 +33,8 @@ public:
 	static constexpr int STONE = 2;
 	static constexpr int DIRT = 3;
 	static constexpr int GRASS = 4;
+	static constexpr int SAND = 9;
+	static constexpr int GRAVEL = 18;
 	static constexpr int WATER_FLOWING = 23;
 	static constexpr int WATER_STILL = 24;
 	static constexpr int LAVA_STILL = 26;
@@ -97,6 +99,13 @@ public:
 	// AIR cells (per the px.java density crossing). The GDScript caller still
 	// runs the surface_layer pass (vanilla port + bedrock RNG) on top.
 	PackedByteArray fill_chunk_3d(int p_chunk_x, int p_chunk_z) const;
+
+	// Native port of Worldgen._apply_surface_layer_3d (px.java::a) — top-down
+	// per-column walk with shared JavaRandom: bedrock band, beach sand/gravel,
+	// dirt-depth filler, biome top block. Bit-exact with the GDScript port
+	// (same RNG sequence). Returns mutated blocks; caller assigns to chunk.blocks.
+	PackedByteArray apply_surface_layer_3d(
+			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
 
 protected:
 	static void _bind_methods();
