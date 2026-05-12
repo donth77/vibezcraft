@@ -227,13 +227,13 @@ var _was_on_floor: bool = false
 # the ground for the first time post-spawn. Without this we'd take 37
 # damage from the initial drop at (8, 100, 8) and respawn-loop forever.
 var _fall_immune_next_landing: bool = true
-# True until the post-load spawn-relocate check runs. Spawn picks a
-# safe column from the SPAWN-CHUNK heightmap, but in 3D mode the
-# heightmap is 2D-only and may not match the actual chunk surface →
-# player can land in water or fall through air. After loading
-# completes, look at the actual chunk and teleport to nearest dry
-# land if needed.
-var _needs_post_load_spawn_check: bool = true
+# Counts down each physics tick after spawn / respawn. While > 0, the
+# spawn-relocate check runs every tick (looking at the actual loaded
+# chunks for dry land). Decrements to 0 once relocated or after the
+# budget expires. Multi-frame budget so a respawn into a region whose
+# chunks haven't loaded yet still gets corrected once they're in.
+# 30 ticks ≈ 0.5 s — well within the chunk-streaming window.
+var _spawn_check_ticks_remaining: int = 30
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -1139,13 +1139,17 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-load spawn relocate. Spawn picks a column from the 2D heightmap
-	# but the actual 3D chunk surface may differ. After loading is done,
-	# look at the real chunk and teleport to the nearest dry land if the
-	# player ended up in water or air.
-	if _needs_post_load_spawn_check and not Game.is_loading:
-		_needs_post_load_spawn_check = false
-		_relocate_if_unsafe_spawn()
+	# Post-load spawn relocate. Spawn / respawn places the player at a
+	# fixed (x, z) but the actual chunk surface (in 3D mode) may not
+	# match the 2D heightmap, OR the chunk may not even be loaded yet
+	# (respawn after walking far). Run the relocate check for ~30 ticks
+	# after spawn so a chunk that loads on tick 5 still gets the player
+	# placed safely.
+	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
+		_spawn_check_ticks_remaining -= 1
+		if _relocate_if_unsafe_spawn():
+			# Successfully placed on dry land — stop checking.
+			_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
@@ -1473,6 +1477,12 @@ func _respawn() -> void:
 	_damage_cooldown_remaining = 0.0
 	_regen_accum = 0.0
 	health = MAX_HEALTH
+	# Re-arm the spawn-relocate check so a respawn into water / floating /
+	# above an unloaded chunk gets corrected over the next ~30 physics
+	# ticks (mirrors the initial-spawn safety net). Multi-tick budget so
+	# a respawn whose chunks haven't streamed in yet still gets relocated
+	# once they load.
+	_spawn_check_ticks_remaining = 30
 	# Clear fire + lava state — vanilla Entity.reset() zeros bg (fireTicks)
 	# on respawn. Without this the trailing burn keeps ticking damage after
 	# the player teleports back to spawn.
@@ -1916,16 +1926,16 @@ func _update_sneak() -> void:
 # Post-load spawn safety net. Walk a spiral outward from the player's
 # current (x, z) and look at the actual loaded-chunk blocks for a column
 # whose surface is dry land at or above sea level. Teleports the player
-# to that column. Bounded to a 32-cell radius so it always finds
-# something within the loaded chunk window. Skips if the player is
-# already on safe ground.
-func _relocate_if_unsafe_spawn() -> void:
+# to that column. Returns true on success (relocated OR already safe),
+# false if no safe column found in the loaded radius (so the caller
+# can keep retrying as more chunks stream in).
+func _relocate_if_unsafe_spawn() -> bool:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):
-		return
+		return false
 	# Already safe? Spawn in water or floating in air = unsafe.
 	if not _is_in_water() and not _is_floating_in_air(cm):
-		return
+		return true  # nothing to do, stop retrying
 	var px: int = int(floor(global_position.x))
 	var pz: int = int(floor(global_position.z))
 	# Spiral search outward.
@@ -1953,7 +1963,8 @@ func _relocate_if_unsafe_spawn() -> void:
 				global_position = Vector3(float(x) + 0.5, float(sy) + 1.5, float(z) + 0.5)
 				velocity = Vector3.ZERO
 				_fall_immune_next_landing = true
-				return
+				return true
+	return false  # no safe column found, caller should retry
 
 
 # True if the column at the player's position has only AIR around them
