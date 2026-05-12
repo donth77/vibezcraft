@@ -37,7 +37,7 @@ const _SAPLING_GROW_MAX_PER_TICK: int = 4
 @export var render_distance: int = 8
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
-@export var max_concurrent_jobs: int = 4
+@export var max_concurrent_jobs: int = 8
 # Cap on _apply_mesh_data calls per frame. Each apply = up to 3 ArrayMesh
 # VBOs + trimesh; stacking them on one frame caused 120→70 fps spikes.
 @export var apply_budget_per_frame: int = 1
