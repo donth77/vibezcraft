@@ -72,14 +72,12 @@ static var _soil_noise: NoiseOctaves  # px.java this.o (4-octave 2D, unused in P
 static var _amplitude_noise: NoiseOctaves  # px.java this.a (10-octave 2D)
 static var _depth_noise: NoiseOctaves  # px.java this.b (16-octave 2D)
 static var _forest_noise: NoiseOctaves  # px.java this.c (8-octave 2D, unused in Phase 3)
-# Phase 4: climate noises matching vanilla po.java (WorldChunkManager).
-# Vanilla uses Simplex (aw.java) via 4-octave ng.java; we use FastNoiseLite
-# Simplex for speed/simplicity. Output is approximate-vanilla, not exact.
-# Scales match vanilla po.java:50-52 (temperature 0.025, rainfall 0.05,
-# extreme 0.25 per-coord step). Each gets its own seed offset.
-static var _temp_noise: FastNoiseLite
-static var _rain_noise: FastNoiseLite
-static var _extreme_noise: FastNoiseLite
+# Climate noises — vanilla po.java port via NoiseOctavesSimplex (ng.java).
+# Each gets its OWN JavaRandom seeded from world_seed * multiplier
+# (vanilla po.java:19-21).
+static var _temp_noise: NoiseOctavesSimplex
+static var _rain_noise: NoiseOctavesSimplex
+static var _extreme_noise: NoiseOctavesSimplex
 static var _cached_seed: int = 0  # tracks which seed the noises were built with
 
 
@@ -125,24 +123,18 @@ static func _ensure_noises(world_seed: int) -> void:
 	# ng.java, climate_at() manually applies a 3× amplification on
 	# the FBM output. Empirical: gives temp_raw effective range
 	# ~[-3, +3], allowing temp to reach < 0.1 (TUNDRA) at low tail.
-	_temp_noise = FastNoiseLite.new()
-	_temp_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_temp_noise.frequency = 0.005
-	_temp_noise.seed = (world_seed * 9871) & 0x7FFFFFFF
-	_temp_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_temp_noise.fractal_octaves = 4
-	_rain_noise = FastNoiseLite.new()
-	_rain_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_rain_noise.frequency = 0.01
-	_rain_noise.seed = (world_seed * 39811) & 0x7FFFFFFF
-	_rain_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_rain_noise.fractal_octaves = 4
-	_extreme_noise = FastNoiseLite.new()
-	_extreme_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_extreme_noise.frequency = 0.05
-	_extreme_noise.seed = (world_seed * 543321) & 0x7FFFFFFF
-	_extreme_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	_extreme_noise.fractal_octaves = 2
+	# Climate noises — vanilla po.java port. Each has its own Random
+	# seeded from `world_seed * multiplier`, mirroring po.java:19-21:
+	#   e (temp):    new ng(new Random(seed * 9871L), 4)
+	#   f (rain):    new ng(new Random(seed * 39811L), 4)
+	#   g (extreme): new ng(new Random(seed * 543321L), 2)
+	# 4 octaves of reverse-FBM Simplex give vanilla's [-N, +N] output
+	# range — wide enough that the (1 - (1 - temp)^2) transform
+	# occasionally produces TUNDRA/DESERT extremes naturally, no amp
+	# hack required.
+	_temp_noise = NoiseOctavesSimplex.create(JavaRandom.new(world_seed * 9871), 4)
+	_rain_noise = NoiseOctavesSimplex.create(JavaRandom.new(world_seed * 39811), 4)
+	_extreme_noise = NoiseOctavesSimplex.create(JavaRandom.new(world_seed * 543321), 2)
 	_cached_seed = world_seed
 
 
@@ -153,15 +145,13 @@ static func climate_at(world_x: float, world_z: float) -> Vector2:
 	_ensure_noises(Worldgen.WORLD_SEED)
 	# Vanilla uses raw noise output then clamps; FastNoiseLite returns
 	# [-1, 1] which is already similar to vanilla simplex range.
-	# Amplify FBM output to widen distribution. FastNoiseLite_FBM
-	# returns [-1, 1]; vanilla ng.java's reverse-FBM has [-N, +N] range.
-	# Math for cold-biome support:
-	#   TUNDRA needs temp < 0.1 → temp_pre < 0.05 → temp_raw < -4.3
-	#   TAIGA  needs temp < 0.5 → temp_pre < 0.29 → temp_raw < -2.7
-	# So amp must let temp_raw reach -4 occasionally. With 5× amp,
-	# noise output of -0.86 → temp_raw -4.3 → TUNDRA possible.
-	var temp_raw: float = _temp_noise.get_noise_2d(world_x, world_z) * 5.0
-	var rain_raw: float = _rain_noise.get_noise_2d(world_x, world_z) * 5.0
+	# Vanilla po.java per-cell sampling. Each noise outputs ~[-N, +N]
+	# from 4-octave reverse-FBM Simplex (or 2-octave for extreme).
+	# Vanilla po.java:42-66 calls: ng.a(arr, x, z, 1, 1, scale, scale, biome_freq_decay)
+	# Scales: temp=0.025, rain=0.05, extreme=0.25
+	# Biome freq decay: temp=0.25, rain=0.3333, extreme=0.5882
+	var temp_raw: float = _temp_noise.sample_2d(world_x, world_z, 0.025, 0.25)
+	var rain_raw: float = _rain_noise.sample_2d(world_x, world_z, 0.05, 0.3333333333333333)
 	# Vanilla po.java uses *0.15 dampening + 0.7/0.5 baseline + smoothstep,
 	# producing output clustered tight in [0.79, 0.98] for temp. That's
 	# because vanilla's `ng.java` 4-octave wrapper has reverse-FBM
@@ -189,7 +179,7 @@ static func climate_at(world_x: float, world_z: float) -> Vector2:
 	# visible cliffs / 1-block grass towers. The vanilla-faithful
 	# transform gives a warm climate with narrow variance, matching
 	# vanilla's smooth terrain shape.
-	var extreme_raw: float = _extreme_noise.get_noise_2d(world_x, world_z)
+	var extreme_raw: float = _extreme_noise.sample_2d(world_x, world_z, 0.25, 0.5882352941176471)
 	var extreme: float = extreme_raw * 1.1 + 0.5
 	var temp: float = (temp_raw * 0.15 + 0.7) * 0.99 + extreme * 0.01
 	temp = 1.0 - (1.0 - temp) * (1.0 - temp)
