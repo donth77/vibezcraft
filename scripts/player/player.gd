@@ -1139,15 +1139,16 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-spawn safety: check EVERY tick (no gating) while the budget is
-	# open. _relocate_if_unsafe_spawn sets ticks_remaining = 0 on success
-	# so we can't loop; on failure (no safe column in 32-cell radius) we
-	# retry next tick. Earlier "every 10 ticks" gating let the player be
-	# visible underwater for ~170 ms after loading finished and before the
-	# first check fired — produced the "saw myself underwater" flicker.
+	# Post-spawn safety: relocate-if-in-water with throttle. The spiral
+	# search inside _relocate_if_unsafe_spawn is ~130k block lookups
+	# (radius 32, column scans), so running it per-tick caused <30 fps
+	# stutter. Schedule: immediate check on tick 1, then retries every
+	# 20 ticks while still in water. Successful relocate ends the budget.
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
-		if _is_in_water():
+		var first_tick: bool = _spawn_check_ticks_remaining == 89
+		var retry_tick: bool = _spawn_check_ticks_remaining % 20 == 0
+		if (first_tick or retry_tick) and _is_in_water():
 			if _relocate_if_unsafe_spawn():
 				_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
@@ -1417,6 +1418,7 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 	health_changed.emit(health, MAX_HEALTH)
 	if health == 0:
 		_drop_inventory_on_death()
+		Music.set_paused(true)
 		died.emit()
 		_show_death_screen()
 
@@ -1470,6 +1472,7 @@ func _show_death_screen() -> void:
 # health. Vanilla shows a death screen with a Respawn button; that's
 # deferred until the death-flow UI lands.
 func _respawn() -> void:
+	Music.set_paused(false)
 	global_position = Vector3(8, 100.0, 8)
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y

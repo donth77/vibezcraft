@@ -60,6 +60,16 @@ func stop_music() -> void:
 		_player.stream = null
 
 
+# Pause / resume in-place — used by the death screen so a death-time
+# gap-timeout doesn't start a fresh track over the dying-player UI.
+# Different from stop_music() which fully tears down for menu return.
+func set_paused(paused: bool) -> void:
+	if _player != null:
+		_player.stream_paused = paused
+	if _gap_timer != null:
+		_gap_timer.paused = paused
+
+
 func set_volume(linear: float) -> void:
 	_volume_linear = clampf(linear, 0.0, 1.0)
 	_apply_volume()
