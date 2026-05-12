@@ -813,7 +813,7 @@ static func _emit_snow_layer_geometry(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	_plant_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array,
 ) -> void:
 	var fx: float = float(x)
 	var fy: float = float(y)
@@ -826,6 +826,10 @@ static func _emit_snow_layer_geometry(
 	var blk: int = chunk.get_block_light(x, y, z)
 	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
 	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
+	# Selection collision so the player's raycast can target this slab.
+	# Without this, the raycast falls through to the support block below
+	# and the snow can't be broken or right-click-targeted.
+	_emit_collision_box(plant_faces, mn, mx)
 
 
 static func _emit_box(

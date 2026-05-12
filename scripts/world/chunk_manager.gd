@@ -217,7 +217,17 @@ func _update_chunk_set() -> void:
 	for coord: Vector2i in _chunks:
 		if not needed.has(coord):
 			to_remove.append(coord)
+	# Throttle evictions to bound the per-frame spike. Crossing a chunk
+	# boundary makes ~17 chunks "not needed" at once; freeing all of them
+	# in one frame triggers ConcavePolygonShape3D + ArrayMesh teardown
+	# that ran ~170 ms in profiles. The to_remove set is rebuilt next
+	# frame, so leftover evictions get picked up — at 4/frame and 60 fps
+	# that's still 240 chunks/sec which dwarfs the boundary-cross rate.
+	const _MAX_EVICTIONS_PER_FRAME: int = 4
+	var evicted: int = 0
 	for coord: Vector2i in to_remove:
+		if evicted >= _MAX_EVICTIONS_PER_FRAME:
+			break
 		# If the chunk was edited while loaded, compress and persist its
 		# blocks before freeing the ChunkNode.
 		if _dirty_loaded.has(coord):
@@ -226,6 +236,7 @@ func _update_chunk_set() -> void:
 		_chunks[coord].cancel_remesh_task()
 		_chunks[coord].queue_free()
 		_chunks.erase(coord)
+		evicted += 1
 	# Drop queued chunks that are no longer needed. In-place reverse-loop
 	# removal avoids allocating a fresh Array + Callable every frame.
 	for i in range(_spawn_queue.size() - 1, -1, -1):
@@ -851,10 +862,11 @@ func _drop_plant_if_unsupported(coord: Vector2i, local_x: int, local_y: int, loc
 		return
 	var chunk: Chunk = _chunks[coord].chunk
 	var here_id: int = chunk.get_block(local_x, local_y, local_z)
-	# Only cross-quad plants pop off on support change. Cubes (dirt on
-	# stone, etc.) stay put. Future torches/levers will need a separate
-	# attachment-shape check.
-	if Blocks.mesh_shape(here_id) != Blocks.MESH_SHAPE_CROSS:
+	# Cross-quad plants AND the snow-layer slab pop off on support change
+	# (vanilla BlockSnow drops + dies if the cell below isn't a solid top).
+	# Other shapes (cubes, fences, doors) stay put.
+	var ms: int = Blocks.mesh_shape(here_id)
+	if ms != Blocks.MESH_SHAPE_CROSS and ms != Blocks.MESH_SHAPE_SNOW_LAYER:
 		return
 	# Drop AIR over it via set_world_block so chunk dirty + persistence
 	# bookkeeping fire the same as a player edit. The recursive call is
