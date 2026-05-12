@@ -227,6 +227,13 @@ var _was_on_floor: bool = false
 # the ground for the first time post-spawn. Without this we'd take 37
 # damage from the initial drop at (8, 100, 8) and respawn-loop forever.
 var _fall_immune_next_landing: bool = true
+# True until the post-load spawn-relocate check runs. Spawn picks a
+# safe column from the SPAWN-CHUNK heightmap, but in 3D mode the
+# heightmap is 2D-only and may not match the actual chunk surface →
+# player can land in water or fall through air. After loading
+# completes, look at the actual chunk and teleport to nearest dry
+# land if needed.
+var _needs_post_load_spawn_check: bool = true
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -1132,6 +1139,13 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Post-load spawn relocate. Spawn picks a column from the 2D heightmap
+	# but the actual 3D chunk surface may differ. After loading is done,
+	# look at the real chunk and teleport to the nearest dry land if the
+	# player ended up in water or air.
+	if _needs_post_load_spawn_check and not Game.is_loading:
+		_needs_post_load_spawn_check = false
+		_relocate_if_unsafe_spawn()
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
@@ -1899,6 +1913,63 @@ func _update_sneak() -> void:
 # column we saw (best of bad options — might still be water but
 # shallowest spot). Bounded to chunk (0,0) so we never move the player
 # beyond the chunk loader's initial-load radius.
+# Post-load spawn safety net. Walk a spiral outward from the player's
+# current (x, z) and look at the actual loaded-chunk blocks for a column
+# whose surface is dry land at or above sea level. Teleports the player
+# to that column. Bounded to a 32-cell radius so it always finds
+# something within the loaded chunk window. Skips if the player is
+# already on safe ground.
+func _relocate_if_unsafe_spawn() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return
+	# Already safe? Spawn in water or floating in air = unsafe.
+	if not _is_in_water() and not _is_floating_in_air(cm):
+		return
+	var px: int = int(floor(global_position.x))
+	var pz: int = int(floor(global_position.z))
+	# Spiral search outward.
+	for r in range(1, 33):
+		for dx in range(-r, r + 1):
+			for dz in range(-r, r + 1):
+				if abs(dx) != r and abs(dz) != r:
+					continue  # only ring at radius r
+				var x: int = px + dx
+				var z: int = pz + dz
+				# Find topmost solid (non-AIR, non-WATER) cell in this column.
+				var sy: int = -1
+				for y in range(127, 0, -1):
+					var b: int = cm.get_world_block(Vector3i(x, y, z))
+					if b != Blocks.AIR and not Blocks.is_water(b):
+						sy = y
+						break
+				if sy < Worldgen.SEA_LEVEL:
+					continue  # underwater seabed
+				# Cell above must be air (clearance for player capsule)
+				var above: int = cm.get_world_block(Vector3i(x, sy + 1, z))
+				if above != Blocks.AIR:
+					continue
+				# Found a dry land column — teleport here.
+				global_position = Vector3(float(x) + 0.5, float(sy) + 1.5, float(z) + 0.5)
+				velocity = Vector3.ZERO
+				_fall_immune_next_landing = true
+				return
+
+
+# True if the column at the player's position has only AIR around them
+# (no solid block within 4 cells below) — they're floating in air with
+# no landing in sight.
+func _is_floating_in_air(cm: Node) -> bool:
+	var x: int = int(floor(global_position.x))
+	var y: int = int(floor(global_position.y))
+	var z: int = int(floor(global_position.z))
+	for dy in range(0, 4):
+		var b: int = cm.get_world_block(Vector3i(x, y - dy, z))
+		if b != Blocks.AIR and not Blocks.is_water(b):
+			return false  # solid block within 4 cells below
+	return true
+
+
 func _find_safe_spawn_in_chunk() -> Vector2i:
 	var min_land_y: int = Worldgen.SEA_LEVEL + 2
 	var fallback: Vector2i = Vector2i(8, 8)

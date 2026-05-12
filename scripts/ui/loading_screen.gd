@@ -130,4 +130,7 @@ func _on_chunk_progress(loaded: int, total: int) -> void:
 	if _bar_fill_rect != null:
 		_bar_fill_rect.offset_right = pct * _BAR_WIDTH
 	if loaded >= total:
+		# Clear the loading-screen flag so in-game SFX (footsteps, block
+		# break/place, ambience) start playing only after world is ready.
+		Game.is_loading = false
 		queue_free()
