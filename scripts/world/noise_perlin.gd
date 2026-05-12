@@ -195,8 +195,16 @@ func sample_3d_grid_additive(
 				var n28: int = n27 & 0xFF
 				d26 -= float(n27)
 				var d27: float = d26 * d26 * d26 * (d26 * (d26 * 6.0 - 15.0) + 10.0)
-				if i6 == 0 or n28 != n16:
-					n16 = n28
+				# Vanilla z.java caches d18-d21 across i6 iterations when n28
+				# (integer Y cell) hasn't changed. But the cached values use
+				# d26 (Y subpixel) from the PREVIOUS iteration — stale when
+				# d26 advances. This produced visible terrain artifacts
+				# (1-block grass towers, fragmented surfaces) because the
+				# gradient × subpixel term diverged from the correct value.
+				# Disabling the cache (always recompute) makes terrain match
+				# direct sample_3d output exactly. ~5% slower per chunk; the
+				# correctness win is worth it.
+				if true:
 					n17 = _perm[n24] + n28
 					n18 = _perm[n17] + n26
 					n19 = _perm[n17 + 1] + n26
