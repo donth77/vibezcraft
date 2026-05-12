@@ -1139,14 +1139,18 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-spawn safety: after a 90-tick (~1.5 s) delay to let the
-	# initial spawn fall complete, check if the player ended up in
-	# water and relocate to nearest dry land. Single one-shot check —
-	# doesn't fire during the fall, doesn't interrupt later movement.
+	# Post-spawn safety: while the budget window is active, check every
+	# 10 ticks if the player is in water, and relocate immediately if so.
+	# Window starts after loading completes, lasts ~1.5 s. The 10-tick
+	# spacing avoids per-frame teleport jitter; firing immediately on
+	# water (instead of waiting for the budget to expire) handles the
+	# case where the player landed in water and would otherwise float
+	# until the delay.
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
-		if _spawn_check_ticks_remaining == 0 and _is_in_water():
-			_relocate_if_unsafe_spawn()
+		if _spawn_check_ticks_remaining % 10 == 0 and _is_in_water():
+			if _relocate_if_unsafe_spawn():
+				_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
