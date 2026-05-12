@@ -371,12 +371,12 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
 		# back to WATER (cave-air becomes underwater).
 		_fill_underwater_air_3d(chunk)
-		# Remove single floating terrain blocks (STONE/DIRT/GRASS/SAND
-		# with all 6 neighbors AIR). Trilerp output occasionally produces
-		# these as 1-cell pockets where density barely exceeds zero
-		# inside an otherwise-air region. Vanilla terrain doesn't have
-		# isolated floating blocks of any solid material.
-		_strip_floating_solo_blocks(chunk)
+		# Remove floating terrain blocks (single cells AND small islands).
+		# BFS from bedrock + chunk boundary through solid neighbors; any
+		# unvisited terrain block is a noise artifact and gets stripped.
+		# Trilerp output occasionally produces these in mid-air where
+		# density grazes above zero; vanilla terrain doesn't have them.
+		_strip_floating_terrain(chunk)
 		# Cold-biome ICE/snow overlay — runs after caves + water-fill
 		# so the topmost-water lookup sees the final water column.
 		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
@@ -594,41 +594,227 @@ static func _smooth_surface_spikes_3d(chunk: Chunk) -> void:
 	PerfProbe.end("worldgen.smooth_spikes", probe_token)
 
 
-# Strip 1-cell floating terrain. A STONE/DIRT/GRASS/SAND cell with
-# AIR on all 6 cardinal neighbors gets converted to AIR (or WATER below
-# sea level). Catches trilerp-output pockets where density grazes
-# above zero in mid-air. Skips blocks at chunk-edge (X/Z=0/15)
-# because we can't see the cross-chunk neighbor; minor visual cost
-# vs. perf of handling the cross-chunk read.
-static func _strip_floating_solo_blocks(chunk: Chunk) -> void:
-	var probe_token := PerfProbe.begin("worldgen.strip_solo")
-	for x in range(1, Chunk.SIZE_X - 1):
-		for z in range(1, Chunk.SIZE_Z - 1):
-			for y in range(1, Chunk.SIZE_Y - 1):
-				var b: int = chunk.get_block_unchecked(x, y, z)
-				if (
-					b != Blocks.STONE
-					and b != Blocks.DIRT
-					and b != Blocks.GRASS
-					and b != Blocks.SAND
-				):
-					continue
-				if chunk.get_block_unchecked(x - 1, y, z) != Blocks.AIR:
-					continue
-				if chunk.get_block_unchecked(x + 1, y, z) != Blocks.AIR:
-					continue
-				if chunk.get_block_unchecked(x, y - 1, z) != Blocks.AIR:
-					continue
-				if chunk.get_block_unchecked(x, y + 1, z) != Blocks.AIR:
-					continue
-				if chunk.get_block_unchecked(x, y, z - 1) != Blocks.AIR:
-					continue
-				if chunk.get_block_unchecked(x, y, z + 1) != Blocks.AIR:
-					continue
-				# Isolated floating block — strip it.
-				var fill: int = Blocks.WATER_STILL if y < SEA_LEVEL else Blocks.AIR
-				chunk.set_block_unchecked(x, y, z, fill)
-	PerfProbe.end("worldgen.strip_solo", probe_token)
+# Strip floating terrain blocks (singletons AND small islands).
+# Algorithm: BFS-mark every solid cell reachable from the bedrock
+# layer (y=0) or any chunk-boundary cell (could be connected via
+# neighbour chunk). Any unvisited cell whose block is a worldgen-
+# placed terrain type (STONE/DIRT/GRASS/SAND/GRAVEL) is a noise
+# artifact and gets converted to AIR (or WATER if y < SEA_LEVEL).
+#
+# Why include chunk-boundary cells as roots: chunks are generated
+# in isolation, so a real overhang spanning two chunks would look
+# "unsupported" to a chunk that doesn't see its neighbour. Seeding
+# from the boundary is conservative — never strips legit terrain,
+# at the cost of leaving some 2-chunk floaters.
+#
+# Why this isn't in C++ yet: ~20 ms in GDScript per chunk on the
+# worker thread, which is acceptable since the heavy 3D fill /
+# surface walk are already in C++. Port if it shows up in profiles.
+static func _strip_floating_terrain(chunk: Chunk) -> void:
+	var probe_token := PerfProbe.begin("worldgen.strip_floating")
+	var blocks: PackedByteArray = chunk.blocks
+	var supported: PackedByteArray = PackedByteArray()
+	supported.resize(Chunk.TOTAL_BLOCKS)
+	var queue: PackedInt32Array = PackedInt32Array()
+	queue.resize(Chunk.TOTAL_BLOCKS)
+	var head: int = 0
+	var tail: int = 0
+	const STRIDE_X: int = 1
+	const STRIDE_Z: int = Chunk.SIZE_X
+	const STRIDE_Y: int = Chunk.SIZE_X * Chunk.SIZE_Z
+	# Project block IDs (NOT vanilla MC IDs — see scripts/world/blocks.gd).
+	var air_id: int = Blocks.AIR
+	var water_still: int = Blocks.WATER_STILL
+	var water_flowing: int = Blocks.WATER_FLOWING
+	var lava_still: int = Blocks.LAVA_STILL
+	var lava_flowing: int = Blocks.LAVA_FLOWING
+
+	# Seed: bedrock layer (y=0) is always solid.
+	for z in range(Chunk.SIZE_Z):
+		for x in range(Chunk.SIZE_X):
+			var idx0: int = z * STRIDE_Z + x
+			var b0: int = blocks[idx0]
+			if (
+				b0 != air_id
+				and b0 != water_still
+				and b0 != water_flowing
+				and b0 != lava_still
+				and b0 != lava_flowing
+			):
+				supported[idx0] = 1
+				queue[tail] = idx0
+				tail += 1
+	# Seed: solid cells on any chunk-boundary column (might connect
+	# through the neighbouring chunk we can't see).
+	for y in range(1, Chunk.SIZE_Y):
+		var y_off: int = y * STRIDE_Y
+		for w in range(Chunk.SIZE_Z):
+			var idx_x0: int = y_off + w * STRIDE_Z
+			var bx0: int = blocks[idx_x0]
+			if (
+				supported[idx_x0] == 0
+				and bx0 != air_id
+				and bx0 != water_still
+				and bx0 != water_flowing
+				and bx0 != lava_still
+				and bx0 != lava_flowing
+			):
+				supported[idx_x0] = 1
+				queue[tail] = idx_x0
+				tail += 1
+			var idx_x1: int = y_off + w * STRIDE_Z + (Chunk.SIZE_X - 1)
+			var bx1: int = blocks[idx_x1]
+			if (
+				supported[idx_x1] == 0
+				and bx1 != air_id
+				and bx1 != water_still
+				and bx1 != water_flowing
+				and bx1 != lava_still
+				and bx1 != lava_flowing
+			):
+				supported[idx_x1] = 1
+				queue[tail] = idx_x1
+				tail += 1
+		for w in range(1, Chunk.SIZE_X - 1):
+			var idx_z0: int = y_off + w
+			var bz0: int = blocks[idx_z0]
+			if (
+				supported[idx_z0] == 0
+				and bz0 != air_id
+				and bz0 != water_still
+				and bz0 != water_flowing
+				and bz0 != lava_still
+				and bz0 != lava_flowing
+			):
+				supported[idx_z0] = 1
+				queue[tail] = idx_z0
+				tail += 1
+			var idx_z1: int = y_off + (Chunk.SIZE_Z - 1) * STRIDE_Z + w
+			var bz1: int = blocks[idx_z1]
+			if (
+				supported[idx_z1] == 0
+				and bz1 != air_id
+				and bz1 != water_still
+				and bz1 != water_flowing
+				and bz1 != lava_still
+				and bz1 != lava_flowing
+			):
+				supported[idx_z1] = 1
+				queue[tail] = idx_z1
+				tail += 1
+
+	# BFS through 6-neighbours.
+	while head < tail:
+		var idx: int = queue[head]
+		head += 1
+		var y: int = idx / STRIDE_Y
+		var rem: int = idx - y * STRIDE_Y
+		var z: int = rem / STRIDE_Z
+		var x: int = rem - z * STRIDE_Z
+		if x > 0:
+			var nidx: int = idx - STRIDE_X
+			var nb: int = blocks[nidx]
+			if (
+				supported[nidx] == 0
+				and nb != air_id
+				and nb != water_still
+				and nb != water_flowing
+				and nb != lava_still
+				and nb != lava_flowing
+			):
+				supported[nidx] = 1
+				queue[tail] = nidx
+				tail += 1
+		if x < Chunk.SIZE_X - 1:
+			var nidx_x: int = idx + STRIDE_X
+			var nb_x: int = blocks[nidx_x]
+			if (
+				supported[nidx_x] == 0
+				and nb_x != air_id
+				and nb_x != water_still
+				and nb_x != water_flowing
+				and nb_x != lava_still
+				and nb_x != lava_flowing
+			):
+				supported[nidx_x] = 1
+				queue[tail] = nidx_x
+				tail += 1
+		if z > 0:
+			var nidz: int = idx - STRIDE_Z
+			var nbz: int = blocks[nidz]
+			if (
+				supported[nidz] == 0
+				and nbz != air_id
+				and nbz != water_still
+				and nbz != water_flowing
+				and nbz != lava_still
+				and nbz != lava_flowing
+			):
+				supported[nidz] = 1
+				queue[tail] = nidz
+				tail += 1
+		if z < Chunk.SIZE_Z - 1:
+			var nidz1: int = idx + STRIDE_Z
+			var nbz1: int = blocks[nidz1]
+			if (
+				supported[nidz1] == 0
+				and nbz1 != air_id
+				and nbz1 != water_still
+				and nbz1 != water_flowing
+				and nbz1 != lava_still
+				and nbz1 != lava_flowing
+			):
+				supported[nidz1] = 1
+				queue[tail] = nidz1
+				tail += 1
+		if y > 0:
+			var nidy: int = idx - STRIDE_Y
+			var nby: int = blocks[nidy]
+			if (
+				supported[nidy] == 0
+				and nby != air_id
+				and nby != water_still
+				and nby != water_flowing
+				and nby != lava_still
+				and nby != lava_flowing
+			):
+				supported[nidy] = 1
+				queue[tail] = nidy
+				tail += 1
+		if y < Chunk.SIZE_Y - 1:
+			var nidy1: int = idx + STRIDE_Y
+			var nby1: int = blocks[nidy1]
+			if (
+				supported[nidy1] == 0
+				and nby1 != air_id
+				and nby1 != water_still
+				and nby1 != water_flowing
+				and nby1 != lava_still
+				and nby1 != lava_flowing
+			):
+				supported[nidy1] = 1
+				queue[tail] = nidy1
+				tail += 1
+
+	# Strip unvisited terrain blocks (project IDs, not vanilla MC IDs).
+	var stone: int = Blocks.STONE
+	var grass: int = Blocks.GRASS
+	var dirt: int = Blocks.DIRT
+	var sand: int = Blocks.SAND
+	var gravel: int = Blocks.GRAVEL
+	for idx2 in range(Chunk.TOTAL_BLOCKS):
+		if supported[idx2] == 1:
+			continue
+		var b2: int = blocks[idx2]
+		if b2 != stone and b2 != dirt and b2 != grass and b2 != sand and b2 != gravel:
+			continue
+		var y2: int = idx2 / STRIDE_Y
+		var rem2: int = idx2 - y2 * STRIDE_Y
+		var z2: int = rem2 / STRIDE_Z
+		var x2: int = rem2 - z2 * STRIDE_Z
+		var fill: int = Blocks.WATER_STILL if y2 < SEA_LEVEL else Blocks.AIR
+		chunk.set_block_unchecked(x2, y2, z2, fill)
+	PerfProbe.end("worldgen.strip_floating", probe_token)
 
 
 # Cold-biome post-pass — vanilla puts these in BiomeDecorator + the
