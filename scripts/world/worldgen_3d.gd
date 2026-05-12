@@ -299,20 +299,46 @@ static func density_grid(chunk_x: int, chunk_z: int) -> PackedFloat64Array:
 	var noise_base_z: int = chunk_z * COARSE_STEP_Z
 
 	# Sample 2D noises (g amplitude, h depth) per (x, z) coarse column.
-	# These are 5×5 = 25 samples each — small, just call sample_2d.
+	# CRITICAL: vanilla nf.a's 8-arg wrapper (px.java:189-190) calls the
+	# 10-arg bulk-grid version with HARDCODED base_y=10.0 and scale_y=1.0.
+	# That means each octave samples at world Y = 10 * amp + offset_y, not
+	# Y = 0. Calling sample_2d (which delegates to sample_3d at Y=0)
+	# samples at the wrong Y → produces a completely different output
+	# distribution than vanilla. Symptom: depth noise mean ~2k vs vanilla
+	# ~10k → terrain forced into 'ocean' branch → mean surface y ~60 vs
+	# vanilla y ~85 at the same seed/chunk.
+	#
+	# Use sample_3d_grid with size_y=1 to replicate vanilla's bulk-grid
+	# sampling exactly. Layout for size_y=1 collapses to (ix * GRID_Z + iz),
+	# matching the existing g_grid[ix * GRID_Z + iz] index.
 	var g_grid: PackedFloat64Array = PackedFloat64Array()
 	var h_grid: PackedFloat64Array = PackedFloat64Array()
 	g_grid.resize(GRID_X * GRID_Z)
 	h_grid.resize(GRID_X * GRID_Z)
-	for ix in range(GRID_X):
-		for iz in range(GRID_Z):
-			var nx: float = float(noise_base_x + ix)
-			var nz: float = float(noise_base_z + iz)
-			# Vanilla samples at (nx * scale, nz * scale).
-			g_grid[ix * GRID_Z + iz] = _amplitude_noise.sample_2d(
-				nx * AMPLITUDE_SCALE, nz * AMPLITUDE_SCALE
-			)
-			h_grid[ix * GRID_Z + iz] = _depth_noise.sample_2d(nx * DEPTH_SCALE, nz * DEPTH_SCALE)
+	_amplitude_noise.sample_3d_grid(
+		g_grid,
+		float(noise_base_x),
+		10.0,
+		float(noise_base_z),
+		GRID_X,
+		1,
+		GRID_Z,
+		AMPLITUDE_SCALE,
+		1.0,
+		AMPLITUDE_SCALE
+	)
+	_depth_noise.sample_3d_grid(
+		h_grid,
+		float(noise_base_x),
+		10.0,
+		float(noise_base_z),
+		GRID_X,
+		1,
+		GRID_Z,
+		DEPTH_SCALE,
+		1.0,
+		DEPTH_SCALE
+	)
 
 	# Sample 3D density grids (e, f, selector). 5×17×5 = 425 samples
 	# each. Use bulk sample_3d_grid for performance.
