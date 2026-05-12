@@ -377,9 +377,6 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# Trilerp output occasionally produces these in mid-air where
 		# density grazes above zero; vanilla terrain doesn't have them.
 		_strip_floating_terrain(chunk)
-		# Cold-biome ICE/snow overlay — runs after caves + water-fill
-		# so the topmost-water lookup sees the final water column.
-		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
@@ -392,6 +389,13 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# 8. Cactus — places 1-3 stacked CACTUS blocks on SAND in Desert
 	# biomes only. Vanilla BlockCactus placement.
 	_scatter_cactus(chunk, chunk_x, chunk_z)
+	# 9. Cold-biome ICE / snow overlay — must run AFTER trees + cactus
+	# so the topmost-block lookup sees tree leaves / canopy and tops
+	# them with snow too. Vanilla WorldServer's snow step iterates
+	# loaded chunks after BiomeDecorator (which places trees), so this
+	# ordering matches.
+	if terrain_3d_enabled:
+		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
@@ -823,6 +827,26 @@ static func _strip_floating_terrain(chunk: Chunk) -> void:
 # faithful. Converts top-of-water cells to ICE in cold biomes,
 # mountain GRASS to SNOW_BLOCK (y>=75), and adds a SNOW_LAYER above
 # every cold-biome grass column at low altitude.
+# Whitelist of blocks that can carry a SNOW_LAYER on top in cold
+# biomes. Excludes ICE (already snow-equivalent), GLASS (vanilla
+# rejects), CACTUS / SAPLING / FLOWERS (non-cube), torches / fences
+# (selection slabs that don't render snow well). Liquids are filtered
+# upstream by _column_surface_y skipping water cells.
+static func _can_hold_snow(block_id: int) -> bool:
+	return (
+		block_id == Blocks.GRASS
+		or block_id == Blocks.DIRT
+		or block_id == Blocks.SAND
+		or block_id == Blocks.GRAVEL
+		or block_id == Blocks.STONE
+		or block_id == Blocks.COBBLESTONE
+		or block_id == Blocks.LOG
+		or block_id == Blocks.LEAVES
+		or block_id == Blocks.PLANKS
+		or block_id == Blocks.SNOW_BLOCK
+	)
+
+
 static func _apply_cold_biome_overlay(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	for x in range(Chunk.SIZE_X):
 		for z in range(Chunk.SIZE_Z):
@@ -835,24 +859,35 @@ static func _apply_cold_biome_overlay(chunk: Chunk, chunk_x: int, chunk_z: int) 
 			if top_y < 0:
 				continue
 			var top_block: int = chunk.get_block_unchecked(x, top_y, z)
-			# Walk up looking for top of any water column → ICE.
-			for y in range(top_y, Chunk.SIZE_Y - 1):
+			# Walk UP from the cell above the surface, looking for the top
+			# of a water column → freeze it to ICE. _column_surface_y
+			# already skipped past water cells, so top_y is the seabed
+			# block; the water (if any) sits at top_y+1 .. sea_level.
+			# Earlier this loop started at top_y itself, immediately
+			# breaking because the seabed block isn't water — ICE never
+			# placed.
+			for y in range(top_y + 1, Chunk.SIZE_Y - 1):
 				var b: int = chunk.get_block_unchecked(x, y, z)
 				if b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
 					break
 				if chunk.get_block_unchecked(x, y + 1, z) == Blocks.AIR:
 					chunk.set_block_unchecked(x, y, z, Blocks.ICE)
 					break
-			# Cold mountain GRASS → SNOW_BLOCK; cold low-altitude GRASS
-			# gets SNOW_LAYER above.
-			if top_block == Blocks.GRASS:
-				if top_y >= 75:
-					chunk.set_block_unchecked(x, top_y, z, Blocks.SNOW_BLOCK)
-				elif (
-					top_y < Chunk.SIZE_Y - 1
-					and chunk.get_block_unchecked(x, top_y + 1, z) == Blocks.AIR
-				):
-					chunk.set_block_unchecked(x, top_y + 1, z, Blocks.SNOW_LAYER)
+			# Cold mountain GRASS → SNOW_BLOCK; cold low-altitude solids
+			# of any kind (grass / sand / dirt / leaves / log) get a
+			# SNOW_LAYER above. Vanilla WorldServer's snow step is
+			# block-agnostic: any solid with air above + sky access gets
+			# topped, which is why taiga forests show snowy canopies.
+			if top_block == Blocks.GRASS and top_y >= 75:
+				chunk.set_block_unchecked(x, top_y, z, Blocks.SNOW_BLOCK)
+				continue
+			if not _can_hold_snow(top_block):
+				continue
+			if top_y >= Chunk.SIZE_Y - 1:
+				continue
+			if chunk.get_block_unchecked(x, top_y + 1, z) != Blocks.AIR:
+				continue
+			chunk.set_block_unchecked(x, top_y + 1, z, Blocks.SNOW_LAYER)
 
 
 static func _block_at(world_x: int, y: int, world_z: int, surface_y: int) -> int:
