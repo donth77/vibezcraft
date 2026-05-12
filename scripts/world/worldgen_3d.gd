@@ -117,21 +117,35 @@ static func _ensure_noises(world_seed: int) -> void:
 	# temperature uses 0.025/cell, rainfall 0.05/cell, extreme 0.25/cell.
 	# Vanilla seed multipliers: 9871 (temp), 39811 (rain), 543321 (extreme).
 	# We pass through hash to fit FastNoiseLite's 32-bit seed.
+	# Climate noise frequencies — these set how rapidly biomes change
+	# across the map. Vanilla po.java uses 0.025 per cell which assumes
+	# vanilla's specific noise distribution; with FastNoiseLite Simplex
+	# at 0.025 we got biome boundaries flipping every ~5 cells, producing
+	# 'snow-capped grass in a forest biome' artifacts (jagged taiga/
+	# forest borders where every taiga sub-cell got snow_layer while
+	# neighboring forest cells didn't). Vanilla biome regions are
+	# 100+ blocks across.
+	# Lowered to 1/5 vanilla — period now ~200 blocks for temp,
+	# ~100 for rain. Biomes are now coherent regions you can recognize
+	# instead of cell-by-cell speckling.
 	_temp_noise = FastNoiseLite.new()
 	_temp_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_temp_noise.frequency = 0.025
+	_temp_noise.frequency = 0.005
 	_temp_noise.seed = (world_seed * 9871) & 0x7FFFFFFF
 	_temp_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_temp_noise.fractal_octaves = 4
 	_rain_noise = FastNoiseLite.new()
 	_rain_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_rain_noise.frequency = 0.05
+	_rain_noise.frequency = 0.01
 	_rain_noise.seed = (world_seed * 39811) & 0x7FFFFFFF
 	_rain_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_rain_noise.fractal_octaves = 4
+	# Extreme noise stays at higher frequency — it's meant to add
+	# regional climate spikes (small dramatic deserts/tundras inside
+	# larger temperate zones), not the dominant biome scale.
 	_extreme_noise = FastNoiseLite.new()
 	_extreme_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_extreme_noise.frequency = 0.25
+	_extreme_noise.frequency = 0.05
 	_extreme_noise.seed = (world_seed * 543321) & 0x7FFFFFFF
 	_extreme_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	_extreme_noise.fractal_octaves = 2
