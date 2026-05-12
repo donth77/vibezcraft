@@ -10,7 +10,18 @@ func _init() -> void:
 	Worldgen.terrain_3d_enabled = true
 	Worldgen.apply_world_seed(seed)
 	Worldgen.surface_height(0, 0)
-	var chunk: Chunk = Worldgen.generate_chunk(cx, cz)
+	# Generate ONLY the base 3D fill — skip surface layer, ores, caves,
+	# decorators. This isolates whether the cliffs are from trilerp itself
+	# or downstream (caves carving, ore replacing).
+	var skip_post: bool = (
+		args.size() > 3 and args[3] == "raw"
+	)
+	var chunk: Chunk
+	if skip_post:
+		chunk = Chunk.new()
+		Worldgen3D.fill_chunk(chunk, cx, cz)
+	else:
+		chunk = Worldgen.generate_chunk(cx, cz)
 
 	# Dump surface_y per (x, z) in 16x16 grid
 	var heights: Array = []
