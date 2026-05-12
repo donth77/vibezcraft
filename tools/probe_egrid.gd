@@ -28,11 +28,11 @@ func _init() -> void:
 	# Our layout: idx = (ix * GRID_Y + iy) * GRID_Z + iz
 	# Vanilla layout: idx = (ix * 5 + iz) * 17 + iy
 	# Print at iy=8 corners
-	# CORRECT layout: sample_3d_grid_additive writes vanilla layout
-	# (Y innermost): idx = X * (Z_size * Y_size) + Z * Y_size + Y
+	# Probe ALL grid cells (5x17x5 = 425) — full bulk grid output
 	for ix in range(5):
-		for iz in range(5):
-			var idx_ours: int = (ix * 5 + iz) * 17 + 8
-			var v: float = e_grid[idx_ours]
-			print("# OURS e[ix=%d,iy=8,iz=%d] = %.4f" % [ix, iz, v])
+		for iy in range(17):
+			for iz in range(5):
+				var idx: int = (ix * 5 + iz) * 17 + iy
+				var v: float = e_grid[idx]
+				print("# OURS e[%d,%d,%d] = %.4f" % [ix, iy, iz, v])
 	quit(0)

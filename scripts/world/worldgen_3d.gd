@@ -176,12 +176,23 @@ static func climate_at(world_x: float, world_z: float) -> Vector2:
 	# This excludes pure Tundra (temp < 0.1) but allows Savanna+Desert
 	# at the dry end and Taiga at the cool wet end. Most cells fall in
 	# Forest/Shrubland zones.
-	var temp: float = temp_raw * 0.3 + 0.65
-	var rain: float = rain_raw * 0.3 + 0.5
-	# Extreme noise lets some regions go to climate extremes.
+	# Port of vanilla po.java:75-101 transform (line numbers in
+	# vendor/alpha-1.2.6-src/src/po.java). Matches vanilla's distribution:
+	#   extreme = c_noise * 1.1 + 0.5
+	#   temp    = (a_noise * 0.15 + 0.7) * (1 - 0.01) + extreme * 0.01
+	#   temp    = 1 - (1 - temp)^2
+	#   rain    = (b_noise * 0.15 + 0.5) * (1 - 0.002) + extreme * 0.002
+	# Vanilla mean: temp ≈ 0.91, rain ≈ 0.5, with narrow variance.
+	# Earlier our formula (temp = noise*0.3+0.65) had temp mean 0.65, way
+	# colder than vanilla → lower d7 → lower d8 → steeper d11 slope →
+	# visible cliffs / 1-block grass towers. The vanilla-faithful
+	# transform gives a warm climate with narrow variance, matching
+	# vanilla's smooth terrain shape.
 	var extreme_raw: float = _extreme_noise.get_noise_2d(world_x, world_z)
-	temp += extreme_raw * 0.1
-	rain += extreme_raw * 0.1
+	var extreme: float = extreme_raw * 1.1 + 0.5
+	var temp: float = (temp_raw * 0.15 + 0.7) * 0.99 + extreme * 0.01
+	temp = 1.0 - (1.0 - temp) * (1.0 - temp)
+	var rain: float = (rain_raw * 0.15 + 0.5) * 0.998 + extreme * 0.002
 	if temp < 0.0:
 		temp = 0.0
 	if temp > 1.0:
@@ -523,13 +534,16 @@ static func fill_chunk(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 				var d8: float = (
 					(grid[((i2 + 0) * GRID_Y + (i4 + 1)) * GRID_Z + (i3 + 1)] - d4) * 0.125
 				)
+				# **CRITICAL BUG FIX 2026-05-12**: d9 was using (i4 + 0) instead
+				# of (i4 + 1), which made d9 = (d5 - d5) * 0.125 = 0 always.
+				# That zero'd the Y-step at the X+1 edge of every coarse cell,
+				# so terrain at i6=3 stayed constant across all i5 instead of
+				# interpolating Y. Result: visible sawtooth pattern where
+				# surface dropped 3-5 cells at each coarse-cell boundary
+				# (the user's 'duplicated grass towers').
 				var d9: float = (
-					(grid[((i2 + 1) * GRID_Y + (i4 + 0)) * GRID_Z + (i3 + 0)] - d5) * 0.125
+					(grid[((i2 + 1) * GRID_Y + (i4 + 1)) * GRID_Z + (i3 + 0)] - d5) * 0.125
 				)
-				# px.java has a typo? Let me re-check. Actually:
-				# d10 = (q[((i2+1)*n8 + (i3+1))*n7 + (i4+1)] - d6) * d2
-				# But our layout is x,y,z with stride GRID_Z so:
-				# d10 = grid[((i2+1)*GRID_Y + (i4+1))*GRID_Z + (i3+1)] - d6) * 0.125
 				var d10: float = (
 					(grid[((i2 + 1) * GRID_Y + (i4 + 1)) * GRID_Z + (i3 + 1)] - d6) * 0.125
 				)
