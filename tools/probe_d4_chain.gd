@@ -2,11 +2,13 @@ extends SceneTree
 
 
 func _init() -> void:
+	var args: PackedStringArray = OS.get_cmdline_user_args()
+	var seed: int = args[0].to_int() if args.size() > 0 else 0
 	BlockAtlas.build()
 	Worldgen.terrain_3d_enabled = true
-	Worldgen.apply_world_seed(0)
+	Worldgen.apply_world_seed(seed)
 	Worldgen.surface_height(0, 0)
-	Worldgen3D._ensure_noises(0)
+	Worldgen3D._ensure_noises(seed)
 
 	# Sample h_grid + g_grid + climate for chunk (0,0), then walk d4/d8/d9 chain
 	var DEPTH_SCALE: float = 200.0
