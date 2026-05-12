@@ -267,7 +267,31 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#      conversion to grass/dirt then runs as a post-pass.
 	if terrain_3d_enabled:
 		var fill_token := PerfProbe.begin("worldgen.3d.fill_chunk")
-		Worldgen3D.fill_chunk(chunk, chunk_x, chunk_z)
+		# Native fast path: WorldgenNative.fill_chunk_3d ports the entire
+		# Worldgen3D.fill_chunk + density_grid + climate sampling pipeline
+		# to C++. Cuts the dominant ~74 ms/chunk cost dramatically. Bit-
+		# identical output to the GDScript path (bit-exact noise port +
+		# same trilerp algorithm).
+		if _native_worldgen != null and _native_worldgen.has_method("fill_chunk_3d"):
+			# Native path skips Worldgen3D.fill_chunk's _ensure_noises
+			# call, so warm the GDScript noise cache here so the
+			# downstream _apply_surface_layer_3d (which uses _beach_noise
+			# + _soil_noise for sand/gravel/dirt-depth) has them ready.
+			Worldgen3D._ensure_noises(WORLD_SEED)
+			chunk.blocks = _native_worldgen.call("fill_chunk_3d", chunk_x, chunk_z)
+			# Recompute max_y (chunk init is zeroed, fill_chunk wrote the
+			# blocks but didn't track max_y).
+			var my: int = 0
+			for x in range(Chunk.SIZE_X):
+				for z in range(Chunk.SIZE_Z):
+					for y in range(Chunk.SIZE_Y - 1, -1, -1):
+						if chunk.get_block_unchecked(x, y, z) != Blocks.AIR:
+							if y > my:
+								my = y
+							break
+			chunk.max_y = my
+		else:
+			Worldgen3D.fill_chunk(chunk, chunk_x, chunk_z)
 		PerfProbe.end("worldgen.3d.fill_chunk", fill_token)
 		var surf_token := PerfProbe.begin("worldgen.3d.surface_layer")
 		_apply_surface_layer_3d(chunk, chunk_x, chunk_z)

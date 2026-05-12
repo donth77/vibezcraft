@@ -91,6 +91,13 @@ public:
 	PackedByteArray scatter_caves(
 			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
 
+	// Native port of Worldgen3D.fill_chunk + density_grid + climate noise
+	// for the 3D density terrain pipeline. Replaces the dominant ~74 ms/chunk
+	// GDScript hot path. Output: 16x128x16 PackedByteArray with STONE / WATER /
+	// AIR cells (per the px.java density crossing). The GDScript caller still
+	// runs the surface_layer pass (vanilla port + bedrock RNG) on top.
+	PackedByteArray fill_chunk_3d(int p_chunk_x, int p_chunk_z) const;
+
 protected:
 	static void _bind_methods();
 
