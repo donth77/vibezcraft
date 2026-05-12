@@ -137,8 +137,10 @@ const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
 const _SUGAR_CANE_ATTEMPTS: int = 4
 const _SUGAR_CANE_SALT: int = 0xC4ED
 # Cactus scatter — Desert biome only. Vanilla rate is roughly 1-2 cacti
-# per desert chunk; we attempt 8 placements with high reject rate.
-const _CACTUS_ATTEMPTS: int = 8
+# per desert chunk. Earlier value of 8 attempts produced visible
+# carpet-density cactus in deserts; reduced to 3 to match perceived
+# vanilla density.
+const _CACTUS_ATTEMPTS: int = 3
 const _CACTUS_SALT: int = 0xCAC7
 
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit

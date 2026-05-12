@@ -233,7 +233,7 @@ var _fall_immune_next_landing: bool = true
 # budget expires. Multi-frame budget so a respawn into a region whose
 # chunks haven't loaded yet still gets corrected once they're in.
 # 30 ticks ≈ 0.5 s — well within the chunk-streaming window.
-var _spawn_check_ticks_remaining: int = 30
+var _spawn_check_ticks_remaining: int = 90
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -1139,18 +1139,14 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# Post-spawn safety: if the player landed in water after the initial
-	# fall, teleport to nearest dry land. Only fires ONCE, after they've
-	# touched the floor (so we're not interrupting the spawn fall or
-	# normal mid-air gameplay). Window expires after 30 ticks even if
-	# they never land (corner case: spawn over a deep cave).
+	# Post-spawn safety: after a 90-tick (~1.5 s) delay to let the
+	# initial spawn fall complete, check if the player ended up in
+	# water and relocate to nearest dry land. Single one-shot check —
+	# doesn't fire during the fall, doesn't interrupt later movement.
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
-		# Only relocate AFTER landing AND only if in water. Avoids
-		# teleporting during the spawn fall or interrupting jumps.
-		if is_on_floor() and _is_in_water():
+		if _spawn_check_ticks_remaining == 0 and _is_in_water():
 			_relocate_if_unsafe_spawn()
-			_spawn_check_ticks_remaining = 0
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
@@ -1483,7 +1479,7 @@ func _respawn() -> void:
 	# ticks (mirrors the initial-spawn safety net). Multi-tick budget so
 	# a respawn whose chunks haven't streamed in yet still gets relocated
 	# once they load.
-	_spawn_check_ticks_remaining = 30
+	_spawn_check_ticks_remaining = 90
 	# Clear fire + lava state — vanilla Entity.reset() zeros bg (fireTicks)
 	# on respawn. Without this the trailing burn keeps ticking damage after
 	# the player teleports back to spawn.
