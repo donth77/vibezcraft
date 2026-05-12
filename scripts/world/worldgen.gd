@@ -302,35 +302,26 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		PerfProbe.end("worldgen.caves", caves_token)
 	else:
 		_CAVES_SCRIPT.scatter(chunk, chunk_x, chunk_z)
-	# 3. Beaches — replaces surface grass/dirt near sea level with sand
-	#    (vanilla Alpha's ChunkProviderGenerate.replaceBlocksForBiome). Must
-	#    run after ores (ores only replace stone, so ordering is neutral
-	#    there) and before trees (so the grass-check gate drops columns
-	#    that were just sanded over).
-	_place_beaches(chunk, chunk_x, chunk_z)
+	# 3. Beaches — replaces surface grass/dirt near sea level with sand.
+	#    SKIP in 3D mode: the vanilla-port _apply_surface_layer_3d already
+	#    handles the y in [60, 65] sand/gravel beach pass inline (vanilla
+	#    px.java::a) using the same JavaRandom that drives bedrock + dirt
+	#    depth. Running _place_beaches again here would over-write the
+	#    vanilla-faithful decisions with our 2D-style heightmap pass.
+	if not terrain_3d_enabled:
+		_place_beaches(chunk, chunk_x, chunk_z)
 	# 4. Ocean fill — writes WATER_STILL into the gap between surface and
-	#    SEA_LEVEL wherever the column peaks below the sea. Runs AFTER
-	#    beaches (water doesn't care what the floor is, and beaches need
-	#    the original grass/dirt surface to decide whether to replace) and
-	#    BEFORE trees (so the tree pass can gate on "dry land"). Matches
-	#    vanilla Alpha's ChunkProviderGenerate sequencing: base strata →
-	#    ore veins → biome replace → water pass → decorators.
-	#    SKIP in 3D mode — Worldgen3D.fill_chunk already filled water at
-	#    the density-pipeline level (per-cell, handles overhangs). Running
-	#    _fill_ocean on top would use 2D heightmap's surface_height which
-	#    doesn't match 3D's actual surface, producing "floating water"
-	#    inside 3D overhangs.
+	#    SEA_LEVEL wherever the column peaks below the sea.
 	if not terrain_3d_enabled:
 		_fill_ocean(chunk, chunk_x, chunk_z)
 	else:
 		# 3D mode: caves can carve through stone below sea level, leaving
-		# AIR pockets in the seabed (visible as bubble-holes underwater).
-		# Convert any AIR cell at y < SEA_LEVEL back to WATER. Vanilla-
-		# equivalent: vanilla's px.java density loop writes water for ALL
-		# cells with negative density at sub-sea. We mostly do that in
-		# Worldgen3D.fill_chunk, but cave gen runs after and overwrites
-		# stone with air. Quick sweep to restore.
+		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
+		# back to WATER (cave-air becomes underwater).
 		_fill_underwater_air_3d(chunk)
+		# Cold-biome ICE/snow overlay — runs after caves + water-fill so
+		# the topmost-water lookup sees the final water column.
+		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface
@@ -375,90 +366,154 @@ static func _build_base_terrain_native(chunk: Chunk, chunk_x: int, chunk_z: int)
 	chunk.max_y = result.max_y
 
 
-# Convert raw 3D-density output (just STONE + AIR) into vanilla
-# stratified surface: top stone → GRASS (above sea) or DIRT (below sea),
-# next 3 stones below → DIRT, bottom y=0 → BEDROCK, and a randomized
-# bedrock band y=1..4. Mirrors vanilla px.java:117-163 surface pass.
+# Vanilla-faithful port of Alpha 1.2.6 px.java::a() (lines 102-166):
+# surface block placement, beach sand/gravel, dirt-filler depth, AND
+# bedrock band — all in one top-down per-column pass driven by a single
+# JavaRandom seeded from chunk coords. This is the right structure for
+# cell-by-cell parity with vanilla saves: any divergence in the
+# JavaRandom call sequence cascades to the rest of the column, so the
+# whole pass has to be ported as a unit (not just bedrock alone).
+#
+# Replaces the older hand-rolled _apply_surface_layer_3d which used a
+# spatial hash for bedrock + fixed/hashed dirt depth — those were
+# vanilla-shaped but not bit-equivalent.
 static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	# Vanilla seed pattern from px.java:169 — same expression used to
+	# seed `this.j` before calling `a()`. The constants are vanilla;
+	# don't change.
+	var rng := JavaRandom.new()
+	rng.set_seed(chunk_x * 341873128712 + chunk_z * 132897987541)
+
+	# Sample the three 16-cell-wide noise fields vanilla calls:
+	#   r = sand-band noise   (this.n.a(r, x*16, z*16, 0, 16,16,1, 1/32, 1/32, 1))
+	#   s = gravel-band noise (this.n.a(s, z*16, 109.0134, x*16, 16,1,16, 1/32, 1, 1/32))
+	#   t = dirt-depth noise  (this.o.a(t, x*16, z*16, 0, 16,16,1, 1/16, 1/16, 1/16))
+	# Note s swaps z/x and uses Y-axis literal 109.0134 — vanilla quirk.
+	var r_noise := PackedFloat64Array()
+	r_noise.resize(256)
+	Worldgen3D._beach_noise.sample_3d_grid(
+		r_noise, chunk_x * 16.0, chunk_z * 16.0, 0.0, 16, 16, 1, 0.03125, 0.03125, 1.0
+	)
+	var s_noise := PackedFloat64Array()
+	s_noise.resize(256)
+	Worldgen3D._beach_noise.sample_3d_grid(
+		s_noise, chunk_z * 16.0, 109.0134, chunk_x * 16.0, 16, 1, 16, 0.03125, 1.0, 0.03125
+	)
+	var t_noise := PackedFloat64Array()
+	t_noise.resize(256)
+	Worldgen3D._soil_noise.sample_3d_grid(
+		t_noise, chunk_x * 16.0, chunk_z * 16.0, 0.0, 16, 16, 1, 0.0625, 0.0625, 0.0625
+	)
+
+	var sea: int = SEA_LEVEL  # 64; matches vanilla `n4 = 64`
+
 	for x in range(Chunk.SIZE_X):
 		for z in range(Chunk.SIZE_Z):
-			# Find topmost STONE in this column.
-			var top_stone_y: int = -1
+			var world_x: int = chunk_x * Chunk.SIZE_X + x
+			var world_z: int = chunk_z * Chunk.SIZE_Z + z
+			# Per-position biome lookup (vanilla feeds in a per-chunk
+			# biome array; we use our climate noise per-cell).
+			var biome_id: int = Worldgen3D.biome_at(float(world_x), float(world_z))
+			var biome_top: int = Worldgen3D.biome_top_block(biome_id)
+			var biome_filler: int = Worldgen3D.biome_filler_block(biome_id)
+			# Vanilla noise indexing is column-major-by-Z: [x + z*16].
+			var ni: int = x + z * 16
+			var bl_sand: bool = r_noise[ni] + rng.next_double() * 0.2 > 0.0
+			var bl_gravel: bool = s_noise[ni] + rng.next_double() * 0.2 > 3.0
+			var n5: int = int(t_noise[ni] / 3.0 + 3.0 + rng.next_double() * 0.25)
+			var n6: int = -1  # filler-cells-remaining counter
+			var by2: int = biome_top
+			var by3: int = biome_filler
+
 			for y in range(Chunk.SIZE_Y - 1, -1, -1):
-				if chunk.get_block_unchecked(x, y, z) == Blocks.STONE:
-					top_stone_y = y
-					break
-			if top_stone_y < 0:
-				continue
-			# Per-biome top + filler. Desert/Ice Desert → SAND, others →
-			# GRASS/DIRT. Underwater columns get the filler regardless of
-			# biome (vanilla seabeds are usually dirt/sand mix; we
-			# approximate with the biome's filler).
+				# Bedrock band: nextInt(5) consumed at EVERY y (vanilla
+				# behavior — the call is unconditional). Writes BEDROCK
+				# only when y <= the draw, which restricts placement to
+				# y=0..4 statistically. Important: this consumes RNG
+				# state at every y, so the surface logic below sees the
+				# correct nextDouble/nextInt sequence.
+				var br: int = rng.next_int_bounded(5)
+				if y <= br:
+					chunk.set_block_unchecked(x, y, z, Blocks.BEDROCK)
+					continue
+				var existing: int = chunk.get_block_unchecked(x, y, z)
+				if existing == Blocks.AIR:
+					n6 = -1
+					continue
+				if existing != Blocks.STONE:
+					continue
+				# First STONE encountered (top of solid in this column).
+				if n6 == -1:
+					if n5 <= 0:
+						by2 = Blocks.AIR
+						by3 = Blocks.STONE
+					elif y >= sea - 4 and y <= sea + 1:
+						# Beach band y in [60, 65]. Sand or gravel
+						# overrides apply here only.
+						by2 = biome_top
+						by3 = biome_filler
+						if bl_gravel:
+							by2 = Blocks.AIR
+							by3 = Blocks.GRAVEL
+						if bl_sand:
+							by2 = Blocks.SAND
+							by3 = Blocks.SAND
+					if y < sea and by2 == Blocks.AIR:
+						# Underwater column with no top block (gravel
+						# beach below sea, or n5<=0 deep ocean) — fill
+						# the surface cell with stationary water so the
+						# seabed isn't an air pocket.
+						by2 = Blocks.WATER_STILL
+					n6 = n5
+					if y >= sea - 1:
+						chunk.set_block_unchecked(x, y, z, by2)
+					else:
+						chunk.set_block_unchecked(x, y, z, by3)
+					continue
+				# Continuing filler: write filler block until counter
+				# exhausts.
+				if n6 <= 0:
+					continue
+				n6 -= 1
+				chunk.set_block_unchecked(x, y, z, by3)
+
+
+# Cold-biome post-pass — vanilla puts these in BiomeDecorator + the
+# snow layer step in WorldServer; we run it as a separate pass after
+# the surface walk so the JavaRandom sequence above stays vanilla-
+# faithful. Converts top-of-water cells to ICE in cold biomes,
+# mountain GRASS to SNOW_BLOCK (y>=75), and adds a SNOW_LAYER above
+# every cold-biome grass column at low altitude.
+static func _apply_cold_biome_overlay(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
 			var world_x: int = chunk_x * Chunk.SIZE_X + x
 			var world_z: int = chunk_z * Chunk.SIZE_Z + z
 			var biome_id: int = Worldgen3D.biome_at(float(world_x), float(world_z))
-			var top_block: int
-			if top_stone_y >= SEA_LEVEL:
-				top_block = Worldgen3D.biome_top_block(biome_id)
-			else:
-				top_block = Worldgen3D.biome_filler_block(biome_id)
-			chunk.set_block_unchecked(x, top_stone_y, z, top_block)
-			# Next N STONE cells below → biome filler (DIRT or SAND).
-			# Vanilla: `1 + this.b.nextInt(4)` per column (1..4, mean 2.5).
-			# We hash the column for a deterministic 1..4 depth — earlier
-			# fixed depth of 3 produced ~3× the vanilla DIRT baseline
-			# (1689/chunk vs ~600).
-			var filler: int = Worldgen3D.biome_filler_block(biome_id)
-			var depth_hash: int = _hash3(world_x, 0, world_z)
-			var filler_depth: int = 1 + (depth_hash & 3)  # 1..4
-			for dy in range(1, filler_depth + 1):
-				var y: int = top_stone_y - dy
-				if y < 0:
+			if not Worldgen3D.biome_is_cold(biome_id):
+				continue
+			var top_y: int = _column_surface_y(chunk, x, z)
+			if top_y < 0:
+				continue
+			var top_block: int = chunk.get_block_unchecked(x, top_y, z)
+			# Walk up looking for top of any water column → ICE.
+			for y in range(top_y, Chunk.SIZE_Y - 1):
+				var b: int = chunk.get_block_unchecked(x, y, z)
+				if b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
 					break
-				if chunk.get_block_unchecked(x, y, z) == Blocks.STONE:
-					chunk.set_block_unchecked(x, y, z, filler)
-			# Cold biomes: convert WATER_STILL surface cells to ICE.
-			# Only top-of-water (where water meets air) becomes ice — the
-			# water below stays water.
-			if Worldgen3D.biome_is_cold(biome_id):
-				# Walk up from top_stone_y looking for the highest WATER_STILL
-				# with AIR above (= surface of the water column).
-				for y in range(top_stone_y + 1, Chunk.SIZE_Y - 1):
-					var b: int = chunk.get_block_unchecked(x, y, z)
-					if b != Blocks.WATER_STILL and b != Blocks.WATER_FLOWING:
-						break
-					if chunk.get_block_unchecked(x, y + 1, z) == Blocks.AIR:
-						chunk.set_block_unchecked(x, y, z, Blocks.ICE)
-						break
-				# Cold mountain peaks (y >= 75): top GRASS → SNOW_BLOCK.
-				# Vanilla generates snow on high cold terrain regardless of
-				# whether snow_layer also accumulates — full snow blocks are
-				# the visible "snowcap" effect.
-				if top_stone_y >= 75 and top_block == Blocks.GRASS:
-					chunk.set_block_unchecked(x, top_stone_y, z, Blocks.SNOW_BLOCK)
-				# Cold low-altitude (sea level..74): place SNOW_LAYER on
-				# top of grass. Vanilla puts a thin snow layer on every
-				# grass block in cold biomes; the air cell directly above
-				# becomes SNOW_LAYER (a 2/16 slab).
+				if chunk.get_block_unchecked(x, y + 1, z) == Blocks.AIR:
+					chunk.set_block_unchecked(x, y, z, Blocks.ICE)
+					break
+			# Cold mountain GRASS → SNOW_BLOCK; cold low-altitude GRASS
+			# gets SNOW_LAYER above.
+			if top_block == Blocks.GRASS:
+				if top_y >= 75:
+					chunk.set_block_unchecked(x, top_y, z, Blocks.SNOW_BLOCK)
 				elif (
-					top_block == Blocks.GRASS
-					and top_stone_y < Chunk.SIZE_Y - 1
-					and chunk.get_block_unchecked(x, top_stone_y + 1, z) == Blocks.AIR
+					top_y < Chunk.SIZE_Y - 1
+					and chunk.get_block_unchecked(x, top_y + 1, z) == Blocks.AIR
 				):
-					chunk.set_block_unchecked(x, top_stone_y + 1, z, Blocks.SNOW_LAYER)
-
-	# Bedrock band (y=0 always; y=1..4 probabilistic per Alpha hash).
-	# Same logic as _block_at uses for the 2D path — extracted here so 3D
-	# mode gets matching bedrock placement.
-	for x in range(Chunk.SIZE_X):
-		for z in range(Chunk.SIZE_Z):
-			var world_x: int = chunk_x * Chunk.SIZE_X + x
-			var world_z: int = chunk_z * Chunk.SIZE_Z + z
-			# y=0 always bedrock
-			chunk.set_block_unchecked(x, 0, z, Blocks.BEDROCK)
-			for y in range(1, 5):
-				if _is_bedrock_at(world_x, y, world_z):
-					chunk.set_block_unchecked(x, y, z, Blocks.BEDROCK)
+					chunk.set_block_unchecked(x, top_y + 1, z, Blocks.SNOW_LAYER)
 
 
 static func _block_at(world_x: int, y: int, world_z: int, surface_y: int) -> int:
