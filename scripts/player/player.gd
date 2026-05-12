@@ -1955,9 +1955,13 @@ func _relocate_if_unsafe_spawn() -> bool:
 						break
 				if sy < Worldgen.SEA_LEVEL:
 					continue  # underwater seabed
-				# Cell above must be air (clearance for player capsule)
-				var above: int = cm.get_world_block(Vector3i(x, sy + 1, z))
-				if above != Blocks.AIR:
+				# Player capsule is ~1.8 tall. Need 2 cells of AIR clearance
+				# directly above the surface. Without this we can teleport
+				# into a tight column (leaves overhang, narrow cave mouth)
+				# and the player ends up stuck inside a block.
+				var above1: int = cm.get_world_block(Vector3i(x, sy + 1, z))
+				var above2: int = cm.get_world_block(Vector3i(x, sy + 2, z))
+				if above1 != Blocks.AIR or above2 != Blocks.AIR:
 					continue
 				# Found a dry land column — teleport here.
 				global_position = Vector3(float(x) + 0.5, float(sy) + 1.5, float(z) + 0.5)

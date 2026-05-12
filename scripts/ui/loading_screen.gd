@@ -26,6 +26,10 @@ var _bar_fill_rect: ColorRect
 
 
 func _ready() -> void:
+	# Set the global loading flag — gates in-game SFX (footsteps, block
+	# break/place, ambience) so the chunk-gen player physics doesn't
+	# leak audio through the loading screen.
+	Game.is_loading = true
 	layer = 100
 	var root := Control.new()
 	root.anchor_right = 1.0

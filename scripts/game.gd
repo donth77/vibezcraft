@@ -21,12 +21,11 @@ const CLOUD_QUALITY_FANCY: int = 2
 @export var fog_enabled: bool = true
 @export var sfx_enabled: bool = true
 
-# True while the loading screen is displayed (initial chunk gen). All
-# in-game SFX (footsteps, block break/place, ambience) are gated on
-# `not is_loading` so the early chunk-gen sounds don't leak through
-# the loading screen. LoadingScreen toggles this on/off in its
-# _ready / _on_chunk_progress (sets false when load completes).
-var is_loading: bool = true
+# True only while the in-game LoadingScreen (chunk-gen progress bar)
+# is displayed. Defaults to false so the main menu, settings, etc.
+# can play SFX normally. LoadingScreen sets this true in its _ready,
+# false when chunk-gen completes (loaded >= total).
+var is_loading: bool = false
 
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.
