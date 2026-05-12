@@ -319,8 +319,14 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
 		# back to WATER (cave-air becomes underwater).
 		_fill_underwater_air_3d(chunk)
-		# Cold-biome ICE/snow overlay — runs after caves + water-fill so
-		# the topmost-water lookup sees the final water column.
+		# Surface smoothing — clip lone 1-cell elevation spikes that
+		# trilerp produces (visible as 'duplicated grass towers'). Runs
+		# AFTER caves + water-fill so the surface walk reads the final
+		# top cell, not a cave-carved opening.
+		_smooth_surface_spikes_3d(chunk)
+		# Cold-biome ICE/snow overlay — runs after smoothing so the
+		# topmost-water lookup sees the final water column AND smoothed
+		# surface heights.
 		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
@@ -476,6 +482,57 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 					continue
 				n6 -= 1
 				chunk.set_block_unchecked(x, y, z, by3)
+
+
+# 3D-mode surface smoothing — clip lone 1-cell elevation spikes.
+# The trilerp interpolation in Worldgen3D.fill_chunk produces smooth
+# density gradients but, near the density=0 boundary, individual cells
+# can land just-above-zero while their 4 neighbors land just-below-zero.
+# Result: isolated 1-block-higher grass columns scattered across an
+# otherwise-flat field, looking like 'duplicated grass towers' (user
+# report 2026-05-12). Vanilla doesn't have this because vanilla's
+# noise distribution puts the density-zero crossing at slightly
+# different positions, but our bit-exact port hits the same cells.
+#
+# Algorithm: for each interior column, compare surface_y to the 4
+# cardinal neighbors' surface_y. If THIS column is strictly higher
+# than ALL neighbors (an isolated peak, not a slope), demote it down
+# to max(neighbors). Skip columns at chunk edge (no full neighbor
+# data). Iterate until stable, max 2 passes (one pass usually catches
+# the artifacts; second handles cells exposed by the first).
+static func _smooth_surface_spikes_3d(chunk: Chunk) -> void:
+	var probe_token := PerfProbe.begin("worldgen.smooth_spikes")
+	for pass_n in range(2):
+		var changes: int = 0
+		for x in range(1, Chunk.SIZE_X - 1):
+			for z in range(1, Chunk.SIZE_Z - 1):
+				var sy: int = _column_surface_y(chunk, x, z)
+				if sy < 0:
+					continue
+				var n_xm: int = _column_surface_y(chunk, x - 1, z)
+				var n_xp: int = _column_surface_y(chunk, x + 1, z)
+				var n_zm: int = _column_surface_y(chunk, x, z - 1)
+				var n_zp: int = _column_surface_y(chunk, x, z + 1)
+				if n_xm < 0 or n_xp < 0 or n_zm < 0 or n_zp < 0:
+					continue
+				var nmax: int = max(max(n_xm, n_xp), max(n_zm, n_zp))
+				# Isolated peak: column is higher than ALL 4 neighbors.
+				# Demote to the highest neighbor by clipping the top
+				# cell(s) to AIR (or WATER if below sea level).
+				if sy <= nmax:
+					continue
+				var fill: int = Blocks.WATER_STILL if sy <= SEA_LEVEL else Blocks.AIR
+				for y in range(nmax + 1, sy + 1):
+					chunk.set_block_unchecked(x, y, z, fill)
+				# After clipping, the new top non-air cell is at nmax. If
+				# it's STONE, promote to GRASS; if it was already DIRT, keep.
+				var new_top: int = chunk.get_block_unchecked(x, nmax, z)
+				if new_top == Blocks.STONE:
+					chunk.set_block_unchecked(x, nmax, z, Blocks.GRASS)
+				changes += 1
+		if changes == 0:
+			break
+	PerfProbe.end("worldgen.smooth_spikes", probe_token)
 
 
 # Cold-biome post-pass — vanilla puts these in BiomeDecorator + the
@@ -1017,13 +1074,15 @@ static func _hash4(a: int, b: int, c: int, d: int) -> int:
 # --- Flowers + mushrooms (vanilla aj.java port) ---
 
 
-# Run flower scatter passes for own chunk + 3 SW neighbors so vanilla's
-# +8,+8 spillover lands in our chunk too (mirrors `_scatter_ores`).
+# Vanilla's flower decorator (BiomeDecorator → aj.java) runs ONCE per
+# chunk during the populate phase, not the +8/+8 spillover pattern that
+# ores use. Earlier 4× spillover (own + 3 SW) was a copy-paste from
+# _scatter_ores that compounded with our 96 attempt count to produce
+# poppy-carpet terrain (user reported "duplicated grass towers" 2026-05-12).
+# Single pass per chunk matches vanilla density.
 static func _scatter_flowers(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.flowers")
-	for dcx in [-1, 0]:
-		for dcz in [-1, 0]:
-			_decorate_flowers(chunk, chunk_x, chunk_z, chunk_x + dcx, chunk_z + dcz)
+	_decorate_flowers(chunk, chunk_x, chunk_z, chunk_x, chunk_z)
 	PerfProbe.end("worldgen.flowers", probe_token)
 
 
