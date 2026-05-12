@@ -266,8 +266,12 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	#      port — fills with stone/air via density threshold; the surface
 	#      conversion to grass/dirt then runs as a post-pass.
 	if terrain_3d_enabled:
+		var fill_token := PerfProbe.begin("worldgen.3d.fill_chunk")
 		Worldgen3D.fill_chunk(chunk, chunk_x, chunk_z)
+		PerfProbe.end("worldgen.3d.fill_chunk", fill_token)
+		var surf_token := PerfProbe.begin("worldgen.3d.surface_layer")
 		_apply_surface_layer_3d(chunk, chunk_x, chunk_z)
+		PerfProbe.end("worldgen.3d.surface_layer", surf_token)
 	elif _native_worldgen != null:
 		_build_base_terrain_native(chunk, chunk_x, chunk_z)
 	else:
@@ -319,14 +323,8 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
 		# back to WATER (cave-air becomes underwater).
 		_fill_underwater_air_3d(chunk)
-		# Surface smoothing — clip lone 1-cell elevation spikes that
-		# trilerp produces (visible as 'duplicated grass towers'). Runs
-		# AFTER caves + water-fill so the surface walk reads the final
-		# top cell, not a cave-carved opening.
-		_smooth_surface_spikes_3d(chunk)
-		# Cold-biome ICE/snow overlay — runs after smoothing so the
-		# topmost-water lookup sees the final water column AND smoothed
-		# surface heights.
+		# Cold-biome ICE/snow overlay — runs after caves + water-fill
+		# so the topmost-water lookup sees the final water column.
 		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
