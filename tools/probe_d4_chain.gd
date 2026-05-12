@@ -20,14 +20,21 @@ func _init() -> void:
 			% ["(ix,iz)", "h_raw", "g_raw", "temp", "rain", "d7", "d4", "d8", "d9"]
 		)
 	)
+	# Use the SAME bulk-grid call as density_grid (Y=10, scale_y=1)
+	var h_grid: PackedFloat64Array = PackedFloat64Array()
+	h_grid.resize(25)
+	Worldgen3D._depth_noise.sample_3d_grid(
+		h_grid, 0.0, 10.0, 0.0, 5, 1, 5, DEPTH_SCALE, 1.0, DEPTH_SCALE
+	)
+	var g_grid: PackedFloat64Array = PackedFloat64Array()
+	g_grid.resize(25)
+	Worldgen3D._amplitude_noise.sample_3d_grid(
+		g_grid, 0.0, 10.0, 0.0, 5, 1, 5, AMPLITUDE_SCALE, 1.0, AMPLITUDE_SCALE
+	)
 	for ix in range(5):
 		for iz in range(5):
-			var nx: float = float(0 * 4 + ix)
-			var nz: float = float(0 * 4 + iz)
-			var h: float = Worldgen3D._depth_noise.sample_2d(nx * DEPTH_SCALE, nz * DEPTH_SCALE)
-			var g: float = Worldgen3D._amplitude_noise.sample_2d(
-				nx * AMPLITUDE_SCALE, nz * AMPLITUDE_SCALE
-			)
+			var h: float = h_grid[ix * 5 + iz]
+			var g: float = g_grid[ix * 5 + iz]
 			var center_x: float = float(0 * 16 + _CLIMATE_OFFSETS[ix])
 			var center_z: float = float(0 * 16 + _CLIMATE_OFFSETS[iz])
 			var climate: Vector2 = Worldgen3D.climate_at(center_x, center_z)

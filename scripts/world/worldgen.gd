@@ -524,11 +524,18 @@ static func _smooth_surface_spikes_3d(chunk: Chunk) -> void:
 				var fill: int = Blocks.WATER_STILL if sy <= SEA_LEVEL else Blocks.AIR
 				for y in range(nmax + 1, sy + 1):
 					chunk.set_block_unchecked(x, y, z, fill)
-				# After clipping, the new top non-air cell is at nmax. If
-				# it's STONE, promote to GRASS; if it was already DIRT, keep.
+				# After clipping, the new top non-air cell is at nmax.
+				# Promote whatever's exposed to the appropriate top block:
+				# - Above sea level → GRASS
+				# - At/below sea level → DIRT (vanilla seabed)
+				# Both STONE *and* DIRT need promotion when above sea —
+				# leaving DIRT exposed was the dominant 'duplicated grass
+				# towers' artifact (DIRT spots in 4-cell coarse-grid
+				# pattern). SAND/GRAVEL stay (vanilla beach band).
 				var new_top: int = chunk.get_block_unchecked(x, nmax, z)
-				if new_top == Blocks.STONE:
-					chunk.set_block_unchecked(x, nmax, z, Blocks.GRASS)
+				if new_top == Blocks.STONE or new_top == Blocks.DIRT:
+					var promoted: int = Blocks.GRASS if nmax >= SEA_LEVEL else Blocks.DIRT
+					chunk.set_block_unchecked(x, nmax, z, promoted)
 				changes += 1
 		if changes == 0:
 			break
