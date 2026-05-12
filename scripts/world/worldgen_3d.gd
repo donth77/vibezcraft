@@ -84,38 +84,35 @@ static var _cached_seed: int = 0  # tracks which seed the noises were built with
 
 
 # Build (or rebuild on seed change) the 8-noise stack the vanilla way:
-# all noises share ONE JavaRandom, consumed in order. Each NoisePerlin
-# constructor pulls 256+3 random doubles, so each noise gets a different
-# gradient table. This sharing is load-bearing for vanilla seed
-# determinism.
+# vanilla px.java:35-42 chains ALL 8 NoiseOctaves through ONE shared
+# JavaRandom, where each `new nf(this.j, N)` constructor advances that
+# RNG by N × (256+3) draws. The per-octave gradient tables therefore
+# depend on the order AND the cumulative entropy consumption — feeding
+# each noise its own RNG (the prior `create_vanilla(world_seed + i, N)`
+# pattern) gave each noise a DIFFERENT gradient table than vanilla,
+# producing the flat-ocean terrain bug at every seed.
+#
+# Order MUST match vanilla px.java exactly:
+#   k = e (16-octave 3D density)
+#   l = f (16-octave 3D density)
+#   m = selector (8-octave 3D)
+#   n = beach (4-octave 2D)
+#   o = soil (4-octave 2D)
+#   a = amplitude (10-octave 2D)
+#   b = depth (16-octave 2D)
+#   c = forest (8-octave 2D)
 static func _ensure_noises(world_seed: int) -> void:
 	if _e_noise != null and _cached_seed == world_seed:
 		return
-	# Vanilla px.java constructor:
-	#   this.k = new nf(this.j, 16);   // e
-	#   this.l = new nf(this.j, 16);   // f
-	#   this.m = new nf(this.j, 8);    // d (selector)
-	#   this.n = new nf(this.j, 4);    // r (beach)
-	#   this.o = new nf(this.j, 4);    // t (soil)
-	#   this.a = new nf(this.j, 10);   // g (amplitude)
-	#   this.b = new nf(this.j, 16);   // h (depth)
-	#   this.c = new nf(this.j, 8);    // forest
-	# Each `new nf(rand, N)` consumes N × (256+3) doubles from `rand`.
-	# Our NoiseOctaves.create_vanilla(world_seed, N) creates a fresh
-	# JavaRandom internally — that breaks vanilla's sharing pattern.
-	# For Phase 3, accept this divergence: each noise gets a slightly
-	# different state than vanilla, but determinism within OUR system
-	# is preserved. Phase 4 may need a shared-Random factory.
-	# (TODO: if cell-diff Phase 3 is too far off, build a shared-Random
-	# factory that mimics vanilla's exact entropy consumption order.)
-	_e_noise = NoiseOctaves.create_vanilla(world_seed, 16)
-	_f_noise = NoiseOctaves.create_vanilla(world_seed + 1, 16)
-	_selector_noise = NoiseOctaves.create_vanilla(world_seed + 2, 8)
-	_beach_noise = NoiseOctaves.create_vanilla(world_seed + 3, 4)
-	_soil_noise = NoiseOctaves.create_vanilla(world_seed + 4, 4)
-	_amplitude_noise = NoiseOctaves.create_vanilla(world_seed + 5, 10)
-	_depth_noise = NoiseOctaves.create_vanilla(world_seed + 6, 16)
-	_forest_noise = NoiseOctaves.create_vanilla(world_seed + 7, 8)
+	var rng := JavaRandom.new(world_seed)
+	_e_noise = NoiseOctaves.create_vanilla_chained(rng, 16)
+	_f_noise = NoiseOctaves.create_vanilla_chained(rng, 16)
+	_selector_noise = NoiseOctaves.create_vanilla_chained(rng, 8)
+	_beach_noise = NoiseOctaves.create_vanilla_chained(rng, 4)
+	_soil_noise = NoiseOctaves.create_vanilla_chained(rng, 4)
+	_amplitude_noise = NoiseOctaves.create_vanilla_chained(rng, 10)
+	_depth_noise = NoiseOctaves.create_vanilla_chained(rng, 16)
+	_forest_noise = NoiseOctaves.create_vanilla_chained(rng, 8)
 	# Climate noises (Phase 4). Frequencies from vanilla po.java:
 	# temperature uses 0.025/cell, rainfall 0.05/cell, extreme 0.25/cell.
 	# Vanilla seed multipliers: 9871 (temp), 39811 (rain), 543321 (extreme).

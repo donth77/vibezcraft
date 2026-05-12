@@ -105,6 +105,28 @@ static func create_vanilla(world_seed: int, octave_count: int) -> NoiseOctaves:
 	return n
 
 
+# Vanilla `px.java:35-42` chains all 8 NoiseOctaves stacks through a SINGLE
+# JavaRandom seeded from WORLD_SEED — each `new nf(this.j, N)` call advances
+# that one RNG by N × (3 + 256) random draws. Per-noise `create_vanilla()`
+# resets the RNG, which gives each noise a DIFFERENT gradient table than
+# vanilla's chained sequence. That divergence shows up downstream: depth-
+# and amplitude-noise distributions don't match vanilla even at the same
+# WORLD_SEED, producing flat terrain instead of vanilla's mountain/ocean
+# variety.
+#
+# This factory takes the shared rng and builds one stack from it,
+# advancing the rng in place. Caller is responsible for the chain order
+# (e.g. e, f, selector, beach, soil, amplitude, depth, forest).
+static func create_vanilla_chained(rng: JavaRandom, octave_count: int) -> NoiseOctaves:
+	var n := NoiseOctaves.new()
+	n._octave_count = octave_count
+	n._is_vanilla = true
+	n._vanilla_octaves.resize(octave_count)
+	for i in range(octave_count):
+		n._vanilla_octaves[i] = NoisePerlin.new(rng)
+	return n
+
+
 # Vanilla nf.a(double, double) — 2D sample. Returns the summed reverse-FBM
 # value. Output range: roughly [-2^N, 2^N] where N = octave_count, since
 # each Perlin returns ~[-1, 1] and the last octave's contribution is
