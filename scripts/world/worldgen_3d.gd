@@ -410,27 +410,24 @@ static func density_grid(chunk_x: int, chunk_z: int) -> PackedFloat64Array:
 	# Vanilla samples climate at the CENTER of each coarse cell (px.java:198-202):
 	#   n10 = 16 / GRID_X = 3 (integer)
 	#   n11 = i2 * 3 + 1 = {1, 4, 7, 10, 13}
-	# Vanilla's noise distribution makes climate ~constant across one chunk,
-	# so per-coarse-column sampling produces ~constant d8 → smooth terrain.
-	# Our FastNoiseLite Simplex distribution varies more per cell, producing
-	# d8 swings of 0.1+ within one chunk → cliff-shaped trilerp output that
-	# the user reported as 'duplicated grass towers / single-block towers'.
-	# Fix: sample climate ONCE per chunk at chunk center, apply uniformly.
-	# This deviates from vanilla's per-coarse-cell sampling but matches
-	# vanilla's effective per-chunk-uniform climate distribution.
-	var chunk_center_x: float = float(chunk_x * 16 + 8)
-	var chunk_center_z: float = float(chunk_z * 16 + 8)
-	var climate: Vector2 = climate_at(chunk_center_x, chunk_center_z)
-	var d5_chunk: float = climate.x  # temperature
-	var d6_chunk: float = climate.y * d5_chunk  # rain × temp (px.java:202)
-	var d7_chunk: float = 1.0 - d6_chunk
-	d7_chunk *= d7_chunk
-	d7_chunk *= d7_chunk
-	d7_chunk = 1.0 - d7_chunk  # = 1 - (1 - temp×rain)^4
+	# Earlier we sampled climate ONCE per chunk because our (now-removed)
+	# FastNoiseLite_FBM climate had high per-cell variance; per-coarse-cell
+	# sampling produced d8 swings → cliff terrain. Now that climate uses
+	# the proper Simplex port (NoiseOctavesSimplex), per-coarse-cell
+	# sampling matches vanilla bit-exact and the cliffs don't reappear.
+	const _CLIMATE_OFFSETS: Array = [1, 4, 7, 10, 13]
 
 	for ix in range(GRID_X):
+		var center_x: float = float(chunk_x * 16 + _CLIMATE_OFFSETS[ix])
 		for iz in range(GRID_Z):
-			var d7: float = d7_chunk
+			var center_z: float = float(chunk_z * 16 + _CLIMATE_OFFSETS[iz])
+			var climate: Vector2 = climate_at(center_x, center_z)
+			var d5: float = climate.x
+			var d6: float = climate.y * d5
+			var d7: float = 1.0 - d6
+			d7 *= d7
+			d7 *= d7
+			d7 = 1.0 - d7  # = 1 - (1 - temp×rain)^4
 
 			# d8 — amplitude (px.java:208-211)
 			var d8: float = (g_grid[column_idx] + AMPLITUDE_OFFSET) / AMPLITUDE_DIVISOR
