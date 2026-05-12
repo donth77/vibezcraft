@@ -371,6 +371,12 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
 		# back to WATER (cave-air becomes underwater).
 		_fill_underwater_air_3d(chunk)
+		# Remove single floating terrain blocks (STONE/DIRT/GRASS/SAND
+		# with all 6 neighbors AIR). Trilerp output occasionally produces
+		# these as 1-cell pockets where density barely exceeds zero
+		# inside an otherwise-air region. Vanilla terrain doesn't have
+		# isolated floating blocks of any solid material.
+		_strip_floating_solo_blocks(chunk)
 		# Cold-biome ICE/snow overlay — runs after caves + water-fill
 		# so the topmost-water lookup sees the final water column.
 		_apply_cold_biome_overlay(chunk, chunk_x, chunk_z)
@@ -586,6 +592,43 @@ static func _smooth_surface_spikes_3d(chunk: Chunk) -> void:
 		if changes == 0:
 			break
 	PerfProbe.end("worldgen.smooth_spikes", probe_token)
+
+
+# Strip 1-cell floating terrain. A STONE/DIRT/GRASS/SAND cell with
+# AIR on all 6 cardinal neighbors gets converted to AIR (or WATER below
+# sea level). Catches trilerp-output pockets where density grazes
+# above zero in mid-air. Skips blocks at chunk-edge (X/Z=0/15)
+# because we can't see the cross-chunk neighbor; minor visual cost
+# vs. perf of handling the cross-chunk read.
+static func _strip_floating_solo_blocks(chunk: Chunk) -> void:
+	var probe_token := PerfProbe.begin("worldgen.strip_solo")
+	for x in range(1, Chunk.SIZE_X - 1):
+		for z in range(1, Chunk.SIZE_Z - 1):
+			for y in range(1, Chunk.SIZE_Y - 1):
+				var b: int = chunk.get_block_unchecked(x, y, z)
+				if (
+					b != Blocks.STONE
+					and b != Blocks.DIRT
+					and b != Blocks.GRASS
+					and b != Blocks.SAND
+				):
+					continue
+				if chunk.get_block_unchecked(x - 1, y, z) != Blocks.AIR:
+					continue
+				if chunk.get_block_unchecked(x + 1, y, z) != Blocks.AIR:
+					continue
+				if chunk.get_block_unchecked(x, y - 1, z) != Blocks.AIR:
+					continue
+				if chunk.get_block_unchecked(x, y + 1, z) != Blocks.AIR:
+					continue
+				if chunk.get_block_unchecked(x, y, z - 1) != Blocks.AIR:
+					continue
+				if chunk.get_block_unchecked(x, y, z + 1) != Blocks.AIR:
+					continue
+				# Isolated floating block — strip it.
+				var fill: int = Blocks.WATER_STILL if y < SEA_LEVEL else Blocks.AIR
+				chunk.set_block_unchecked(x, y, z, fill)
+	PerfProbe.end("worldgen.strip_solo", probe_token)
 
 
 # Cold-biome post-pass — vanilla puts these in BiomeDecorator + the
