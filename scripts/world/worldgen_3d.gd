@@ -32,6 +32,11 @@ enum Biome {
 	PLAINS,
 	ICE_DESERT,
 	TUNDRA,
+	# Non-vanilla extension. Returned by `effective_biome_at(x, z, y)` when
+	# the actual surface y sits well below sea level. `biome_at(x, z)` still
+	# returns the climate biome so the cold overlay's freeze check fires
+	# correctly over cold-climate water.
+	OCEAN,
 }
 
 # Coarse grid: 5×17×5 sample positions per chunk; trilerped to 16×128×16
@@ -62,6 +67,12 @@ const SELECTOR_DIVISOR: float = 10.0  # px.java:248: (d/10 + 1)/2
 
 # Vanilla SEA_LEVEL.
 const SEA_LEVEL: int = 64
+
+# Threshold for non-vanilla "Ocean" biome classification — surfaces this far
+# below sea level are deep enough that the cell is dominated by water rather
+# than the local climate. Used by `effective_biome_at` and the surface walk's
+# DIRT-seabed override.
+const OCEAN_DEPTH_THRESHOLD: int = 4
 
 # Cached noise stack — built once per seed.
 static var _e_noise: NoiseOctaves  # px.java this.k (16-octave 3D density)
@@ -227,12 +238,26 @@ static func biome_at(world_x: float, world_z: float) -> int:
 	return Biome.RAINFOREST
 
 
+# Returns OCEAN if the surface y is well below sea level, else the
+# climate biome. Use this for any caller that knows the actual surface
+# y (surface walk, debug overlay computing height at the player). Cold
+# overlay still uses `biome_at` so a deep cold-climate ocean still gets
+# ICE on the water surface — the OCEAN label only changes the seabed
+# block, not the freezing behavior.
+static func effective_biome_at(world_x: float, world_z: float, surface_y: int) -> int:
+	if surface_y < Worldgen.SEA_LEVEL - OCEAN_DEPTH_THRESHOLD:
+		return Biome.OCEAN
+	return biome_at(world_x, world_z)
+
+
 # Per-biome top block (the surface). Most biomes default to GRASS but
 # Desert + Ice Desert use SAND. Vanilla gg.java init at line 47:
 # `gg.h.o = gg.h.p = (byte)nq.E.bh` (Desert + Ice Desert top/filler = SAND).
 static func biome_top_block(biome_id: int) -> int:
 	if biome_id == Biome.DESERT or biome_id == Biome.ICE_DESERT:
 		return Blocks.SAND
+	if biome_id == Biome.OCEAN:
+		return Blocks.DIRT
 	return Blocks.GRASS
 
 
@@ -280,6 +305,8 @@ static func biome_tree_density(biome_id: int) -> float:
 			return 0.2  # very sparse
 		Biome.DESERT, Biome.ICE_DESERT:
 			return 0.0  # no trees
+		Biome.OCEAN:
+			return 0.0  # no trees on seabed
 		_:
 			return 1.0
 

@@ -520,6 +520,16 @@ static func _apply_surface_layer_3d(chunk: Chunk, chunk_x: int, chunk_z: int) ->
 						if bl_sand:
 							by2 = Blocks.SAND
 							by3 = Blocks.SAND
+					elif y < sea - Worldgen3D.OCEAN_DEPTH_THRESHOLD:
+						# Non-vanilla Ocean biome. Shallow seabed
+						# (n5 > 0 already, so we have dirt depth).
+						# Force DIRT seabed regardless of the climate
+						# biome — matches Beta BiomeOcean. Cold-
+						# climate cells still freeze the surface
+						# water via the cold overlay (which keys on
+						# the climate biome, not the effective biome).
+						by2 = Worldgen3D.biome_top_block(Worldgen3D.Biome.OCEAN)
+						by3 = Worldgen3D.biome_filler_block(Worldgen3D.Biome.OCEAN)
 					if y < sea and by2 == Blocks.AIR:
 						# Underwater column with no top block (gravel
 						# beach below sea, or n5<=0 deep ocean) — fill

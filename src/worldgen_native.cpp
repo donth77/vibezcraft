@@ -1087,8 +1087,13 @@ enum BiomeId {
 	BIOME_DESERT = 7,
 	BIOME_PLAINS = 8,
 	BIOME_ICE_DESERT = 9,
-	BIOME_TUNDRA = 10
+	BIOME_TUNDRA = 10,
+	BIOME_OCEAN = 11
 };
+
+// Surface y at-or-below SEA_LEVEL minus this counts as Ocean. Mirrors
+// Worldgen3D.OCEAN_DEPTH_THRESHOLD.
+constexpr int OCEAN_DEPTH_THRESHOLD = 4;
 
 Climate climate_at_native(double world_x, double world_z) {
 	const double temp_raw = simplex_octaves_sample_2d(g_w3d_noise.temp, world_x, world_z, 0.025, 0.25);
@@ -1130,6 +1135,7 @@ int biome_at_native(double world_x, double world_z) {
 // Mirror Worldgen3D.biome_top_block / biome_filler_block.
 int biome_top_block_native(int biome) {
 	if (biome == BIOME_DESERT || biome == BIOME_ICE_DESERT) return WorldgenNative::SAND;
+	if (biome == BIOME_OCEAN) return WorldgenNative::DIRT;
 	return WorldgenNative::GRASS;
 }
 
@@ -1385,6 +1391,15 @@ PackedByteArray WorldgenNative::apply_surface_layer_3d(
 							by2 = SAND;
 							by3 = SAND;
 						}
+					} else if (y < sea - OCEAN_DEPTH_THRESHOLD) {
+						// Non-vanilla Ocean biome: shallow seabed (n5 > 0
+						// already, so dirt depth exists). Force DIRT seabed
+						// regardless of climate biome's top block. Matches
+						// Beta BiomeOcean. Cold-climate cells still get ICE
+						// on the water surface above via the cold overlay
+						// (which keys on climate biome, not effective).
+						by2 = biome_top_block_native(BIOME_OCEAN);
+						by3 = biome_filler_block_native(BIOME_OCEAN);
 					}
 					if (y < sea && by2 == AIR) {
 						by2 = WATER_STILL;
