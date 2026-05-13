@@ -161,11 +161,18 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		_last_mining_particle_ms = now
 		var mining_id: int = _chunk_manager.get_world_block(target)
 		_BLOCK_FX.spawn_mining(_chunk_manager, target, mining_id, Vector3(hit.normal_i))
-	# Update crack overlay — pick the integer stage based on progress
+	# Update crack overlay — pick the integer stage based on progress.
+	# Position + scale to the block's selection AABB so non-cube blocks
+	# (snow_layer slab, etc.) get a crack matching the visible shape
+	# rather than a full 1x1x1 box floating above the slab.
 	var damage: float = clamp(_mining_progress / _mining_total_time, 0.0, 1.0)
 	var stage: int = clamp(int(damage * float(_crack_stages)), 0, _crack_stages - 1)
+	var hit_id_now: int = _chunk_manager.get_world_block(target)
+	var hit_meta_now: int = _chunk_manager.get_world_block_meta(target)
+	var crack_aabb: AABB = Blocks.selection_aabb(hit_id_now, hit_meta_now)
 	_crack.visible = true
-	_crack.global_position = Vector3(target) + Vector3(0.5, 0.5, 0.5)
+	_crack.global_position = Vector3(target) + crack_aabb.position + crack_aabb.size * 0.5
+	_crack.scale = crack_aabb.size
 	_crack_material.set_shader_parameter("stage", stage)
 	# Complete the break?
 	if _mining_progress >= _mining_total_time:
