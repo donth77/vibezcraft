@@ -63,14 +63,13 @@ void fragment() {
 	//     float f2 = 0.05;  // floor
 	//     float f3 = 1 - i/15;
 	//     brightness[i] = (1 - f3) / (f3*3 + 1) * (1 - f2) + f2;
-	// Source uses 0.05 floor — on 2010 LCDs that crushed to perceived black.
-	// Modern OLED/IPS panels render the same value as visibly dim; to match
-	// the "I literally cannot see anything" cave feel that vanilla had on
-	// contemporary hardware, we use 0.0 here. At light=0 (deep cave, no
-	// torch) faces render pure black; one cell away from a torch (light=14)
-	// the LUT still hits ~78%, so torches are strong sources and the
-	// non-linear roll-off in vanilla's curve is preserved for steps 1..15.
-	float f2 = 0.0;
+	// Restored vanilla's 0.05 floor so cells with sky=block=0 render at 5%
+	// brightness instead of pure black. Earlier 0.0 made under-overhang
+	// faces and unlit cave ceilings unreadably dark on modern monitors.
+	// One cell away from a torch (light=14) the LUT still hits ~78%, so
+	// torches remain strong sources and the non-linear roll-off in
+	// vanilla's curve is preserved for steps 1..15.
+	float f2 = 0.05;
 	float f3 = 1.0 - light;
 	float lit = (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - f2) + f2;
 	// Per-face Notch shading. Vanilla constants (vendor/alpha-1.2.6-src/bk.java:819-822):
