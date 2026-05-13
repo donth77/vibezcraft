@@ -187,7 +187,9 @@ func _ready() -> void:
 func play_break(block_id: int) -> void:
 	# Glass has a dedicated shatter set, not the stone dig variants — vanilla
 	# BlockGlass overrides StepSound.soundOnDestroyed to "random.glass*".
-	if block_id == Blocks.GLASS:
+	# Ice uses the same glass shatter set in vanilla (BlockIce.stepSound =
+	# soundGlassFootstep, which is the glass break/footstep set).
+	if block_id == Blocks.GLASS or block_id == Blocks.ICE:
 		var path: String = _GLASS_BREAK_SOUNDS[randi() % _GLASS_BREAK_SOUNDS.size()]
 		_play_one(path, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
 		return

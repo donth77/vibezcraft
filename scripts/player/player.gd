@@ -91,6 +91,13 @@ const DAMAGE_GENERIC: String = "generic"
 const DAMAGE_FALL: String = "fall"
 const DAMAGE_DROWN: String = "drown"
 const DAMAGE_LAVA: String = "lava"
+const DAMAGE_CACTUS: String = "cactus"
+# Vanilla BlockCactus damages every tick the entity AABB intersects a
+# cactus cell shrunk by 1/16 on each side. Damage = 1 HP. We rate-limit
+# to half-second intervals (10 vanilla ticks) — matches the apparent
+# damage rate when standing in a cactus and avoids 20Hz HP drain.
+const _CACTUS_DAMAGE_INTERVAL_SEC: float = 0.5
+const _CACTUS_DAMAGE: int = 1
 # Vanilla EntityLiving: airTicks = 300 (15 s) when head out of water,
 # decrements each tick head is submerged. At -20 ticks (1 s past zero),
 # deals 2 damage and resets to 0. We use seconds instead of ticks.
@@ -111,6 +118,8 @@ const _LAVA_DAMAGE: int = 4
 # delta while the player's feet/body overlap a lava cell, fires damage
 # every interval, resets when the player leaves lava.
 var _lava_tick: float = 0.0
+# Same pattern for cactus contact damage.
+var _cactus_tick: float = 0.0
 # Edge-detect flag for the lava-entry fizz SFX. True while player's AABB
 # overlaps lava; on rising edge (false → true), play one fizz sound.
 var _was_in_lava: bool = false
@@ -1650,6 +1659,15 @@ func _tick_lava(delta: float) -> void:
 			take_damage(_LAVA_DAMAGE, DAMAGE_LAVA)
 	else:
 		_lava_tick = 0.0
+	# Cactus contact damage. Vanilla BlockCactus.b deals 1 HP every
+	# tick the entity AABB intersects a cactus cell shrunk by 1/16.
+	if _is_touching_cactus():
+		_cactus_tick += delta
+		if _cactus_tick >= _CACTUS_DAMAGE_INTERVAL_SEC:
+			_cactus_tick = 0.0
+			take_damage(_CACTUS_DAMAGE, DAMAGE_CACTUS)
+	else:
+		_cactus_tick = 0.0
 	# Fire-after-lava trail. Ticks down regardless of current lava state
 	# (being re-seeded above when the player is still in lava). Each
 	# _FIRE_BURN_INTERVAL_SEC applies 1 damage until the 15-s window
@@ -1686,6 +1704,41 @@ func on_fire() -> bool:
 # our sampling is a cheap approximation that still catches the common
 # cases (standing in, walking into, falling in). Corner-straddle edge
 # cases are rare and the next tick resolves them.
+# True if the player capsule overlaps any CACTUS cell. Vanilla cactus
+# AABB is shrunk by 1/16 on each side, so a player who's just outside
+# the cactus block boundary doesn't take damage. We approximate by
+# checking the 3 cardinal cells the player occupies (feet/waist/eye)
+# and the 4 horizontal neighbours, using a 0.4-unit lateral overlap
+# threshold (player radius ~0.3 + cactus radius 0.4375 - tolerance).
+func _is_touching_cactus() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var px: float = global_position.x
+	var pz: float = global_position.z
+	var fx: int = int(floor(px))
+	var fz: int = int(floor(pz))
+	for dy: float in [-0.85, 0.0, 0.7]:
+		var fy: int = int(floor(global_position.y + dy))
+		# Check the cell the player is in plus 4 neighbours; the lateral
+		# overlap test catches grazing contacts at cell edges.
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var cx: int = fx + dx
+				var cz: int = fz + dz
+				if cm.get_world_block(Vector3i(cx, fy, cz)) != Blocks.CACTUS:
+					continue
+				# Cactus cell occupies (cx + 0.0625, cz + 0.0625) to
+				# (cx + 0.9375, cz + 0.9375). Player is a 0.6-wide capsule
+				# centred at (px, pz). Closest distance from player edge
+				# to cactus AABB along each axis:
+				var dx_dist: float = max(0.0, abs(px - (float(cx) + 0.5)) - 0.4375 - 0.3)
+				var dz_dist: float = max(0.0, abs(pz - (float(cz) + 0.5)) - 0.4375 - 0.3)
+				if dx_dist <= 0.0 and dz_dist <= 0.0:
+					return true
+	return false
+
+
 func _is_in_lava() -> bool:
 	# `global_position` is the CAPSULE CENTER (not the feet) — the collision
 	# shape is a 1.8-tall Capsule3D with default zero transform, so the feet
