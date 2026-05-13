@@ -1478,6 +1478,15 @@ func _show_death_screen() -> void:
 # deferred until the death-flow UI lands.
 func _respawn() -> void:
 	Music.set_paused(false)
+	# Force-load the spawn chunk synchronously. Without this, dying far
+	# from origin can return to an unloaded chunk (0,0) — the player
+	# falls through AIR (unloaded cells read as AIR), drops past y=-20,
+	# the y < -20 fallback teleports back to the same unloaded chunk,
+	# and the cycle repeats indefinitely. Initial boot has this same
+	# protection via ChunkManager._initial_load → _spawn_chunk_sync.
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm != null and cm.has_method("_spawn_chunk_sync"):
+		cm.call("_spawn_chunk_sync", Vector2i(0, 0))
 	global_position = Vector3(8, 100.0, 8)
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y
