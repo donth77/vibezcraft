@@ -1151,6 +1151,11 @@ func _physics_process(delta: float) -> void:
 		if (first_tick or retry_tick) and _is_in_water():
 			if _relocate_if_unsafe_spawn():
 				_spawn_check_ticks_remaining = 0
+		# Final fallback: budget just expired and we're still in water
+		# (no land within the spiral's 32-cell radius — open ocean).
+		# Drop a small sand platform so the player has solid ground.
+		if _spawn_check_ticks_remaining == 0 and _is_in_water():
+			_create_emergency_spawn_platform()
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
@@ -1976,6 +1981,39 @@ func _relocate_if_unsafe_spawn() -> bool:
 				_fall_immune_next_landing = true
 				return true
 	return false  # no safe column found, caller should retry
+
+
+# Last-resort spawn fallback when the spiral search fails to find dry
+# land within radius (open ocean spawn). Drops a 5x5 SAND platform at
+# y = SEA_LEVEL just above the water surface, clears the air column
+# above so the player can stand, and teleports the player on top.
+# Only overwrites WATER / AIR — never destroys existing terrain (so a
+# tiny island that the spiral missed because of a chunk-load race
+# stays intact).
+func _create_emergency_spawn_platform() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("set_world_block"):
+		return
+	var px: int = int(floor(global_position.x))
+	var pz: int = int(floor(global_position.z))
+	# SEA_LEVEL = 64; water tops out at y=63 (cell at y=63 is the topmost
+	# water layer, top edge at y=64). Place SAND at y=64 — sits at the
+	# water surface, player stands on top at y=65.
+	var platform_y: int = Worldgen.SEA_LEVEL
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			var gx: int = px + dx
+			var gz: int = pz + dz
+			var here: int = cm.get_world_block(Vector3i(gx, platform_y, gz))
+			if here == Blocks.AIR or Blocks.is_water(here):
+				cm.set_world_block(Vector3i(gx, platform_y, gz), Blocks.SAND)
+			# Clear the cell above so the player has head clearance.
+			var above: int = cm.get_world_block(Vector3i(gx, platform_y + 1, gz))
+			if Blocks.is_water(above):
+				cm.set_world_block(Vector3i(gx, platform_y + 1, gz), Blocks.AIR)
+	global_position = Vector3(float(px) + 0.5, float(platform_y) + 2.0, float(pz) + 0.5)
+	velocity = Vector3.ZERO
+	_fall_immune_next_landing = true
 
 
 # True if the column at the player's position has only AIR around them
