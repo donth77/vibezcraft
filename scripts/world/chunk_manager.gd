@@ -175,18 +175,38 @@ func _process(_delta: float) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.tick")
 	_cached_player_chunk = _player_chunk_coord()
 	_applies_this_frame = 0
+	# Sub-probes: each step in _process gets its own ring so we can
+	# isolate the 80+ ms tick spikes without guessing. Lightweight —
+	# Time.get_ticks_usec is one syscall per begin/end and the ring
+	# write is ~50 ns. Total overhead ~1-2 µs per frame.
+	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
+	PerfProbe.end("chunk_mgr.tick.update_chunk_set", t_set)
+	var t_coll := PerfProbe.begin("chunk_mgr.tick.collision_activity")
 	_update_collision_activity()
+	PerfProbe.end("chunk_mgr.tick.collision_activity", t_coll)
+	var t_reap := PerfProbe.begin("chunk_mgr.tick.reap_pending")
 	_reap_stale_pending()
+	PerfProbe.end("chunk_mgr.tick.reap_pending", t_reap)
+	var t_disp := PerfProbe.begin("chunk_mgr.tick.dispatch_workers")
 	_dispatch_workers()
+	PerfProbe.end("chunk_mgr.tick.dispatch_workers", t_disp)
+	var t_mat := PerfProbe.begin("chunk_mgr.tick.materialize_one")
 	_materialize_one_ready_chunk()
+	PerfProbe.end("chunk_mgr.tick.materialize_one", t_mat)
+	var t_relight_disp := PerfProbe.begin("chunk_mgr.tick.relight_dispatch")
 	_drain_one_relight_dispatch()
+	PerfProbe.end("chunk_mgr.tick.relight_dispatch", t_relight_disp)
+	var t_relight_drain := PerfProbe.begin("chunk_mgr.tick.relight_drain")
 	_drain_relight_results()
+	PerfProbe.end("chunk_mgr.tick.relight_drain", t_relight_drain)
 	_ambient_scan_accum += _delta
 	if _ambient_scan_accum >= 0.1:
 		_ambient_scan_accum = 0.0
 		AmbientFx.tick(self, _cached_player_chunk, int(floor(_player.global_position.y)))
+	var t_leaf := PerfProbe.begin("chunk_mgr.tick.leaf_decay")
 	_tick_leaf_decay()
+	PerfProbe.end("chunk_mgr.tick.leaf_decay", t_leaf)
 	_tick_sapling_growth()
 	_tick_cane_growth()
 	# Scheduled block-tick queue — Flow #2 foundation for fluid flow.
