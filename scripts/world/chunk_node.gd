@@ -338,6 +338,18 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		array_mesh.surface_set_material(0, BlockAtlas.material())
 		_mesh_instance.mesh = array_mesh
+		# Per-instance Savanna tint — sample the climate biome at chunk
+		# center; the chunk shader gates the yellow shift behind UV ∈
+		# grass_top so non-grass faces stay normal. Per-chunk granularity
+		# (not per-cell) is the trade-off for not plumbing a biome map
+		# through the mesher.
+		if Worldgen.terrain_3d_enabled:
+			var coord_now: Vector2i = _compute_chunk_coord()
+			var center_x: float = float(coord_now.x * Chunk.SIZE_X + 8)
+			var center_z: float = float(coord_now.y * Chunk.SIZE_Z + 8)
+			var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
+			var tint: float = 1.0 if biome_id == Worldgen3D.Biome.SAVANNA else 0.0
+			_mesh_instance.set_instance_shader_parameter("savanna_tint", tint)
 		# Prefer the worker-built collision faces (native mesher path).
 		# When the GDScript fallback ran (e.g. chunk has water cells),
 		# collision_faces isn't in the dict and we re-derive on the main

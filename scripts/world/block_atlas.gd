@@ -270,6 +270,16 @@ static func material() -> ShaderMaterial:
 		_material = ShaderMaterial.new()
 		_material.shader = load("res://shaders/chunk.gdshader") as Shader
 		_material.set_shader_parameter("atlas_texture", texture())
+		# Tell the shader where the grass-top atlas slot lives so it can
+		# gate per-instance biome tinting (Savanna yellow) to grass faces
+		# only. Vec4 = (x, y, w, h) in UV space.
+		var grass_rect: Rect2 = uv_rect("grass_top")
+		_material.set_shader_parameter(
+			"grass_top_uv",
+			Vector4(
+				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
+			)
+		)
 	return _material
 
 

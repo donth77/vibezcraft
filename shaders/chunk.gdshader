@@ -25,6 +25,17 @@ uniform float sky_factor : hint_range(0.0, 1.0) = 1.0;
 // Default 0 keeps shipping behavior identical when no key is pressed.
 uniform int debug_view = 0;
 
+// Atlas UV slot for grass_top (x, y, w, h). Set by BlockAtlas at build()
+// so the per-instance biome tint below only modifies grass faces — without
+// this, dirt / stone tops would also catch the savanna yellow.
+uniform vec4 grass_top_uv = vec4(0.0);
+
+// Per-instance Savanna tint factor (0.0 = no tint, 1.0 = full yellow).
+// ChunkNode sets this based on the chunk-center biome. Beta-style mostly-
+// per-chunk biome tinting; per-cell precision would need a chunk biome_map
+// + mesher changes (deferred).
+instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
+
 varying vec3 v_normal;
 varying vec2 v_light;
 
@@ -78,7 +89,18 @@ void fragment() {
 	} else {
 		b = 0.6;
 	}
-	vec3 normal_color = c.rgb * b * lit;
+	vec3 albedo_rgb = c.rgb;
+	// Savanna biome tint. Gate on UV being inside the grass_top slot so
+	// only grass-top faces in savanna chunks get the yellow shift; dirt /
+	// stone tops in the same chunk render normally. Vanilla Beta savanna
+	// grass color (BiomeBase.l() default ~ #BFB755 → ~vec3(0.75, 0.72, 0.33)).
+	if (savanna_tint > 0.0
+			&& UV.x >= grass_top_uv.x && UV.x < grass_top_uv.x + grass_top_uv.z
+			&& UV.y >= grass_top_uv.y && UV.y < grass_top_uv.y + grass_top_uv.w) {
+		vec3 tint = vec3(1.0, 0.95, 0.55);
+		albedo_rgb = mix(albedo_rgb, albedo_rgb * tint, savanna_tint);
+	}
+	vec3 normal_color = albedo_rgb * b * lit;
 	// Heatmap: 0 → red, 15 → green, linear lerp in between. Lets us
 	// SEE the exact per-face value the mesher packed without having
 	// to chase it through the lighting LUT or face shade. Faces with
