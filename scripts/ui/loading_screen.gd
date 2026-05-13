@@ -30,6 +30,12 @@ func _ready() -> void:
 	# break/place, ambience) so the chunk-gen player physics doesn't
 	# leak audio through the loading screen.
 	Game.is_loading = true
+	# Reset the day/night clock to noon for each new world. WorldTime is
+	# an autoload, so its own _ready only fires once per Godot session;
+	# without this, loading a new seed inherits whatever time the prior
+	# session left it at (could be midnight) and the player drops into
+	# darkness on a fresh world.
+	WorldTime.set_time_ticks(6000)
 	layer = 100
 	var root := Control.new()
 	root.anchor_right = 1.0

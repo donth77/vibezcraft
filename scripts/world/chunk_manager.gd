@@ -33,6 +33,17 @@ const _PENDING_TIMEOUT_MS: int = 30000
 # Retry delay when growth is blocked (no sky exposure yet).
 const _SAPLING_GROW_RETRY_SEC: float = 30.0
 const _SAPLING_GROW_MAX_PER_TICK: int = 4
+# Sugar cane growth — vanilla BlockReed.b() ticks the meta counter on
+# every random tick (~1/(16 × 16 × 16 × 4) per chunk per tick) and
+# grows one block when meta hits 15. We compress that into a single
+# delay between growth attempts; 60-180 s mirrors the rough vanilla
+# wall-clock cadence (random tick rate × 16 ticks per growth).
+const _CANE_GROW_MEAN_SEC: float = 90.0
+const _CANE_GROW_MIN_SEC: float = 60.0
+const _CANE_GROW_MAX_SEC: float = 180.0
+const _CANE_GROW_RETRY_SEC: float = 60.0
+const _CANE_GROW_MAX_PER_TICK: int = 4
+const _CANE_MAX_HEIGHT: int = 3
 
 @export var render_distance: int = 8
 @export var chunk_scene: PackedScene
@@ -84,6 +95,11 @@ var _dirty_loaded: Dictionary = {}  # loaded edited chunks awaiting persist-on-u
 #     time (proxy for Alpha's light≥9), re-queues if blocked.
 var _decaying_leaves: Array = []
 var _growing_saplings: Array = []
+# Sugar cane growth queue. Entries: { pos, grow_at }. Only the TOP cane
+# of each column is enqueued (lower canes can't grow). On growth, the
+# new top cell is enqueued; if blocked (column at max height, no air
+# above, support gone) we re-queue with a longer delay.
+var _growing_canes: Array = []
 # Guard: prevents recursive STILL-water cell cascades via set_world_block
 # from inside on_neighbor_changed. See BlockFluids for the fanout shape.
 var _inside_fluid_notify: bool = false
@@ -172,6 +188,7 @@ func _process(_delta: float) -> void:
 		AmbientFx.tick(self, _cached_player_chunk, int(floor(_player.global_position.y)))
 	_tick_leaf_decay()
 	_tick_sapling_growth()
+	_tick_cane_growth()
 	# Scheduled block-tick queue — Flow #2 foundation for fluid flow.
 	# Drains at vanilla 20 Hz (50 ms per tick); fires BlockFluids cascade
 	# and future redstone / growth callbacks. Frame-hitch-safe: the
@@ -354,6 +371,12 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	# mark it so any further edits (or just the next unload) re-persist.
 	if data.get("from_save", false):
 		_dirty_loaded[coord] = true
+	# Worldgen scatter writes SUGAR_CANE directly to chunk.blocks, so the
+	# set_world_block growth-enqueue hook never fires for fresh chunks.
+	# Walk the chunk on materialize and enqueue every cane top so they
+	# can grow over time. Cheap: only walks cells with non-AIR after
+	# the first hit, and saplings/canes are sparse.
+	_enqueue_existing_canes(coord, data.chunk)
 	# Re-dirty loaded neighbors AND this new chunk so the edge-snapshot
 	# re-mesh path (chunk_node._dispatch_remesh → _attach_neighbor_edges)
 	# runs once per seam. The worker's initial mesh (_compute_chunk_data
@@ -690,6 +713,13 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	# bonemeal-spawn later), schedule it for a future tree growth tick.
 	if id == Blocks.SAPLING:
 		_enqueue_sapling_growth(world_pos)
+	# Sugar cane growth — only enqueue when a NEW top is being created
+	# (no cane above), which covers worldgen scatter, player placement,
+	# and the recursive enqueue from _tick_cane_growth itself.
+	if id == Blocks.SUGAR_CANE:
+		var above_id: int = get_world_block(world_pos + Vector3i(0, 1, 0))
+		if above_id != Blocks.SUGAR_CANE:
+			_enqueue_cane_growth(world_pos)
 	# Leaf decay — when a log is removed, scan nearby leaves and orphan
 	# any that can no longer BFS-reach a log within LeafDecay.DECAY_RADIUS.
 	# The nested set_world_block writes only AIR over LEAVES (never LOG),
@@ -1002,6 +1032,117 @@ func _tick_sapling_growth() -> void:
 		grow_tree_at(pos)
 		processed += 1
 		if processed >= _SAPLING_GROW_MAX_PER_TICK:
+			return
+
+
+# Scan a freshly-materialized chunk for SUGAR_CANE column tops and
+# enqueue each for growth. Walks each (x, z) column top-down looking
+# for the highest cane cell; bails out of the column on first non-cane
+# non-air block.
+func _enqueue_existing_canes(coord: Vector2i, chunk: Chunk) -> void:
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(Chunk.SIZE_Y - 1, 0, -1):
+				var b: int = chunk.get_block_unchecked(x, y, z)
+				if b == Blocks.AIR:
+					continue
+				if b == Blocks.SUGAR_CANE:
+					var wp := Vector3i(coord.x * Chunk.SIZE_X + x, y, coord.y * Chunk.SIZE_Z + z)
+					_enqueue_cane_growth(wp)
+				break
+
+
+# Sugar cane growth — vanilla BlockReed.b(). On growth, replaces the
+# AIR cell above the cane with another SUGAR_CANE if the column is
+# under max height (3) and water is adjacent at the BASE of the
+# column. Re-enqueues the new top so it can grow further later. If
+# blocked (no air, max height, support gone), re-enqueues with retry
+# delay; eventually drops out when the cane is broken.
+func _enqueue_cane_growth(pos: Vector3i) -> void:
+	var u: float = maxf(randf(), 0.0001)
+	var delay: float = clampf(-_CANE_GROW_MEAN_SEC * log(u), _CANE_GROW_MIN_SEC, _CANE_GROW_MAX_SEC)
+	var now: float = Time.get_ticks_msec() / 1000.0
+	_growing_canes.append({"pos": pos, "grow_at": now + delay})
+
+
+# Walk down from `pos` to find the base of the cane column.
+func _cane_column_base(pos: Vector3i) -> Vector3i:
+	var p := pos
+	while p.y > 0 and get_world_block(p + Vector3i(0, -1, 0)) == Blocks.SUGAR_CANE:
+		p.y -= 1
+	return p
+
+
+# Cane needs water at the base column-1 (per BlockReed.canPlace), one
+# of the 4 cardinal cells at base.y - 1. Mirrors vanilla's placement
+# check, applied at growth time too.
+func _cane_base_has_water(base_pos: Vector3i) -> bool:
+	var below_y: int = base_pos.y - 1
+	for off: Vector3i in [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+	]:
+		var p: Vector3i = Vector3i(base_pos.x + off.x, below_y, base_pos.z + off.z)
+		if Blocks.is_water(get_world_block(p)):
+			return true
+	return false
+
+
+# gdlint: disable=max-returns
+func _tick_cane_growth() -> void:
+	if _growing_canes.is_empty():
+		return
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var processed: int = 0
+	for i in range(_growing_canes.size() - 1, -1, -1):
+		var entry: Dictionary = _growing_canes[i]
+		if entry.grow_at > now:
+			continue
+		_growing_canes.remove_at(i)
+		var pos: Vector3i = entry.pos
+		var here: int = get_world_block(pos)
+		if here != Blocks.SUGAR_CANE:
+			# Player broke the top cane — drop the entry; if a lower
+			# cane is now the top, the next set_world_block on its
+			# placement re-enqueues.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Only the topmost cane in a column grows.
+		if get_world_block(pos + Vector3i(0, 1, 0)) == Blocks.SUGAR_CANE:
+			# Stale top — the column grew above this cell already.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Column height check.
+		var base: Vector3i = _cane_column_base(pos)
+		var height: int = pos.y - base.y + 1
+		if height >= _CANE_MAX_HEIGHT:
+			# Already at max — give up on this stalk; vanilla random
+			# tick would also no-op forever.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Air above?
+		var above: Vector3i = pos + Vector3i(0, 1, 0)
+		if get_world_block(above) != Blocks.AIR:
+			_growing_canes.append({"pos": pos, "grow_at": now + _CANE_GROW_RETRY_SEC})
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Base must still have water adjacent (vanilla BlockReed.canPlace).
+		if not _cane_base_has_water(base):
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		set_world_block(above, Blocks.SUGAR_CANE)
+		_enqueue_cane_growth(above)
+		processed += 1
+		if processed >= _CANE_GROW_MAX_PER_TICK:
 			return
 
 
