@@ -741,23 +741,16 @@ func test_relight_overhang_spanning_seam_propagates_into_covered_chunk() -> void
 	)
 
 
-# Root-cause asserter for the under-overhang flat-shadow bug.
-# Found via instrumented run of the GDScript relight path: chunk B's
-# south/north edge cells (z=0, z=15) end up at sky=14 — not 0 — because
-# their cardinal neighbour in chunk (1, -1) / (1, 1) is UNLOADED, and
-# the manager's get_world_sky_light returns 15 for unloaded chunks
-# (vanilla "treat unknown as sky-exposed" convention). The recompute
-# sees a phantom-15 source and produces 14; the BFS then propagates
-# the 14 inward across the chunk.
+# Regression for the under-overhang flat-shadow bug.
+# Was: chunk B's south/north edge cells (z=0, z=15) ended up at sky=14
+# because their cardinal neighbour in chunk (1, -1) / (1, 1) is UNLOADED,
+# and get_world_sky_light returns 15 for unloaded chunks (vanilla
+# "treat unknown as sky-exposed" convention). Phantom-15 sources flood-
+# lit covered chunks at load boundaries.
 #
-# Result in-game: a fully-covered chunk near a load boundary lights up
-# brightly along its outer edge, gradient inward, instead of staying
-# dark. Visually shows up as bright glow in an under-overhang cave
-# near where chunks are streaming in.
-#
-# Test pins the bug so any fix is verifiable. Currently asserts the
-# (buggy) observed behaviour so the test passes today; flip the
-# expected value when the fix lands.
+# Fix: _recompute_sky_light_at_world now treats unloaded neighbours as
+# DARK (sky=0) when the queried cell is itself under cover. Sky-exposed
+# cells still use the vanilla 15 convention. See lighting.gd.
 func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
 	var manager := _StubManager.new()
 	var c00 := Chunk.new()
@@ -786,15 +779,20 @@ func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
 	Lighting.fill_sky_light(c10)
 	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
 	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
-	# Chunk B at z=0 (south edge): neighbour at z=-1 is in unloaded
-	# chunk (1, -1) → phantom sky=15 → cells flood-light to 14.
+	# After fix: chunk B's south-edge corner is no longer flood-lit by
+	# a phantom-15 source from unloaded chunk (1, -1). Cell at (15, 65, 0)
+	# is far from chunk A's seam AND at a chunk corner — should stay dark.
 	assert_eq(
-		c10.get_sky_light(0, 65, 0),
-		14,
+		c10.get_sky_light(15, 65, 0),
+		0,
 		(
-			"Bug: under-overhang cell at south chunk edge gets phantom light "
-			+ "from unloaded neighbour chunk. Should be 0; got %d" % c10.get_sky_light(0, 65, 0)
+			"deep under-overhang corner should be 0 (no real sky exposure "
+			+ "within loaded world); got %d" % c10.get_sky_light(15, 65, 0)
 		)
 	)
-	# When fixed, both of these should be 0 (deep under-overhang cells
-	# with no real sky exposure within the loaded chunk world).
+	# Seam-adjacent cell still pulls from chunk A's edge (7) with -1 decay.
+	assert_eq(
+		c10.get_sky_light(0, 65, 8),
+		6,
+		"seam-adjacent under-overhang cell pulls from chunk A's 7 with -1 decay"
+	)

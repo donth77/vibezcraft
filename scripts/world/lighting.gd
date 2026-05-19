@@ -420,9 +420,23 @@ static func _recompute_sky_light_at_world(p: Vector3i, manager) -> int:
 		return emission
 	var step: int = maxi(raw_opacity, 1)
 	var max_n: int = 0
+	# When the queried cell is UNDER COVER (emission == 0, i.e. height_map
+	# at this column > y), treat unloaded-chunk neighbours as DARK rather
+	# than the vanilla "unknown = sky 15" convention. Rationale: an
+	# unloaded neighbour at the same y is just as likely to be under the
+	# same overhang as we are, so phantom-15 lights would flood-light
+	# covered chunks at load boundaries. The vanilla convention still
+	# applies for sky-exposed cells where the unloaded neighbour would
+	# genuinely be sky-lit too. See
+	# test_relight_overhang_phantom_light_from_unloaded_neighbour.
+	var under_cover: bool = emission == 0
 	for n: Vector3i in _NEIGHBORS:
 		var np := Vector3i(p.x + n.x, p.y + n.y, p.z + n.z)
-		var nl: int = manager.get_world_sky_light(np)
+		var nl: int
+		if under_cover and not _world_pos_in_loaded_chunk(np, manager):
+			nl = 0
+		else:
+			nl = manager.get_world_sky_light(np)
 		if nl > max_n:
 			max_n = nl
 	var from_neighbors: int = maxi(0, max_n - step)
