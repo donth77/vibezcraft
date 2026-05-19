@@ -739,3 +739,62 @@ func test_relight_overhang_spanning_seam_propagates_into_covered_chunk() -> void
 	assert_gt(
 		post_edge, 0, "post-relight: at minimum the seam-adjacent cell must receive SOME light"
 	)
+
+
+# Root-cause asserter for the under-overhang flat-shadow bug.
+# Found via instrumented run of the GDScript relight path: chunk B's
+# south/north edge cells (z=0, z=15) end up at sky=14 — not 0 — because
+# their cardinal neighbour in chunk (1, -1) / (1, 1) is UNLOADED, and
+# the manager's get_world_sky_light returns 15 for unloaded chunks
+# (vanilla "treat unknown as sky-exposed" convention). The recompute
+# sees a phantom-15 source and produces 14; the BFS then propagates
+# the 14 inward across the chunk.
+#
+# Result in-game: a fully-covered chunk near a load boundary lights up
+# brightly along its outer edge, gradient inward, instead of staying
+# dark. Visually shows up as bright glow in an under-overhang cave
+# near where chunks are streaming in.
+#
+# Test pins the bug so any fix is verifiable. Currently asserts the
+# (buggy) observed behaviour so the test passes today; flip the
+# expected value when the fix lands.
+func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
+	var manager := _StubManager.new()
+	var c00 := Chunk.new()
+	var c10 := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = c00
+	manager.chunks[Vector2i(1, 0)] = c10
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(4):
+				c00.set_block(x, y, z, Blocks.BEDROCK)
+				c10.set_block(x, y, z, Blocks.BEDROCK)
+			for y in range(4, 64):
+				c00.set_block(x, y, z, Blocks.STONE)
+				c10.set_block(x, y, z, Blocks.STONE)
+			c00.set_block(x, 64, z, Blocks.GRASS)
+			c10.set_block(x, 64, z, Blocks.GRASS)
+	for x in range(8, 16):
+		for z in range(Chunk.SIZE_Z):
+			c00.set_block(x, 70, z, Blocks.STONE)
+			c00.set_block(x, 71, z, Blocks.STONE)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			c10.set_block(x, 70, z, Blocks.STONE)
+			c10.set_block(x, 71, z, Blocks.STONE)
+	Lighting.fill_sky_light(c00)
+	Lighting.fill_sky_light(c10)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
+	# Chunk B at z=0 (south edge): neighbour at z=-1 is in unloaded
+	# chunk (1, -1) → phantom sky=15 → cells flood-light to 14.
+	assert_eq(
+		c10.get_sky_light(0, 65, 0),
+		14,
+		(
+			"Bug: under-overhang cell at south chunk edge gets phantom light "
+			+ "from unloaded neighbour chunk. Should be 0; got %d" % c10.get_sky_light(0, 65, 0)
+		)
+	)
+	# When fixed, both of these should be 0 (deep under-overhang cells
+	# with no real sky exposure within the loaded chunk world).
