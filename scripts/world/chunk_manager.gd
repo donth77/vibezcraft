@@ -531,15 +531,54 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	PerfProbe.end("chunk_mgr.materialize", probe_token)
 
 
-# Synchronous fallback used at startup so the player has terrain to land on.
+# Synchronous startup spawn — runs once per chunk in the initial ring
+# during _spawn_initial_chunks (the spiral-out load that fills the
+# loading screen's progress bar).
+#
+# IMPORTANT: must check disk for saved data BEFORE regenerating. Audit
+# miss originally: this path called Worldgen.generate_chunk directly,
+# so every chunk in the initial ring (the chunks closest to spawn where
+# the player has actually been editing) silently regenerated on world
+# load. Only chunks beyond the initial ring went through the disk-
+# fallback path in _dispatch_workers / _compute_chunk_data.
+#
+# Decode runs on the main thread here (the worker-thread decode lives
+# in _compute_chunk_data). That's a 1-3 ms hit per saved chunk during
+# the loading screen, well inside its budget.
 func _spawn_chunk_sync(coord: Vector2i) -> void:
 	if _chunks.has(coord):
 		return
-	var chunk := Worldgen.generate_chunk(coord.x, coord.y)
+	var saved_entry: Dictionary = {}
+	if _saved_chunks.has(coord):
+		saved_entry = _saved_chunks[coord]
+		_saved_chunks.erase(coord)
+	else:
+		saved_entry = _SAVE_LOAD.load_chunk(coord)
+	var chunk: Chunk
+	var saplings: Array[Vector3i] = []
+	if saved_entry.is_empty():
+		chunk = Worldgen.generate_chunk(coord.x, coord.y)
+	else:
+		var decoded: Array = _decode_saved_entry(coord, saved_entry)
+		chunk = decoded[0] as Chunk
+		saplings = decoded[1]
 	Lighting.fill_sky_light(chunk)
 	Lighting.fill_block_light(chunk)
+	# Warm the heightmap (same reason as _compute_chunk_data — avoids the
+	# 15 ms is_sky_exposed rebuild firing on the next main-thread tick).
+	chunk.is_sky_exposed(0, 0, 0)
 	var mesh_data := Mesher.mesh_chunk_fast(chunk)
-	_materialize_chunk(coord, {"chunk": chunk, "mesh": mesh_data})
+	_materialize_chunk(
+		coord,
+		{
+			"chunk": chunk,
+			"mesh": mesh_data,
+			"from_save": not saved_entry.is_empty(),
+			"saplings": saplings,
+			"pending_ticks": saved_entry.get("pending_ticks", []),
+			"tile_entities": saved_entry.get("tile_entities", {}),
+		}
+	)
 
 
 # Snapshot the {target + cardinal neighbors} chunks and dispatch the
