@@ -29,7 +29,7 @@ const CLONE_VERSION: String = "0.1"
 # --- Path ---
 
 
-static func meta_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String:
+static func meta_path(world_name: String = "") -> String:
 	return "%s/world.json" % SaveLoad.world_dir(world_name)
 
 
@@ -40,7 +40,7 @@ static func meta_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String:
 # pass through the loaded one with updated fields. Always rewrites
 # last_played + format_version + clone_version so callers don't have to
 # remember to.
-static func save_meta(meta: Dictionary, world_name: String = SaveLoad.DEFAULT_WORLD) -> bool:
+static func save_meta(meta: Dictionary, world_name: String = "") -> bool:
 	_ensure_world_dir(world_name)
 	var to_write: Dictionary = meta.duplicate(true)
 	to_write["format_version"] = _FORMAT_VERSION
@@ -55,16 +55,14 @@ static func save_meta(meta: Dictionary, world_name: String = SaveLoad.DEFAULT_WO
 # Read world.json. Returns the parsed Dictionary, or an empty Dictionary
 # if the file is missing / malformed / unrecognized format. Empty result
 # is the "this is a fresh world" signal — caller picks defaults.
-static func load_meta(world_name: String = SaveLoad.DEFAULT_WORLD) -> Dictionary:
+static func load_meta(world_name: String = "") -> Dictionary:
 	var path: String = meta_path(world_name)
-	if not FileAccess.file_exists(path):
+	# Crash-recovery aware read via SaveLoad.read_with_recovery (same
+	# .new/.old fallback the region + entity + player loaders use).
+	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
+	if bytes.is_empty():
 		return {}
-	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		push_warning("[WorldMeta] cannot open %s for read" % path)
-		return {}
-	var text: String = f.get_as_text()
-	f.close()
+	var text: String = bytes.get_string_from_utf8()
 	# JSON.new().parse(...) instead of JSON.parse_string: the static helper
 	# logs an engine-level ERROR on malformed input, which GUT treats as a
 	# test failure. The instance API returns the error code quietly.

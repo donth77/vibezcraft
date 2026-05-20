@@ -67,15 +67,27 @@ static var _region_cache: Dictionary = {}
 # --- Path helpers ---
 
 
-static func world_dir(world_name: String = DEFAULT_WORLD) -> String:
-	return "user://%s" % world_name
+# Resolve an empty world_name to the live Game.active_world (set by
+# Select-World UI). Callers that pass an explicit name get it back
+# unchanged — used by tests for slot isolation. Without this, the
+# multi-world UI was silently broken: defaults baked the const
+# "World1" at compile time, so picking World3 in the slot list
+# still routed every save to World1.
+static func resolve_world(world_name: String) -> String:
+	if world_name == "":
+		return Game.active_world
+	return world_name
 
 
-static func region_dir(world_name: String = DEFAULT_WORLD) -> String:
+static func world_dir(world_name: String = "") -> String:
+	return "user://%s" % resolve_world(world_name)
+
+
+static func region_dir(world_name: String = "") -> String:
 	return "%s/region" % world_dir(world_name)
 
 
-static func region_path(rx: int, rz: int, world_name: String = DEFAULT_WORLD) -> String:
+static func region_path(rx: int, rz: int, world_name: String = "") -> String:
 	return "%s/r.%d.%d.bin" % [region_dir(world_name), rx, rz]
 
 
@@ -91,11 +103,10 @@ static func chunk_to_region(coord: Vector2i) -> Vector2i:
 # Write a single chunk's entry dict to its region file. Reads the existing
 # region (or starts empty), updates the entry for `coord`, and atomically
 # rewrites the region. Returns true on success.
-static func save_chunk(
-	coord: Vector2i, entry: Dictionary, world_name: String = DEFAULT_WORLD
-) -> bool:
+static func save_chunk(coord: Vector2i, entry: Dictionary, world_name: String = "") -> bool:
 	if entry.is_empty():
 		return false
+	world_name = resolve_world(world_name)
 	_ensure_region_dir(world_name)
 	var rcoord: Vector2i = chunk_to_region(coord)
 	var region: Dictionary = _load_region(rcoord, world_name)
@@ -105,7 +116,8 @@ static func save_chunk(
 
 # Read a chunk's entry from its region file. Returns an empty dict if the
 # chunk has never been saved (or the region file doesn't exist).
-static func load_chunk(coord: Vector2i, world_name: String = DEFAULT_WORLD) -> Dictionary:
+static func load_chunk(coord: Vector2i, world_name: String = "") -> Dictionary:
+	world_name = resolve_world(world_name)
 	var rcoord: Vector2i = chunk_to_region(coord)
 	var region: Dictionary = _load_region(rcoord, world_name)
 	return region.get(coord, {})
@@ -113,7 +125,8 @@ static func load_chunk(coord: Vector2i, world_name: String = DEFAULT_WORLD) -> D
 
 # Flush all in-memory region caches to disk. Used by autosave + save-and-quit.
 # Returns the count of regions written.
-static func flush_all_regions(world_name: String = DEFAULT_WORLD) -> int:
+static func flush_all_regions(world_name: String = "") -> int:
+	world_name = resolve_world(world_name)
 	var written: int = 0
 	var prefix: String = "%s|" % world_name
 	for key: String in _region_cache.keys():
@@ -170,7 +183,7 @@ static func migrate_legacy_world() -> bool:
 # Total disk size of a world's directory (recursive). Returns 0 if the
 # world doesn't exist. Used by the Select World screen to render the
 # "World N (X.XX MB)" slot label that le.java draws.
-static func world_size_bytes(world_name: String = DEFAULT_WORLD) -> int:
+static func world_size_bytes(world_name: String = "") -> int:
 	var dir_path: String = world_dir(world_name)
 	if not DirAccess.dir_exists_absolute(dir_path):
 		return 0
@@ -179,7 +192,7 @@ static func world_size_bytes(world_name: String = DEFAULT_WORLD) -> int:
 
 # True if any data exists for this slot. Cheap shortcut around
 # world_size_bytes for the empty-vs-not-empty UI test.
-static func world_exists(world_name: String = DEFAULT_WORLD) -> bool:
+static func world_exists(world_name: String = "") -> bool:
 	return DirAccess.dir_exists_absolute(world_dir(world_name))
 
 
@@ -206,7 +219,8 @@ static func _dir_size_recursive(path: String) -> int:
 
 # Wipe a world from disk + cache. Used by Delete World UI (step 7.7) and by
 # tests doing isolated setups.
-static func delete_world(world_name: String = DEFAULT_WORLD) -> bool:
+static func delete_world(world_name: String = "") -> bool:
+	world_name = resolve_world(world_name)
 	var prefix: String = "%s|" % world_name
 	for key: String in _region_cache.keys():
 		if key.begins_with(prefix):
@@ -231,7 +245,7 @@ static func _load_region(rcoord: Vector2i, world_name: String) -> Dictionary:
 	if _region_cache.has(key):
 		return _region_cache[key]
 	var path: String = region_path(rcoord.x, rcoord.y, world_name)
-	var bytes: PackedByteArray = _read_with_recovery(path)
+	var bytes: PackedByteArray = read_with_recovery(path)
 	var region: Dictionary = {}
 	if bytes.size() >= _HEADER_SIZE:
 		var magic: PackedByteArray = bytes.slice(0, 4)
@@ -258,17 +272,28 @@ static func _load_region(rcoord: Vector2i, world_name: String) -> Dictionary:
 static func _flush_region(rcoord: Vector2i, region: Dictionary, world_name: String) -> bool:
 	var path: String = region_path(rcoord.x, rcoord.y, world_name)
 	var body: PackedByteArray = var_to_bytes(region)
-	var out: PackedByteArray = PackedByteArray()
-	out.resize(_HEADER_SIZE + body.size())
-	for i in range(4):
-		out[i] = _magic[i]
-	out.encode_u32(4, _FORMAT_VERSION)
-	for i in range(body.size()):
-		out[_HEADER_SIZE + i] = body[i]
-	if not atomic_write(path, out):
+	if not pack_and_write(path, _magic, _FORMAT_VERSION, body):
 		return false
 	_region_cache[_cache_key(rcoord, world_name)] = region
 	return true
+
+
+# Shared header-+ body pack-and-write helper used by every persistence
+# module that writes a magic / version / payload file (chunk regions,
+# entities.bin, player.bin). Uses append_array (memcpy-style) so a full
+# 4 MB region payload doesn't churn through 4M GDScript loop iterations
+# like the previous byte-by-byte version did. Centralized so the
+# multi-module file-format pattern stays in one place.
+static func pack_and_write(
+	path: String, magic: PackedByteArray, version: int, body: PackedByteArray
+) -> bool:
+	var header: PackedByteArray = magic.duplicate()
+	var version_bytes: PackedByteArray = PackedByteArray()
+	version_bytes.resize(4)
+	version_bytes.encode_u32(0, version)
+	header.append_array(version_bytes)
+	header.append_array(body)
+	return atomic_write(path, header)
 
 
 # --- Atomic write + crash recovery ---
@@ -331,7 +356,7 @@ static func atomic_write(path: String, bytes: PackedByteArray) -> bool:
 #   - main missing, .old exists → recover .old (atomic_write crashed between
 #                                 the rename-out and the rename-in)
 # Returns empty PackedByteArray when no recoverable file exists.
-static func _read_with_recovery(path: String) -> PackedByteArray:
+static func read_with_recovery(path: String) -> PackedByteArray:
 	if FileAccess.file_exists(path):
 		var f: FileAccess = FileAccess.open(path, FileAccess.READ)
 		if f == null:
@@ -352,7 +377,7 @@ static func _read_with_recovery(path: String) -> PackedByteArray:
 	if FileAccess.file_exists(old_path):
 		push_warning("[SaveLoad] %s missing but .old exists; recovering previous version" % path)
 		DirAccess.rename_absolute(old_path, path)
-		return _read_with_recovery(path)
+		return read_with_recovery(path)
 	return PackedByteArray()
 
 

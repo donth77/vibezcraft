@@ -154,7 +154,27 @@ func _on_slot_pressed(slot_index: int) -> void:
 		return
 	var world_name: String = "World%d" % slot_index
 	Game.active_world = world_name
+	_prepare_world_seed(world_name)
 	get_tree().change_scene_to_file(_MAIN_SCENE_PATH)
+
+
+# Ensure the worldgen seed matches this slot's saved seed BEFORE main.tscn
+# spawns ChunkManager. Without this, every slot would use whatever seed
+# settings.cfg had (a global) — picking World3 would generate the same
+# terrain as World1. Two cases:
+#   - Existing world: read world.json, apply its seed.
+#   - Fresh slot:     roll a random seed, write a new world.json with it,
+#                     then apply. The world.json gets the rest of its
+#                     fields (spawn, time, timestamps) filled by
+#                     ChunkManager's first autosave.
+func _prepare_world_seed(world_name: String) -> void:
+	var meta: Dictionary = WorldMeta.load_meta(world_name)
+	if meta.is_empty():
+		randomize()
+		var fresh_seed: int = randi_range(1, 0x7FFFFFFF)
+		meta = WorldMeta.make_initial(fresh_seed, Vector3i(0, 70, 0), 6000)
+		WorldMeta.save_meta(meta, world_name)
+	Worldgen.apply_world_seed(int(meta.get("seed", Worldgen.WORLD_SEED)))
 
 
 func _on_cancel_pressed() -> void:

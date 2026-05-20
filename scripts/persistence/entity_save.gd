@@ -38,7 +38,7 @@ static var _magic: PackedByteArray = PackedByteArray(_MAGIC_BYTES)
 # --- Path ---
 
 
-static func entities_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String:
+static func entities_path(world_name: String = "") -> String:
 	return "%s/entities.bin" % SaveLoad.world_dir(world_name)
 
 
@@ -49,7 +49,7 @@ static func entities_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String
 # persist (currently DroppedItem). Writes the result to entities.bin
 # atomically via the same .new → rename pattern SaveLoad uses.
 # Returns the count of entities written.
-static func save_all(parent: Node, world_name: String = SaveLoad.DEFAULT_WORLD) -> int:
+static func save_all(parent: Node, world_name: String = "") -> int:
 	if parent == null:
 		return 0
 	_ensure_world_dir(world_name)
@@ -59,14 +59,7 @@ static func save_all(parent: Node, world_name: String = SaveLoad.DEFAULT_WORLD) 
 		if not entry.is_empty():
 			entries.append(entry)
 	var body: PackedByteArray = var_to_bytes(entries)
-	var out: PackedByteArray = PackedByteArray()
-	out.resize(_HEADER_SIZE + body.size())
-	for i in range(4):
-		out[i] = _magic[i]
-	out.encode_u32(4, _FORMAT_VERSION)
-	for i in range(body.size()):
-		out[_HEADER_SIZE + i] = body[i]
-	if not SaveLoad.atomic_write(entities_path(world_name), out):
+	if not SaveLoad.pack_and_write(entities_path(world_name), _magic, _FORMAT_VERSION, body):
 		return 0
 	return entries.size()
 
@@ -89,18 +82,16 @@ static func _serialize_one(node: Node) -> Dictionary:
 # doesn't exist (returns 0); also resilient to a missing-main +
 # .new-or-.old recovery (delegates to SaveLoad._read_with_recovery via
 # the shared atomic-write contract — see crash recovery in save-load-plan §5.3).
-static func load_all(parent: Node, world_name: String = SaveLoad.DEFAULT_WORLD) -> int:
+static func load_all(parent: Node, world_name: String = "") -> int:
 	if parent == null:
 		return 0
 	var path: String = entities_path(world_name)
-	if not FileAccess.file_exists(path):
+	# read_with_recovery handles missing-main-but-.new-or-.old-exists from
+	# a prior crash, same path SaveLoad uses for region files. Without it
+	# a crash during save_all would silently lose entities forever.
+	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
+	if bytes.is_empty():
 		return 0
-	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		push_warning("[EntitySave] cannot open %s for read" % path)
-		return 0
-	var bytes: PackedByteArray = f.get_buffer(f.get_length())
-	f.close()
 	if bytes.size() < _HEADER_SIZE:
 		push_warning("[EntitySave] %s shorter than header" % path)
 		return 0
@@ -147,7 +138,7 @@ static func _spawn_one(entry: Dictionary, parent: Node) -> bool:
 
 # Delete the entities file for a world. Used when starting a fresh world
 # in a previously-used slot (multi-world UI in step 7.6+) and by tests.
-static func delete_entities_file(world_name: String = SaveLoad.DEFAULT_WORLD) -> bool:
+static func delete_entities_file(world_name: String = "") -> bool:
 	var path: String = entities_path(world_name)
 	if not FileAccess.file_exists(path):
 		return true

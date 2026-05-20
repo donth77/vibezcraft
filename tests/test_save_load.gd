@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends GutTest
 
 # SaveLoad disk persistence (step 7.1 of the save/load plan). Round-trip,
@@ -212,6 +213,54 @@ func test_recovery_discards_new_when_main_missing() -> void:
 
 
 # --- Cache behaviour ---
+
+# --- Multi-world default routing (audit fix) ---
+
+# Regression: previously, omitting world_name baked in the const "World1"
+# at compile time. Picking World3 in the Select-World UI set
+# Game.active_world but every save still routed to World1's region files.
+# These tests pin the active-world-aware default.
+
+
+func test_default_world_name_routes_to_active_world() -> void:
+	var saved_active: String = Game.active_world
+	Game.active_world = "test_save_load_active_routing"
+	SaveLoad.delete_world(Game.active_world)
+	SaveLoad.clear_cache()
+	var blocks := PackedByteArray()
+	blocks.resize(Chunk.TOTAL_BLOCKS)
+	blocks.fill(Blocks.STONE)
+	# Save with NO world_name — should land in the active world, not World1.
+	SaveLoad.save_chunk(Vector2i(0, 0), _make_entry(blocks))
+	assert_true(
+		FileAccess.file_exists(SaveLoad.region_path(0, 0, "test_save_load_active_routing")),
+		"region file written to active world"
+	)
+	assert_false(
+		SaveLoad.load_chunk(Vector2i(0, 0), "World1").has("bytes"),
+		"World1 untouched when active world differs"
+	)
+	# Cleanup
+	SaveLoad.delete_world(Game.active_world)
+	Game.active_world = saved_active
+
+
+func test_explicit_world_name_overrides_active() -> void:
+	var saved_active: String = Game.active_world
+	Game.active_world = "test_save_load_override_a"
+	SaveLoad.delete_world("test_save_load_override_a")
+	SaveLoad.delete_world("test_save_load_override_b")
+	SaveLoad.clear_cache()
+	var blocks := PackedByteArray()
+	blocks.resize(Chunk.TOTAL_BLOCKS)
+	# Explicit world_name beats Game.active_world.
+	SaveLoad.save_chunk(Vector2i(0, 0), _make_entry(blocks), "test_save_load_override_b")
+	assert_true(FileAccess.file_exists(SaveLoad.region_path(0, 0, "test_save_load_override_b")))
+	assert_false(FileAccess.file_exists(SaveLoad.region_path(0, 0, "test_save_load_override_a")))
+	SaveLoad.delete_world("test_save_load_override_a")
+	SaveLoad.delete_world("test_save_load_override_b")
+	Game.active_world = saved_active
+
 
 # --- Legacy world migration (step 7.5) ---
 

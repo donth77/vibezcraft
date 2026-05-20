@@ -40,7 +40,7 @@ static var _magic: PackedByteArray = PackedByteArray(_MAGIC_BYTES)
 # --- Path ---
 
 
-static func player_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String:
+static func player_path(world_name: String = "") -> String:
 	return "%s/player.bin" % SaveLoad.world_dir(world_name)
 
 
@@ -49,20 +49,13 @@ static func player_path(world_name: String = SaveLoad.DEFAULT_WORLD) -> String:
 
 # Snapshot the player's persistent state and write it to disk. Returns
 # true on success.
-static func save_player(player: Node3D, world_name: String = SaveLoad.DEFAULT_WORLD) -> bool:
+static func save_player(player: Node3D, world_name: String = "") -> bool:
 	if player == null:
 		return false
 	_ensure_world_dir(world_name)
 	var payload: Dictionary = _build_payload(player)
 	var body: PackedByteArray = var_to_bytes(payload)
-	var out: PackedByteArray = PackedByteArray()
-	out.resize(_HEADER_SIZE + body.size())
-	for i in range(4):
-		out[i] = _magic[i]
-	out.encode_u32(4, _FORMAT_VERSION)
-	for i in range(body.size()):
-		out[_HEADER_SIZE + i] = body[i]
-	return SaveLoad.atomic_write(player_path(world_name), out)
+	return SaveLoad.pack_and_write(player_path(world_name), _magic, _FORMAT_VERSION, body)
 
 
 static func _build_payload(player: Node3D) -> Dictionary:
@@ -99,18 +92,15 @@ static func _build_payload(player: Node3D) -> Dictionary:
 # Returns true on success, false on missing/malformed file (leaves the
 # player at its default-spawn position so the caller can detect fresh
 # worlds with player_save.load_player(...) == false).
-static func load_player(player: Node3D, world_name: String = SaveLoad.DEFAULT_WORLD) -> bool:
+static func load_player(player: Node3D, world_name: String = "") -> bool:
 	if player == null:
 		return false
 	var path: String = player_path(world_name)
-	if not FileAccess.file_exists(path):
+	# Crash-recovery aware read via SaveLoad.read_with_recovery (same
+	# .new/.old fallback the region loader uses).
+	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
+	if bytes.is_empty():
 		return false
-	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		push_warning("[PlayerSave] cannot open %s for read" % path)
-		return false
-	var bytes: PackedByteArray = f.get_buffer(f.get_length())
-	f.close()
 	if bytes.size() < _HEADER_SIZE:
 		push_warning("[PlayerSave] %s shorter than header" % path)
 		return false
@@ -152,7 +142,7 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 # --- Cleanup ---
 
 
-static func delete_player_file(world_name: String = SaveLoad.DEFAULT_WORLD) -> bool:
+static func delete_player_file(world_name: String = "") -> bool:
 	var path: String = player_path(world_name)
 	if not FileAccess.file_exists(path):
 		return true
