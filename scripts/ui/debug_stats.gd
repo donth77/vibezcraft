@@ -38,9 +38,12 @@ func _ready() -> void:
 	# has released the mouse (Esc). Label + scroll child are IGNORE, the
 	# Button defaults to STOP on its own hit rect.
 	mouse_filter = Control.MOUSE_FILTER_PASS
-	# Anchor top-right, auto-sizing: let the container shrink to content.
-	# No offset_bottom — PanelContainer hugs its VBox child and the VBox's
-	# internal caps keep the whole panel on-screen.
+	# Anchor top-right. Width is fixed by the offset pair (560 → 16 from
+	# the right edge = 544 px). Vertical: anchored to the TOP only and
+	# explicitly told to grow downward so the perf-label re-layout per
+	# update doesn't bounce the panel position around. The ScrollContainer
+	# below caps perf-text height so the overall panel never escapes the
+	# viewport.
 	anchor_left = 1.0
 	anchor_top = 0.0
 	anchor_right = 1.0
@@ -49,8 +52,11 @@ func _ready() -> void:
 	offset_top = 56
 	offset_right = -16
 	offset_bottom = 56  # container will expand downward as needed
-	size_flags_horizontal = Control.SIZE_SHRINK_END
-	size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	grow_vertical = Control.GROW_DIRECTION_END
+	# Belt-and-braces: don't paint outside our own rect even if a child's
+	# minimum size ever does briefly exceed it during a layout pass.
+	clip_contents = true
 
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.05, 0.05, 0.06, 0.78)
@@ -81,17 +87,29 @@ func _ready() -> void:
 	_label.text = ""
 	vbox.add_child(_label)
 
-	# Perf probes — tiny font so they never blow out the panel height.
+	# Perf probes — wrapped in a ScrollContainer with a fixed max height so
+	# adding sub-probes can never push the FPS line (in `_label` above) or
+	# the buttons (below) off-screen. The probe list now exceeds 35 rows in
+	# typical use and the cumulative height was overflowing the viewport.
+	var perf_scroll := ScrollContainer.new()
+	perf_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	# Cap vertical at 420 px — fits ~24 rows at 18 px font + 4 px line
+	# spacing. Anything beyond scrolls inside the panel.
+	perf_scroll.custom_minimum_size = Vector2(0, 420)
+	perf_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	perf_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(perf_scroll)
 	_perf_label = Label.new()
 	_perf_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_perf_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_perf_label.add_theme_font_size_override("font_size", _PERF_FONT_SIZE)
 	_perf_label.add_theme_color_override("font_color", Color(0.85, 0.95, 1.0, 1.0))
 	_perf_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1))
 	_perf_label.add_theme_constant_override("shadow_offset_x", 1)
 	_perf_label.add_theme_constant_override("shadow_offset_y", 1)
 	_perf_label.text = ""
-	vbox.add_child(_perf_label)
+	perf_scroll.add_child(_perf_label)
 
 	_scout_button = Button.new()
 	_scout_button.text = "Refresh scout (F6)"
