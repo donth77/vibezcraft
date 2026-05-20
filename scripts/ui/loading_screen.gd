@@ -26,6 +26,16 @@ var _bar_fill_rect: ColorRect
 
 
 func _ready() -> void:
+	# Set the global loading flag — gates in-game SFX (footsteps, block
+	# break/place, ambience) so the chunk-gen player physics doesn't
+	# leak audio through the loading screen.
+	Game.is_loading = true
+	# Reset the day/night clock to noon for each new world. WorldTime is
+	# an autoload, so its own _ready only fires once per Godot session;
+	# without this, loading a new seed inherits whatever time the prior
+	# session left it at (could be midnight) and the player drops into
+	# darkness on a fresh world.
+	WorldTime.set_time_ticks(6000)
 	layer = 100
 	var root := Control.new()
 	root.anchor_right = 1.0
@@ -130,4 +140,7 @@ func _on_chunk_progress(loaded: int, total: int) -> void:
 	if _bar_fill_rect != null:
 		_bar_fill_rect.offset_right = pct * _BAR_WIDTH
 	if loaded >= total:
+		# Clear the loading-screen flag so in-game SFX (footsteps, block
+		# break/place, ambience) start playing only after world is ready.
+		Game.is_loading = false
 		queue_free()

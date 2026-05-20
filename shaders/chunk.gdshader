@@ -11,6 +11,16 @@ render_mode cull_back, unshaded;
 
 uniform sampler2D atlas_texture : filter_nearest, source_color;
 
+// Animated fire strip — vanilla fire_layer_0.png at 16×512 (32 frames of
+// 16×16 stacked vertically). When a fragment's UV falls inside the fire
+// tile's atlas region (`fire_uv`), we sample from THIS texture instead
+// of the atlas, with V offset by TIME × FPS so frames cycle. Single tex
+// + single shader branch — avoids a per-chunk material or re-meshing.
+uniform sampler2D fire_strip : filter_nearest, source_color;
+uniform vec4 fire_uv = vec4(-1.0);  // (x, y, w, h) in atlas space; (-1,-1,-1,-1) = disabled
+const float FIRE_FRAMES = 32.0;
+const float FIRE_FPS = 24.0;
+
 // Sky-light multiplier driven by WorldTime.sky_factor() (0.05 midnight,
 // 1.0 noon). Applied to the per-vertex sky_light value packed in COLOR.r.
 // Default 1.0 keeps the shader functional when no driver is attached
@@ -24,6 +34,17 @@ uniform float sky_factor : hint_range(0.0, 1.0) = 1.0;
 //   3 = combined-light heatmap (after sky_factor + max-of-both)
 // Default 0 keeps shipping behavior identical when no key is pressed.
 uniform int debug_view = 0;
+
+// Atlas UV slot for grass_top (x, y, w, h). Set by BlockAtlas at build()
+// so the per-instance biome tint below only modifies grass faces — without
+// this, dirt / stone tops would also catch the savanna yellow.
+uniform vec4 grass_top_uv = vec4(0.0);
+
+// Per-instance Savanna tint factor (0.0 = no tint, 1.0 = full yellow).
+// ChunkNode sets this based on the chunk-center biome. Beta-style mostly-
+// per-chunk biome tinting; per-cell precision would need a chunk biome_map
+// + mesher changes (deferred).
+instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
 
 varying vec3 v_normal;
 varying vec2 v_light;
@@ -39,7 +60,20 @@ void vertex() {
 
 
 void fragment() {
-	vec4 c = texture(atlas_texture, UV);
+	vec4 c;
+	// Fire animation — UV check against the fire tile's atlas region.
+	// If inside, remap to the fire_strip texture with TIME-based V offset
+	// so frames cycle. Outside, sample the atlas as normal.
+	if (fire_uv.x >= 0.0
+			&& UV.x >= fire_uv.x && UV.x < fire_uv.x + fire_uv.z
+			&& UV.y >= fire_uv.y && UV.y < fire_uv.y + fire_uv.w) {
+		vec2 local_uv = (UV - fire_uv.xy) / fire_uv.zw;
+		float frame = floor(mod(TIME * FIRE_FPS, FIRE_FRAMES));
+		vec2 strip_uv = vec2(local_uv.x, (frame + local_uv.y) / FIRE_FRAMES);
+		c = texture(fire_strip, strip_uv);
+	} else {
+		c = texture(atlas_texture, UV);
+	}
 	if (c.a < 0.5) {
 		discard;
 	}
@@ -52,14 +86,13 @@ void fragment() {
 	//     float f2 = 0.05;  // floor
 	//     float f3 = 1 - i/15;
 	//     brightness[i] = (1 - f3) / (f3*3 + 1) * (1 - f2) + f2;
-	// Source uses 0.05 floor — on 2010 LCDs that crushed to perceived black.
-	// Modern OLED/IPS panels render the same value as visibly dim; to match
-	// the "I literally cannot see anything" cave feel that vanilla had on
-	// contemporary hardware, we use 0.0 here. At light=0 (deep cave, no
-	// torch) faces render pure black; one cell away from a torch (light=14)
-	// the LUT still hits ~78%, so torches are strong sources and the
-	// non-linear roll-off in vanilla's curve is preserved for steps 1..15.
-	float f2 = 0.0;
+	// Restored vanilla's 0.05 floor so cells with sky=block=0 render at 5%
+	// brightness instead of pure black. Earlier 0.0 made under-overhang
+	// faces and unlit cave ceilings unreadably dark on modern monitors.
+	// One cell away from a torch (light=14) the LUT still hits ~78%, so
+	// torches remain strong sources and the non-linear roll-off in
+	// vanilla's curve is preserved for steps 1..15.
+	float f2 = 0.05;
 	float f3 = 1.0 - light;
 	float lit = (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - f2) + f2;
 	// Per-face Notch shading. Vanilla constants (vendor/alpha-1.2.6-src/bk.java:819-822):
@@ -78,7 +111,18 @@ void fragment() {
 	} else {
 		b = 0.6;
 	}
-	vec3 normal_color = c.rgb * b * lit;
+	vec3 albedo_rgb = c.rgb;
+	// Savanna biome tint. Gate on UV being inside the grass_top slot so
+	// only grass-top faces in savanna chunks get the yellow shift; dirt /
+	// stone tops in the same chunk render normally. Vanilla Beta savanna
+	// grass color (BiomeBase.l() default ~ #BFB755 → ~vec3(0.75, 0.72, 0.33)).
+	if (savanna_tint > 0.0
+			&& UV.x >= grass_top_uv.x && UV.x < grass_top_uv.x + grass_top_uv.z
+			&& UV.y >= grass_top_uv.y && UV.y < grass_top_uv.y + grass_top_uv.w) {
+		vec3 tint = vec3(1.0, 0.95, 0.55);
+		albedo_rgb = mix(albedo_rgb, albedo_rgb * tint, savanna_tint);
+	}
+	vec3 normal_color = albedo_rgb * b * lit;
 	// Heatmap: 0 → red, 15 → green, linear lerp in between. Lets us
 	// SEE the exact per-face value the mesher packed without having
 	// to chase it through the lighting LUT or face shade. Faces with

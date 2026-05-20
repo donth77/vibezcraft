@@ -52,6 +52,12 @@ const _BLOCKS: Array = [
 	Blocks.FLOWER_YELLOW,
 	Blocks.MUSHROOM_BROWN,
 	Blocks.MUSHROOM_RED,
+	Blocks.SUGAR_CANE,
+	Blocks.ICE,
+	Blocks.SNOW_BLOCK,
+	Blocks.CACTUS,
+	Blocks.SNOW_LAYER,
+	Blocks.TNT,
 ]
 
 const _ITEMS: Array = [
@@ -64,12 +70,14 @@ const _ITEMS: Array = [
 	Items.FLINT,
 	Items.LEATHER,
 	Items.BONEMEAL,
+	Items.GUNPOWDER,
 	Items.BUCKET_EMPTY,
 	Items.BUCKET_WATER,
 	Items.BUCKET_LAVA,
 	Items.FLINT_AND_STEEL,
 	Items.WOODEN_DOOR,
 	Items.IRON_DOOR,
+	Items.SUGAR_CANE,
 	Items.WOODEN_PICKAXE,
 	Items.WOODEN_AXE,
 	Items.WOODEN_SHOVEL,

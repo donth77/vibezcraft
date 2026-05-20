@@ -195,6 +195,21 @@ func sample_3d_grid_additive(
 				var n28: int = n27 & 0xFF
 				d26 -= float(n27)
 				var d27: float = d26 * d26 * d26 * (d26 * (d26 * 6.0 - 15.0) + 10.0)
+				# Vanilla z.java caches d18-d21 across i6 iterations when n28
+				# (integer Y cell) hasn't changed. The cached values use
+				# d26 (Y subpixel) from when the cache was last computed,
+				# which drifts as i6 advances within the same integer Y
+				# cell. From a "correct Perlin sample" standpoint this is
+				# wrong, but VANILLA TERRAIN DEPENDS ON THIS — vanilla's
+				# bulk-grid output uses these cached (technically incorrect)
+				# values, which is what produces vanilla's characteristic
+				# smooth terrain appearance.
+				#
+				# Earlier we disabled the cache to match sum-of-point-samples
+				# (commit 7bd8f23), which gave us bit-correct Perlin values
+				# but cliffs everywhere — terrain that diverged from vanilla's
+				# saved worlds at the same seed. Re-enabling restores vanilla
+				# parity. The 'wrong' cache is intentional vanilla behavior.
 				if i6 == 0 or n28 != n16:
 					n16 = n28
 					n17 = _perm[n24] + n28

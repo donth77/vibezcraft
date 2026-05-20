@@ -22,22 +22,33 @@ const _LEAF_DECAY_MAX_PER_TICK: int = 16
 const _SAPLING_GROW_MEAN_SEC: float = 90.0
 const _SAPLING_GROW_MIN_SEC: float = 30.0
 const _SAPLING_GROW_MAX_SEC: float = 300.0
+
+# Workers can crash silently (uncaught exception, propagate_notification
+# race on Node-creating noise constructors, etc.) and never write
+# `_ready_results` → coord stays in `_pending` forever → chunk never
+# materializes → visible 16×16 black void in the world. Reap stale
+# entries each frame and re-enqueue them. 30s is generous (typical
+# chunk gen ~30 ms).
+const _PENDING_TIMEOUT_MS: int = 30000
 # Retry delay when growth is blocked (no sky exposure yet).
 const _SAPLING_GROW_RETRY_SEC: float = 30.0
 const _SAPLING_GROW_MAX_PER_TICK: int = 4
-
-# Workers that don't return within this many ms are considered crashed
-# and the coord is re-dispatched. Catches the "missing chunk hole" bug
-# where a worker silently fails (uncaught exception, propagate_notification
-# race on a Node-creating noise constructor, etc.) and never writes
-# `_ready_results` → coord stays in `_pending` forever → chunk never
-# materializes. 30 seconds is generous (typical chunk gen ~30 ms).
-const _PENDING_TIMEOUT_MS: int = 30000
+# Sugar cane growth — vanilla BlockReed.b() ticks the meta counter on
+# every random tick (~1/(16 × 16 × 16 × 4) per chunk per tick) and
+# grows one block when meta hits 15. We compress that into a single
+# delay between growth attempts; 60-180 s mirrors the rough vanilla
+# wall-clock cadence (random tick rate × 16 ticks per growth).
+const _CANE_GROW_MEAN_SEC: float = 90.0
+const _CANE_GROW_MIN_SEC: float = 60.0
+const _CANE_GROW_MAX_SEC: float = 180.0
+const _CANE_GROW_RETRY_SEC: float = 60.0
+const _CANE_GROW_MAX_PER_TICK: int = 4
+const _CANE_MAX_HEIGHT: int = 3
 
 @export var render_distance: int = 8
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
-@export var max_concurrent_jobs: int = 4
+@export var max_concurrent_jobs: int = 8
 # Cap on _apply_mesh_data calls per frame. Each apply = up to 3 ArrayMesh
 # VBOs + trimesh; stacking them on one frame caused 120→70 fps spikes.
 @export var apply_budget_per_frame: int = 1
@@ -84,6 +95,11 @@ var _dirty_loaded: Dictionary = {}  # loaded edited chunks awaiting persist-on-u
 #     time (proxy for Alpha's light≥9), re-queues if blocked.
 var _decaying_leaves: Array = []
 var _growing_saplings: Array = []
+# Sugar cane growth queue. Entries: { pos, grow_at }. Only the TOP cane
+# of each column is enqueued (lower canes can't grow). On growth, the
+# new top cell is enqueued; if blocked (column at max height, no air
+# above, support gone) we re-queue with a longer delay.
+var _growing_canes: Array = []
 # Guard: prevents recursive STILL-water cell cascades via set_world_block
 # from inside on_neighbor_changed. See BlockFluids for the fanout shape.
 var _inside_fluid_notify: bool = false
@@ -92,7 +108,12 @@ var _inside_fluid_notify: bool = false
 # unwind via FluidFx.flush_deferred.
 var _light_defer_depth: int = 0
 var _deferred_sky_seeds: Dictionary = {}  # Vector3i → true
+var _deferred_block_seeds: Dictionary = {}  # Vector3i → true
 var _deferred_fizz: Array = []
+# Frame-coalesced immediate-rebuild dedup. set_world_block_immediate
+# accumulates chunk coords here; call_deferred flushes each unique
+# chunk once per frame. See set_world_block_immediate for context.
+var _pending_immediate_rebuild: Dictionary = {}
 # Last player chunk we ran _update_collision_activity against. Skip the
 # sweep until the player actually crosses a chunk boundary.
 var _last_collision_center: Vector2i = Vector2i(2147483647, 2147483647)
@@ -159,18 +180,46 @@ func _process(_delta: float) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.tick")
 	_cached_player_chunk = _player_chunk_coord()
 	_applies_this_frame = 0
+	# Sub-probes: each step in _process gets its own ring so we can
+	# isolate the 80+ ms tick spikes without guessing. Lightweight —
+	# Time.get_ticks_usec is one syscall per begin/end and the ring
+	# write is ~50 ns. Total overhead ~1-2 µs per frame.
+	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
+	PerfProbe.end("chunk_mgr.tick.update_chunk_set", t_set)
+	var t_coll := PerfProbe.begin("chunk_mgr.tick.collision_activity")
 	_update_collision_activity()
+	PerfProbe.end("chunk_mgr.tick.collision_activity", t_coll)
+	var t_reap := PerfProbe.begin("chunk_mgr.tick.reap_pending")
+	_reap_stale_pending()
+	PerfProbe.end("chunk_mgr.tick.reap_pending", t_reap)
+	var t_disp := PerfProbe.begin("chunk_mgr.tick.dispatch_workers")
 	_dispatch_workers()
+	PerfProbe.end("chunk_mgr.tick.dispatch_workers", t_disp)
+	var t_mat := PerfProbe.begin("chunk_mgr.tick.materialize_one")
 	_materialize_one_ready_chunk()
+	PerfProbe.end("chunk_mgr.tick.materialize_one", t_mat)
+	var t_relight_disp := PerfProbe.begin("chunk_mgr.tick.relight_dispatch")
 	_drain_one_relight_dispatch()
+	PerfProbe.end("chunk_mgr.tick.relight_dispatch", t_relight_disp)
+	var t_relight_drain := PerfProbe.begin("chunk_mgr.tick.relight_drain")
 	_drain_relight_results()
+	PerfProbe.end("chunk_mgr.tick.relight_drain", t_relight_drain)
 	_ambient_scan_accum += _delta
 	if _ambient_scan_accum >= 0.1:
 		_ambient_scan_accum = 0.0
-		AmbientFx.tick(self, _cached_player_chunk, int(floor(_player.global_position.y)))
+		var t_ambient := PerfProbe.begin("chunk_mgr.tick.ambient")
+		AmbientFx.tick(self, _chunks, _player.global_position)
+		PerfProbe.end("chunk_mgr.tick.ambient", t_ambient)
+	var t_leaf := PerfProbe.begin("chunk_mgr.tick.leaf_decay")
 	_tick_leaf_decay()
+	PerfProbe.end("chunk_mgr.tick.leaf_decay", t_leaf)
+	var t_sap := PerfProbe.begin("chunk_mgr.tick.sapling_growth")
 	_tick_sapling_growth()
+	PerfProbe.end("chunk_mgr.tick.sapling_growth", t_sap)
+	var t_cane := PerfProbe.begin("chunk_mgr.tick.cane_growth")
+	_tick_cane_growth()
+	PerfProbe.end("chunk_mgr.tick.cane_growth", t_cane)
 	# Scheduled block-tick queue — Flow #2 foundation for fluid flow.
 	# Drains at vanilla 20 Hz (50 ms per tick); fires BlockFluids cascade
 	# and future redstone / growth callbacks. Frame-hitch-safe: the
@@ -181,7 +230,9 @@ func _process(_delta: float) -> void:
 	# sometimes lags one reload behind when a new class_name lands,
 	# which manifests as "Identifier TickScheduler not declared" on
 	# first run. The preload path doesn't depend on the index.
+	var t_sched := PerfProbe.begin("chunk_mgr.tick.scheduler")
 	_TICK_SCHEDULER.advance(_delta, self)
+	PerfProbe.end("chunk_mgr.tick.scheduler", t_sched)
 	PerfProbe.end("chunk_mgr.tick", probe_token)
 
 
@@ -216,7 +267,17 @@ func _update_chunk_set() -> void:
 	for coord: Vector2i in _chunks:
 		if not needed.has(coord):
 			to_remove.append(coord)
+	# Throttle evictions to bound the per-frame spike. Crossing a chunk
+	# boundary makes ~17 chunks "not needed" at once; freeing all of them
+	# in one frame triggers ConcavePolygonShape3D + ArrayMesh teardown
+	# that ran ~170 ms in profiles. The to_remove set is rebuilt next
+	# frame, so leftover evictions get picked up — at 4/frame and 60 fps
+	# that's still 240 chunks/sec which dwarfs the boundary-cross rate.
+	const _MAX_EVICTIONS_PER_FRAME: int = 4
+	var evicted: int = 0
 	for coord: Vector2i in to_remove:
+		if evicted >= _MAX_EVICTIONS_PER_FRAME:
+			break
 		# If the chunk was edited while loaded, compress and persist its
 		# blocks before freeing the ChunkNode.
 		if _dirty_loaded.has(coord):
@@ -225,6 +286,7 @@ func _update_chunk_set() -> void:
 		_chunks[coord].cancel_remesh_task()
 		_chunks[coord].queue_free()
 		_chunks.erase(coord)
+		evicted += 1
 	# Drop queued chunks that are no longer needed. In-place reverse-loop
 	# removal avoids allocating a fresh Array + Callable every frame.
 	for i in range(_spawn_queue.size() - 1, -1, -1):
@@ -248,14 +310,12 @@ func _update_chunk_set() -> void:
 
 
 # Hand queued chunks off to worker threads, capping in-flight work. If the
-# chunk has saved player edits, we decompress on the main thread (~1 ms,
-# infrequent) and pass the restored Chunk to the worker — saves the worker
-# from running worldgen and keeps `_saved_chunks` access main-thread-only.
-func _dispatch_workers() -> void:
-	# Reap stale pending entries (worker crashed silently, no _ready_results).
-	# Without this, a single failed chunk leaves a permanent "hole" in the
-	# world (visible in screenshots as a 16×16 black void). Collect-then-erase
-	# to avoid mutating the dict while iterating its keys (undefined in GDScript).
+# chunk has saved player edits, we pop the compressed entry off main and
+# pass it to the worker; the worker does the decompress + rescan. Used to
+# decompress inline here (`_restore_saved_chunk` with 5 PackedByteArray
+# decompresses + a 32 KB linear scan), which caused 80+ ms main-thread
+# freezes when several saved chunks respawned in a single dispatch loop.
+func _reap_stale_pending() -> void:
 	var now_ms: int = Time.get_ticks_msec()
 	var stale: Array[Vector2i] = []
 	for coord: Vector2i in _pending.keys():
@@ -264,37 +324,69 @@ func _dispatch_workers() -> void:
 	for coord: Vector2i in stale:
 		push_warning("[chunk_mgr] reaping stale pending chunk %s — worker likely crashed" % coord)
 		_pending.erase(coord)
+		# Re-enqueue so dispatch retries it next tick.
+		if not _spawn_queue_set.has(coord):
+			_spawn_queue.append(coord)
+			_spawn_queue_set[coord] = true
+
+
+func _dispatch_workers() -> void:
 	while not _spawn_queue.is_empty() and _pending.size() < max_concurrent_jobs:
 		var coord: Vector2i = _spawn_queue.pop_front()
 		_spawn_queue_set.erase(coord)
 		if _chunks.has(coord) or _pending.has(coord):
 			continue
-		_pending[coord] = now_ms
-		var saved_chunk: Chunk = _restore_saved_chunk(coord)  # null if not saved
-		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_chunk))
+		_pending[coord] = Time.get_ticks_msec()
+		# Pop the compressed save entry (microseconds — dict has + erase).
+		# Worker does decompress + rescan; main thread applies the side
+		# effects (sapling enqueue, pending-tick restore) in _materialize_chunk.
+		var saved_entry: Dictionary = {}
+		if _saved_chunks.has(coord):
+			saved_entry = _saved_chunks[coord]
+			_saved_chunks.erase(coord)
+		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_entry))
 
 
 # Worker-thread function — runs off the main thread. Uses the supplied
-# saved chunk if present (player-edited reload); otherwise runs worldgen.
-# Either way, builds the mesh arrays and stores the result behind a mutex.
-# Lighting fill runs after worldgen but before mesh: vanilla mesher reads
-# sky_light per face for the chunk shader (slice 5), so the data must be
-# in place before the mesh arrays are baked. We ALWAYS re-run the fill
-# (even on restore) — saved sky_light from earlier sessions can be stale
-# if the player saved before the lighting code shipped (everything reads
-# as default 15 and caves render lit). With the C++ port this costs
-# ~30-50ms per chunk vs the old 380ms, so the wasted-work argument no
-# longer holds and correctness wins.
-func _compute_chunk_data(coord: Vector2i, saved_chunk: Chunk) -> void:
+# saved entry (decompress + rescan in-worker) if non-empty; otherwise
+# runs worldgen. Either way, builds the mesh arrays and stores the result
+# behind a mutex. Lighting fill runs after worldgen but before mesh:
+# vanilla mesher reads sky_light per face for the chunk shader (slice 5),
+# so the data must be in place before the mesh arrays are baked. We
+# ALWAYS re-run the fill (even on restore) — saved sky_light from earlier
+# sessions can be stale if the player saved before the lighting code
+# shipped (everything reads as default 15 and caves render lit). With
+# the C++ port this costs ~30-50ms per chunk vs the old 380ms, so the
+# wasted-work argument no longer holds and correctness wins.
+func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.worker_total")
-	var chunk: Chunk = (
-		saved_chunk if saved_chunk != null else Worldgen.generate_chunk(coord.x, coord.y)
-	)
+	var chunk: Chunk
+	var sapling_positions: Array[Vector3i] = []
+	if saved_entry.is_empty():
+		chunk = Worldgen.generate_chunk(coord.x, coord.y)
+	else:
+		var decoded: Array = _decode_saved_entry(coord, saved_entry)
+		chunk = decoded[0] as Chunk
+		sapling_positions = decoded[1]
 	Lighting.fill_sky_light(chunk)
 	Lighting.fill_block_light(chunk)
+	# Warm the heightmap on the worker. Fresh chunks come out of worldgen
+	# with _height_map_dirty=true (set_block_unchecked only maintains max_y,
+	# not the per-column heightmap). Without this, the first main-thread
+	# is_sky_exposed call — fired by prepare_relight_data right after
+	# materialize — pays a 15-27 ms _rebuild_height_map walk (32 KB scan
+	# × Blocks.light_opacity lookup). Forcing it here moves the cost off
+	# the main-thread frame budget.
+	chunk.is_sky_exposed(0, 0, 0)
 	var mesh_data := Mesher.mesh_chunk_fast(chunk)
 	_result_mutex.lock()
-	_ready_results[coord] = {"chunk": chunk, "mesh": mesh_data, "from_save": saved_chunk != null}
+	_ready_results[coord] = {
+		"chunk": chunk,
+		"mesh": mesh_data,
+		"from_save": not saved_entry.is_empty(),
+		"saplings": sapling_positions,
+		"pending_ticks": saved_entry.get("pending_ticks", []),
+	}
 	_result_mutex.unlock()
 	PerfProbe.end("chunk_mgr.worker_total", probe_token)
 
@@ -328,17 +420,35 @@ func _materialize_one_ready_chunk() -> void:
 
 func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.materialize")
+	var t_inst := PerfProbe.begin("chunk_mgr.materialize.instantiate")
 	var node: Node3D = chunk_scene.instantiate()
 	node.position = Vector3(coord.x * Chunk.SIZE_X, 0, coord.y * Chunk.SIZE_Z)
 	node.set("chunk_data", data.chunk)
 	node.set("precomputed_mesh_data", data.mesh)
+	PerfProbe.end("chunk_mgr.materialize.instantiate", t_inst)
+	var t_add := PerfProbe.begin("chunk_mgr.materialize.add_child")
 	add_child(node)
+	PerfProbe.end("chunk_mgr.materialize.add_child", t_add)
 	_chunks[coord] = node
 	chunks_generated_total += 1
 	# A chunk that came from `_saved_chunks` is already player-edited;
 	# mark it so any further edits (or just the next unload) re-persist.
+	# Re-enqueue saplings + pending block ticks from the worker decode here
+	# (main thread) — those mutate _growing_saplings + TickScheduler state
+	# which the worker couldn't touch safely.
 	if data.get("from_save", false):
 		_dirty_loaded[coord] = true
+		for sap_pos: Vector3i in data.get("saplings", []) as Array:
+			_enqueue_sapling_growth(sap_pos)
+		var ticks: Array = data.get("pending_ticks", []) as Array
+		if not ticks.is_empty():
+			TickScheduler.restore_ticks(ticks)
+	# Drain cane tops collected during worldgen / decode (worker thread).
+	# Was a 32k-cell column walk on every materialize before — now a small
+	# list iteration (typical chunks: 0-4 entries).
+	for cane_pos: Vector3i in data.chunk.cane_tops:
+		_enqueue_cane_growth(cane_pos)
+	data.chunk.cane_tops.clear()
 	# Re-dirty loaded neighbors AND this new chunk so the edge-snapshot
 	# re-mesh path (chunk_node._dispatch_remesh → _attach_neighbor_edges)
 	# runs once per seam. The worker's initial mesh (_compute_chunk_data
@@ -494,15 +604,13 @@ func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
 	}
 
 
-# Decompress a previously-saved chunk back into a Chunk RefCounted, ready
-# to hand off to a worker for re-meshing. Returns null if the coord has
-# no saved data. We pop it from `_saved_chunks` because the chunk will
-# be live in `_chunks` again — re-persistence happens on next unload.
-func _restore_saved_chunk(coord: Vector2i) -> Chunk:
-	if not _saved_chunks.has(coord):
-		return null
-	var entry: Dictionary = _saved_chunks[coord]
-	_saved_chunks.erase(coord)
+# Worker-thread decoder for a saved entry: decompresses + rescans into a
+# Chunk and collects sapling positions for main-thread re-enqueue. Returns
+# [chunk: Chunk, saplings: Array[Vector3i]]. The main-thread side effects
+# (TickScheduler.restore_ticks + _enqueue_sapling_growth) are applied later
+# in _materialize_chunk; this function only touches the local Chunk it
+# constructs, so it's safe to run off the main thread.
+static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 	var c := Chunk.new()
 	c.blocks = (entry.bytes as PackedByteArray).decompress(Chunk.TOTAL_BLOCKS, _COMPRESS_MODE)
 	c.max_y = entry.max_y
@@ -535,7 +643,12 @@ func _restore_saved_chunk(coord: Vector2i) -> Chunk:
 		c._height_map_dirty = false
 	else:
 		c._height_map_dirty = true
-	# Rescan non-cube + chest flags + re-enqueue saplings.
+	# Rescan non-cube + chest flags, collect sapling positions, and pick
+	# the topmost SUGAR_CANE per column for the cane growth queue. All four
+	# bookkeeping passes fold into one linear walk so worker decode stays
+	# O(N) over chunk.blocks.
+	var saplings: Array[Vector3i] = []
+	var cane_top_y: Dictionary = {}  # Vector2i(lx, lz) -> highest ly seen
 	var found_non_cube: bool = false
 	var found_chest: bool = false
 	for i in range(c.blocks.size()):
@@ -544,21 +657,27 @@ func _restore_saved_chunk(coord: Vector2i) -> Chunk:
 			found_chest = true
 		if Blocks.needs_gdscript_mesher(b):
 			found_non_cube = true
+			var lx: int = i % Chunk.SIZE_X
+			var lz: int = (i / Chunk.SIZE_X) % Chunk.SIZE_Z
+			var ly: int = i / (Chunk.SIZE_X * Chunk.SIZE_Z)
 			if b == Blocks.SAPLING:
-				var lx: int = i % Chunk.SIZE_X
-				var lz: int = (i / Chunk.SIZE_X) % Chunk.SIZE_Z
-				var ly: int = i / (Chunk.SIZE_X * Chunk.SIZE_Z)
-				_enqueue_sapling_growth(
+				saplings.append(
 					Vector3i(coord.x * Chunk.SIZE_X + lx, ly, coord.y * Chunk.SIZE_Z + lz)
 				)
+			elif b == Blocks.SUGAR_CANE:
+				var key := Vector2i(lx, lz)
+				if not cane_top_y.has(key) or int(cane_top_y[key]) < ly:
+					cane_top_y[key] = ly
 	c.has_non_cube_blocks = found_non_cube
 	c.has_chest_blocks = found_chest
-	# Re-enqueue any pending block ticks harvested when this chunk was
-	# unloaded (fluid spread mid-flow, FIRE burn-out timers, etc.).
-	# Their relative `delay` resumes from current_tick on restore.
-	if entry.has("pending_ticks"):
-		TickScheduler.restore_ticks(entry.pending_ticks as Array)
-	return c
+	# Materialize the per-column cane tops into world coords.
+	for key: Vector2i in cane_top_y:
+		c.cane_tops.append(
+			Vector3i(
+				coord.x * Chunk.SIZE_X + key.x, int(cane_top_y[key]), coord.y * Chunk.SIZE_Z + key.y
+			)
+		)
+	return [c, saplings]
 
 
 # Re-enable physics only on chunks within collision_radius of the player
@@ -596,6 +715,30 @@ func find_chest_node_at(world_pos: Vector3i) -> ChestNode:
 	if chunk_node.has_method("find_chest_node_at_local"):
 		return chunk_node.find_chest_node_at_local(local)
 	return null
+
+
+# Batch begin — defers per-edit lighting BFS updates so a multi-block
+# operation (explosion, future area-fill commands) runs ONE BFS per unique
+# seed at end_batch() instead of N inline BFS calls. Pair with end_batch().
+# Calls nest safely: only the outermost flush drains the seeds.
+func begin_batch() -> void:
+	_light_defer_depth += 1
+
+
+# Batch end — drains accumulated sky/block-light seeds via one BFS each.
+# A typical TNT explosion affects ~100 cells; this turns 200 inline BFS
+# calls into ~100 batched ones (often fewer after dedup by world_pos),
+# eliminating the per-detonation frame spike.
+func end_batch() -> void:
+	_light_defer_depth -= 1
+	if _light_defer_depth > 0:
+		return
+	for world_pos: Vector3i in _deferred_sky_seeds:
+		Lighting.update_sky_light_around_world(world_pos, self)
+	for world_pos: Vector3i in _deferred_block_seeds:
+		Lighting.update_block_light_around_world(world_pos, self)
+	_deferred_sky_seeds.clear()
+	_deferred_block_seeds.clear()
 
 
 # World-coord block edit. Looks up the right chunk, converts to local coords,
@@ -655,10 +798,16 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 			Lighting.update_sky_light_around_world(world_pos, self)
 	# Block-light update mirrors the sky branch — lava (bucket + flow)
 	# emits 15 and needs this BFS to light surrounding cells on edit.
+	# Deferred during a batch (begin_batch / end_batch) so an N-block
+	# explosion runs the BFS once per unique seed at flush time instead
+	# of N times inline.
 	var em_diff: bool = Blocks.light_emission(old_id) != Blocks.light_emission(id)
 	var op_diff: bool = Blocks.light_opacity(old_id) != Blocks.light_opacity(id)
 	if old_id != id and (em_diff or op_diff):
-		Lighting.update_block_light_around_world(world_pos, self)
+		if _light_defer_depth > 0:
+			_deferred_block_seeds[world_pos] = true
+		else:
+			Lighting.update_block_light_around_world(world_pos, self)
 	# Plant detach — vanilla BlockPlant.doPhysics fires when a neighbor
 	# changes; if the support directly below is no longer grass/dirt/
 	# farmland, the plant pops off and drops itself. We trigger on any
@@ -675,6 +824,13 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	# bonemeal-spawn later), schedule it for a future tree growth tick.
 	if id == Blocks.SAPLING:
 		_enqueue_sapling_growth(world_pos)
+	# Sugar cane growth — only enqueue when a NEW top is being created
+	# (no cane above), which covers worldgen scatter, player placement,
+	# and the recursive enqueue from _tick_cane_growth itself.
+	if id == Blocks.SUGAR_CANE:
+		var above_id: int = get_world_block(world_pos + Vector3i(0, 1, 0))
+		if above_id != Blocks.SUGAR_CANE:
+			_enqueue_cane_growth(world_pos)
 	# Leaf decay — when a log is removed, scan nearby leaves and orphan
 	# any that can no longer BFS-reach a log within LeafDecay.DECAY_RADIUS.
 	# The nested set_world_block writes only AIR over LEAVES (never LOG),
@@ -709,11 +865,25 @@ func set_world_block_immediate(world_pos: Vector3i, id: int) -> void:
 	var coord := Vector2i(chunk_x, chunk_z)
 	if not _chunks.has(coord):
 		return
+	# Coalesce per-frame: many FallingBlocks landing in the same chunk
+	# (TNT on a sand pile lands 50+ entities the same frame) used to
+	# trigger N full-chunk mesh rebuilds inline — each ~10–50 ms. We
+	# now mark the chunk for deferred rebuild and dedup via the dict;
+	# call_deferred fires before the frame renders, so the "block
+	# appears same frame as entity hides" guarantee still holds and a
+	# burst pays one rebuild per chunk instead of N.
+	if not _pending_immediate_rebuild.has(coord):
+		_pending_immediate_rebuild[coord] = true
+		call_deferred("_flush_immediate_rebuild", coord)
+
+
+# Drained at end of frame for each unique chunk that received an
+# immediate write. See set_world_block_immediate.
+func _flush_immediate_rebuild(coord: Vector2i) -> void:
+	_pending_immediate_rebuild.erase(coord)
+	if not _chunks.has(coord):
+		return
 	var chunk_node: Node3D = _chunks[coord]
-	# Synchronous same-frame rebuild — `FallingBlock` relies on the
-	# freshly-placed block being visible the moment the entity hides.
-	# Chunk re-meshes otherwise go through the worker dispatch in
-	# chunk_node._process; this bypasses it on purpose.
 	chunk_node._apply_mesh_data(Mesher.mesh_chunk_fast(chunk_node.chunk))
 	chunk_node.chunk.dirty = false
 
@@ -847,10 +1017,11 @@ func _drop_plant_if_unsupported(coord: Vector2i, local_x: int, local_y: int, loc
 		return
 	var chunk: Chunk = _chunks[coord].chunk
 	var here_id: int = chunk.get_block(local_x, local_y, local_z)
-	# Only cross-quad plants pop off on support change. Cubes (dirt on
-	# stone, etc.) stay put. Future torches/levers will need a separate
-	# attachment-shape check.
-	if Blocks.mesh_shape(here_id) != Blocks.MESH_SHAPE_CROSS:
+	# Cross-quad plants AND the snow-layer slab pop off on support change
+	# (vanilla BlockSnow drops + dies if the cell below isn't a solid top).
+	# Other shapes (cubes, fences, doors) stay put.
+	var ms: int = Blocks.mesh_shape(here_id)
+	if ms != Blocks.MESH_SHAPE_CROSS and ms != Blocks.MESH_SHAPE_SNOW_LAYER:
 		return
 	# Drop AIR over it via set_world_block so chunk dirty + persistence
 	# bookkeeping fire the same as a player edit. The recursive call is
@@ -986,6 +1157,100 @@ func _tick_sapling_growth() -> void:
 		grow_tree_at(pos)
 		processed += 1
 		if processed >= _SAPLING_GROW_MAX_PER_TICK:
+			return
+
+
+# Sugar cane growth — vanilla BlockReed.b(). On growth, replaces the
+# AIR cell above the cane with another SUGAR_CANE if the column is
+# under max height (3) and water is adjacent at the BASE of the
+# column. Re-enqueues the new top so it can grow further later. If
+# blocked (no air, max height, support gone), re-enqueues with retry
+# delay; eventually drops out when the cane is broken.
+func _enqueue_cane_growth(pos: Vector3i) -> void:
+	var u: float = maxf(randf(), 0.0001)
+	var delay: float = clampf(-_CANE_GROW_MEAN_SEC * log(u), _CANE_GROW_MIN_SEC, _CANE_GROW_MAX_SEC)
+	var now: float = Time.get_ticks_msec() / 1000.0
+	_growing_canes.append({"pos": pos, "grow_at": now + delay})
+
+
+# Walk down from `pos` to find the base of the cane column.
+func _cane_column_base(pos: Vector3i) -> Vector3i:
+	var p := pos
+	while p.y > 0 and get_world_block(p + Vector3i(0, -1, 0)) == Blocks.SUGAR_CANE:
+		p.y -= 1
+	return p
+
+
+# Cane needs water at the base column-1 (per BlockReed.canPlace), one
+# of the 4 cardinal cells at base.y - 1. Mirrors vanilla's placement
+# check, applied at growth time too.
+func _cane_base_has_water(base_pos: Vector3i) -> bool:
+	var below_y: int = base_pos.y - 1
+	for off: Vector3i in [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+	]:
+		var p: Vector3i = Vector3i(base_pos.x + off.x, below_y, base_pos.z + off.z)
+		if Blocks.is_water(get_world_block(p)):
+			return true
+	return false
+
+
+# gdlint: disable=max-returns
+func _tick_cane_growth() -> void:
+	if _growing_canes.is_empty():
+		return
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var processed: int = 0
+	for i in range(_growing_canes.size() - 1, -1, -1):
+		var entry: Dictionary = _growing_canes[i]
+		if entry.grow_at > now:
+			continue
+		_growing_canes.remove_at(i)
+		var pos: Vector3i = entry.pos
+		var here: int = get_world_block(pos)
+		if here != Blocks.SUGAR_CANE:
+			# Player broke the top cane — drop the entry; if a lower
+			# cane is now the top, the next set_world_block on its
+			# placement re-enqueues.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Only the topmost cane in a column grows.
+		if get_world_block(pos + Vector3i(0, 1, 0)) == Blocks.SUGAR_CANE:
+			# Stale top — the column grew above this cell already.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Column height check.
+		var base: Vector3i = _cane_column_base(pos)
+		var height: int = pos.y - base.y + 1
+		if height >= _CANE_MAX_HEIGHT:
+			# Already at max — give up on this stalk; vanilla random
+			# tick would also no-op forever.
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Air above?
+		var above: Vector3i = pos + Vector3i(0, 1, 0)
+		if get_world_block(above) != Blocks.AIR:
+			_growing_canes.append({"pos": pos, "grow_at": now + _CANE_GROW_RETRY_SEC})
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		# Base must still have water adjacent (vanilla BlockReed.canPlace).
+		if not _cane_base_has_water(base):
+			processed += 1
+			if processed >= _CANE_GROW_MAX_PER_TICK:
+				return
+			continue
+		set_world_block(above, Blocks.SUGAR_CANE)
+		_enqueue_cane_growth(above)
+		processed += 1
+		if processed >= _CANE_GROW_MAX_PER_TICK:
 			return
 
 

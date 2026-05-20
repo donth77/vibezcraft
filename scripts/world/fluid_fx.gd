@@ -105,6 +105,19 @@ static func spawn_fizz(parent: Node, pos: Vector3i) -> void:
 	_schedule_return(parent, particles)
 
 
+# Generic smoke puff at a Vector3 world position. Bit-identical pool
+# call to spawn_fizz minus the SFX — same 8 particles, same extents,
+# same upward drift. Identical extents matter: tighter values cluster
+# particles at the same point and read as a clumpy blob, not the
+# spread-out cloud lava-fizz produces.
+static func spawn_smoke(parent: Node, pos: Vector3) -> void:
+	var particles := _acquire(parent, 8, Vector3(0.35, 0.1, 0.35))
+	particles.position = pos
+	particles.visible = true
+	particles.restart()
+	_schedule_return(parent, particles)
+
+
 # Drain deferred sky-light seeds + fizz positions collected during a
 # fluid neighbor-notify fanout. Called from ChunkManager when its
 # `_light_defer_depth` unwinds to zero. `sky_seeds` is a Dictionary
@@ -519,17 +532,10 @@ static func _spawn_lava_smoke_burst(parent: Node, world_pos: Vector3) -> void:
 	_schedule_return(parent, smoke)
 
 
-# Fire smoke — mirrors qh.java:189-236 BlockFire.randomDisplayTick's
-# `largesmoke` spawns on flammable-adjacent faces of a FIRE cell. Single
-# puff per call, drifts up + disperses. Shares the largesmoke material
-# with spawn_fizz so no extra shader / material.
+# Fire smoke — vanilla qh.java:189-236 BlockFire.randomDisplayTick's
+# `largesmoke` spawns. Delegates to spawn_smoke (lava-fizz pool path).
 static func spawn_fire_smoke(parent: Node, pos: Vector3i) -> void:
-	var particles := _acquire(parent, 3, Vector3(0.3, 0.1, 0.3))
-	particles.position = Vector3(pos) + Vector3(0.5, 0.5, 0.5)
-	particles.lifetime = 1.5
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+	spawn_smoke(parent, Vector3(pos) + Vector3(0.5, 0.5, 0.5))
 
 
 # Vanilla EntityFlameFX (ko.java:23) samples particles.png tile 48 — an

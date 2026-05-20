@@ -161,11 +161,18 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		_last_mining_particle_ms = now
 		var mining_id: int = _chunk_manager.get_world_block(target)
 		_BLOCK_FX.spawn_mining(_chunk_manager, target, mining_id, Vector3(hit.normal_i))
-	# Update crack overlay — pick the integer stage based on progress
+	# Update crack overlay — pick the integer stage based on progress.
+	# Position + scale to the block's selection AABB so non-cube blocks
+	# (snow_layer slab, etc.) get a crack matching the visible shape
+	# rather than a full 1x1x1 box floating above the slab.
 	var damage: float = clamp(_mining_progress / _mining_total_time, 0.0, 1.0)
 	var stage: int = clamp(int(damage * float(_crack_stages)), 0, _crack_stages - 1)
+	var hit_id_now: int = _chunk_manager.get_world_block(target)
+	var hit_meta_now: int = _chunk_manager.get_world_block_meta(target)
+	var crack_aabb: AABB = Blocks.selection_aabb(hit_id_now, hit_meta_now)
 	_crack.visible = true
-	_crack.global_position = Vector3(target) + Vector3(0.5, 0.5, 0.5)
+	_crack.global_position = Vector3(target) + crack_aabb.position + crack_aabb.size * 0.5
+	_crack.scale = crack_aabb.size
 	_crack_material.set_shader_parameter("stage", stage)
 	# Complete the break?
 	if _mining_progress >= _mining_total_time:
@@ -530,6 +537,9 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
 		return false
 	_chunk_manager.set_world_block(fire_pos, Blocks.FIRE)
+	# Kickstart the spread/decay loop — without this, fire just sits
+	# there static and never spreads to adjacent flammables.
+	TickScheduler.schedule(fire_pos, Blocks.FIRE, BlockFire.TICK_RATE)
 	# `random.click` at pitch 0.9 — see SFX.play_flint_and_steel for the
 	# vanilla audio note (Alpha was silent; modern MC plays a metallic
 	# strike). Click-at-low-pitch is the closest tactile substitute we
@@ -632,6 +642,24 @@ func _try_bucket(hit: Dictionary, hit_id: int) -> bool:
 				return false
 			place_pos = empty_cell.pos
 		var dest_id: int = _chunk_manager.get_world_block(place_pos)
+		# Water bucket on FIRE — vanilla ag.java:74-79 short-circuits the
+		# place: clicking water-bucket onto a fire cell extinguishes it
+		# with the fizz SFX + smoke puff instead of writing water. Also
+		# extinguish when the hit-cell ITSELF is fire (player clicked
+		# directly on the flame quad). Consumes the bucket either way.
+		if item_id == Items.BUCKET_WATER:
+			var fire_cell: Vector3i = place_pos
+			if dest_id != Blocks.FIRE and not hit.is_empty():
+				var clicked_id: int = _chunk_manager.get_world_block(hit.block_pos)
+				if clicked_id == Blocks.FIRE:
+					fire_cell = hit.block_pos
+					dest_id = Blocks.FIRE
+			if dest_id == Blocks.FIRE:
+				_chunk_manager.set_world_block(fire_cell, Blocks.AIR)
+				SFX.play_fizz(false)
+				inv.replace_selected(Items.BUCKET_EMPTY, 1)
+				_trigger_player_use_swing()
+				return true
 		if not Blocks.is_replaceable(dest_id) and dest_id != Blocks.AIR:
 			return false
 		var source_id: int = (
@@ -773,6 +801,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# a two-block-tall door block. Route through a dedicated handler.
 	if stack.item_id == Items.WOODEN_DOOR or stack.item_id == Items.IRON_DOOR:
 		return _try_place_door(hit, stack)
+	# Sugar cane item → SUGAR_CANE block placement. Item and block IDs
+	# differ but the placement check uses block id; route via dedicated
+	# handler that performs the support check + block write.
+	if stack.item_id == Items.SUGAR_CANE:
+		return _try_place_sugar_cane(hit, stack)
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
@@ -1019,6 +1052,57 @@ func _try_place_door(hit: Dictionary, stack: ItemStack) -> bool:
 	_chunk_manager.set_world_block_with_meta(place, block_id, n6)
 	_chunk_manager.set_world_block_with_meta(above, block_id, n6 + 8)
 	SFX.play_place(block_id)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Sugar cane placement: requires a valid support (grass/dirt/sand or
+# another sugar cane below) AND water adjacent at the base. Vanilla
+# BlockReed.canPlace checks both. Place the SUGAR_CANE block; consume
+# one item.
+func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	# Determine target cell — replace if hit cell is replaceable, else
+	# place into the neighbor in the hit's normal direction.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var place: Vector3i
+	if Blocks.is_replaceable(hit_id):
+		place = hit.block_pos
+	else:
+		place = hit.block_pos + hit.normal_i
+	# Target cell must be empty.
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# Support check: grass/dirt/sand below, OR another sugar cane.
+	var support_id: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
+	if not Blocks.can_place_at(Blocks.SUGAR_CANE, support_id):
+		return false
+	# Water-adjacency check (vanilla BlockReed: at least one cardinal
+	# neighbor at the BASE Y must be water). Skip if support is another
+	# sugar cane (stacking on existing).
+	if support_id != Blocks.SUGAR_CANE:
+		var has_water: bool = false
+		for off: Vector3i in [
+			Vector3i(1, -1, 0), Vector3i(-1, -1, 0), Vector3i(0, -1, 1), Vector3i(0, -1, -1)
+		]:
+			var n_id: int = _chunk_manager.get_world_block(place + off)
+			if n_id == Blocks.WATER_STILL or n_id == Blocks.WATER_FLOWING:
+				has_water = true
+				break
+		if not has_water:
+			return false
+	# Player occupancy guard.
+	var player: Node3D = get_parent()
+	var pp := player.global_position
+	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
+	if place == player_block or place == player_block + Vector3i(0, 1, 0):
+		return false
+	_chunk_manager.set_world_block(place, Blocks.SUGAR_CANE)
+	SFX.play_place(Blocks.SUGAR_CANE)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()

@@ -1,11 +1,11 @@
 #include "worldgen_native.h"
 
-#include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/core/class_db.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 using namespace godot;
 
@@ -66,14 +66,316 @@ struct JavaRandom {
 
 	// 24-bit precision float in [0, 1).
 	float next_float() { return static_cast<float>(next(24)) / 16777216.0f; }
+
+	// 53-bit precision double in [0, 1).
+	double next_double() {
+		const int64_t high = static_cast<int64_t>(next(26));
+		const int64_t low = static_cast<int64_t>(next(27));
+		return static_cast<double>((high << 27) + low) / 9007199254740992.0;
+	}
+};
+
+// ===========================================================================
+// NoisePerlin — bit-exact port of vanilla Alpha 1.2.6 z.java (Perlin noise).
+// Mirror of scripts/world/noise_perlin.gd. Used by the e/f/selector/h/g/
+// beach/soil/forest noise stacks in 3D density terrain generation.
+// ===========================================================================
+struct NoisePerlin {
+	int perm[512];
+	double x_offset;
+	double y_offset;
+	double z_offset;
+
+	explicit NoisePerlin(JavaRandom &rng) {
+		x_offset = rng.next_double() * 256.0;
+		y_offset = rng.next_double() * 256.0;
+		z_offset = rng.next_double() * 256.0;
+		for (int i = 0; i < 256; i++) {
+			perm[i] = i;
+		}
+		for (int n = 0; n < 256; n++) {
+			const int swap_idx = rng.next_int_bounded(256 - n) + n;
+			const int tmp = perm[n];
+			perm[n] = perm[swap_idx];
+			perm[swap_idx] = tmp;
+			perm[n + 256] = perm[n];
+		}
+	}
+
+	static inline double lerp(double t, double a, double b) {
+		return a + t * (b - a);
+	}
+
+	static inline double grad_3d(int hash, double x, double y, double z) {
+		const int n3 = hash & 0xF;
+		const double d5 = (n3 < 8) ? x : y;
+		double d7;
+		if (n3 < 4) {
+			d7 = y;
+		} else if (n3 == 12 || n3 == 14) {
+			d7 = x;
+		} else {
+			d7 = z;
+		}
+		const double sd5 = ((n3 & 1) != 0) ? -d5 : d5;
+		const double sd7 = ((n3 & 2) != 0) ? -d7 : d7;
+		return sd5 + sd7;
+	}
+
+	// 3D Perlin sample. Mirror of z.java::a(double, double, double).
+	double sample_3d(double x, double y, double z) const {
+		double d5 = x + x_offset;
+		double d6 = y + y_offset;
+		double d7 = z + z_offset;
+		int n2 = static_cast<int>(d5);
+		int n3 = static_cast<int>(d6);
+		int n4 = static_cast<int>(d7);
+		if (d5 < static_cast<double>(n2)) {
+			n2 -= 1;
+		}
+		if (d6 < static_cast<double>(n3)) {
+			n3 -= 1;
+		}
+		if (d7 < static_cast<double>(n4)) {
+			n4 -= 1;
+		}
+		const int n5 = n2 & 0xFF;
+		const int n6 = n3 & 0xFF;
+		const int n7 = n4 & 0xFF;
+		d5 -= static_cast<double>(n2);
+		d6 -= static_cast<double>(n3);
+		d7 -= static_cast<double>(n4);
+		const double d8 = d5 * d5 * d5 * (d5 * (d5 * 6.0 - 15.0) + 10.0);
+		const double d9 = d6 * d6 * d6 * (d6 * (d6 * 6.0 - 15.0) + 10.0);
+		const double d10 = d7 * d7 * d7 * (d7 * (d7 * 6.0 - 15.0) + 10.0);
+		const int n8 = perm[n5] + n6;
+		const int n9 = perm[n8] + n7;
+		const int n10 = perm[n8 + 1] + n7;
+		const int n11 = perm[n5 + 1] + n6;
+		const int n12 = perm[n11] + n7;
+		const int n13 = perm[n11 + 1] + n7;
+		return lerp(d10,
+				lerp(d9,
+						lerp(d8, grad_3d(perm[n9], d5, d6, d7),
+								grad_3d(perm[n12], d5 - 1.0, d6, d7)),
+						lerp(d8, grad_3d(perm[n10], d5, d6 - 1.0, d7),
+								grad_3d(perm[n13], d5 - 1.0, d6 - 1.0, d7))),
+				lerp(d9,
+						lerp(d8,
+								grad_3d(perm[n9 + 1], d5, d6, d7 - 1.0),
+								grad_3d(perm[n12 + 1], d5 - 1.0, d6, d7 - 1.0)),
+						lerp(d8,
+								grad_3d(perm[n10 + 1], d5, d6 - 1.0, d7 - 1.0),
+								grad_3d(perm[n13 + 1], d5 - 1.0, d6 - 1.0, d7 - 1.0))));
+	}
+
+	// Bulk 3D grid additive fill — accumulates noise values into out[].
+	// Mirror of z.java::a(double[], ...) bulk method. Uses the inner-cache
+	// trick (vanilla cache d18-d21 across i6 iterations when n28 unchanged).
+	// out is indexed (x * size_y + y) * size_z + z (vanilla layout, Y inner).
+	void sample_3d_grid_additive(double *out, double base_x, double base_y, double base_z,
+			int size_x, int size_y, int size_z, double scale_x, double scale_y, double scale_z,
+			double amp_divisor) const {
+		if (size_y == 1) {
+			sample_2d_grid_additive(out, base_x, base_z, size_x, size_z, scale_x, scale_z,
+					amp_divisor);
+			return;
+		}
+		const double inv_amp = 1.0 / amp_divisor;
+		int n15 = 0;
+		int n16 = -1, n17 = 0, n18 = 0, n19 = 0, n20 = 0, n21 = 0, n22 = 0;
+		double d18 = 0, d19 = 0, d20 = 0, d21 = 0;
+		for (int i4 = 0; i4 < size_x; i4++) {
+			double d22 = (base_x + double(i4)) * scale_x + x_offset;
+			int n23 = static_cast<int>(d22);
+			if (d22 < double(n23)) {
+				n23 -= 1;
+			}
+			const int n24 = n23 & 0xFF;
+			d22 -= double(n23);
+			const double d23 = d22 * d22 * d22 * (d22 * (d22 * 6.0 - 15.0) + 10.0);
+			for (int i5 = 0; i5 < size_z; i5++) {
+				double d24 = (base_z + double(i5)) * scale_z + z_offset;
+				int n25 = static_cast<int>(d24);
+				if (d24 < double(n25)) {
+					n25 -= 1;
+				}
+				const int n26 = n25 & 0xFF;
+				d24 -= double(n25);
+				const double d25 = d24 * d24 * d24 * (d24 * (d24 * 6.0 - 15.0) + 10.0);
+				for (int i6 = 0; i6 < size_y; i6++) {
+					double d26 = (base_y + double(i6)) * scale_y + y_offset;
+					int n27 = static_cast<int>(d26);
+					if (d26 < double(n27)) {
+						n27 -= 1;
+					}
+					const int n28 = n27 & 0xFF;
+					d26 -= double(n27);
+					const double d27 = d26 * d26 * d26 * (d26 * (d26 * 6.0 - 15.0) + 10.0);
+					if (i6 == 0 || n28 != n16) {
+						n16 = n28;
+						n17 = perm[n24] + n28;
+						n18 = perm[n17] + n26;
+						n19 = perm[n17 + 1] + n26;
+						n20 = perm[n24 + 1] + n28;
+						n21 = perm[n20] + n26;
+						n22 = perm[n20 + 1] + n26;
+						d18 = lerp(d23, grad_3d(perm[n18], d22, d26, d24),
+								grad_3d(perm[n21], d22 - 1.0, d26, d24));
+						d19 = lerp(d23, grad_3d(perm[n19], d22, d26 - 1.0, d24),
+								grad_3d(perm[n22], d22 - 1.0, d26 - 1.0, d24));
+						d20 = lerp(d23, grad_3d(perm[n18 + 1], d22, d26, d24 - 1.0),
+								grad_3d(perm[n21 + 1], d22 - 1.0, d26, d24 - 1.0));
+						d21 = lerp(d23, grad_3d(perm[n19 + 1], d22, d26 - 1.0, d24 - 1.0),
+								grad_3d(perm[n22 + 1], d22 - 1.0, d26 - 1.0, d24 - 1.0));
+					}
+					const double d28 = lerp(d27, d18, d19);
+					const double d29 = lerp(d27, d20, d21);
+					const double d30 = lerp(d25, d28, d29);
+					out[n15] += d30 * inv_amp;
+					n15++;
+				}
+			}
+		}
+	}
+
+	// 2D-optimized grid path (vanilla z.java:89-126).
+	void sample_2d_grid_additive(double *out, double base_x, double base_z, int size_x,
+			int size_z, double scale_x, double scale_z, double amp_divisor) const {
+		const double inv_amp = 1.0 / amp_divisor;
+		int n9 = 0;
+		for (int i2 = 0; i2 < size_x; i2++) {
+			double d12 = (base_x + double(i2)) * scale_x + x_offset;
+			int n10 = static_cast<int>(d12);
+			if (d12 < double(n10)) {
+				n10 -= 1;
+			}
+			const int n11 = n10 & 0xFF;
+			d12 -= double(n10);
+			const double d13 = d12 * d12 * d12 * (d12 * (d12 * 6.0 - 15.0) + 10.0);
+			for (int i3 = 0; i3 < size_z; i3++) {
+				double d14 = (base_z + double(i3)) * scale_z + z_offset;
+				int n12 = static_cast<int>(d14);
+				if (d14 < double(n12)) {
+					n12 -= 1;
+				}
+				const int n13 = n12 & 0xFF;
+				d14 -= double(n12);
+				const double d15 = d14 * d14 * d14 * (d14 * (d14 * 6.0 - 15.0) + 10.0);
+				const int n5 = perm[n11] + 0;
+				const int n6 = perm[n5] + n13;
+				const int n7 = perm[n11 + 1] + 0;
+				const int n8 = perm[n7] + n13;
+				const double d9 = lerp(d13, grad_3d(perm[n6], d12, 0.0, d14),
+						grad_3d(perm[n8], d12 - 1.0, 0.0, d14));
+				const double d10 = lerp(d13,
+						grad_3d(perm[n6 + 1], d12, 0.0, d14 - 1.0),
+						grad_3d(perm[n8 + 1], d12 - 1.0, 0.0, d14 - 1.0));
+				const double d16 = lerp(d15, d9, d10);
+				out[n9] += d16 * inv_amp;
+				n9++;
+			}
+		}
+	}
+};
+
+// ===========================================================================
+// NoiseSimplex — bit-exact port of vanilla Alpha 1.2.6 aw.java (Simplex).
+// Mirror of scripts/world/noise_simplex.gd. Used by climate noise (po.java).
+// ===========================================================================
+struct NoiseSimplex {
+	int perm[512];
+	double x_offset;
+	double y_offset;
+	double z_offset;
+	static constexpr double SKEW = 0.36602540378443864967;  // 0.5 * (sqrt(3) - 1)
+	static constexpr double UNSKEW = 0.21132486540518711775;  // (3 - sqrt(3)) / 6
+	// Static gradient table (12 vectors). Z column unused for 2D.
+	static constexpr double GRAD[12][2] = {
+			{1, 1}, {-1, 1}, {1, -1}, {-1, -1},
+			{1, 0}, {-1, 0}, {1, 0}, {-1, 0},
+			{0, 1}, {0, -1}, {0, 1}, {0, -1}};
+
+	explicit NoiseSimplex(JavaRandom &rng) {
+		x_offset = rng.next_double() * 256.0;
+		y_offset = rng.next_double() * 256.0;
+		z_offset = rng.next_double() * 256.0;
+		for (int i = 0; i < 256; i++) {
+			perm[i] = i;
+		}
+		for (int n = 0; n < 256; n++) {
+			const int swap_idx = rng.next_int_bounded(256 - n) + n;
+			const int tmp = perm[n];
+			perm[n] = perm[swap_idx];
+			perm[swap_idx] = tmp;
+			perm[n + 256] = perm[n];
+		}
+	}
+
+	static inline int floor(double d) {
+		return d > 0.0 ? static_cast<int>(d) : static_cast<int>(d) - 1;
+	}
+
+	void sample_2d_grid_additive(double *out, double base_x, double base_z, int size_x,
+			int size_z, double scale_x, double scale_z, double amp_factor) const {
+		int n4 = 0;
+		for (int i2 = 0; i2 < size_x; i2++) {
+			const double d7 = (base_x + double(i2)) * scale_x + x_offset;
+			for (int i3 = 0; i3 < size_z; i3++) {
+				const double d14 = (base_z + double(i3)) * scale_z + y_offset;
+				const double d15 = (d7 + d14) * SKEW;
+				const int n8 = floor(d7 + d15);
+				const int n7 = floor(d14 + d15);
+				const double d13 = double(n8 + n7) * UNSKEW;
+				const double d16 = double(n8) - d13;
+				const double d17 = d7 - d16;
+				const double d11 = double(n7) - d13;
+				const double d12 = d14 - d11;
+				int n6, n5;
+				if (d17 > d12) {
+					n6 = 1;
+					n5 = 0;
+				} else {
+					n6 = 0;
+					n5 = 1;
+				}
+				const double d18 = d17 - double(n6) + UNSKEW;
+				const double d19 = d12 - double(n5) + UNSKEW;
+				const double d20 = d17 - 1.0 + 2.0 * UNSKEW;
+				const double d21 = d12 - 1.0 + 2.0 * UNSKEW;
+				const int n9 = n8 & 0xFF;
+				const int n10 = n7 & 0xFF;
+				const int n11 = perm[n9 + perm[n10]] % 12;
+				const int n12 = perm[n9 + n6 + perm[n10 + n5]] % 12;
+				const int n13 = perm[n9 + 1 + perm[n10 + 1]] % 12;
+				double d10 = 0.0;
+				double d22 = 0.5 - d17 * d17 - d12 * d12;
+				if (d22 >= 0.0) {
+					d22 *= d22;
+					d10 = d22 * d22 * (GRAD[n11][0] * d17 + GRAD[n11][1] * d12);
+				}
+				double d9 = 0.0;
+				double d23 = 0.5 - d18 * d18 - d19 * d19;
+				if (d23 >= 0.0) {
+					d23 *= d23;
+					d9 = d23 * d23 * (GRAD[n12][0] * d18 + GRAD[n12][1] * d19);
+				}
+				double d8 = 0.0;
+				double d24 = 0.5 - d20 * d20 - d21 * d21;
+				if (d24 >= 0.0) {
+					d24 *= d24;
+					d8 = d24 * d24 * (GRAD[n13][0] * d20 + GRAD[n13][1] * d21);
+				}
+				out[n4] += 70.0 * (d10 + d9 + d8) * amp_factor;
+				n4++;
+			}
+		}
+	}
 };
 
 // Mirror worldgen_caves.gd constants.
 constexpr int CAVES_RADIUS_CHUNKS = 8;
-// Must stay in sync with worldgen_caves.gd::_CAVE_MAX_Y. Capped below
-// sea level (SEA_LEVEL - 5 = 59) so caves don't break through ocean
-// floors. Visual cleanup; deviation from vanilla 120.
-constexpr int CAVE_MAX_Y = 59;
+constexpr int CAVE_MAX_Y = 120;
 constexpr double CAVE_PI = 3.141592653589793;
 constexpr double CAVE_TAU = 2.0 * CAVE_PI;
 
@@ -384,10 +686,13 @@ int WorldgenNative::block_at(int world_x, int y, int world_z, int surface_y) {
 		return BEDROCK;
 	}
 	if (y == surface_y) {
-		// Below sea = DIRT (ocean floor); at/above sea = GRASS. Mirrors
-		// Worldgen._block_at — must NOT subtract BEACH_DEPTH_BELOW here
-		// (that's the beach-band constant, not the grass/dirt line).
-		if (surface_y < SEA_LEVEL) {
+		// Ocean-floor columns get DIRT at surface to match BiomeOcean's
+		// ai=DIRT override in vanilla BiomeBase.b(). Mirrors
+		// Worldgen._block_at in scripts/world/worldgen.gd — if this
+		// diverges, the parity test (tests/test_worldgen_native.gd) will
+		// catch it. Constants duplicated from Worldgen consts; see
+		// worldgen_native.h for mapping.
+		if (surface_y < SEA_LEVEL - BEACH_DEPTH_BELOW) {
 			return DIRT;
 		}
 		return GRASS;
@@ -447,309 +752,6 @@ Dictionary WorldgenNative::build_base_terrain(
 	result["blocks"] = blocks;
 	result["max_y"] = max_y;
 	return result;
-}
-
-// Slice 3-D: native port of WorldgenDensity.build_density_terrain. The
-// hot inner loop — per-cell trilerp from a 5×17×5 coarse density grid
-// into the full 16×128×16 chunk, plus the density blend (primary +
-// secondary + selector) and Y-bias subtraction.
-//
-// In GDScript this loop is ~32K cells × ~7 lerps each = ~224K function
-// calls. GDScript function-dispatch overhead alone makes that ~50-100ms
-// per chunk — the dominant cost in 3D-density mode. Native does the
-// same math in raw doubles, ~5-10× faster.
-//
-// Caller pre-samples noise grids in GDScript (FastNoiseLite is already
-// fast in Godot's C++) and hands the raw float arrays. This avoids
-// also porting NoiseOctaves to native (would need a separate Perlin
-// implementation that matches FastNoiseLite's gradient table for
-// parity — much bigger scope).
-//
-// Grid layouts:
-//   density_a, density_b, selector: 5*17*5 = 425 doubles, indexed
-//                                   `(gx * GRID_Y + gy) * GRID_Z + gz`
-//   col_target_y, col_amplitude:    5*5    =  25 doubles, indexed
-//                                   `gx * GRID_Z + gz`
-Dictionary WorldgenNative::build_density_terrain(
-		int p_chunk_x,
-		int p_chunk_z,
-		const PackedFloat64Array &p_density_a,
-		const PackedFloat64Array &p_density_b,
-		const PackedFloat64Array &p_selector,
-		const PackedFloat64Array &p_col_target_y,
-		const PackedFloat64Array &p_col_amplitude,
-		float p_stone_bias_factor,
-		float p_air_bias_factor,
-		float p_noise_normalizer,
-		float p_selector_normalizer,
-		int p_top_taper_cells,
-		float p_top_taper_force_air) const {
-	// Mirror WorldgenDensity GDScript constants.
-	constexpr int GRID_X = 5;
-	constexpr int GRID_Y = 17;
-	constexpr int GRID_Z = 5;
-	constexpr int COARSE_STEP_X = 4;
-	constexpr int COARSE_STEP_Y = 8;
-	constexpr int COARSE_STEP_Z = 4;
-	constexpr int GRID_SIZE = GRID_X * GRID_Y * GRID_Z;
-
-	(void)p_chunk_x;  // unused — chunk coords already baked into noise samples
-	(void)p_chunk_z;
-
-	// Bail if any input grid is sized wrong (caller bug).
-	if (p_density_a.size() != GRID_SIZE || p_density_b.size() != GRID_SIZE
-			|| p_selector.size() != GRID_SIZE
-			|| p_col_target_y.size() != GRID_X * GRID_Z
-			|| p_col_amplitude.size() != GRID_X * GRID_Z) {
-		Dictionary err;
-		err["blocks"] = PackedByteArray();
-		err["max_y"] = 0;
-		return err;
-	}
-
-	const double *da = p_density_a.ptr();
-	const double *db = p_density_b.ptr();
-	const double *sel = p_selector.ptr();
-	const double *targets = p_col_target_y.ptr();
-	const double *amps = p_col_amplitude.ptr();
-
-	// Working density grid — local doubles, modified in place. Same
-	// layout as the input grids.
-	double density[GRID_SIZE];
-
-	// Step 1: blend primary + secondary via selector, normalize.
-	// d10 = lerp(d12, d13, clamp((selector/N + 1) / 2, 0, 1))
-	const double sel_inv = 1.0 / static_cast<double>(p_selector_normalizer);
-	const double noise_inv = 1.0 / static_cast<double>(p_noise_normalizer);
-	for (int i = 0; i < GRID_SIZE; i++) {
-		const double d12 = da[i] * noise_inv;
-		const double d13 = db[i] * noise_inv;
-		const double d14 = (sel[i] * sel_inv + 1.0) * 0.5;
-		double t = d14;
-		if (t < 0.0) {
-			t = 0.0;
-		} else if (t > 1.0) {
-			t = 1.0;
-		}
-		density[i] = d12 + (d13 - d12) * t;
-	}
-
-	// Step 2: per-column Y-bias subtraction + top-of-world taper.
-	// Mirrors WorldgenDensity._y_bias_with_target_amp + the top-taper
-	// branch. Asymmetric stone/air bias, divided by per-column amplitude.
-	const int taper_start = GRID_Y - p_top_taper_cells;
-	const double taper_div = static_cast<double>(p_top_taper_cells - 1);
-	for (int gx = 0; gx < GRID_X; gx++) {
-		for (int gy = 0; gy < GRID_Y; gy++) {
-			const double world_y = static_cast<double>(gy * COARSE_STEP_Y);
-			double taper = 0.0;
-			if (gy >= taper_start) {
-				taper = static_cast<double>(gy - taper_start) / taper_div;
-			}
-			for (int gz = 0; gz < GRID_Z; gz++) {
-				const int col_idx = gx * GRID_Z + gz;
-				const double col_target = targets[col_idx];
-				const double col_amp = amps[col_idx];
-				const double diff = world_y - col_target;
-				double y_bias = 0.0;
-				if (diff < 0.0) {
-					y_bias = diff * static_cast<double>(p_stone_bias_factor) / col_amp;
-				} else {
-					y_bias = diff * static_cast<double>(p_air_bias_factor) / col_amp;
-				}
-				const int idx = (gx * GRID_Y + gy) * GRID_Z + gz;
-				double biased = density[idx] - y_bias;
-				if (taper > 0.0) {
-					biased = biased * (1.0 - taper)
-							+ static_cast<double>(p_top_taper_force_air) * taper;
-				}
-				density[idx] = biased;
-			}
-		}
-	}
-
-	// Step 3: trilerp density grid into per-cell threshold → STONE/AIR.
-	// 8 corner densities define each coarse cube; sub-cell loop walks
-	// the COARSE_STEP_X × COARSE_STEP_Y × COARSE_STEP_Z cells inside.
-	PackedByteArray blocks;
-	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
-	blocks.resize(volume);
-	uint8_t *blocks_ptr = blocks.ptrw();
-	for (int i = 0; i < volume; i++) {
-		blocks_ptr[i] = AIR;
-	}
-	int max_y = 0;
-	for (int gx = 0; gx < GRID_X - 1; gx++) {
-		for (int gz = 0; gz < GRID_Z - 1; gz++) {
-			for (int gy = 0; gy < GRID_Y - 1; gy++) {
-				const double d000 = density[(gx * GRID_Y + gy) * GRID_Z + gz];
-				const double d001 = density[(gx * GRID_Y + gy) * GRID_Z + gz + 1];
-				const double d010 = density[(gx * GRID_Y + (gy + 1)) * GRID_Z + gz];
-				const double d011 = density[(gx * GRID_Y + (gy + 1)) * GRID_Z + gz + 1];
-				const double d100 = density[((gx + 1) * GRID_Y + gy) * GRID_Z + gz];
-				const double d101 = density[((gx + 1) * GRID_Y + gy) * GRID_Z + gz + 1];
-				const double d110 = density[((gx + 1) * GRID_Y + (gy + 1)) * GRID_Z + gz];
-				const double d111 = density[((gx + 1) * GRID_Y + (gy + 1)) * GRID_Z + gz + 1];
-				for (int sy = 0; sy < COARSE_STEP_Y; sy++) {
-					const double ty = static_cast<double>(sy) / static_cast<double>(COARSE_STEP_Y);
-					const double d00 = d000 + (d010 - d000) * ty;
-					const double d01 = d001 + (d011 - d001) * ty;
-					const double d10 = d100 + (d110 - d100) * ty;
-					const double d11 = d101 + (d111 - d101) * ty;
-					const int world_y = gy * COARSE_STEP_Y + sy;
-					if (world_y >= SIZE_Y) {
-						continue;
-					}
-					for (int sx = 0; sx < COARSE_STEP_X; sx++) {
-						const double tx = static_cast<double>(sx) / static_cast<double>(COARSE_STEP_X);
-						const double d0 = d00 + (d10 - d00) * tx;
-						const double d1 = d01 + (d11 - d01) * tx;
-						const int local_x = gx * COARSE_STEP_X + sx;
-						for (int sz = 0; sz < COARSE_STEP_Z; sz++) {
-							const double tz = static_cast<double>(sz) / static_cast<double>(COARSE_STEP_Z);
-							const double d = d0 + (d1 - d0) * tz;
-							if (d > 0.0) {
-								const int local_z = gz * COARSE_STEP_Z + sz;
-								const int idx = world_y * SIZE_X * SIZE_Z + local_z * SIZE_X + local_x;
-								blocks_ptr[idx] = STONE;
-								if (world_y > max_y) {
-									max_y = world_y;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	Dictionary result;
-	result["blocks"] = blocks;
-	result["max_y"] = max_y;
-	return result;
-}
-
-// Slice 3-D2: native port of WorldgenDensity.apply_surface_layer.
-// After build_density_terrain fills the chunk with raw STONE/AIR, this
-// pass converts the topmost STONE per column → GRASS (or DIRT below
-// sea level — vanilla `px.java:130-148` rule), the next 3 STONE cells
-// → DIRT, then runs the deterministic bedrock pass at y=0..4 using
-// the same hash3 the GDScript `is_bedrock_at` uses.
-//
-// 16×16 columns × ~128-cell scan top-down was ~16ms in GDScript.
-// Native version is ~1ms — column scan is just byte reads in a flat
-// array.
-PackedByteArray WorldgenNative::apply_surface_layer(
-		int p_chunk_x,
-		int p_chunk_z,
-		const PackedByteArray &p_blocks) const {
-	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
-	if (p_blocks.size() != volume) {
-		return p_blocks;
-	}
-	PackedByteArray blocks = p_blocks;
-	uint8_t *blocks_ptr = blocks.ptrw();
-	for (int x = 0; x < SIZE_X; x++) {
-		for (int z = 0; z < SIZE_Z; z++) {
-			const int world_x = p_chunk_x * SIZE_X + x;
-			const int world_z = p_chunk_z * SIZE_Z + z;
-			// Walk top-down to find the topmost STONE in this column.
-			int top_stone_y = -1;
-			for (int y = SIZE_Y - 1; y >= 0; y--) {
-				const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
-				if (blocks_ptr[idx] == STONE) {
-					top_stone_y = y;
-					break;
-				}
-			}
-			if (top_stone_y >= 0) {
-				// Top cell: GRASS if at/above sea level, DIRT otherwise
-				// (ocean floor — water fill will cover it). Vanilla
-				// `px.java:130-148` does the same.
-				const int top_idx = top_stone_y * SIZE_X * SIZE_Z + z * SIZE_X + x;
-				blocks_ptr[top_idx] = (top_stone_y >= SEA_LEVEL) ? GRASS : DIRT;
-				// Next 3 STONE cells → DIRT.
-				for (int dy = 1; dy < 4; dy++) {
-					const int y = top_stone_y - dy;
-					if (y < 0) {
-						break;
-					}
-					const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
-					if (blocks_ptr[idx] == STONE) {
-						blocks_ptr[idx] = DIRT;
-					}
-				}
-			}
-			// Bedrock pass at y=0..4 — probabilistic per the same hash
-			// `is_bedrock_at` the GDScript path uses, so byte-for-byte
-			// parity holds.
-			for (int y = 0; y < 5; y++) {
-				if (is_bedrock_at(world_x, y, world_z)) {
-					const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
-					blocks_ptr[idx] = BEDROCK;
-				}
-			}
-		}
-	}
-	return blocks;
-}
-
-// Slice 3-D3: native port of NoiseOctaves.sample_3d_grid. The caller
-// passes the same Array<Ref<FastNoiseLite>> that GDScript uses (one
-// configured Perlin per octave), and we run the reverse-FBM accumulation
-// loop in C++. Because the underlying FastNoiseLite instances are SHARED
-// between GDScript and native paths, the noise output at any (x,y,z) is
-// byte-identical — so the grid we produce here matches the GDScript
-// fallback exactly.
-//
-// Per-call cost: ~10ms in GDScript (Variant dispatch overhead per
-// `get_noise_3d` call) → ~1ms native (direct C++ method call). Three
-// noise grids per chunk × 16-octave reverse-FBM = ~20K Perlin samples,
-// so this matters during chunk gen.
-PackedFloat64Array WorldgenNative::sample_noise_grid_3d(
-		const Array &p_octaves,
-		double p_base_x,
-		double p_base_y,
-		double p_base_z,
-		int p_size_x,
-		int p_size_y,
-		int p_size_z,
-		double p_scale_x,
-		double p_scale_y,
-		double p_scale_z) const {
-	PackedFloat64Array out;
-	const int total = p_size_x * p_size_y * p_size_z;
-	out.resize(total);
-	double *out_ptr = out.ptrw();
-	for (int i = 0; i < total; i++) {
-		out_ptr[i] = 0.0;
-	}
-	const int octave_count = p_octaves.size();
-	double amp = 1.0;
-	for (int octave = 0; octave < octave_count; octave++) {
-		Ref<FastNoiseLite> noise = p_octaves[octave];
-		if (noise.is_null()) {
-			amp /= 2.0;
-			continue;
-		}
-		const double fx_scale = p_scale_x * amp;
-		const double fy_scale = p_scale_y * amp;
-		const double fz_scale = p_scale_z * amp;
-		const double inv_amp = 1.0 / amp;
-		for (int x = 0; x < p_size_x; x++) {
-			const double sx = (p_base_x + static_cast<double>(x)) * fx_scale;
-			for (int y = 0; y < p_size_y; y++) {
-				const double sy = (p_base_y + static_cast<double>(y)) * fy_scale;
-				for (int z = 0; z < p_size_z; z++) {
-					const double sz = (p_base_z + static_cast<double>(z)) * fz_scale;
-					const int idx = (x * p_size_y + y) * p_size_z + z;
-					out_ptr[idx] += noise->get_noise_3d(sx, sy, sz) * inv_amp;
-				}
-			}
-		}
-		amp /= 2.0;
-	}
-	return out;
 }
 
 // Deterministic port of Worldgen._place_vein_ellipsoid, which is itself a
@@ -915,16 +917,12 @@ PackedByteArray WorldgenNative::scatter_ores(
 // so only the target chunk mutates; seed-chunk iterations that produce
 // worms entirely outside the target run their PRNG stream for
 // determinism but emit no carves.
-Dictionary WorldgenNative::scatter_caves(
+PackedByteArray WorldgenNative::scatter_caves(
 		int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const {
 	PackedByteArray out = p_blocks;
-	Dictionary result;
-	result["blocks"] = out;
-	result["has_non_cube"] = false;
-	result["has_water"] = false;
 	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
 	if (out.size() < volume) {
-		return result;
+		return out;
 	}
 	uint8_t *blocks_ptr = out.ptrw();
 
@@ -944,58 +942,483 @@ Dictionary WorldgenNative::scatter_caves(
 			spawn_from_seed_chunk(rng, blocks_ptr, p_chunk_x, p_chunk_z, seed_cx, seed_cz);
 		}
 	}
+	return out;
+}
 
-	// Sync the chunk-state flags that GDScript's `set_block_unchecked`
-	// would have updated cell-by-cell. The native base-terrain + caves
-	// paths bypass that helper (they write blocks_ptr directly), so
-	// without this scan the GDScript-side `chunk.has_water_cells` /
-	// `has_non_cube_blocks` flags stay stale → mesher dispatch chooses
-	// the wrong path and chunk-state diverges from the GDScript reference
-	// (test_mesher_native parity catches this).
-	//
-	// Single linear pass over 32K cells in C++ — replaces the GDScript
-	// `_post_process_native_caves` loop that cost ~10-15 ms/chunk and
-	// dominated the cave probe time. Mesh-shape and water predicates are
-	// inlined here to keep the loop hot.
-	bool has_non_cube = false;
-	bool has_water = false;
-	for (int i = 0; i < volume; i++) {
-		const uint8_t id = blocks_ptr[i];
-		if (!has_non_cube) {
-			// Mirrors Blocks.needs_gdscript_mesher / mesh_shape() — any
-			// id whose mesh shape isn't CUBE. Listed by ID; keep in sync
-			// with scripts/world/blocks.gd if new non-cube blocks land.
-			switch (id) {
-				case SAPLING:  // 22
-				case FIRE:  // 27
-				case TORCH:  // 28
-				case FENCE:  // 30
-				case WOOD_STAIRS:  // 31
-				case COBBLESTONE_STAIRS:  // 32
-				case WOODEN_DOOR:  // 33
-				case IRON_DOOR:  // 34
-				case LADDER:  // 35
-				case FLOWER_RED:  // 37
-				case FLOWER_YELLOW:  // 38
-				case MUSHROOM_BROWN:  // 39
-				case MUSHROOM_RED:  // 40
-					has_non_cube = true;
-					break;
-				default:
-					break;
+// ============================================================================
+// 3D-density terrain port — Worldgen3D.fill_chunk + density_grid + climate
+// All in one method for cache locality. Caches the noise stacks per seed.
+// ============================================================================
+namespace {
+// Worldgen3D constants — mirror scripts/world/worldgen_3d.gd
+constexpr int W3D_GRID_X = 5;
+constexpr int W3D_GRID_Y = 17;
+constexpr int W3D_GRID_Z = 5;
+constexpr double W3D_COORDINATE_SCALE = 684.412;
+constexpr double W3D_HEIGHT_SCALE = 684.412;
+constexpr double W3D_SELECTOR_SCALE_XZ = 684.412 / 80.0;
+constexpr double W3D_SELECTOR_SCALE_Y = 684.412 / 160.0;
+constexpr double W3D_AMPLITUDE_SCALE = 1.121;
+constexpr double W3D_DEPTH_SCALE = 200.0;
+constexpr double W3D_AMPLITUDE_OFFSET = 256.0;
+constexpr double W3D_AMPLITUDE_DIVISOR = 512.0;
+constexpr double W3D_DEPTH_DIVISOR = 8000.0;
+constexpr double W3D_DENSITY_DIVISOR = 512.0;
+constexpr double W3D_SELECTOR_DIVISOR = 10.0;
+constexpr int W3D_SEA_LEVEL = 64;
+
+// Cached noise stacks for the 3D pipeline. Static — rebuilt only on
+// seed change. The vector indexing matches GDScript order:
+//   e=0, f=1, selector=2, beach=3, soil=4, amplitude=5, depth=6, forest=7
+struct Worldgen3DNoiseCache {
+	std::vector<NoisePerlin> e;  // 16 octaves
+	std::vector<NoisePerlin> f;  // 16
+	std::vector<NoisePerlin> selector;  // 8
+	std::vector<NoisePerlin> beach;  // 4 (unused in fill_chunk)
+	std::vector<NoisePerlin> soil;  // 4 (unused in fill_chunk)
+	std::vector<NoisePerlin> amplitude;  // 10
+	std::vector<NoisePerlin> depth;  // 16
+	std::vector<NoisePerlin> forest;  // 8 (unused in fill_chunk)
+	// Climate noises (Simplex) — separate Random per noise per po.java.
+	std::vector<NoiseSimplex> temp;  // 4 octaves
+	std::vector<NoiseSimplex> rain;  // 4
+	std::vector<NoiseSimplex> extreme;  // 2
+	int64_t cached_seed = 0;
+	bool valid = false;
+
+	void rebuild(int64_t seed) {
+		// Vanilla px.java:35-42 chains all 8 noise stacks through ONE
+		// JavaRandom seeded from world_seed.
+		JavaRandom rng(seed);
+		auto fill = [&](std::vector<NoisePerlin> &dst, int n) {
+			dst.clear();
+			dst.reserve(n);
+			for (int i = 0; i < n; i++) {
+				dst.emplace_back(rng);
 			}
-		}
-		if (!has_water && (id == WATER_STILL || id == WATER_FLOWING)) {
-			has_water = true;
-		}
-		if (has_non_cube && has_water) {
-			break;  // both set, nothing more to detect
+		};
+		fill(e, 16);
+		fill(f, 16);
+		fill(selector, 8);
+		fill(beach, 4);
+		fill(soil, 4);
+		fill(amplitude, 10);
+		fill(depth, 16);
+		fill(forest, 8);
+		// Climate noises — own Random per noise (po.java:19-21)
+		auto fill_simplex = [&](std::vector<NoiseSimplex> &dst, int64_t s, int n) {
+			JavaRandom r2(s);
+			dst.clear();
+			dst.reserve(n);
+			for (int i = 0; i < n; i++) {
+				dst.emplace_back(r2);
+			}
+		};
+		fill_simplex(temp, seed * 9871LL, 4);
+		fill_simplex(rain, seed * 39811LL, 4);
+		fill_simplex(extreme, seed * 543321LL, 2);
+		cached_seed = seed;
+		valid = true;
+	}
+};
+
+Worldgen3DNoiseCache g_w3d_noise;
+
+// NoiseOctaves bulk grid (vanilla nf.a 10-arg). Accumulates per-octave
+// reverse-FBM into out[]. amp_v halves per octave; coords are pre-
+// multiplied by amp_v; sample is divided by amp_v (= contribution multiplier).
+void octaves_3d_grid(const std::vector<NoisePerlin> &octaves, double *out,
+		double base_x, double base_y, double base_z, int sx, int sy, int sz, double scale_x,
+		double scale_y, double scale_z) {
+	std::fill(out, out + sx * sy * sz, 0.0);
+	double amp_v = 1.0;
+	for (const auto &o : octaves) {
+		o.sample_3d_grid_additive(
+				out, base_x, base_y, base_z, sx, sy, sz,
+				scale_x * amp_v, scale_y * amp_v, scale_z * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+}
+
+// 2D bulk grid (vanilla nf.a 8-arg wrapper) — base_y=10, scale_y=1, size_y=1.
+void octaves_2d_grid(const std::vector<NoisePerlin> &octaves, double *out, double base_x,
+		double base_z, int sx, int sz, double scale_x, double scale_z) {
+	std::fill(out, out + sx * sz, 0.0);
+	double amp_v = 1.0;
+	for (const auto &o : octaves) {
+		o.sample_3d_grid_additive(
+				out, base_x, 10.0, base_z, sx, 1, sz,
+				scale_x * amp_v, 1.0 * amp_v, scale_z * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+}
+
+// NoiseOctavesSimplex single-point sample (vanilla po.java per-cell call).
+double simplex_octaves_sample_2d(const std::vector<NoiseSimplex> &octaves, double x, double z,
+		double scale, double biome_freq_decay) {
+	double out = 0.0;
+	const double sx_norm = scale / 1.5;
+	const double sz_norm = scale / 1.5;
+	double amp = 1.0;
+	double freq = 1.0;
+	for (const auto &o : octaves) {
+		o.sample_2d_grid_additive(
+				&out, x, z, 1, 1, sx_norm * freq, sz_norm * freq, 0.55 / amp);
+		freq *= biome_freq_decay;
+		amp *= 0.5;
+	}
+	return out;
+}
+
+struct Climate {
+	double temp;
+	double rain;
+};
+
+// Biome enum mirroring Worldgen3D.Biome (for biome_at_native).
+enum BiomeId {
+	BIOME_RAINFOREST = 0,
+	BIOME_SWAMPLAND = 1,
+	BIOME_SEASONAL_FOREST = 2,
+	BIOME_FOREST = 3,
+	BIOME_SAVANNA = 4,
+	BIOME_SHRUBLAND = 5,
+	BIOME_TAIGA = 6,
+	BIOME_DESERT = 7,
+	BIOME_PLAINS = 8,
+	BIOME_ICE_DESERT = 9,
+	BIOME_TUNDRA = 10,
+	BIOME_OCEAN = 11
+};
+
+// Surface y at-or-below SEA_LEVEL minus this counts as Ocean. Mirrors
+// Worldgen3D.OCEAN_DEPTH_THRESHOLD.
+constexpr int OCEAN_DEPTH_THRESHOLD = 4;
+
+Climate climate_at_native(double world_x, double world_z) {
+	const double temp_raw = simplex_octaves_sample_2d(g_w3d_noise.temp, world_x, world_z, 0.025, 0.25);
+	const double rain_raw = simplex_octaves_sample_2d(g_w3d_noise.rain, world_x, world_z, 0.05, 0.3333333333333333);
+	const double extreme_raw = simplex_octaves_sample_2d(g_w3d_noise.extreme, world_x, world_z, 0.25, 0.5882352941176471);
+	const double extreme = extreme_raw * 1.1 + 0.5;
+	double temp = (temp_raw * 0.15 + 0.7) * 0.99 + extreme * 0.01;
+	temp = 1.0 - (1.0 - temp) * (1.0 - temp);
+	double rain = (rain_raw * 0.15 + 0.5) * 0.998 + extreme * 0.002;
+	if (temp < 0.0) temp = 0.0;
+	if (temp > 1.0) temp = 1.0;
+	if (rain < 0.0) rain = 0.0;
+	if (rain > 1.0) rain = 1.0;
+	return {temp, rain};
+}
+
+// Mirror Worldgen3D.biome_at — gg.java decision tree port.
+int biome_at_native(double world_x, double world_z) {
+	const Climate c = climate_at_native(world_x, world_z);
+	const double temp = c.temp;
+	const double rain = c.rain * temp;
+	if (temp < 0.1) return BIOME_TUNDRA;
+	if (rain < 0.2) {
+		if (temp < 0.5) return BIOME_TUNDRA;
+		if (temp < 0.95) return BIOME_SAVANNA;
+		return BIOME_DESERT;
+	}
+	if (rain > 0.5 && temp < 0.7) return BIOME_SWAMPLAND;
+	if (temp < 0.5) return BIOME_TAIGA;
+	if (temp < 0.97) {
+		if (rain < 0.35) return BIOME_SHRUBLAND;
+		return BIOME_FOREST;
+	}
+	if (rain < 0.45) return BIOME_PLAINS;
+	if (rain < 0.9) return BIOME_SEASONAL_FOREST;
+	return BIOME_RAINFOREST;
+}
+
+// Mirror Worldgen3D.biome_top_block / biome_filler_block.
+int biome_top_block_native(int biome) {
+	if (biome == BIOME_DESERT || biome == BIOME_ICE_DESERT) return WorldgenNative::SAND;
+	if (biome == BIOME_OCEAN) return WorldgenNative::DIRT;
+	return WorldgenNative::GRASS;
+}
+
+int biome_filler_block_native(int biome) {
+	if (biome == BIOME_DESERT || biome == BIOME_ICE_DESERT) return WorldgenNative::SAND;
+	return WorldgenNative::DIRT;
+}
+
+}  // anonymous namespace
+
+// Native fill_chunk_3d — generates 16x128x16 base terrain (STONE/WATER/AIR)
+// for the 3D density pipeline. Replaces Worldgen3D.fill_chunk + density_grid
+// + climate sampling, all in one C++ pass.
+PackedByteArray WorldgenNative::fill_chunk_3d(int p_chunk_x, int p_chunk_z) const {
+	// Rebuild noise cache if seed changed
+	if (!g_w3d_noise.valid || g_w3d_noise.cached_seed != world_seed) {
+		g_w3d_noise.rebuild(world_seed);
+	}
+
+	// Sample 2D noises (h depth, g amplitude) at Y=10 per coarse column
+	const int noise_base_x = p_chunk_x * 4;
+	const int noise_base_z = p_chunk_z * 4;
+	double g_grid[W3D_GRID_X * W3D_GRID_Z];
+	double h_grid[W3D_GRID_X * W3D_GRID_Z];
+	octaves_2d_grid(g_w3d_noise.amplitude, g_grid, double(noise_base_x), double(noise_base_z),
+			W3D_GRID_X, W3D_GRID_Z, W3D_AMPLITUDE_SCALE, W3D_AMPLITUDE_SCALE);
+	octaves_2d_grid(g_w3d_noise.depth, h_grid, double(noise_base_x), double(noise_base_z),
+			W3D_GRID_X, W3D_GRID_Z, W3D_DEPTH_SCALE, W3D_DEPTH_SCALE);
+
+	// Sample 3D density noises (e, f, selector)
+	const int grid3d_size = W3D_GRID_X * W3D_GRID_Y * W3D_GRID_Z;
+	double e_grid[grid3d_size];
+	double f_grid[grid3d_size];
+	double d_grid[grid3d_size];
+	octaves_3d_grid(g_w3d_noise.e, e_grid, double(noise_base_x), 0.0, double(noise_base_z),
+			W3D_GRID_X, W3D_GRID_Y, W3D_GRID_Z, W3D_COORDINATE_SCALE, W3D_HEIGHT_SCALE,
+			W3D_COORDINATE_SCALE);
+	octaves_3d_grid(g_w3d_noise.f, f_grid, double(noise_base_x), 0.0, double(noise_base_z),
+			W3D_GRID_X, W3D_GRID_Y, W3D_GRID_Z, W3D_COORDINATE_SCALE, W3D_HEIGHT_SCALE,
+			W3D_COORDINATE_SCALE);
+	octaves_3d_grid(g_w3d_noise.selector, d_grid, double(noise_base_x), 0.0, double(noise_base_z),
+			W3D_GRID_X, W3D_GRID_Y, W3D_GRID_Z, W3D_SELECTOR_SCALE_XZ, W3D_SELECTOR_SCALE_Y,
+			W3D_SELECTOR_SCALE_XZ);
+
+	// Build density grid q (post d11 subtraction). Per-cell climate.
+	static constexpr int CLIMATE_OFFSETS[5] = {1, 4, 7, 10, 13};
+	double q[grid3d_size];
+	int density_idx = 0;
+	int column_idx = 0;
+	const int n6 = W3D_GRID_Y;
+	for (int ix = 0; ix < W3D_GRID_X; ix++) {
+		const double center_x = double(p_chunk_x * 16 + CLIMATE_OFFSETS[ix]);
+		for (int iz = 0; iz < W3D_GRID_Z; iz++) {
+			const double center_z = double(p_chunk_z * 16 + CLIMATE_OFFSETS[iz]);
+			Climate climate = climate_at_native(center_x, center_z);
+			double d6 = climate.rain * climate.temp;
+			double d7 = 1.0 - d6;
+			d7 *= d7;
+			d7 *= d7;
+			d7 = 1.0 - d7;
+			double d8 = (g_grid[column_idx] + W3D_AMPLITUDE_OFFSET) / W3D_AMPLITUDE_DIVISOR;
+			d8 *= d7;
+			if (d8 > 1.0) d8 = 1.0;
+			double d4 = h_grid[column_idx] / W3D_DEPTH_DIVISOR;
+			if (d4 < 0.0) d4 = -d4 * 0.3;
+			d4 = d4 * 3.0 - 2.0;
+			if (d4 < 0.0) {
+				d4 = d4 / 2.0;
+				if (d4 < -1.0) d4 = -1.0;
+				d4 = d4 / 1.4;
+				d4 = d4 / 2.0;
+				d8 = 0.0;
+			} else {
+				if (d4 > 1.0) d4 = 1.0;
+				d4 = d4 / 8.0;
+			}
+			if (d8 < 0.0) d8 = 0.0;
+			d8 += 0.5;
+			d4 = d4 * double(n6) / 16.0;
+			const double d9 = double(n6) / 2.0 + d4 * 4.0;
+			for (int iy = 0; iy < n6; iy++) {
+				double d11 = (double(iy) - d9) * 12.0 / d8;
+				if (d11 < 0.0) d11 *= 4.0;
+				const double d12 = e_grid[density_idx] / W3D_DENSITY_DIVISOR;
+				const double d13 = f_grid[density_idx] / W3D_DENSITY_DIVISOR;
+				const double d14 = (d_grid[density_idx] / W3D_SELECTOR_DIVISOR + 1.0) / 2.0;
+				double d10;
+				if (d14 < 0.0) {
+					d10 = d12;
+				} else if (d14 > 1.0) {
+					d10 = d13;
+				} else {
+					d10 = d12 + (d13 - d12) * d14;
+				}
+				d10 -= d11;
+				if (iy > n6 - 4) {
+					const double d15 = double(iy - (n6 - 4)) / 3.0;
+					d10 = d10 * (1.0 - d15) + -10.0 * d15;
+				}
+				q[(ix * W3D_GRID_Y + iy) * W3D_GRID_Z + iz] = d10;
+				density_idx++;
+			}
+			column_idx++;
 		}
 	}
-	result["blocks"] = out;
-	result["has_non_cube"] = has_non_cube;
-	result["has_water"] = has_water;
-	return result;
+
+	// Trilerp + write blocks. Same loop structure as Worldgen3D.fill_chunk
+	// (but with the d9 fix: (i4+1) on all four Y-step deltas).
+	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
+	PackedByteArray out;
+	out.resize(volume);
+	uint8_t *blocks = out.ptrw();
+	std::fill(blocks, blocks + volume, static_cast<uint8_t>(AIR));
+	for (int i2 = 0; i2 < 4; i2++) {
+		for (int i3 = 0; i3 < 4; i3++) {
+			for (int i4 = 0; i4 < 16; i4++) {
+				double d3 = q[((i2 + 0) * W3D_GRID_Y + (i4 + 0)) * W3D_GRID_Z + (i3 + 0)];
+				double d4 = q[((i2 + 0) * W3D_GRID_Y + (i4 + 0)) * W3D_GRID_Z + (i3 + 1)];
+				double d5 = q[((i2 + 1) * W3D_GRID_Y + (i4 + 0)) * W3D_GRID_Z + (i3 + 0)];
+				double d6 = q[((i2 + 1) * W3D_GRID_Y + (i4 + 0)) * W3D_GRID_Z + (i3 + 1)];
+				const double d7 =
+						(q[((i2 + 0) * W3D_GRID_Y + (i4 + 1)) * W3D_GRID_Z + (i3 + 0)] - d3) * 0.125;
+				const double d8 =
+						(q[((i2 + 0) * W3D_GRID_Y + (i4 + 1)) * W3D_GRID_Z + (i3 + 1)] - d4) * 0.125;
+				const double d9 =
+						(q[((i2 + 1) * W3D_GRID_Y + (i4 + 1)) * W3D_GRID_Z + (i3 + 0)] - d5) * 0.125;
+				const double d10 =
+						(q[((i2 + 1) * W3D_GRID_Y + (i4 + 1)) * W3D_GRID_Z + (i3 + 1)] - d6) * 0.125;
+				for (int i5 = 0; i5 < 8; i5++) {
+					double d12 = d3;
+					double d13 = d4;
+					const double d14 = (d5 - d3) * 0.25;
+					const double d15 = (d6 - d4) * 0.25;
+					for (int i6 = 0; i6 < 4; i6++) {
+						double d17 = d12;
+						const double d18 = (d13 - d12) * 0.25;
+						for (int i7 = 0; i7 < 4; i7++) {
+							const int local_x = i2 * 4 + i6;
+							const int local_y = i4 * 8 + i5;
+							const int local_z = i3 * 4 + i7;
+							const int idx = local_y * SIZE_X * SIZE_Z + local_z * SIZE_X + local_x;
+							if (d17 > 0.0) {
+								blocks[idx] = static_cast<uint8_t>(STONE);
+							} else if (local_y < W3D_SEA_LEVEL) {
+								blocks[idx] = static_cast<uint8_t>(WATER_STILL);
+							}  // else AIR (default)
+							d17 += d18;
+						}
+						d12 += d14;
+						d13 += d15;
+					}
+					d3 += d7;
+					d4 += d8;
+					d5 += d9;
+					d6 += d10;
+				}
+			}
+		}
+	}
+	return out;
+}
+
+// Native port of Worldgen._apply_surface_layer_3d (vanilla px.java::a).
+// Walks each column top-down with shared JavaRandom: bedrock band,
+// sand/gravel beach overlay, dirt-depth filler, biome top block. Bit-
+// exact with the GDScript port (same RNG sequence).
+PackedByteArray WorldgenNative::apply_surface_layer_3d(
+		int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const {
+	if (!g_w3d_noise.valid || g_w3d_noise.cached_seed != world_seed) {
+		g_w3d_noise.rebuild(world_seed);
+	}
+	PackedByteArray out = p_blocks;
+	const int volume = SIZE_X * SIZE_Y * SIZE_Z;
+	if (out.size() < volume) return out;
+	uint8_t *blocks = out.ptrw();
+
+	// Vanilla px.java:169 seed pattern.
+	JavaRandom rng(int64_t(p_chunk_x) * 341873128712LL +
+				   int64_t(p_chunk_z) * 132897987541LL);
+
+	// Sample r/s/t noise grids (16x16) using cached beach/soil noises.
+	// r = sand band: this.n.a(r, x*16, z*16, 0, 16,16,1, 1/32, 1/32, 1)
+	// s = gravel band: this.n.a(s, z*16, 109.0134, x*16, 16,1,16, 1/32, 1, 1/32) — note swap!
+	// t = dirt depth: this.o.a(t, x*16, z*16, 0, 16,16,1, 1/16, 1/16, 1/16)
+	double r_noise[256];
+	double s_noise[256];
+	double t_noise[256];
+	std::fill(r_noise, r_noise + 256, 0.0);
+	std::fill(s_noise, s_noise + 256, 0.0);
+	std::fill(t_noise, t_noise + 256, 0.0);
+	double amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.beach) {
+		o.sample_3d_grid_additive(r_noise, double(p_chunk_x * 16), double(p_chunk_z * 16), 0.0,
+				16, 16, 1, 0.03125 * amp_v, 0.03125 * amp_v, 1.0 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+	amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.beach) {
+		o.sample_3d_grid_additive(s_noise, double(p_chunk_z * 16), 109.0134, double(p_chunk_x * 16),
+				16, 1, 16, 0.03125 * amp_v, 1.0 * amp_v, 0.03125 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+	amp_v = 1.0;
+	for (const auto &o : g_w3d_noise.soil) {
+		o.sample_3d_grid_additive(t_noise, double(p_chunk_x * 16), double(p_chunk_z * 16), 0.0,
+				16, 16, 1, 0.0625 * amp_v, 0.0625 * amp_v, 0.0625 * amp_v, amp_v);
+		amp_v /= 2.0;
+	}
+
+	const int sea = W3D_SEA_LEVEL;  // 64
+
+	for (int x = 0; x < SIZE_X; x++) {
+		for (int z = 0; z < SIZE_Z; z++) {
+			const double world_x_d = double(p_chunk_x * SIZE_X + x);
+			const double world_z_d = double(p_chunk_z * SIZE_Z + z);
+			const int biome = biome_at_native(world_x_d, world_z_d);
+			const int biome_top = biome_top_block_native(biome);
+			const int biome_filler = biome_filler_block_native(biome);
+			const int ni = x + z * 16;
+			const bool bl_sand = r_noise[ni] + rng.next_double() * 0.2 > 0.0;
+			const bool bl_gravel = s_noise[ni] + rng.next_double() * 0.2 > 3.0;
+			const int n5 = static_cast<int>(t_noise[ni] / 3.0 + 3.0 + rng.next_double() * 0.25);
+			int n6 = -1;
+			int by2 = biome_top;
+			int by3 = biome_filler;
+			for (int y = SIZE_Y - 1; y >= 0; y--) {
+				const int br = rng.next_int_bounded(5);
+				const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+				if (y <= br) {
+					blocks[idx] = static_cast<uint8_t>(BEDROCK);
+					continue;
+				}
+				const int existing = blocks[idx];
+				if (existing == AIR) {
+					n6 = -1;
+					continue;
+				}
+				if (existing != STONE) {
+					continue;
+				}
+				if (n6 == -1) {
+					if (n5 <= 0) {
+						by2 = AIR;
+						by3 = STONE;
+					} else if (y >= sea - 4 && y <= sea + 1) {
+						by2 = biome_top;
+						by3 = biome_filler;
+						if (bl_gravel) {
+							by2 = AIR;
+							by3 = GRAVEL;
+						}
+						if (bl_sand) {
+							by2 = SAND;
+							by3 = SAND;
+						}
+					} else if (y < sea - OCEAN_DEPTH_THRESHOLD) {
+						// Non-vanilla Ocean biome: shallow seabed (n5 > 0
+						// already, so dirt depth exists). Force DIRT seabed
+						// regardless of climate biome's top block. Matches
+						// Beta BiomeOcean. Cold-climate cells still get ICE
+						// on the water surface above via the cold overlay
+						// (which keys on climate biome, not effective).
+						by2 = biome_top_block_native(BIOME_OCEAN);
+						by3 = biome_filler_block_native(BIOME_OCEAN);
+					}
+					if (y < sea && by2 == AIR) {
+						by2 = WATER_STILL;
+					}
+					n6 = n5;
+					if (y >= sea - 1) {
+						blocks[idx] = static_cast<uint8_t>(by2);
+					} else {
+						blocks[idx] = static_cast<uint8_t>(by3);
+					}
+					continue;
+				}
+				if (n6 <= 0) continue;
+				n6--;
+				blocks[idx] = static_cast<uint8_t>(by3);
+			}
+		}
+	}
+	return out;
 }
 
 void WorldgenNative::_bind_methods() {
@@ -1003,45 +1426,17 @@ void WorldgenNative::_bind_methods() {
 			D_METHOD("build_base_terrain", "chunk_x", "chunk_z", "heightmap"),
 			&WorldgenNative::build_base_terrain);
 	ClassDB::bind_method(
-			D_METHOD(
-					"build_density_terrain",
-					"chunk_x",
-					"chunk_z",
-					"density_a",
-					"density_b",
-					"selector",
-					"col_target_y",
-					"col_amplitude",
-					"stone_bias_factor",
-					"air_bias_factor",
-					"noise_normalizer",
-					"selector_normalizer",
-					"top_taper_cells",
-					"top_taper_force_air"),
-			&WorldgenNative::build_density_terrain);
-	ClassDB::bind_method(
-			D_METHOD("apply_surface_layer", "chunk_x", "chunk_z", "blocks"),
-			&WorldgenNative::apply_surface_layer);
-	ClassDB::bind_method(
-			D_METHOD(
-					"sample_noise_grid_3d",
-					"octaves",
-					"base_x",
-					"base_y",
-					"base_z",
-					"size_x",
-					"size_y",
-					"size_z",
-					"scale_x",
-					"scale_y",
-					"scale_z"),
-			&WorldgenNative::sample_noise_grid_3d);
-	ClassDB::bind_method(
 			D_METHOD("scatter_ores", "chunk_x", "chunk_z", "blocks", "ore_configs"),
 			&WorldgenNative::scatter_ores);
 	ClassDB::bind_method(
 			D_METHOD("scatter_caves", "chunk_x", "chunk_z", "blocks"),
 			&WorldgenNative::scatter_caves);
+	ClassDB::bind_method(
+			D_METHOD("fill_chunk_3d", "chunk_x", "chunk_z"),
+			&WorldgenNative::fill_chunk_3d);
+	ClassDB::bind_method(
+			D_METHOD("apply_surface_layer_3d", "chunk_x", "chunk_z", "blocks"),
+			&WorldgenNative::apply_surface_layer_3d);
 	// Static class method exposed as instance-callable so GDScript can
 	// invoke `_native_worldgen.set_world_seed(N)` symmetrically with the
 	// other native APIs. The static keyword in the header keeps the

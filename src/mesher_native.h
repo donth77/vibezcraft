@@ -83,6 +83,11 @@ public:
 	static constexpr int FLOWER_YELLOW = 38;
 	static constexpr int MUSHROOM_BROWN = 39;
 	static constexpr int MUSHROOM_RED = 40;
+	static constexpr int SUGAR_CANE = 41;
+	static constexpr int ICE = 42;
+	static constexpr int SNOW_BLOCK = 43;
+	static constexpr int CACTUS = 44;
+	static constexpr int SNOW_LAYER = 45;
 
 	MesherNative();
 	~MesherNative();

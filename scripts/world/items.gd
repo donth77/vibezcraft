@@ -103,6 +103,10 @@ const IRON_DOOR: int = 147
 # death; the only other source is debug spawning until creepers ship. Used
 # in the TNT recipe (4 sand + 5 gunpowder in a 3×3 checkerboard).
 const GUNPOWDER: int = 148
+# Sugar cane item — drops from breaking the SUGAR_CANE block. Held in
+# hand as a green stick. Vanilla introduced as "reeds" in Alpha v1.0.4.
+# We just carry it as a placeable plant for now (no sugar/paper crafting).
+const SUGAR_CANE: int = 149
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -451,6 +455,8 @@ static func display_name(item_id: int) -> String:
 			return "Iron Door"
 		GUNPOWDER:
 			return "Gunpowder"
+		SUGAR_CANE:
+			return "Sugar Cane"
 		Blocks.TNT:
 			return "TNT"
 		Blocks.AIR:
@@ -509,6 +515,16 @@ static func display_name(item_id: int) -> String:
 			return "Cobblestone Stairs"
 		Blocks.LADDER:
 			return "Ladder"
+		Blocks.SUGAR_CANE:
+			return "Sugar Cane"
+		Blocks.ICE:
+			return "Ice"
+		Blocks.SNOW_BLOCK:
+			return "Snow Block"
+		Blocks.SNOW_LAYER:
+			return "Snow Layer"
+		Blocks.CACTUS:
+			return "Cactus"
 	return ""
 
 

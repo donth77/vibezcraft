@@ -105,6 +105,28 @@ static func create_vanilla(world_seed: int, octave_count: int) -> NoiseOctaves:
 	return n
 
 
+# Vanilla `px.java:35-42` chains all 8 NoiseOctaves stacks through a SINGLE
+# JavaRandom seeded from WORLD_SEED — each `new nf(this.j, N)` call advances
+# that one RNG by N × (3 + 256) random draws. Per-noise `create_vanilla()`
+# resets the RNG, which gives each noise a DIFFERENT gradient table than
+# vanilla's chained sequence. That divergence shows up downstream: depth-
+# and amplitude-noise distributions don't match vanilla even at the same
+# WORLD_SEED, producing flat terrain instead of vanilla's mountain/ocean
+# variety.
+#
+# This factory takes the shared rng and builds one stack from it,
+# advancing the rng in place. Caller is responsible for the chain order
+# (e.g. e, f, selector, beach, soil, amplitude, depth, forest).
+static func create_vanilla_chained(rng: JavaRandom, octave_count: int) -> NoiseOctaves:
+	var n := NoiseOctaves.new()
+	n._octave_count = octave_count
+	n._is_vanilla = true
+	n._vanilla_octaves.resize(octave_count)
+	for i in range(octave_count):
+		n._vanilla_octaves[i] = NoisePerlin.new(rng)
+	return n
+
+
 # Vanilla nf.a(double, double) — 2D sample. Returns the summed reverse-FBM
 # value. Output range: roughly [-2^N, 2^N] where N = octave_count, since
 # each Perlin returns ~[-1, 1] and the last octave's contribution is
@@ -175,11 +197,13 @@ func sample_3d_grid(
 			)
 			amp_v /= 2.0
 		return
-	# Native fast path — same FastNoiseLite instances are passed to
-	# C++, so noise output is byte-identical to the GDScript loop below.
-	# ~10× faster (Variant dispatch overhead per get_noise_3d call is
-	# the dominant cost in the GDScript path).
-	if Worldgen._native_worldgen != null:
+	# Native fast path — only available if WorldgenNative ships
+	# sample_noise_grid_3d (added in Phase 5 of terrain rework). Until
+	# then we always use the GDScript loop below.
+	if (
+		Worldgen._native_worldgen != null
+		and Worldgen._native_worldgen.has_method("sample_noise_grid_3d")
+	):
 		var native_out: PackedFloat64Array = (
 			Worldgen
 			. _native_worldgen
@@ -197,7 +221,6 @@ func sample_3d_grid(
 				scale_z,
 			)
 		)
-		# Copy into the caller-supplied output buffer (signature contract).
 		for i in range(native_out.size()):
 			out[i] = native_out[i]
 		return

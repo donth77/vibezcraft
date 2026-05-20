@@ -33,6 +33,14 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.FLOWER_YELLOW: "flower_yellow",
 	Blocks.MUSHROOM_BROWN: "mushroom_brown",
 	Blocks.MUSHROOM_RED: "mushroom_red",
+	Blocks.SUGAR_CANE: "sugar_cane",
+	Blocks.ICE: "ice",
+	Blocks.SNOW_BLOCK: "snow",
+	Blocks.CACTUS: "cactus_side",
+	Blocks.SNOW_LAYER: "snow",
+	# TNT — flat-sprite fallback before BlockIconRenderer's iso-cube bake
+	# lands. Uses the side face (lettering) which is the most recognizable.
+	Blocks.TNT: "tnt_side",
 }
 
 # Item sprite basenames. Resolved at load time: first try
@@ -89,6 +97,9 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# Gunpowder — canonical Alpha 1.2.6 sprite at items.png (7,8). Used in
 	# the TNT recipe; sourced via debug spawner only until creepers ship.
 	Items.GUNPOWDER: "gunpowder",
+	# Sugar cane (vanilla "reeds"). Sprite at items.png (11, 1). Held in
+	# hand and placeable into a SUGAR_CANE block via interaction.gd.
+	Items.SUGAR_CANE: "sugar_cane",
 	# Flint and steel — canonical Alpha 1.2.6 sprite at items.png (5,0),
 	# extracted by scripts/dev/extract_alpha_pack.py into the alpha_vanilla
 	# pack. Other packs fall through to the placeholder color until they

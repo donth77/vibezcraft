@@ -55,6 +55,19 @@ const _ICONIFIED_BLOCKS: Array = [
 	# blocky sprite. Falls through to ItemIcons' flat sprite path which
 	# loads packs/{active}/sapling.png directly, matching how vanilla MC
 	# inventory shows non-cube items.
+	# Biome blocks added 2026-05-11. Ice + snow_block render as full
+	# cubes so iso bakes cleanly. Cactus is approximated as a cube
+	# (vanilla 14/16 width gaps are visual only — bake as full cube
+	# for the icon, matches vanilla inventory representation).
+	# Sugar cane + snow_layer are NOT iconified — non-cube in-world
+	# (cross-quad, thin slab) so iso bake would look wrong; fall
+	# through to flat sprite path.
+	Blocks.ICE,
+	Blocks.SNOW_BLOCK,
+	Blocks.CACTUS,
+	# TNT renders as a full cube with 3 distinct faces (top fuse plate, side
+	# lettering, plain red bottom). Iso bake shows the top + 2 sides cleanly.
+	Blocks.TNT,
 ]
 
 static var _viewport: SubViewport

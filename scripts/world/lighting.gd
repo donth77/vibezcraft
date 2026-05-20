@@ -420,9 +420,23 @@ static func _recompute_sky_light_at_world(p: Vector3i, manager) -> int:
 		return emission
 	var step: int = maxi(raw_opacity, 1)
 	var max_n: int = 0
+	# When the queried cell is UNDER COVER (emission == 0, i.e. height_map
+	# at this column > y), treat unloaded-chunk neighbours as DARK rather
+	# than the vanilla "unknown = sky 15" convention. Rationale: an
+	# unloaded neighbour at the same y is just as likely to be under the
+	# same overhang as we are, so phantom-15 lights would flood-light
+	# covered chunks at load boundaries. The vanilla convention still
+	# applies for sky-exposed cells where the unloaded neighbour would
+	# genuinely be sky-lit too. See
+	# test_relight_overhang_phantom_light_from_unloaded_neighbour.
+	var under_cover: bool = emission == 0
 	for n: Vector3i in _NEIGHBORS:
 		var np := Vector3i(p.x + n.x, p.y + n.y, p.z + n.z)
-		var nl: int = manager.get_world_sky_light(np)
+		var nl: int
+		if under_cover and not _world_pos_in_loaded_chunk(np, manager):
+			nl = 0
+		else:
+			nl = manager.get_world_sky_light(np)
 		if nl > max_n:
 			max_n = nl
 	var from_neighbors: int = maxi(0, max_n - step)
@@ -739,7 +753,10 @@ static func _relight_chunk_borders_native(
 static func prepare_relight_data(
 	coord: Vector2i, target: Chunk, neighbors: Array[Vector2i], manager
 ) -> Array:
+	var t_hm := PerfProbe.begin("lighting.prepare_relight.height_map")
 	target.is_sky_exposed(0, Chunk.SIZE_Y - 1, 0)
+	PerfProbe.end("lighting.prepare_relight.height_map", t_hm)
+	var t_dup := PerfProbe.begin("lighting.prepare_relight.dup")
 	var chunk_data: Array = [
 		[
 			coord.x,
@@ -750,11 +767,15 @@ static func prepare_relight_data(
 			target.height_map.duplicate(),
 		]
 	]
+	PerfProbe.end("lighting.prepare_relight.dup", t_dup)
 	for n_coord: Vector2i in neighbors:
 		var n: Chunk = manager.get_chunk_at_coord(n_coord)
 		if n == null:
 			continue
+		var t_nhm := PerfProbe.begin("lighting.prepare_relight.height_map")
 		n.is_sky_exposed(0, Chunk.SIZE_Y - 1, 0)
+		PerfProbe.end("lighting.prepare_relight.height_map", t_nhm)
+		var t_ndup := PerfProbe.begin("lighting.prepare_relight.dup")
 		(
 			chunk_data
 			. append(
@@ -768,6 +789,7 @@ static func prepare_relight_data(
 				]
 			)
 		)
+		PerfProbe.end("lighting.prepare_relight.dup", t_ndup)
 	return chunk_data
 
 

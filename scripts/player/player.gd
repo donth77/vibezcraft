@@ -91,6 +91,13 @@ const DAMAGE_GENERIC: String = "generic"
 const DAMAGE_FALL: String = "fall"
 const DAMAGE_DROWN: String = "drown"
 const DAMAGE_LAVA: String = "lava"
+const DAMAGE_CACTUS: String = "cactus"
+# Vanilla BlockCactus damages every tick the entity AABB intersects a
+# cactus cell shrunk by 1/16 on each side. Damage = 1 HP. We rate-limit
+# to half-second intervals (10 vanilla ticks) — matches the apparent
+# damage rate when standing in a cactus and avoids 20Hz HP drain.
+const _CACTUS_DAMAGE_INTERVAL_SEC: float = 0.5
+const _CACTUS_DAMAGE: int = 1
 # Vanilla EntityLiving: airTicks = 300 (15 s) when head out of water,
 # decrements each tick head is submerged. At -20 ticks (1 s past zero),
 # deals 2 damage and resets to 0. We use seconds instead of ticks.
@@ -111,6 +118,8 @@ const _LAVA_DAMAGE: int = 4
 # delta while the player's feet/body overlap a lava cell, fires damage
 # every interval, resets when the player leaves lava.
 var _lava_tick: float = 0.0
+# Same pattern for cactus contact damage.
+var _cactus_tick: float = 0.0
 # Edge-detect flag for the lava-entry fizz SFX. True while player's AABB
 # overlaps lava; on rising edge (false → true), play one fizz sound.
 var _was_in_lava: bool = false
@@ -227,6 +236,13 @@ var _was_on_floor: bool = false
 # the ground for the first time post-spawn. Without this we'd take 37
 # damage from the initial drop at (8, 100, 8) and respawn-loop forever.
 var _fall_immune_next_landing: bool = true
+# Counts down each physics tick after spawn / respawn. While > 0, the
+# spawn-relocate check runs every tick (looking at the actual loaded
+# chunks for dry land). Decrements to 0 once relocated or after the
+# budget expires. Multi-frame budget so a respawn into a region whose
+# chunks haven't loaded yet still gets corrected once they're in.
+# 30 ticks ≈ 0.5 s — well within the chunk-streaming window.
+var _spawn_check_ticks_remaining: int = 90
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -600,9 +616,21 @@ func _build_held_tool(id: int) -> void:
 		# compact item pulls it upward off the hand; centering + shrinking
 		# keeps it nestled in the fist without clipping the arm mesh.
 		if Items.is_tool_item(id):
-			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
+			# Flint-and-steel's sprite occupies only ~half the 16×16
+			# canvas (the rest is transparent), so the same _tp_held_tool_
+			# pixel_size that suits a full-canvas pickaxe makes flint-
+			# and-steel read as comically oversized in the fist. Halve
+			# the per-pixel scale for this specific item so the visible
+			# voxels sit at roughly the same hand-relative size as a
+			# pickaxe head.
+			var effective_ps: float = tp_ps
+			if id == Items.FLINT_AND_STEEL:
+				effective_ps = tp_ps * 0.5
+			_held_tool_tp.scale = Vector3(effective_ps, effective_ps, effective_ps)
 			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+			_held_tool_tp.position = Vector3(
+				-tp_pivot_px.x * effective_ps, -tp_pivot_px.y * effective_ps, 0
+			)
 			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
 				_held_tool_tp.rotation = _axe_tp_mesh_rotation
 		else:
@@ -1132,6 +1160,23 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Post-spawn safety: relocate-if-in-water with throttle. The spiral
+	# search inside _relocate_if_unsafe_spawn is ~130k block lookups
+	# (radius 32, column scans), so running it per-tick caused <30 fps
+	# stutter. Schedule: immediate check on tick 1, then retries every
+	# 20 ticks while still in water. Successful relocate ends the budget.
+	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
+		_spawn_check_ticks_remaining -= 1
+		var first_tick: bool = _spawn_check_ticks_remaining == 89
+		var retry_tick: bool = _spawn_check_ticks_remaining % 20 == 0
+		if (first_tick or retry_tick) and _is_in_water():
+			if _relocate_if_unsafe_spawn():
+				_spawn_check_ticks_remaining = 0
+		# Final fallback: budget just expired and we're still in water
+		# (no land within the spiral's 32-cell radius — open ocean).
+		# Drop a small sand platform so the player has solid ground.
+		if _spawn_check_ticks_remaining == 0 and _is_in_water():
+			_create_emergency_spawn_platform()
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
 	# Previously this lived near the bottom of the function, which meant
 	# the water / flight branches' early returns skipped it: drown damage
@@ -1399,8 +1444,18 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 	health_changed.emit(health, MAX_HEALTH)
 	if health == 0:
 		_drop_inventory_on_death()
+		Music.set_paused(true)
 		died.emit()
 		_show_death_screen()
+
+
+# Adds an instantaneous impulse to the player's velocity — used by
+# Explosion._apply_entity_damage to fling the player away from a TNT
+# blast. Vanilla ks.java:96-98 adds (d4, d3, d2) × d13 directly to the
+# entity's velocity; we receive the pre-scaled impulse vector and apply
+# it the same way. Gravity + air drag handle the arc on subsequent frames.
+func apply_explosion_knockback(impulse: Vector3) -> void:
+	velocity += impulse
 
 
 # Vanilla EntityPlayer.dropAllItems / inventoryDrops — every non-empty
@@ -1452,6 +1507,16 @@ func _show_death_screen() -> void:
 # health. Vanilla shows a death screen with a Respawn button; that's
 # deferred until the death-flow UI lands.
 func _respawn() -> void:
+	Music.set_paused(false)
+	# Force-load the spawn chunk synchronously. Without this, dying far
+	# from origin can return to an unloaded chunk (0,0) — the player
+	# falls through AIR (unloaded cells read as AIR), drops past y=-20,
+	# the y < -20 fallback teleports back to the same unloaded chunk,
+	# and the cycle repeats indefinitely. Initial boot has this same
+	# protection via ChunkManager._initial_load → _spawn_chunk_sync.
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm != null and cm.has_method("_spawn_chunk_sync"):
+		cm.call("_spawn_chunk_sync", Vector2i(0, 0))
 	global_position = Vector3(8, 100.0, 8)
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y
@@ -1459,6 +1524,12 @@ func _respawn() -> void:
 	_damage_cooldown_remaining = 0.0
 	_regen_accum = 0.0
 	health = MAX_HEALTH
+	# Re-arm the spawn-relocate check so a respawn into water / floating /
+	# above an unloaded chunk gets corrected over the next ~30 physics
+	# ticks (mirrors the initial-spawn safety net). Multi-tick budget so
+	# a respawn whose chunks haven't streamed in yet still gets relocated
+	# once they load.
+	_spawn_check_ticks_remaining = 90
 	# Clear fire + lava state — vanilla Entity.reset() zeros bg (fireTicks)
 	# on respawn. Without this the trailing burn keeps ticking damage after
 	# the player teleports back to spawn.
@@ -1609,6 +1680,15 @@ func _tick_lava(delta: float) -> void:
 			take_damage(_LAVA_DAMAGE, DAMAGE_LAVA)
 	else:
 		_lava_tick = 0.0
+	# Cactus contact damage. Vanilla BlockCactus.b deals 1 HP every
+	# tick the entity AABB intersects a cactus cell shrunk by 1/16.
+	if _is_touching_cactus():
+		_cactus_tick += delta
+		if _cactus_tick >= _CACTUS_DAMAGE_INTERVAL_SEC:
+			_cactus_tick = 0.0
+			take_damage(_CACTUS_DAMAGE, DAMAGE_CACTUS)
+	else:
+		_cactus_tick = 0.0
 	# Fire-after-lava trail. Ticks down regardless of current lava state
 	# (being re-seeded above when the player is still in lava). Each
 	# _FIRE_BURN_INTERVAL_SEC applies 1 damage until the 15-s window
@@ -1645,6 +1725,41 @@ func on_fire() -> bool:
 # our sampling is a cheap approximation that still catches the common
 # cases (standing in, walking into, falling in). Corner-straddle edge
 # cases are rare and the next tick resolves them.
+# True if the player capsule overlaps any CACTUS cell. Vanilla cactus
+# AABB is shrunk by 1/16 on each side, so a player who's just outside
+# the cactus block boundary doesn't take damage. We approximate by
+# checking the 3 cardinal cells the player occupies (feet/waist/eye)
+# and the 4 horizontal neighbours, using a 0.4-unit lateral overlap
+# threshold (player radius ~0.3 + cactus radius 0.4375 - tolerance).
+func _is_touching_cactus() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var px: float = global_position.x
+	var pz: float = global_position.z
+	var fx: int = int(floor(px))
+	var fz: int = int(floor(pz))
+	for dy: float in [-0.85, 0.0, 0.7]:
+		var fy: int = int(floor(global_position.y + dy))
+		# Check the cell the player is in plus 4 neighbours; the lateral
+		# overlap test catches grazing contacts at cell edges.
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var cx: int = fx + dx
+				var cz: int = fz + dz
+				if cm.get_world_block(Vector3i(cx, fy, cz)) != Blocks.CACTUS:
+					continue
+				# Cactus cell occupies (cx + 0.0625, cz + 0.0625) to
+				# (cx + 0.9375, cz + 0.9375). Player is a 0.6-wide capsule
+				# centred at (px, pz). Closest distance from player edge
+				# to cactus AABB along each axis:
+				var dx_dist: float = max(0.0, abs(px - (float(cx) + 0.5)) - 0.4375 - 0.3)
+				var dz_dist: float = max(0.0, abs(pz - (float(cz) + 0.5)) - 0.4375 - 0.3)
+				if dx_dist <= 0.0 and dz_dist <= 0.0:
+					return true
+	return false
+
+
 func _is_in_lava() -> bool:
 	# `global_position` is the CAPSULE CENTER (not the feet) — the collision
 	# shape is a 1.8-tall Capsule3D with default zero transform, so the feet
@@ -1899,17 +2014,112 @@ func _update_sneak() -> void:
 # column we saw (best of bad options — might still be water but
 # shallowest spot). Bounded to chunk (0,0) so we never move the player
 # beyond the chunk loader's initial-load radius.
+# Post-load spawn safety net. Walk a spiral outward from the player's
+# current (x, z) and look at the actual loaded-chunk blocks for a column
+# whose surface is dry land at or above sea level. Teleports the player
+# to that column. Returns true on success (relocated OR already safe),
+# false if no safe column found in the loaded radius (so the caller
+# can keep retrying as more chunks stream in).
+func _relocate_if_unsafe_spawn() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	# Already safe? Spawn in water or floating in air = unsafe.
+	if not _is_in_water() and not _is_floating_in_air(cm):
+		return true  # nothing to do, stop retrying
+	var px: int = int(floor(global_position.x))
+	var pz: int = int(floor(global_position.z))
+	# Spiral search outward.
+	for r in range(1, 33):
+		for dx in range(-r, r + 1):
+			for dz in range(-r, r + 1):
+				if abs(dx) != r and abs(dz) != r:
+					continue  # only ring at radius r
+				var x: int = px + dx
+				var z: int = pz + dz
+				# Find topmost solid (non-AIR, non-WATER) cell in this column.
+				var sy: int = -1
+				for y in range(127, 0, -1):
+					var b: int = cm.get_world_block(Vector3i(x, y, z))
+					if b != Blocks.AIR and not Blocks.is_water(b):
+						sy = y
+						break
+				if sy < Worldgen.SEA_LEVEL:
+					continue  # underwater seabed
+				# Player capsule is ~1.8 tall. Need 2 cells of AIR clearance
+				# directly above the surface. Without this we can teleport
+				# into a tight column (leaves overhang, narrow cave mouth)
+				# and the player ends up stuck inside a block.
+				var above1: int = cm.get_world_block(Vector3i(x, sy + 1, z))
+				var above2: int = cm.get_world_block(Vector3i(x, sy + 2, z))
+				if above1 != Blocks.AIR or above2 != Blocks.AIR:
+					continue
+				# Found a dry land column — teleport here. Player capsule
+				# centre needs to sit at sy+2.0 so feet (centre - 0.9) land
+				# at sy+1.1, just above the solid surface block at sy. The
+				# old `sy + 1.5` put feet at sy+0.5 — INSIDE the surface
+				# block — and the CharacterBody3D got wedged.
+				global_position = Vector3(float(x) + 0.5, float(sy) + 2.0, float(z) + 0.5)
+				velocity = Vector3.ZERO
+				_fall_immune_next_landing = true
+				return true
+	return false  # no safe column found, caller should retry
+
+
+# Last-resort spawn fallback when the spiral search fails to find dry
+# land within radius (open ocean spawn). Drops a 5x5 SAND platform at
+# y = SEA_LEVEL just above the water surface, clears the air column
+# above so the player can stand, and teleports the player on top.
+# Only overwrites WATER / AIR — never destroys existing terrain (so a
+# tiny island that the spiral missed because of a chunk-load race
+# stays intact).
+func _create_emergency_spawn_platform() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("set_world_block"):
+		return
+	var px: int = int(floor(global_position.x))
+	var pz: int = int(floor(global_position.z))
+	# SEA_LEVEL = 64; water tops out at y=63 (cell at y=63 is the topmost
+	# water layer, top edge at y=64). Place SAND at y=64 — sits at the
+	# water surface, player stands on top at y=65.
+	var platform_y: int = Worldgen.SEA_LEVEL
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			var gx: int = px + dx
+			var gz: int = pz + dz
+			var here: int = cm.get_world_block(Vector3i(gx, platform_y, gz))
+			if here == Blocks.AIR or Blocks.is_water(here):
+				cm.set_world_block(Vector3i(gx, platform_y, gz), Blocks.SAND)
+			# Clear the cell above so the player has head clearance.
+			var above: int = cm.get_world_block(Vector3i(gx, platform_y + 1, gz))
+			if Blocks.is_water(above):
+				cm.set_world_block(Vector3i(gx, platform_y + 1, gz), Blocks.AIR)
+	global_position = Vector3(float(px) + 0.5, float(platform_y) + 2.0, float(pz) + 0.5)
+	velocity = Vector3.ZERO
+	_fall_immune_next_landing = true
+
+
+# True if the column at the player's position has only AIR around them
+# (no solid block within 4 cells below) — they're floating in air with
+# no landing in sight.
+func _is_floating_in_air(cm: Node) -> bool:
+	var x: int = int(floor(global_position.x))
+	var y: int = int(floor(global_position.y))
+	var z: int = int(floor(global_position.z))
+	for dy in range(0, 4):
+		var b: int = cm.get_world_block(Vector3i(x, y - dy, z))
+		if b != Blocks.AIR and not Blocks.is_water(b):
+			return false  # solid block within 4 cells below
+	return true
+
+
 func _find_safe_spawn_in_chunk() -> Vector2i:
 	var min_land_y: int = Worldgen.SEA_LEVEL + 2
 	var fallback: Vector2i = Vector2i(8, 8)
 	var best_y: int = 0
 	for x in range(0, 16):
 		for z in range(0, 16):
-			var surface_y: int
-			if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
-				surface_y = int(WorldgenDensity.estimate_target_y(x, z))
-			else:
-				surface_y = Worldgen.surface_height(x, z)
+			var surface_y: int = Worldgen.surface_height(x, z)
 			if surface_y >= min_land_y:
 				return Vector2i(x, z)
 			if surface_y > best_y:

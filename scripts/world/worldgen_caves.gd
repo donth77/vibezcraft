@@ -24,12 +24,7 @@ extends RefCounted
 # LAVA_STILL instead of AIR so deep caves have hazardous lava pools.
 
 const _RADIUS_CHUNKS: int = 8  # dl.java:7 `this.a = 8`
-# Vanilla `_CAVE_MAX_Y = 120` (lx.java:83). Cap at SEA_LEVEL - 5 = 59 so
-# caves stay underground and don't break through ocean floors. Tried
-# raising to 76 to allow surface caves but that re-introduced the
-# underwater cave openings users found visually jarring. To restore
-# vanilla (with surface caves and underwater entrances), set to 120.
-const _CAVE_MAX_Y: int = 59
+const _CAVE_MAX_Y: int = 120  # lx.java:83 carve-AABB clip
 
 
 # Entry point called from worldgen.generate_chunk.

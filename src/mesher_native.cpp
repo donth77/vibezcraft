@@ -544,7 +544,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER) {
 					continue;
 				}
 
@@ -574,9 +574,9 @@ Dictionary MesherNative::mesh_chunk_data(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -617,10 +617,19 @@ Dictionary MesherNative::mesh_chunk_data(
 					norms.append(normal);
 					// UVs: V-flipped so the top of the face samples the top
 					// of the texture (matches GDScript Mesher winding).
-					uvs.append(Vector2(uv_x, uv_y + uv_h));
-					uvs.append(Vector2(uv_x, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					// Side faces (idx 2-5) also swap U so asymmetric text
+					// (e.g. TNT's "N" on the side) renders un-mirrored.
+					if (face < 2) {
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					} else {
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+					}
 					// Reversed winding for cull_back: triangles are (0,2,1)
 					// and (0,3,2) in vertex space → (v0,v2,v1) and (v0,v3,v2).
 					indices.append(base);
@@ -785,7 +794,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER) {
 					continue;
 				}
 				for (int face = 0; face < 6; face++) {
@@ -821,9 +830,9 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE
 									&& !neighbor_is_water && !neighbor_is_lava);
 					const bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -861,10 +870,20 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					norms.append(normal);
 					norms.append(normal);
 					norms.append(normal);
-					uvs.append(Vector2(uv_x, uv_y + uv_h));
-					uvs.append(Vector2(uv_x, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					// Side faces (idx 2-5) swap U so asymmetric horizontal
+					// detail (TNT's "N") renders un-mirrored. Top/bottom keep
+					// the original order.
+					if (face < 2) {
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					} else {
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+					}
 					// Per-vertex face light = neighbor cell's sky/block. Flat
 					// per-face — Alpha 1.2.6 had no smooth lighting (added
 					// Beta 1.6); all 4 verts get the same value.

@@ -15,9 +15,14 @@ extends Node3D
 # ~0.6 m/s above the world (~y = SIZE_Y - 8). World-position offset, no
 # parallax — vanilla matches this.
 
-const _SUN_DISTANCE: float = 90.0  # far enough to be behind any chunk in render distance
-const _SUN_SIZE: float = 30.0  # ~30° angular size at distance 90
-const _MOON_SIZE: float = 25.0  # vanilla moon is slightly smaller than sun
+const _SUN_DISTANCE: float = 256.0
+# Sized to match the same angular size the previous 90-unit values gave
+# (30 / 90 ≈ 0.33 rad). At render_distance = 8 chunks the diagonal reach
+# is ~181 blocks; the old 90-unit distance let distant terrain z-buffer
+# in FRONT of the celestial body, producing the "moon clips through far
+# blocks" symptom. 256 is comfortably beyond any in-view chunk.
+const _SUN_SIZE: float = 85.0  # 30 × (256 / 90)
+const _MOON_SIZE: float = 71.0  # 25 × (256 / 90)
 # Vanilla Alpha cloud altitude (f.java:652 `f9 = 108.0f - f6 + 0.33f`) —
 # absolute world y = 108. Our old value of SIZE_Y-1+12=139 put clouds too
 # high, shrinking their apparent size and making the cell grid more visible

@@ -80,6 +80,19 @@ const _LAYOUT := {
 	"flower_yellow": 43,
 	"mushroom_brown": 44,
 	"mushroom_red": 45,
+	# Sugar cane (vanilla "reeds"). Cross-quad like flowers. Vanilla
+	# terrain.png cell (9, 4).
+	"sugar_cane": 46,
+	# Ice (vanilla terrain.png cell (3, 4)). Semi-transparent cube.
+	"ice": 47,
+	# Snow block (vanilla terrain.png cell (2, 4)). Same texture as
+	# snow layer; opaque white.
+	"snow": 48,
+	# Cactus — three faces (top, side, bottom) at vanilla terrain.png
+	# cells (5..7, 4).
+	"cactus_top": 49,
+	"cactus_side": 50,
+	"cactus_bottom": 51,
 }
 
 static var active_pack: String = DEFAULT_PACK
@@ -257,6 +270,27 @@ static func material() -> ShaderMaterial:
 		_material = ShaderMaterial.new()
 		_material.shader = load("res://shaders/chunk.gdshader") as Shader
 		_material.set_shader_parameter("atlas_texture", texture())
+		# Tell the shader where the grass-top atlas slot lives so it can
+		# gate per-instance biome tinting (Savanna yellow) to grass faces
+		# only. Vec4 = (x, y, w, h) in UV space.
+		var grass_rect: Rect2 = uv_rect("grass_top")
+		_material.set_shader_parameter(
+			"grass_top_uv",
+			Vector4(
+				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
+			)
+		)
+		# Animated fire — pass the atlas region the static fire tile occupies
+		# (the shader uses it as a UV gate) plus the multi-frame strip the
+		# shader samples from on a hit. fire_layer_0.png is 16×512 (32 frames).
+		var fire_rect: Rect2 = uv_rect("fire")
+		_material.set_shader_parameter(
+			"fire_uv",
+			Vector4(fire_rect.position.x, fire_rect.position.y, fire_rect.size.x, fire_rect.size.y)
+		)
+		var fire_strip: Texture2D = load("res://assets/textures/particles/fire_layer_0.png")
+		if fire_strip != null:
+			_material.set_shader_parameter("fire_strip", fire_strip)
 	return _material
 
 

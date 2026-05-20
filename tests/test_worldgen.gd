@@ -1,6 +1,23 @@
 # gdlint: disable=max-public-methods
 extends GutTest
 
+# Worldgen tests assert 2D-heightmap-mode invariants (grass-on-top,
+# water-fills-to-sea-level, beach-band coverage). The 3D density path
+# produces different per-cell results — biome surface blocks (sand-
+# deserts, snow), 3D-density water filling, etc. — which is by design.
+# Pin tests to the 2D path so the assertions remain meaningful;
+# Worldgen3D-mode behavior is asserted by tests/test_worldgen_3d.gd.
+var _terrain_3d_was: bool
+
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
+
 
 func test_surface_height_is_deterministic() -> void:
 	var h1 := Worldgen.surface_height(42, 17)
@@ -266,21 +283,25 @@ func test_caves_deterministic() -> void:
 
 
 func test_caves_place_lava_below_y10() -> void:
-	# lx.java:115-116 — cave worm carves below y=10 write lava instead of air.
-	# We only assert that caves produce SOME lava below y=10 (caves are the
-	# only source there). Lava placement above y=10 is also valid now via
-	# the lake decorator (px.java:286-292: 1/8 chance lava lake, biased
-	# deeper but capable of landing across the 0..120 Y range).
+	# lx.java:115-116 — worm carves below y=10 write lava instead of air.
+	# Scan a large area and confirm (a) some lava shows up below y=10,
+	# and (b) no lava lands at y>=10 (only AIR carves there).
 	var lava_low: int = 0
+	var lava_high: int = 0
 	for cx in range(-5, 6):
 		for cz in range(-5, 6):
 			var c := Worldgen.generate_chunk(cx, cz)
 			for x in range(Chunk.SIZE_X):
 				for z in range(Chunk.SIZE_Z):
-					for y in range(1, 10):
-						if c.get_block(x, y, z) == Blocks.LAVA_STILL:
-							lava_low += 1
+					for y in range(1, 50):
+						var b: int = c.get_block(x, y, z)
+						if b == Blocks.LAVA_STILL:
+							if y < 10:
+								lava_low += 1
+							else:
+								lava_high += 1
 	assert_gt(lava_low, 50, "expected >50 lava cells under y=10, got %d" % lava_low)
+	assert_eq(lava_high, 0, "no lava should land at y>=10, got %d" % lava_high)
 
 
 # --- Trees ---
@@ -377,11 +398,8 @@ func test_water_fills_underwater_columns_up_to_sea_level() -> void:
 
 func test_dry_land_columns_have_no_water() -> void:
 	# Inverse of the ocean test — above SEA_LEVEL a dry column must never
-	# contain water EXCEPT inside a lake bowl. Lake-placed water (vanilla
-	# `bv.java`) sits at the BOTTOM of a 4-cell-tall AIR bowl, so a water
-	# cell above sea level is OK if the cell directly above it is AIR
-	# (rejected: water cells with no AIR above, which would mean the
-	# ocean-fill pass leaked above the column's surface).
+	# contain water. Catches a pass that would accidentally fill water
+	# above the surface of hills.
 	for cx in range(-2, 3):
 		for cz in range(-2, 3):
 			var c := Worldgen.generate_chunk(cx, cz)
@@ -391,27 +409,14 @@ func test_dry_land_columns_have_no_water() -> void:
 					var world_z: int = cz * Chunk.SIZE_Z + z
 					var surface_y: int = Worldgen.surface_height(world_x, world_z)
 					if surface_y < Worldgen.SEA_LEVEL:
-						continue
+						continue  # underwater column, tested above
+					# Scan the whole dry column for any water cell.
 					for y in range(Chunk.SIZE_Y):
 						var b: int = c.get_block(x, y, z)
-						if not Blocks.is_water(b):
-							continue
-						# Lake bowl signature: any AIR cell above this column
-						# (every lake places ≥4 cells of AIR above its water).
-						# Cave-trapped water without a lake bowl (the bug we're
-						# guarding against) never has AIR above — caves are
-						# random tunnels, not bowls.
-						var has_air_above: bool = false
-						for ay in range(y + 1, Chunk.SIZE_Y):
-							if c.get_block(x, ay, z) == Blocks.AIR:
-								has_air_above = true
-								break
-						if has_air_above:
-							continue
 						assert_false(
-							true,
+							Blocks.is_water(b),
 							(
-								"non-lake water in dry column at (%d,%d,%d) surface=%d"
+								"dry column has water at (%d,%d,%d) surface=%d"
 								% [world_x, y, world_z, surface_y]
 							)
 						)
@@ -452,21 +457,14 @@ func test_ocean_fill_is_deterministic() -> void:
 # --- Beaches ---
 
 
-func test_beach_band_columns_match_beach_noise_gate() -> void:
-	# Beach sand placement is gated on (a) surface in beach band AND
-	# (b) Worldgen beach-noise > 0 at that column. The gate exists so
-	# isolated low-spot columns inside forests don't randomly turn to
-	# sand (vanilla `px.java:120` `bl2 = r > 0`).
-	#
-	# Verify both directions:
-	#   * Sand cells exist (gate doesn't suppress all sand)
-	#   * NO sand outside the beach band (depth-of-band invariant holds)
-	#   * Beach-band columns where beach_noise <= 0 stay grass/dirt
+func test_beach_band_columns_have_sand_surface() -> void:
+	# Every column whose surface_y is inside the beach band should have
+	# SAND at the surface (not GRASS or DIRT). Columns outside the band
+	# keep their vanilla strata.
 	var lo: int = Worldgen.SEA_LEVEL - Worldgen.BEACH_DEPTH_BELOW
 	var hi: int = Worldgen.SEA_LEVEL + Worldgen.BEACH_HEIGHT_ABOVE
-	var any_sand: bool = false
-	var any_band_grass: bool = false  # confirms gate suppresses some columns
-	var any_hill_grass: bool = false
+	var found_beach_column: bool = false
+	var found_hill_column: bool = false
 	for cx in range(-3, 4):
 		for cz in range(-3, 4):
 			var c := Worldgen.generate_chunk(cx, cz)
@@ -476,39 +474,36 @@ func test_beach_band_columns_match_beach_noise_gate() -> void:
 					var world_z: int = cz * Chunk.SIZE_Z + z
 					var surface_y: int = Worldgen.surface_height(world_x, world_z)
 					var surface: int = c.get_block(x, surface_y, z)
-					# Caves can punch a mouth through the surface — skip.
+					# Caves (lx.java, bit-exact Alpha port) can punch a mouth
+					# through the surface — accept AIR as a valid "this column
+					# was intersected by a worm" outcome and skip.
 					if surface == Blocks.AIR:
 						continue
-					if surface == Blocks.SAND:
-						any_sand = true
-						# Biomes-on: Desert / Ice-Desert biomes have SAND
-						# surface anywhere (not just beach band). Skip the
-						# band check for those columns.
-						var in_sand_biome: bool = false
-						if Worldgen.biomes_enabled:
-							var biome: int = BiomeClimate.biome_at(world_x, world_z)
-							in_sand_biome = Biomes.is_sand_biome(biome)
-						if not in_sand_biome:
-							assert_true(
-								surface_y >= lo and surface_y <= hi,
-								(
-									"sand at (%d,%d,%d) outside beach band [%d,%d]"
-									% [world_x, surface_y, world_z, lo, hi]
-								)
+					if surface_y >= lo and surface_y <= hi:
+						found_beach_column = true
+						assert_eq(
+							surface,
+							Blocks.SAND,
+							(
+								"beach column surface at (%d,%d,%d) should be sand"
+								% [world_x, surface_y, world_z]
 							)
-					elif surface_y >= lo and surface_y <= hi and surface == Blocks.GRASS:
-						any_band_grass = true
-					elif surface_y > hi and surface == Blocks.GRASS:
-						any_hill_grass = true
-	assert_true(any_sand, "no sand placed anywhere — beach pass fully suppressed")
-	# Note: pre-3D beach pass (now used in 2D mode) has NO noise gate —
-	# every beach-band column becomes sand. So `any_band_grass` may be
-	# zero, which is correct. Only enforce that hills above the band
-	# stay grass (the "no sand on mountains" invariant).
-	assert_true(any_hill_grass, "no above-band hill columns — bigger problem")
-	# Suppress unused-variable warning while keeping the metric for debug.
-	if any_band_grass:
-		pass
+						)
+					elif surface_y > hi:
+						found_hill_column = true
+						# Hills above the beach band keep grass unless an ore
+						# vein happens to poke through (ores don't replace
+						# grass so this is safe).
+						assert_eq(
+							surface,
+							Blocks.GRASS,
+							(
+								"hill surface at (%d,%d,%d) should stay grass"
+								% [world_x, surface_y, world_z]
+							)
+						)
+	assert_true(found_beach_column, "at least one beach-band column found in scan")
+	assert_true(found_hill_column, "at least one above-band hill column found in scan")
 
 
 func test_beach_sand_depth_covers_shore() -> void:
@@ -533,24 +528,10 @@ func test_beach_sand_depth_covers_shore() -> void:
 						if y <= 0:
 							break
 						var b: int = c.get_block(x, y, z)
-						# Wider water-adjacency search (radius 4) catches
-						# columns where the actual chunk-surface dropped
-						# below the heightmap (cave carve under the shore,
-						# or chunk-column-surface differs from heightmap in
-						# 3D mode). Allow water + air as legitimate
-						# subsurface — caves, ocean fill, lake bowls are
-						# all valid block types under a beach overlay.
-						var ok: bool = (
-							b == Blocks.SAND
-							or b == Blocks.DIRT
-							or b == Blocks.STONE
-							or b == Blocks.AIR
-							or Blocks.is_water(b)
-						)
 						assert_true(
-							ok,
+							b == Blocks.SAND or b == Blocks.DIRT or b == Blocks.STONE,
 							(
-								"beach subsurface at (%d,%d,%d) is sand/dirt/stone/water/air, got %d"
+								"beach subsurface at (%d,%d,%d) is sand/dirt/stone, got %d"
 								% [world_x, y, world_z, b]
 							)
 						)

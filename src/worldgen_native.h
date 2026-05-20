@@ -33,22 +33,11 @@ public:
 	static constexpr int STONE = 2;
 	static constexpr int DIRT = 3;
 	static constexpr int GRASS = 4;
-	static constexpr int SAPLING = 22;
+	static constexpr int SAND = 9;
+	static constexpr int GRAVEL = 18;
 	static constexpr int WATER_FLOWING = 23;
 	static constexpr int WATER_STILL = 24;
 	static constexpr int LAVA_STILL = 26;
-	static constexpr int FIRE = 27;
-	static constexpr int TORCH = 28;
-	static constexpr int FENCE = 30;
-	static constexpr int WOOD_STAIRS = 31;
-	static constexpr int COBBLESTONE_STAIRS = 32;
-	static constexpr int WOODEN_DOOR = 33;
-	static constexpr int IRON_DOOR = 34;
-	static constexpr int LADDER = 35;
-	static constexpr int FLOWER_RED = 37;
-	static constexpr int FLOWER_YELLOW = 38;
-	static constexpr int MUSHROOM_BROWN = 39;
-	static constexpr int MUSHROOM_RED = 40;
 	// Mirrors scripts/world/worldgen.gd. Alpha 1.2.6 px.java:103 (sea level).
 	// world_seed is mutable so the GDScript main-menu "World seed" setting
 	// can rewrite it via set_world_seed() before any chunk gen runs. The
@@ -57,9 +46,6 @@ public:
 	// instance shares the same seed (Worldgen only constructs one).
 	static int64_t world_seed;
 	static constexpr int SEA_LEVEL = 64;
-	// Must stay in sync with scripts/world/worldgen.gd::BEACH_DEPTH_BELOW.
-	// (No longer used by block_at — that decision is now SEA_LEVEL-based —
-	// but kept for any future code that needs the beach Y-band lower bound.)
 	static constexpr int BEACH_DEPTH_BELOW = 4;
 
 	WorldgenNative();
@@ -104,81 +90,22 @@ public:
 	// The port uses C++ int64_t's native signed-wrap semantics for the
 	// Java Random LCG, which matches Java's long arithmetic directly —
 	// no need for GDScript's 24-bit-split workaround.
-	//
-	// Returns Dictionary { blocks: PackedByteArray, has_non_cube: bool,
-	// has_water: bool }. The flag fields let GDScript update chunk-state
-	// without re-scanning the chunk — the inline scan in the C++ pass is
-	// ~10× faster than the equivalent GDScript loop and was the dominant
-	// cost in the worker thread's cave probe.
-	Dictionary scatter_caves(
+	PackedByteArray scatter_caves(
 			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
 
-	// Slice 3-D: Native port of WorldgenDensity.build_density_terrain
-	// (the trilerp + density-blend + Y-bias inner loop). The caller
-	// pre-samples all 3 noise grids in GDScript (FastNoiseLite is
-	// already fast in Godot's C++), then hands the raw float arrays
-	// to this method which performs the per-cell blend, Y-bias
-	// computation, and trilerp threshold — replacing ~32K nested-loop
-	// `lerp()` calls in GDScript that were the main bottleneck of 3D
-	// terrain mode.
-	//
-	// Grid sizes match Worldgen's GRID_X/Y/Z (5×17×5 = 425 floats);
-	// per-column arrays are 5×5 = 25 floats. The mirror in GDScript
-	// is `WorldgenDensity.build_density_terrain` — parity is enforced
-	// by tests/test_worldgen_native.gd.
-	Dictionary build_density_terrain(
-			int p_chunk_x,
-			int p_chunk_z,
-			const PackedFloat64Array &p_density_a,
-			const PackedFloat64Array &p_density_b,
-			const PackedFloat64Array &p_selector,
-			const PackedFloat64Array &p_col_target_y,
-			const PackedFloat64Array &p_col_amplitude,
-			float p_stone_bias_factor,
-			float p_air_bias_factor,
-			float p_noise_normalizer,
-			float p_selector_normalizer,
-			int p_top_taper_cells,
-			float p_top_taper_force_air) const;
+	// Native port of Worldgen3D.fill_chunk + density_grid + climate noise
+	// for the 3D density terrain pipeline. Replaces the dominant ~74 ms/chunk
+	// GDScript hot path. Output: 16x128x16 PackedByteArray with STONE / WATER /
+	// AIR cells (per the px.java density crossing). The GDScript caller still
+	// runs the surface_layer pass (vanilla port + bedrock RNG) on top.
+	PackedByteArray fill_chunk_3d(int p_chunk_x, int p_chunk_z) const;
 
-	// Native port of WorldgenDensity.apply_surface_layer (slice 3-D2).
-	// After build_density_terrain fills the chunk with raw STONE/AIR,
-	// this pass scans each column top-down, converts the topmost STONE
-	// → GRASS (or DIRT below sea level — `px.java:130-148` rule), the
-	// next 3 STONE cells → DIRT, then runs the deterministic bedrock
-	// pass at y=0..4. Mirrors the GDScript path byte-for-byte; parity
-	// guarded by tests/test_density_native_parity.gd.
-	//
-	// 16×16 columns × ~128-cell scan each = ~32K reads in GDScript.
-	// Native pass cuts this to ~1ms.
-	PackedByteArray apply_surface_layer(
-			int p_chunk_x,
-			int p_chunk_z,
-			const PackedByteArray &p_blocks) const;
-
-	// Slice 3-D3: native port of NoiseOctaves.sample_3d_grid (the
-	// multi-octave reverse-FBM noise grid sampler). Caller passes an
-	// Array of Ref<FastNoiseLite> (one per octave, pre-configured by
-	// NoiseOctaves.create), C++ does the reverse-FBM accumulation +
-	// per-cell get_noise_3d calls — ~10× faster than the GDScript loop
-	// because the Variant-dispatch overhead per `get_noise_3d` call
-	// dominates the actual noise math.
-	//
-	// Output array is laid out (x * size_y + y) * size_z + z (matches
-	// GDScript layout). Parity with NoiseOctaves.sample_3d_grid is
-	// guaranteed because the same FastNoiseLite instances are used —
-	// noise output is byte-identical at the same coords.
-	PackedFloat64Array sample_noise_grid_3d(
-			const Array &p_octaves,
-			double p_base_x,
-			double p_base_y,
-			double p_base_z,
-			int p_size_x,
-			int p_size_y,
-			int p_size_z,
-			double p_scale_x,
-			double p_scale_y,
-			double p_scale_z) const;
+	// Native port of Worldgen._apply_surface_layer_3d (px.java::a) — top-down
+	// per-column walk with shared JavaRandom: bedrock band, beach sand/gravel,
+	// dirt-depth filler, biome top block. Bit-exact with the GDScript port
+	// (same RNG sequence). Returns mutated blocks; caller assigns to chunk.blocks.
+	PackedByteArray apply_surface_layer_3d(
+			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
 
 protected:
 	static void _bind_methods();

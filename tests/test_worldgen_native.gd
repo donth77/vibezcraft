@@ -11,17 +11,19 @@ extends GutTest
 # generate_chunk output (including ores/trees on top of the fill) is
 # what we compare. That exercises the whole pipeline end-to-end.
 
+# Pin to 2D heightmap mode — the native fast path is bypassed entirely
+# in 3D density mode (Worldgen3D.fill_chunk replaces it), so these
+# parity tests only make sense against the 2D pipeline.
+var _terrain_3d_was: bool
 
-func before_each() -> void:
-	# Defensive isolation — prior test files (test_density_terrain,
-	# test_density_native_parity) toggle terrain_mode and the native
-	# handle. Without this reset the parity check would compare across
-	# a polluted state and surface as 1-cell divergences (especially
-	# after the vanilla *12 Y-bias change made tiny FP differences in
-	# noise caches amplify into block-level mismatches).
-	Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_2D_HEIGHTMAP
-	Worldgen.apply_world_seed(12345)
-	WorldgenDensity.reset()
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
 
 
 func _generate_with_native(chunk_x: int, chunk_z: int) -> Chunk:
@@ -34,11 +36,6 @@ func _generate_with_native(chunk_x: int, chunk_z: int) -> Chunk:
 	var prev := Worldgen._native_worldgen
 	if prev == null:
 		Worldgen.enable_native()
-	# Reset noise caches before each generate so prior chunk gens (which
-	# may have warmed FastNoiseLite caches with different seeds) can't
-	# leak FP-precision differences into the byte-equality check.
-	WorldgenDensity.reset()
-	Worldgen.apply_world_seed(12345)
 	var chunk := Worldgen.generate_chunk(chunk_x, chunk_z)
 	Worldgen._native_worldgen = prev
 	return chunk
@@ -47,8 +44,6 @@ func _generate_with_native(chunk_x: int, chunk_z: int) -> Chunk:
 func _generate_with_gdscript(chunk_x: int, chunk_z: int) -> Chunk:
 	var prev := Worldgen._native_worldgen
 	Worldgen._native_worldgen = null
-	WorldgenDensity.reset()
-	Worldgen.apply_world_seed(12345)
 	var chunk := Worldgen.generate_chunk(chunk_x, chunk_z)
 	Worldgen._native_worldgen = prev
 	return chunk

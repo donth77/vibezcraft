@@ -18,7 +18,11 @@ var chunk: Chunk
 # digs again while a worker is running, `chunk.dirty` gets set again and
 # we requeue once the current task lands.
 var _remesh_task_id: int = -1
-var _remesh_result: Dictionary = {}
+# Single-element Array holding the most-recent worker result. Passed to
+# the worker by reference so it can write without touching `self`. Array
+# is RefCounted + the worker holds a strong reference, so it survives
+# even if the chunk_node is freed mid-worker.
+var _remesh_result_holder: Array = []
 # Explicit null default + init in _init() rather than `:= Mutex.new()` —
 # the inline initializer occasionally runs as null when a ChunkNode is
 # instantiated from the .tscn and then its script's worker tasks fire
@@ -150,8 +154,10 @@ func _process(_delta: float) -> void:
 		WorkerThreadPool.wait_for_task_completion(_remesh_task_id)
 		_remesh_task_id = -1
 		_remesh_mutex.lock()
-		var data: Dictionary = _remesh_result
-		_remesh_result = {}
+		var data: Dictionary = {}
+		if not _remesh_result_holder.is_empty():
+			data = _remesh_result_holder[0]
+			_remesh_result_holder[0] = {}
 		_remesh_mutex.unlock()
 		if not data.is_empty() and not chunk.dirty:
 			_pending_apply = data
@@ -200,7 +206,19 @@ func _dispatch_remesh() -> void:
 	# which looks worse than the culled case but is only a transient
 	# issue: _materialize_chunk re-dirties neighbors when a chunk loads.
 	_attach_neighbor_edges(snap)
-	_remesh_task_id = WorkerThreadPool.add_task(_remesh_worker.bind(snap))
+	# Pass the mutex + result-holder array DIRECTLY (no self closure) so
+	# the worker never touches `self` after dispatch. If the chunk_node is
+	# freed mid-worker, the worker still has strong references to the
+	# Mutex (RefCounted) and the result Array, so it can complete
+	# safely. The main thread reads from the same Array via
+	# _remesh_result_holder. Without this, freeing the chunk_node before
+	# the worker landed could null `self._remesh_mutex` between worker's
+	# null-check and lock() call → crash.
+	if _remesh_result_holder.is_empty():
+		_remesh_result_holder.append({})
+	_remesh_task_id = WorkerThreadPool.add_task(
+		_static_remesh_worker.bind(snap, _remesh_mutex, _remesh_result_holder)
+	)
 
 
 # Populate the snapshot's `edge_blocks_*` / `edge_meta_*` fields from the
@@ -246,16 +264,18 @@ func _compute_chunk_coord() -> Vector2i:
 	return Vector2i(int(floor(p.x / float(Chunk.SIZE_X))), int(floor(p.z / float(Chunk.SIZE_Z))))
 
 
-# Runs on a WorkerThreadPool thread. Reads only `snap` — the main thread
-# keeps writing to `chunk`. Result is dropped into `_remesh_result` under
-# the mutex so _process can pick it up next frame.
-func _remesh_worker(snap: Chunk) -> void:
-	var data := Mesher.mesh_chunk_fast(snap)
-	var mtx: Mutex = _remesh_mutex
-	if mtx == null:
-		return
+# Runs on a WorkerThreadPool thread. STATIC — does not touch `self`.
+# Takes the mutex + result-holder array by argument so the worker holds
+# its own strong references; the chunk_node can free itself mid-worker
+# without crashing this function. The worker writes its result to
+# holder[0]; the main thread reads via _remesh_result_holder in _process.
+static func _static_remesh_worker(snap: Chunk, mtx: Mutex, holder: Array) -> void:
+	var data: Dictionary = Mesher.mesh_chunk_fast(snap)
+	# mtx and holder are guaranteed non-null here — they were captured by
+	# the bind in _dispatch_remesh and the worker holds strong refs.
 	mtx.lock()
-	_remesh_result = data
+	if not holder.is_empty():
+		holder[0] = data
 	mtx.unlock()
 
 
@@ -318,6 +338,18 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		array_mesh.surface_set_material(0, BlockAtlas.material())
 		_mesh_instance.mesh = array_mesh
+		# Per-instance Savanna tint — sample the climate biome at chunk
+		# center; the chunk shader gates the yellow shift behind UV ∈
+		# grass_top so non-grass faces stay normal. Per-chunk granularity
+		# (not per-cell) is the trade-off for not plumbing a biome map
+		# through the mesher.
+		if Worldgen.terrain_3d_enabled:
+			var coord_now: Vector2i = _compute_chunk_coord()
+			var center_x: float = float(coord_now.x * Chunk.SIZE_X + 8)
+			var center_z: float = float(coord_now.y * Chunk.SIZE_Z + 8)
+			var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
+			var tint: float = 1.0 if biome_id == Worldgen3D.Biome.SAVANNA else 0.0
+			_mesh_instance.set_instance_shader_parameter("savanna_tint", tint)
 		# Prefer the worker-built collision faces (native mesher path).
 		# When the GDScript fallback ran (e.g. chunk has water cells),
 		# collision_faces isn't in the dict and we re-derive on the main

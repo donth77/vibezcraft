@@ -192,16 +192,21 @@ func _build_buttons() -> void:
 	# 16 px between rows.
 	vbox.add_theme_constant_override("separation", 16)
 	add_child(vbox)
-	_add_button(vbox, "Play Game", _on_play_pressed)
+	var play_btn := _add_button(vbox, "Play Game", _on_play_pressed)
 	_add_button(vbox, "Settings...", _on_settings_pressed)
 	_add_button(vbox, "Quit", _on_quit_pressed)
+	# Pre-focus the first button so the menu is usable via Tab / arrow keys +
+	# Enter without a mouse — covers cases where the OS cursor isn't being
+	# rendered (e.g. macOS editor embedded play).
+	play_btn.call_deferred("grab_focus")
 
 
-func _add_button(parent: VBoxContainer, text: String, handler: Callable) -> void:
+func _add_button(parent: VBoxContainer, text: String, handler: Callable) -> VanillaButton:
 	var btn := VanillaButton.new()
 	btn.text = text
 	btn.pressed.connect(handler)
 	parent.add_child(btn)
+	return btn
 
 
 # Top-left version label — dj.java:106 renders "Minecraft Alpha v1.2.6" at

@@ -38,9 +38,12 @@ func _ready() -> void:
 	# has released the mouse (Esc). Label + scroll child are IGNORE, the
 	# Button defaults to STOP on its own hit rect.
 	mouse_filter = Control.MOUSE_FILTER_PASS
-	# Anchor top-right, auto-sizing: let the container shrink to content.
-	# No offset_bottom — PanelContainer hugs its VBox child and the VBox's
-	# internal caps keep the whole panel on-screen.
+	# Anchor top-right. Width is fixed by the offset pair (560 → 16 from
+	# the right edge = 544 px). Vertical: anchored to the TOP only and
+	# explicitly told to grow downward so the perf-label re-layout per
+	# update doesn't bounce the panel position around. The ScrollContainer
+	# below caps perf-text height so the overall panel never escapes the
+	# viewport.
 	anchor_left = 1.0
 	anchor_top = 0.0
 	anchor_right = 1.0
@@ -49,8 +52,11 @@ func _ready() -> void:
 	offset_top = 56
 	offset_right = -16
 	offset_bottom = 56  # container will expand downward as needed
-	size_flags_horizontal = Control.SIZE_SHRINK_END
-	size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	grow_vertical = Control.GROW_DIRECTION_END
+	# Belt-and-braces: don't paint outside our own rect even if a child's
+	# minimum size ever does briefly exceed it during a layout pass.
+	clip_contents = true
 
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.05, 0.05, 0.06, 0.78)
@@ -81,17 +87,29 @@ func _ready() -> void:
 	_label.text = ""
 	vbox.add_child(_label)
 
-	# Perf probes — tiny font so they never blow out the panel height.
+	# Perf probes — wrapped in a ScrollContainer with a fixed max height so
+	# adding sub-probes can never push the FPS line (in `_label` above) or
+	# the buttons (below) off-screen. The probe list now exceeds 35 rows in
+	# typical use and the cumulative height was overflowing the viewport.
+	var perf_scroll := ScrollContainer.new()
+	perf_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	# Cap vertical at 420 px — fits ~24 rows at 18 px font + 4 px line
+	# spacing. Anything beyond scrolls inside the panel.
+	perf_scroll.custom_minimum_size = Vector2(0, 420)
+	perf_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	perf_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vbox.add_child(perf_scroll)
 	_perf_label = Label.new()
 	_perf_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_perf_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_perf_label.add_theme_font_size_override("font_size", _PERF_FONT_SIZE)
 	_perf_label.add_theme_color_override("font_color", Color(0.85, 0.95, 1.0, 1.0))
 	_perf_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1))
 	_perf_label.add_theme_constant_override("shadow_offset_x", 1)
 	_perf_label.add_theme_constant_override("shadow_offset_y", 1)
 	_perf_label.text = ""
-	vbox.add_child(_perf_label)
+	perf_scroll.add_child(_perf_label)
 
 	_scout_button = Button.new()
 	_scout_button.text = "Refresh scout (F6)"
@@ -147,6 +165,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		var label: String = ["normal", "sky_light", "block_light", "combined"][_light_view]
 		print("[debug] chunk light heatmap = %d (%s)" % [_light_view, label])
 		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("debug_biome_scan") and Game.debug_enabled:
+		_dump_biome_scan()
+		get_viewport().set_input_as_handled()
 
 
 func _on_scout_pressed() -> void:
@@ -198,16 +219,17 @@ func _format_stats() -> String:
 		var p: Vector3 = _player.global_position
 		lines.append("Pos: %.1f, %.1f, %.1f" % [p.x, p.y, p.z])
 		lines.append("Block: %d, %d, %d" % [int(floor(p.x)), int(floor(p.y)), int(floor(p.z))])
-		# Biome readout — only when biomes_enabled (else BiomeClimate
-		# hasn't warmed its noise stack and lookup would lazy-init from
-		# the main thread which is fine but pointless).
-		if Worldgen.biomes_enabled:
-			var bx: int = int(floor(p.x))
-			var bz: int = int(floor(p.z))
-			var biome: int = BiomeClimate.biome_at(bx, bz)
-			var climate: Vector2 = BiomeClimate.climate_at(bx, bz)
+		# Biome readout — only meaningful in 3D-density mode (2D path
+		# has no biome system). Shows climate values (temp, rain) plus
+		# the selected biome name from gg.java's decision tree.
+		var mode: String = "3D" if Worldgen.terrain_3d_enabled else "2D"
+		lines.append("Terrain: %s" % mode)
+		if Worldgen.terrain_3d_enabled:
+			var climate: Vector2 = Worldgen3D.climate_at(p.x, p.z)
+			var biome_id: int = Worldgen3D.biome_at(p.x, p.z)
+			var biome_name: String = Worldgen3D.Biome.keys()[biome_id]
 			lines.append(
-				"Biome: %s (temp %.2f rain %.2f)" % [Biomes.name_of(biome), climate.x, climate.y]
+				"Biome: %s  T=%.2f R=%.2f" % [biome_name.capitalize(), climate.x, climate.y]
 			)
 	var mem_mb: float = float(OS.get_static_memory_usage()) / 1048576.0
 	lines.append("Mem: %.1f MB" % mem_mb)
@@ -288,6 +310,19 @@ func _scout_chunks_around_player() -> Dictionary:
 				sqrt(float(nearest_lava_dist_sq)),
 			]
 		)
+	# Biome distribution scan — sample 9×9 chunks (~144×144 blocks)
+	# centered on player. Reports counts per biome so you can verify
+	# whether the climate noise is producing variety or clustering.
+	# Only meaningful in 3D-density mode (2D path doesn't run biome
+	# selection); skipped otherwise to keep the readout uncluttered.
+	var biome_counts: Dictionary = {}
+	if Worldgen.terrain_3d_enabled:
+		for cdx in range(-4, 5):
+			for cdz in range(-4, 5):
+				var wx: float = float((pcx + cdx) * 16 + 8)
+				var wz: float = float((pcz + cdz) * 16 + 8)
+				var bid: int = Worldgen3D.biome_at(wx, wz)
+				biome_counts[bid] = int(biome_counts.get(bid, 0)) + 1
 	return {
 		"subsurf_air": subsurf_air,
 		"deep_air": deep_air,
@@ -295,7 +330,139 @@ func _scout_chunks_around_player() -> Dictionary:
 		"nearest_lava": nearest_lava_str,
 		"chunks_scanned": chunks_scanned,
 		"chunks_with_caves": chunks_with_caves,
+		"biome_counts": biome_counts,
 	}
+
+
+# B-key handler — dump diagnostic info for the area around the player to
+# stdout. Three sections: an ASCII biome map (32×32 around player),
+# surface-block composition for the player's chunk, and current biome
+# climate readings. Console output (not panel) so the F3 readout stays
+# uncluttered. Only runs in 3D mode + when debug_enabled.
+func _dump_biome_scan() -> void:
+	if _player == null:
+		print("[biome-scan] no player ref")
+		return
+	if not Worldgen.terrain_3d_enabled:
+		print("[biome-scan] 3D mode is off — biome system inactive")
+		return
+	var p: Vector3 = _player.global_position
+	var px: int = int(floor(p.x))
+	var pz: int = int(floor(p.z))
+	var pcx: int = int(floor(p.x / 16.0))
+	var pcz: int = int(floor(p.z / 16.0))
+
+	print("=== BIOME SCAN @ (%d, %d) chunk (%d, %d) ===" % [px, pz, pcx, pcz])
+	# Climate at player
+	var climate: Vector2 = Worldgen3D.climate_at(float(px), float(pz))
+	var bid: int = Worldgen3D.biome_at(float(px), float(pz))
+	print(
+		(
+			"climate: temp=%.3f rain=%.3f → biome=%s (cold=%s)"
+			% [
+				climate.x,
+				climate.y,
+				Worldgen3D.Biome.keys()[bid],
+				str(Worldgen3D.biome_is_cold(bid)),
+			]
+		)
+	)
+
+	# 32×32 biome map centered on player (16 cells in each direction)
+	# Each char is one cell. Legend: F=Forest H=Shrubland V=Savanna
+	# C=Cold(Tundra/Taiga/IceDesert) D=Desert P=Plains R=Rainforest
+	# S=SeasonalForest W=Swampland @ =player position
+	var legend: Dictionary = {
+		Worldgen3D.Biome.RAINFOREST: "R",
+		Worldgen3D.Biome.SWAMPLAND: "W",
+		Worldgen3D.Biome.SEASONAL_FOREST: "S",
+		Worldgen3D.Biome.FOREST: "F",
+		Worldgen3D.Biome.SAVANNA: "V",
+		Worldgen3D.Biome.SHRUBLAND: "H",
+		Worldgen3D.Biome.TAIGA: "T",
+		Worldgen3D.Biome.DESERT: "D",
+		Worldgen3D.Biome.PLAINS: "P",
+		Worldgen3D.Biome.ICE_DESERT: "I",
+		Worldgen3D.Biome.TUNDRA: "U"
+	}
+	print("biome map (32×32 cells, centered on player @, T/U/I = cold biomes):")
+	for dz in range(-16, 16):
+		var line: String = ""
+		for dx in range(-16, 16):
+			if dx == 0 and dz == 0:
+				line += "@"
+			else:
+				var b: int = Worldgen3D.biome_at(float(px + dx), float(pz + dz))
+				line += legend.get(b, "?")
+		print("  " + line)
+
+	# Surface block composition for the player's chunk (and 8 neighbors)
+	if _chunk_manager == null:
+		print("(no chunk manager — skipping surface block dump)")
+		return
+	var chunks_dict: Dictionary = _chunk_manager.get("_chunks")
+	if chunks_dict == null:
+		return
+	var counts_surf: Dictionary = {}
+	var counts_above: Dictionary = {}
+	var n_cols: int = 0
+	for dcx in range(-1, 2):
+		for dcz in range(-1, 2):
+			var key := Vector2i(pcx + dcx, pcz + dcz)
+			if not chunks_dict.has(key):
+				continue
+			var node = chunks_dict[key]
+			if node == null or not ("chunk" in node):
+				continue
+			var chunk: Chunk = node.chunk
+			if chunk == null:
+				continue
+			for x in range(16):
+				for z in range(16):
+					n_cols += 1
+					var sy: int = -1
+					for y in range(127, -1, -1):
+						var b: int = chunk.get_block_unchecked(x, y, z)
+						if (
+							b != Blocks.AIR
+							and b != Blocks.WATER_STILL
+							and b != Blocks.WATER_FLOWING
+						):
+							sy = y
+							break
+					if sy < 0:
+						continue
+					var b_surf: int = chunk.get_block_unchecked(x, sy, z)
+					counts_surf[b_surf] = int(counts_surf.get(b_surf, 0)) + 1
+					if sy < 127:
+						var b_above: int = chunk.get_block_unchecked(x, sy + 1, z)
+						if b_above != Blocks.AIR:
+							counts_above[b_above] = int(counts_above.get(b_above, 0)) + 1
+	if n_cols == 0:
+		print("(player's 3×3 chunks not loaded — fly closer + retry)")
+		return
+	print("surface blocks across 3×3 loaded chunks (%d columns):" % n_cols)
+	var keys: Array = counts_surf.keys()
+	keys.sort_custom(func(a, b): return counts_surf[a] > counts_surf[b])
+	for k: int in keys:
+		print(
+			(
+				"  %3d %s: %d (%.1f%%)"
+				% [k, Blocks.name_of(k), counts_surf[k], 100.0 * counts_surf[k] / n_cols]
+			)
+		)
+	if not counts_above.is_empty():
+		print("on-top of surface (plants / decorations):")
+		var keys2: Array = counts_above.keys()
+		keys2.sort_custom(func(a, b): return counts_above[a] > counts_above[b])
+		for k: int in keys2:
+			print(
+				(
+					"  %3d %s: %d (%.1f%%)"
+					% [k, Blocks.name_of(k), counts_above[k], 100.0 * counts_above[k] / n_cols]
+				)
+			)
+	print("=== END BIOME SCAN ===")
 
 
 # PerfProbe p50/p95 (in µs) per instrumented site. Shown in a small font
@@ -327,6 +494,15 @@ func _format_perf() -> String:
 						% [scout.chunks_with_caves, scout.chunks_scanned]
 					)
 				)
+			var bcounts: Dictionary = scout.get("biome_counts", {})
+			if not bcounts.is_empty():
+				var sorted_ids: Array = bcounts.keys()
+				sorted_ids.sort_custom(func(a, b): return bcounts[a] > bcounts[b])
+				var parts: Array[String] = []
+				for bid: int in sorted_ids:
+					var bname: String = Worldgen3D.Biome.keys()[bid].capitalize()
+					parts.append("%s=%d" % [bname, bcounts[bid]])
+				lines.append("Biomes (9×9 chunks): %s" % " ".join(parts))
 	var snap: Dictionary = PerfProbe.snapshot()
 	if not snap.is_empty():
 		# p50/p95/max — max catches the lag spike that p95 averages away.

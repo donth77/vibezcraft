@@ -50,15 +50,14 @@ func _process(delta: float) -> void:
 		_land_at(int(floor(global_position.y)))
 		return
 
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
 	# Stacked-column defense: when a column of sand/gravel falls together,
 	# entities land one at a time — but the entity above has its mesh
 	# extending into the cell that just became solid, and renders a z-
 	# fighting overlap for the frame between its neighbour landing and
-	# its own raycast catching up. Check every frame whether the cell our
-	# mesh bottom is currently in became solid; if so, land on top of it
-	# immediately (same frame) instead of descending into it.
-	var x: int = int(floor(global_position.x))
-	var z: int = int(floor(global_position.z))
+	# its own descent. Check every frame whether the cell our mesh bottom
+	# is currently in became solid; if so, land on top of it immediately.
 	var bottom_cell_y: int = int(floor(global_position.y - MESH_SIZE * 0.5))
 	if _chunk_manager.get_world_block(Vector3i(x, bottom_cell_y, z)) != Blocks.AIR:
 		_land_at(bottom_cell_y + 1)
@@ -67,18 +66,19 @@ func _process(delta: float) -> void:
 	_velocity_y = maxf(_velocity_y + GRAVITY * delta, TERMINAL_VELOCITY)
 	var step: float = _velocity_y * delta
 	var new_y: float = global_position.y + step
-	# Raycast down from current center to (current center + step - half-height).
-	# When we'd land inside a solid block, snap our base to its top and place.
-	_ray_query.from = global_position
-	_ray_query.to = Vector3(global_position.x, new_y - MESH_SIZE * 0.5, global_position.z)
-	var hit := get_world_3d().direct_space_state.intersect_ray(_ray_query)
-	if not hit.is_empty():
-		# Land on top of whatever we hit. The block we write goes at
-		# floor(hit.position.y + epsilon) — i.e. the cell ABOVE the hit
-		# surface so the cube sits flush on top.
-		var land_y: int = int(floor(hit.position.y + 0.001))
-		_land_at(land_y)
-		return
+	# Sweep DOWN through integer cells from current bottom to destination
+	# bottom, checking chunk data directly instead of physics raycasting.
+	# A TNT blast on sand can spawn 100+ FallingBlocks at once; physics
+	# raycasts at that count drop the frame rate by 40+ FPS. Direct
+	# chunk_manager.get_world_block calls are ~10× cheaper and give the
+	# same accuracy at single-cell granularity (sand falls cell-by-cell).
+	var new_bottom_y: int = int(floor(new_y - MESH_SIZE * 0.5))
+	if new_bottom_y < bottom_cell_y:
+		# Walk down through the cells we'd cross this frame.
+		for check_y in range(bottom_cell_y - 1, new_bottom_y - 1, -1):
+			if _chunk_manager.get_world_block(Vector3i(x, check_y, z)) != Blocks.AIR:
+				_land_at(check_y + 1)
+				return
 	global_position.y = new_y
 	if new_y < -10.0:
 		# Fell off the world; just disappear.

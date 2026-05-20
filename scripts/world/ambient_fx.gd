@@ -23,24 +23,44 @@ const _SCAN_RADIUS: int = 15
 
 # One scan pass. Rolls _CELLS_PER_SCAN random cells in a block-radius
 # window around the player and dispatches effects based on cell id.
-# `manager` is the ChunkManager (exposes `get_world_block`); `player_pos`
-# is the player's world position (floored to block coords per axis).
-static func tick(manager: Node, _player_coord: Vector2i, player_y: int) -> void:
-	var player: Node = manager.get("_player") as Node
-	if player == null:
-		return
-	var px: int = int(floor((player as Node3D).global_position.x))
-	var pz: int = int(floor((player as Node3D).global_position.z))
+# `manager` is the ChunkManager (needed only by the rare effect callbacks
+# for particle spawn parenting); `chunks` is the manager's `_chunks` dict
+# (coord → ChunkNode) used for the hot 1000-cell read loop without going
+# through manager.call("get_world_block", ...) — that dynamic dispatch
+# alone was costing ~3 ms per tick at the 10 Hz cadence.
+static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void:
+	var px: int = int(floor(player_pos.x))
+	var py: int = int(floor(player_pos.y))
+	var pz: int = int(floor(player_pos.z))
+	# Single-slot chunk cache. A 30-block-wide scan window hits at most 4
+	# chunks; the cache spares us a chunks.has + dict get on the vast
+	# majority of rolls (most stay in one chunk for many cells in a row).
+	# Sentinel (INT_MIN, INT_MIN) so the first iteration always misses.
+	var last_coord := Vector2i(-2147483648, -2147483648)
+	var last_chunk: Chunk = null
 	for _i in range(_CELLS_PER_SCAN):
 		var dx: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var dy: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var dz: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var wx: int = px + dx
-		var wy: int = player_y + dy
+		var wy: int = py + dy
 		var wz: int = pz + dz
 		if wy < 1 or wy >= Chunk.SIZE_Y - 1:
 			continue
-		var id: int = manager.call("get_world_block", Vector3i(wx, wy, wz)) as int
+		# Chunk coord = floor(wx / 16). Arithmetic right-shift handles
+		# negative wx correctly in GDScript (Python-style: -1 >> 4 == -1).
+		# `& 15` recovers the in-chunk local coord in the same trick.
+		var cx: int = wx >> 4
+		var cz: int = wz >> 4
+		if cx != last_coord.x or cz != last_coord.y:
+			last_coord = Vector2i(cx, cz)
+			last_chunk = null
+			if chunks.has(last_coord):
+				var node: Node3D = chunks[last_coord]
+				last_chunk = node.chunk
+		if last_chunk == null:
+			continue
+		var id: int = last_chunk.get_block(wx & 15, wy, wz & 15)
 		if Blocks.is_lava(id):
 			_lava(manager, wx, wy, wz)
 		elif id == Blocks.FIRE:
@@ -69,12 +89,43 @@ static func _lava(manager: Node, wx: int, wy: int, wz: int) -> void:
 
 
 # Fire-cell ambient: crackle sound + smoke puff. qh.java:186-188 rolls
-# 1-in-24 for the sound.
+# 1-in-24 for the sound. We gate the crackle by remaining fire life —
+# short-lived fire (placed on a non-flammable surface like grass, lasts
+# ~2 s before age>3 extinction) shouldn't fire a crackle in its last
+# tick: fire.ogg is 1.82 s long at pitch 1.0 and STRETCHES to ~6 s at
+# pitch 0.3, so a crackle that starts at 1.5 s outlasts the fire by
+# several seconds. Skip when the cell is one or two ticks from
+# extinguishing AND there are no flammable neighbors keeping it alive.
 static func _fire(manager: Node, wx: int, wy: int, wz: int) -> void:
 	if randi() % 4 == 0:
-		SFX.play_fire_crackle()
-	if randi() % 2 == 0:
-		FluidFx.spawn_fire_smoke(manager, Vector3i(wx, wy, wz))
+		if not _fire_about_to_die(manager, wx, wy, wz):
+			SFX.play_fire_crackle()
+	# Smoke disabled — never got the particles to render right (squished
+	# sprite look even through the lava-fizz pool). Vanilla qh.java:189-
+	# 236 emits one `largesmoke` per flammable-adjacent face per random
+	# tick; revisit when a dedicated emitter looks correct.
+
+
+# True if the fire cell will extinguish within ~1 tick. Used to skip the
+# crackle SFX so a 1.82-2 s clip doesn't outlast a fire that's about to
+# go out. Mirrors the extinction check in BlockFire.update (Step 2): no
+# flammable neighbor + opaque floor + age > 3 → next tick extinguishes.
+static func _fire_about_to_die(manager: Node, wx: int, wy: int, wz: int) -> bool:
+	var pos := Vector3i(wx, wy, wz)
+	var age: int = manager.get_world_block_meta(pos)
+	if age < 3:
+		return false
+	for o: Vector3i in [
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, -1, 0),
+		Vector3i(0, 1, 0),
+		Vector3i(0, 0, -1),
+		Vector3i(0, 0, 1)
+	]:
+		if BlockFire.can_catch_fire(manager.get_world_block(pos + o)):
+			return false
+	return true
 
 
 # Torch-cell ambient: flame + smoke at the torch tip, meta-aware so wall

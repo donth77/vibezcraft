@@ -5,6 +5,21 @@ extends GutTest
 # Bukkit/mc-dev `Chunk.java` init-lighting loop (~line 160) for the
 # column pass and World.b(EnumSkyBlock, ...) for lateral propagation.
 
+# Pin to 2D heightmap mode — 3D density produces overhangs that block
+# sky light differently and would invalidate the "high above surface =
+# full daylight" assertions that test against a known max_y.
+var _terrain_3d_was: bool
+
+
+func before_all() -> void:
+	_terrain_3d_was = Worldgen.terrain_3d_enabled
+	Worldgen.terrain_3d_enabled = false
+
+
+func after_all() -> void:
+	Worldgen.terrain_3d_enabled = _terrain_3d_was
+
+
 # --- Block opacity ---
 
 
@@ -633,3 +648,151 @@ func test_relight_chunk_borders_no_op_with_no_loaded_neighbors() -> void:
 	var before := chunk.sky_light.duplicate()
 	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
 	assert_true(chunk.sky_light == before, "isolated chunk's sky_light unchanged by relight")
+
+
+# --- Overhang spanning a chunk boundary ---
+#
+# Bug repro: an overhang that crosses a chunk seam leaves the FULLY-COVERED
+# chunk with sky_light = 0 everywhere under the overhang. fill_sky_light's
+# Phase 2 BFS seeds only cells at MAX_LIGHT, so a chunk with no sky-exposed
+# cells gets no seeds, and the chunk-internal pass produces all-zero light.
+# relight_chunk_borders must then propagate sky light from the seam inward
+# all the way across the 16-cell chunk, so the deepest under-overhang cells
+# still receive a graceful gradient (something like 15→14→…→0) rather than
+# the visually-jarring "solid black on one side of a seam, normal gradient
+# on the other" the user reported.
+#
+# Setup:
+#   chunk A (cx=0): grass floor at y=64, stone overhang at y=70..71 covering
+#                   x=8..15 (right half).
+#   chunk B (cx=1): grass floor at y=64, stone overhang at y=70..71 covering
+#                   x=0..15 (entire chunk).
+#   So the overhang spans 24 columns total; chunk B has zero sky-exposed
+#   cells in the y=65..69 air pocket.
+func test_relight_overhang_spanning_seam_propagates_into_covered_chunk() -> void:
+	var manager := _StubManager.new()
+	var c00 := Chunk.new()
+	var c10 := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = c00
+	manager.chunks[Vector2i(1, 0)] = c10
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			# Bedrock + stone fill + grass surface in both chunks.
+			for y in range(4):
+				c00.set_block(x, y, z, Blocks.BEDROCK)
+				c10.set_block(x, y, z, Blocks.BEDROCK)
+			for y in range(4, 64):
+				c00.set_block(x, y, z, Blocks.STONE)
+				c10.set_block(x, y, z, Blocks.STONE)
+			c00.set_block(x, 64, z, Blocks.GRASS)
+			c10.set_block(x, 64, z, Blocks.GRASS)
+	for x in range(8, 16):
+		for z in range(Chunk.SIZE_Z):
+			c00.set_block(x, 70, z, Blocks.STONE)
+			c00.set_block(x, 71, z, Blocks.STONE)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			c10.set_block(x, 70, z, Blocks.STONE)
+			c10.set_block(x, 71, z, Blocks.STONE)
+	Lighting.fill_sky_light(c00)
+	Lighting.fill_sky_light(c10)
+	# Before relight: chunk B's under-overhang air should be all zeros
+	# (Phase 2 BFS has no seeds). Documents the bug.
+	var pre_edge: int = c10.get_sky_light(0, 65, 8)  # x=16 in world, adjacent to c00
+	var pre_far: int = c10.get_sky_light(15, 65, 8)  # x=31 in world, deepest cell
+	assert_eq(pre_edge, 0, "pre-relight: chunk B seam-edge cell is 0 (Phase 2 had no seeds)")
+	assert_eq(pre_far, 0, "pre-relight: chunk B deepest cell is 0")
+	# Run relight for both chunks (mirrors what ChunkManager does on
+	# materialize). After relight, the seam-edge cell should pull a useful
+	# amount of light from chunk A's open sky, and the gradient should
+	# decay smoothly toward the far side instead of dropping to 0 at the
+	# seam.
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
+	var post_edge: int = c10.get_sky_light(0, 65, 8)
+	var post_far: int = c10.get_sky_light(15, 65, 8)
+	# Seam-edge cell: chunk A has sky=7 at x=15 (decay 15→7 across columns
+	# 8..15). One more step into chunk B at x=0 should land at sky=6.
+	assert_gte(
+		post_edge,
+		5,
+		(
+			"post-relight: chunk B seam-edge should pull at least sky=5 from chunk A "
+			+ "(got %d)" % post_edge
+		)
+	)
+	# Far side: 16 cells deeper at sky=7 minus 16 attenuation can't go
+	# below 0. The TEST IS NOT that this cell is non-zero — it'd take a
+	# full chunk-crossing BFS — but that the gradient is monotone, i.e.
+	# the deepest cell is <= the seam edge. Catches the "everything stays
+	# 0 because BFS bailed" regression.
+	assert_lte(
+		post_far,
+		post_edge,
+		(
+			"post-relight: gradient should decay monotonically away from seam "
+			+ "(edge=%d, far=%d)" % [post_edge, post_far]
+		)
+	)
+	# And document that the seam edge is brighter than 0 — the smoke-test
+	# assertion that propagation happened at all.
+	assert_gt(
+		post_edge, 0, "post-relight: at minimum the seam-adjacent cell must receive SOME light"
+	)
+
+
+# Regression for the under-overhang flat-shadow bug.
+# Was: chunk B's south/north edge cells (z=0, z=15) ended up at sky=14
+# because their cardinal neighbour in chunk (1, -1) / (1, 1) is UNLOADED,
+# and get_world_sky_light returns 15 for unloaded chunks (vanilla
+# "treat unknown as sky-exposed" convention). Phantom-15 sources flood-
+# lit covered chunks at load boundaries.
+#
+# Fix: _recompute_sky_light_at_world now treats unloaded neighbours as
+# DARK (sky=0) when the queried cell is itself under cover. Sky-exposed
+# cells still use the vanilla 15 convention. See lighting.gd.
+func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
+	var manager := _StubManager.new()
+	var c00 := Chunk.new()
+	var c10 := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = c00
+	manager.chunks[Vector2i(1, 0)] = c10
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(4):
+				c00.set_block(x, y, z, Blocks.BEDROCK)
+				c10.set_block(x, y, z, Blocks.BEDROCK)
+			for y in range(4, 64):
+				c00.set_block(x, y, z, Blocks.STONE)
+				c10.set_block(x, y, z, Blocks.STONE)
+			c00.set_block(x, 64, z, Blocks.GRASS)
+			c10.set_block(x, 64, z, Blocks.GRASS)
+	for x in range(8, 16):
+		for z in range(Chunk.SIZE_Z):
+			c00.set_block(x, 70, z, Blocks.STONE)
+			c00.set_block(x, 71, z, Blocks.STONE)
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			c10.set_block(x, 70, z, Blocks.STONE)
+			c10.set_block(x, 71, z, Blocks.STONE)
+	Lighting.fill_sky_light(c00)
+	Lighting.fill_sky_light(c10)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
+	# After fix: chunk B's south-edge corner is no longer flood-lit by
+	# a phantom-15 source from unloaded chunk (1, -1). Cell at (15, 65, 0)
+	# is far from chunk A's seam AND at a chunk corner — should stay dark.
+	assert_eq(
+		c10.get_sky_light(15, 65, 0),
+		0,
+		(
+			"deep under-overhang corner should be 0 (no real sky exposure "
+			+ "within loaded world); got %d" % c10.get_sky_light(15, 65, 0)
+		)
+	)
+	# Seam-adjacent cell still pulls from chunk A's edge (7) with -1 decay.
+	assert_eq(
+		c10.get_sky_light(0, 65, 8),
+		6,
+		"seam-adjacent under-overhang cell pulls from chunk A's 7 with -1 decay"
+	)

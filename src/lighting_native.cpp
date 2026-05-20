@@ -281,6 +281,14 @@ Dictionary LightingNative::update_sky_light_around_world(
 	};
 
 	// Per-cell sky-light recompute — mirrors Lighting._recompute_sky_light_at_world.
+	// Under-cover cells (emission == 0) treat unloaded-neighbour chunks as
+	// DARK rather than sky=15 — see the matching block in relight_chunk_borders
+	// for the rationale.
+	auto in_loaded_edit = [&](int wx, int wz) -> bool {
+		int cx = floor_div_size(wx, SIZE_X);
+		int cz = floor_div_size(wz, SIZE_Z);
+		return slabs.find(chunk_key(cx, cz)) != slabs.end();
+	};
 	auto recompute = [&](int wx, int wy, int wz) -> int {
 		int id = get_block(wx, wy, wz);
 		int raw_op = op[id];
@@ -290,11 +298,20 @@ Dictionary LightingNative::update_sky_light_around_world(
 		}
 		int step = std::max(raw_op, 1);
 		int max_n = 0;
+		bool under_cover = emission == 0;
 		static constexpr int N_DX[6] = { 1, -1, 0, 0, 0, 0 };
 		static constexpr int N_DY[6] = { 0, 0, 1, -1, 0, 0 };
 		static constexpr int N_DZ[6] = { 0, 0, 0, 0, 1, -1 };
 		for (int n = 0; n < 6; n++) {
-			int nl = get_sky(wx + N_DX[n], wy + N_DY[n], wz + N_DZ[n]);
+			int nx = wx + N_DX[n];
+			int ny = wy + N_DY[n];
+			int nz = wz + N_DZ[n];
+			int nl;
+			if (under_cover && !in_loaded_edit(nx, nz)) {
+				nl = 0;
+			} else {
+				nl = get_sky(nx, ny, nz);
+			}
 			if (nl > max_n) {
 				max_n = nl;
 			}
@@ -845,8 +862,23 @@ Dictionary LightingNative::relight_chunk_borders(
 		}
 		int step = std::max(raw_op, 1);
 		int max_n = 0;
+		// Under-cover (emission == 0): treat unloaded-neighbour chunks
+		// as DARK (sky=0) instead of the vanilla "unknown = sky 15"
+		// convention. An unloaded neighbour at this y is just as likely
+		// to be under the same multi-chunk overhang as we are; phantom-
+		// 15 lights would flood-light covered chunks at load boundaries.
+		// Sky-exposed cells still use the vanilla 15 default.
+		bool under_cover = emission == 0;
 		for (int n = 0; n < 6; n++) {
-			int nl = get_sky(wx + N_DX[n], wy + N_DY[n], wz + N_DZ[n]);
+			int nx = wx + N_DX[n];
+			int ny = wy + N_DY[n];
+			int nz = wz + N_DZ[n];
+			int nl;
+			if (under_cover && !in_loaded(nx, nz)) {
+				nl = 0;
+			} else {
+				nl = get_sky(nx, ny, nz);
+			}
 			if (nl > max_n) max_n = nl;
 		}
 		return std::max(emission, std::max(0, max_n - step));

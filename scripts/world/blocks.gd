@@ -111,13 +111,16 @@ const IRON_DOOR := 34
 # 0.4, axe-preferred, wood material. Player climbing physics clamp fall
 # speed and allow upward movement when overlapping the ladder cell.
 const LADDER := 35
-# Vanilla Alpha BlockTNT (v.java, id 46). Hardness 0 = instant break, drops
-# itself (NOT primed-TNT-on-mine — vanilla a(Random)=0 only suppresses the
-# random drop when the block is broken by an explosion shockwave). Right-
-# click with flint and steel ignites: replace block with kr (EntityTNTPrimed),
-# 80-tick fuse → explosion power 4 at the entity position. Faces use 3
-# distinct atlas tiles (top fuse plate, side TNT lettering, plain red bottom)
-# extracted from the Alpha terrain.png at row 0 cols 8-10.
+# Vanilla Alpha BlockTNT (v.java, id 46). Hardness 0 = instant break. Vanilla
+# `a(Random) { return 0; }` (v.java:29-31) means the block drops nothing on
+# any break path — Alpha TNT was strictly craft-only. We intentionally
+# deviate to modern-MC behavior and drop the block on hand-mine so it's
+# acquirable without first reaching a creeper-source for gunpowder (no mobs
+# yet — see `drops()` fall-through). Right-click with flint and steel
+# ignites: replace block with kr (EntityTNTPrimed), 80-tick fuse →
+# explosion power 4 at the entity position. Faces use 3 distinct atlas
+# tiles (top fuse plate, side TNT lettering, plain red bottom) extracted
+# from the Alpha terrain.png at row 0 cols 8-10.
 const TNT := 36
 # Vanilla Alpha BlockFlowers (mr.java) — red poppy (nq.ad, id 37) and yellow
 # dandelion (nq.ae, id 38). Cross-quad render like SAPLING. Hardness 0,
@@ -133,6 +136,32 @@ const FLOWER_YELLOW := 38
 # (brown) and 1/8 (red) per chunk.
 const MUSHROOM_BROWN := 39
 const MUSHROOM_RED := 40
+# Sugar cane (vanilla "reeds", introduced Alpha v1.0.4). Multi-block tall
+# plant placed on grass/dirt/sand directly adjacent to water. Cross-quad
+# mesh like flowers/mushrooms. Drops itself as ITEM (Items.SUGAR_CANE)
+# when broken. Vanilla block ID is 83; ours is 41 because our IDs are
+# sequential from 0 (see CLAUDE.md "block IDs are stable" note).
+const SUGAR_CANE := 41
+# Ice (vanilla BlockIce, id 79). Frozen water surface in cold biomes.
+# Semi-transparent, slightly slippery. Drops nothing when broken (water
+# flows back in vanilla). Worldgen converts WATER_STILL → ICE for
+# surface cells in Tundra/Taiga/Ice Desert biomes.
+const ICE := 42
+# Snow block (vanilla BlockSnowBlock id 80). Full opaque white cube.
+# Generated naturally on cold mountain peaks (Tundra/Taiga/Ice Desert
+# at high altitude). Drops 4 snowballs in vanilla; we drop nothing for
+# now since snowballs aren't an item yet.
+const SNOW_BLOCK := 43
+# Cactus (vanilla BlockCactus id 81). Multi-block tall plant in deserts.
+# 14/16 width cube (gap on each side). Damages player on touch.
+# Only places on SAND. Cannot have non-air blocks adjacent to its sides.
+const CACTUS := 44
+# Snow layer (vanilla BlockSnowLayer id 78). Thin 2/16-tall slab at the
+# bottom of the cell; sits on top of grass/dirt/stone in cold biomes.
+# Player walks through it (no collision) — vanilla treats it as a
+# decoration block. Drops nothing for now (vanilla drops snowball,
+# which we don't have).
+const SNOW_LAYER := 45
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -167,12 +196,27 @@ const MESH_SHAPE_DOOR: int = 6
 # Flat 2/16-thick slab mounted against a wall face. 4 orientations via
 # metadata (2..5), same as torch wall variants. Vanilla render type 8.
 const MESH_SHAPE_LADDER: int = 7
+# Thin 2/16-tall slab on the floor — used by snow_layer. Bottom face
+# hugs the supporting block below; top face + 4 sides at y=2/16.
+const MESH_SHAPE_SNOW_LAYER: int = 8
+# Vanilla Alpha BlockFire render type 3 (bk.java::d). Two leaning vertical
+# planes if the cell below is opaque (X-cross with tops offset 0.2 inward),
+# or wall-hugging quads against each opaque/flammable side neighbor when
+# the floor is non-solid. All quads use the same animated fire atlas tile
+# (chunk shader does time-based UV strip lookup), so no extra material.
+const MESH_SHAPE_FIRE: int = 9
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
 # match in GDScript — called ~30K times per worldgen chunk + ~30K times
 # per lighting BFS pass.
 static var _light_opacity_lut: PackedByteArray
+# Lazy-init explosion-resistance LUT (PackedFloat32Array of 256 entries).
+# explosion_resistance() is called once per non-AIR cell per ray step in
+# an explosion (~5000+ calls per TNT detonation). The match statement
+# version is ~10× slower than a direct array index, and the BFS-shaped
+# explosion ray-cast is the hot path during chained TNT cascades.
+static var _resistance_lut: PackedFloat32Array
 
 
 # Dispatch a scheduled block-tick fired by `TickScheduler`. `manager` is
@@ -214,6 +258,9 @@ static func is_opaque(id: int) -> bool:
 		id != AIR
 		and id != LEAVES
 		and id != GLASS
+		and id != ICE
+		and id != CACTUS
+		and id != SNOW_LAYER
 		and id != SAPLING
 		and id != WATER_FLOWING
 		and id != WATER_STILL
@@ -245,6 +292,7 @@ static func is_opaque(id: int) -> bool:
 		and id != FLOWER_YELLOW
 		and id != MUSHROOM_BROWN
 		and id != MUSHROOM_RED
+		and id != SUGAR_CANE
 	)
 
 
@@ -317,6 +365,7 @@ static func is_replaceable(id: int) -> bool:
 		or id == FLOWER_YELLOW
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
+		or id == SUGAR_CANE
 	)
 
 
@@ -339,6 +388,14 @@ static func _build_light_opacity_lut() -> void:
 		_light_opacity_lut[i] = 15
 	_light_opacity_lut[AIR] = 0
 	_light_opacity_lut[GLASS] = 0
+	# Ice — semi-transparent like glass; vanilla BlockIce returns 3 from
+	# getOpacity (slight light dampening for the underwater volume below).
+	_light_opacity_lut[ICE] = 3
+	# Snow block — fully opaque white cube; default opacity (15) is right.
+	# Cactus — non-cube (14/16 width with side gaps); pass light through
+	# at the gap. Vanilla returns 0 from getOpacity.
+	_light_opacity_lut[CACTUS] = 0
+	_light_opacity_lut[SNOW_LAYER] = 0
 	_light_opacity_lut[SAPLING] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
 	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
@@ -382,6 +439,7 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[FLOWER_YELLOW] = 0
 	_light_opacity_lut[MUSHROOM_BROWN] = 0
 	_light_opacity_lut[MUSHROOM_RED] = 0
+	_light_opacity_lut[SUGAR_CANE] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -421,6 +479,23 @@ static func can_place_at(id: int, support_id: int) -> bool:
 		# Vanilla mushrooms accept opaque-cube support too (so they grow on
 		# stone in caves). Keep the same valid-plant check + opaque fallback.
 		return is_valid_plant_support(support_id) or is_opaque(support_id)
+	if id == SUGAR_CANE:
+		# Vanilla sugar cane: grass/dirt/sand below + water adjacent at the
+		# base. Placement just checks the support; water-adjacency is the
+		# worldgen scatter's responsibility (and a future tick check). Also
+		# allow stacking on another sugar cane (multi-tall placement).
+		return (
+			support_id == GRASS
+			or support_id == DIRT
+			or support_id == SAND
+			or support_id == SUGAR_CANE
+		)
+	if id == CACTUS:
+		# Vanilla BlockCactus.canPlace: SAND only, OR another CACTUS for
+		# multi-tall stacking. Vanilla also requires NO solid block on
+		# any of the 4 cardinal sides — that side-block check is a
+		# placement-time concern handled in interaction.gd if needed.
+		return support_id == SAND or support_id == CACTUS
 	return true
 
 
@@ -441,6 +516,14 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 	# 0.4,0.7) — a 0.4-wide, 0.4-tall box hugging the cell's bottom center.
 	if id == FLOWER_RED or id == FLOWER_YELLOW or id == MUSHROOM_BROWN or id == MUSHROOM_RED:
 		return AABB(Vector3(0.3, 0.0, 0.3), Vector3(0.4, 0.4, 0.4))
+	if id == SUGAR_CANE:
+		# Vanilla BlockReed setBlockBounds(0.125, 0, 0.125, 0.875, 1.0, 0.875)
+		# — taller than flowers and slightly wider, hugs the full cell height.
+		return AABB(Vector3(0.125, 0.0, 0.125), Vector3(0.75, 1.0, 0.75))
+	if id == SNOW_LAYER:
+		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
+		# — full-width slab, 2/16 tall.
+		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -517,13 +600,15 @@ static func _door_facing(meta: int) -> int:
 static func mesh_shape(id: int) -> int:
 	if (
 		id == SAPLING
-		or id == FIRE
 		or id == FLOWER_RED
 		or id == FLOWER_YELLOW
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
+		or id == SUGAR_CANE
 	):
 		return MESH_SHAPE_CROSS
+	if id == FIRE:
+		return MESH_SHAPE_FIRE
 	if id == TORCH:
 		return MESH_SHAPE_TORCH
 	if id == CHEST:
@@ -536,6 +621,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_DOOR
 	if id == LADDER:
 		return MESH_SHAPE_LADDER
+	if id == SNOW_LAYER:
+		return MESH_SHAPE_SNOW_LAYER
 	return MESH_SHAPE_CUBE
 
 
@@ -556,6 +643,19 @@ static func needs_gdscript_mesher(id: int) -> bool:
 # and obsidian use absurd values so they're effectively immune to TNT.
 # Numbers come from Bukkit/mc-dev (Beta-faithful; Alpha used the same
 # values for the few blocks it had).
+# Direct LUT lookup for the explosion ray-cast hot path. Lazy-builds the
+# table on first call by walking every block id through the slower match
+# below. PackedFloat32Array index = block_id; returns 0.0 for unknown ids
+# (matches the match's fallthrough).
+static func explosion_resistance_fast(id: int) -> float:
+	if _resistance_lut.is_empty():
+		_resistance_lut = PackedFloat32Array()
+		_resistance_lut.resize(256)
+		for i in range(256):
+			_resistance_lut[i] = explosion_resistance(i)
+	return _resistance_lut[id] if id >= 0 and id < 256 else 0.0
+
+
 static func explosion_resistance(id: int) -> float:
 	match id:
 		BEDROCK:
@@ -598,7 +698,15 @@ static func hardness(id: int) -> float:
 			return 0.0
 		LEAVES, GLASS:
 			return 0.2
-		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
+		ICE:
+			return 0.5  # vanilla BlockIce hardness
+		SNOW_BLOCK:
+			return 0.2  # vanilla BlockSnowBlock — soft, shovel-preferred
+		CACTUS:
+			return 0.4  # vanilla BlockCactus hardness
+		SNOW_LAYER:
+			return 0.1  # vanilla BlockSnowLayer instant break
+		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
 		DIRT, SAND:
 			return 0.5
@@ -773,10 +881,20 @@ static func drops(id: int) -> int:
 			return AIR  # Alpha leaves dropped 0 or 1 sapling — no saplings yet
 		GLASS:
 			return AIR  # vanilla: glass shatters when broken, drops nothing
+		ICE:
+			return AIR  # vanilla: ice melts to water on break (handled in interaction)
+		SNOW_BLOCK:
+			return SNOW_BLOCK  # vanilla drops 4 snowballs; we drop the block until snowballs ship
+		CACTUS:
+			return CACTUS  # drops itself
+		SNOW_LAYER:
+			return AIR  # vanilla drops snowball; defer until snowball item exists
 		SAPLING:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
 			return id  # plants drop themselves
+		SUGAR_CANE:
+			return Items.SUGAR_CANE  # drops as ITEM (re-place via item)
 		BEDROCK:
 			return AIR
 		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
@@ -844,6 +962,14 @@ static func name_of(id: int) -> String:
 			return "lit_furnace"
 		GLASS:
 			return "glass"
+		ICE:
+			return "ice"
+		SNOW_BLOCK:
+			return "snow"
+		SNOW_LAYER:
+			return "snow"
+		CACTUS:
+			return "cactus_side"  # 1-arg fallback; per-face uses get_texture_for_face_string
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING:
@@ -878,6 +1004,8 @@ static func name_of(id: int) -> String:
 			return "mushroom_brown"
 		MUSHROOM_RED:
 			return "mushroom_red"
+		SUGAR_CANE:
+			return "sugar_cane"
 	return "unknown"
 
 
@@ -954,6 +1082,20 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "furnace_front_lit"
 		GLASS:
 			return "glass"
+		ICE:
+			return "ice"
+		SNOW_BLOCK:
+			return "snow"
+		SNOW_LAYER:
+			return "snow"
+		CACTUS:
+			match face:
+				"top":
+					return "cactus_top"
+				"bottom":
+					return "cactus_bottom"
+				_:
+					return "cactus_side"
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING, WATER_STILL:
@@ -1009,6 +1151,8 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "mushroom_brown"
 		MUSHROOM_RED:
 			return "mushroom_red"
+		SUGAR_CANE:
+			return "sugar_cane"
 	return ""
 
 

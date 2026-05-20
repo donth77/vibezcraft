@@ -30,12 +30,27 @@ extends RefCounted
 # Cost is ~1500 rays × ~15 steps × dict ops ≈ tens of microseconds in
 # practice, well below a frame.
 
+# Sample density for the explosion-direction grid. 16 = vanilla
+# (1352 boundary rays = 16³ - 14³). Lower values trade crater-edge
+# irregularity for fewer ray-cast iterations:
+#   12 → 728 rays  (1.85× faster ray cast, slightly smoother crater)
+#    8 → 296 rays  (4.5× faster, noticeably rounder crater)
+# Keep at 16 for vanilla parity; drop to 12 if profiling shows the ray
+# cast is the dominant cost in chained-TNT cascades.
 const _RAY_GRID: int = 16
 const _STEP: float = 0.3
 const _DROP_RATE: float = 0.3
-# 0.3 step × 0.75 vanilla scale factor = 0.225 — the per-step intensity
-# decay coefficient applied to (resistance + 0.3).
-const _DECAY_COEFF: float = 0.225
+# Vanilla ks.java:54 — `f4 -= f3 * 0.75f` runs UNCONDITIONALLY each step,
+# regardless of whether the cell is AIR or solid. Without this, rays cast
+# into open sky never lose intensity and the while-loop runs forever
+# (game freeze). 0.3 step × 0.75 = 0.225 per step.
+const _STEP_DECAY: float = 0.225
+# Additional decay from a solid cell's blast resistance — vanilla
+# `f4 -= (resistance + 0.3f) * f3` (f3 = 0.3, the step length). Stone
+# resistance 6 → ~1.9 extra decay per step, so a TNT (initial ~3 power)
+# ray dies in ~2 stone steps. That's the iconic "TNT breaks ~3 blocks
+# deep of stone" depth.
+const _RESISTANCE_COEFF: float = 0.3
 
 const _PRIMED_TNT := preload("res://scripts/world/primed_tnt.gd")
 
@@ -89,14 +104,36 @@ static func _cast_ray(
 	# 70% to 130% of power per ray. Variance is what makes TNT craters
 	# irregular instead of perfectly spherical.
 	var intensity: float = power * (0.7 + randf() * 0.6)
+	# Cache the current chunk + its coords so consecutive cells in the
+	# same chunk skip the chunk dict lookup. Each ray walks ~10 cells;
+	# the average ray crosses at most 1-2 chunk boundaries, so this
+	# cuts the dict-lookup count by an order of magnitude.
+	var cached_cx: int = 2147483647
+	var cached_cz: int = 2147483647
+	var cached_chunk: Chunk = null
 	while intensity > 0.0:
 		var bx: int = int(floor(x))
 		var by: int = int(floor(y))
 		var bz: int = int(floor(z))
-		var block_id: int = manager.get_world_block(Vector3i(bx, by, bz))
+		# Inlined chunk lookup w/ caching. Equivalent to
+		# manager.get_world_block(Vector3i(bx, by, bz)) but skips the
+		# coord-recompute + dict access when this cell is in the same
+		# chunk as the previous step.
+		var cx: int = bx >> 4  # Chunk.SIZE_X = 16, log2 = 4
+		var cz: int = bz >> 4
+		var block_id: int = Blocks.AIR
+		if by >= 0 and by < Chunk.SIZE_Y:
+			if cx != cached_cx or cz != cached_cz:
+				cached_cx = cx
+				cached_cz = cz
+				cached_chunk = manager.get_chunk_at_coord(Vector2i(cx, cz))
+			if cached_chunk != null:
+				var lx: int = bx - (cx << 4)
+				var lz: int = bz - (cz << 4)
+				block_id = cached_chunk.get_block(lx, by, lz)
 		if block_id != Blocks.AIR:
-			var resistance: float = Blocks.explosion_resistance(block_id)
-			intensity -= (resistance + 0.3) * _DECAY_COEFF
+			var resistance: float = Blocks.explosion_resistance_fast(block_id)
+			intensity -= (resistance + 0.3) * _RESISTANCE_COEFF
 		if intensity > 0.0:
 			# Pack (x, y, z) into a single key so the hash-set semantics
 			# come from the dict — Vector3i works as a key directly in GDScript.
@@ -104,6 +141,9 @@ static func _cast_ray(
 		x += dx * _STEP
 		y += dy * _STEP
 		z += dz * _STEP
+		# Unconditional per-step decay — runs for AIR cells too. Without
+		# this, rays in open sky never terminate (game freeze).
+		intensity -= _STEP_DECAY
 
 
 # Damage entities (player today; mobs once they ship) within `power × 2`
@@ -158,6 +198,12 @@ static func _apply_block_destruction(
 	# emitter using EMISSION_SHAPE_POINTS) — same visual read at a much
 	# lower per-detonation Node count.
 	ExplosionFx.spawn_burst(manager, origin, affected)
+	# Batch all block writes — each set_world_block normally fires an
+	# inline sky-light + block-light BFS (touches a ~16-cell radius each).
+	# An explosion affecting ~100 cells would do ~200 BFS calls; batching
+	# defers them to a single drain at the end and dedups by seed
+	# position, eliminating the per-detonation frame spike.
+	manager.begin_batch()
 	for cell: Vector3i in affected:
 		var block_id: int = manager.get_world_block(cell)
 		if block_id == Blocks.AIR:
@@ -181,6 +227,8 @@ static func _apply_block_destruction(
 			var drop: int = Blocks.drops(block_id)
 			if drop != Blocks.AIR:
 				_spawn_drop(manager, cell, drop)
+	# Drain the deferred sky/block-light seeds in one pass.
+	manager.end_batch()
 
 
 static func _spawn_drop(manager: Node, cell: Vector3i, drop_id: int) -> void:

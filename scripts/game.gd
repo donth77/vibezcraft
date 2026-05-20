@@ -21,6 +21,12 @@ const CLOUD_QUALITY_FANCY: int = 2
 @export var fog_enabled: bool = true
 @export var sfx_enabled: bool = true
 
+# True only while the in-game LoadingScreen (chunk-gen progress bar)
+# is displayed. Defaults to false so the main menu, settings, etc.
+# can play SFX normally. LoadingScreen sets this true in its _ready,
+# false when chunk-gen completes (loaded >= total).
+var is_loading: bool = false
+
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.
 var debug_enabled: bool = false
@@ -116,7 +122,6 @@ func _read_dotenv() -> Dictionary:
 
 func _ready() -> void:
 	InputActions.register_defaults()
-	_apply_resolution_override()
 	# Install the bitmap MC font as the global fallback so every Control that
 	# doesn't override its font picks it up automatically — no per-scene wiring.
 	var mc_font := MinecraftFont.get_font()
@@ -136,6 +141,13 @@ func _ready() -> void:
 	# survives relaunches; env / .env still win so devs can override without
 	# editing the saved profile.
 	var cfg := SettingsMenu.load_config()
+	# Resolution: apply the cfg-saved value first, then env override wins.
+	# Order matters — _apply_resolution_override is a no-op when the env var
+	# isn't set, so cfg always lands; when it IS set, the env call overrides.
+	var cfg_resolution: String = cfg.get_value("graphics", "resolution", "")
+	if cfg_resolution != "":
+		SettingsMenu.apply_resolution_value(cfg_resolution)
+	_apply_resolution_override()
 	var settings_pack: String = cfg.get_value("graphics", "texture_pack", texture_pack)
 	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", settings_pack)
 	BlockAtlas.active_pack = resolved_pack
@@ -205,68 +217,9 @@ func _ready() -> void:
 				% [str(debug_mining), str(debug_lighting), str(debug_mesh), str(debug_worldgen)]
 			)
 		)
-	# Terrain mode toggle — `MC_CLONE_TERRAIN_MODE` env var picks between
-	# the 2D heightmap (legacy/fallback) and the vanilla-faithful 3D
-	# density path. Default is 3D density for runtime since the user
-	# wants to A/B-test it in-game; tests keep their static-var default
-	# of MODE_2D_HEIGHTMAP for byte-equality stability. Accepted values
-	# (case-insensitive): `3d_density` or `2d_heightmap`. Unrecognized
-	# values fall through to the runtime default with a warning.
-	var terrain_mode_raw: String = _resolve_str("MC_CLONE_TERRAIN_MODE", "3d_density")
-	var terrain_mode_lower: String = terrain_mode_raw.to_lower()
-	if terrain_mode_lower == "2d_heightmap":
-		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_2D_HEIGHTMAP
-	elif terrain_mode_lower == "3d_density":
-		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
-	else:
-		push_warning(
-			(
-				"[Game] MC_CLONE_TERRAIN_MODE expected '3d_density' or '2d_heightmap', got: %s"
-				% terrain_mode_raw
-			)
-		)
-		Worldgen.terrain_mode = Worldgen.TerrainMode.MODE_3D_DENSITY
-	print("[Game] terrain_mode=%s" % terrain_mode_lower)
-	# Biome system toggle — orthogonal to terrain mode. When enabled,
-	# surface block selection becomes biome-driven (Desert columns are
-	# SAND, Plains are GRASS, etc.). Recommended combo for Alpha parity:
-	# MC_CLONE_TERRAIN_MODE=3d_density MC_CLONE_BIOMES=1.
-	var biomes_raw: String = _resolve_str("MC_CLONE_BIOMES", "0")
-	Worldgen.biomes_enabled = biomes_raw == "1" or biomes_raw.to_lower() == "true"
-	print("[Game] biomes_enabled=%s" % Worldgen.biomes_enabled)
-	# Vanilla noise toggle — replaces our FastNoiseLite-based per-octave
-	# noise with the proper Java-Random Perlin port (vanilla nf.java +
-	# z.java pattern). Wider variance + correlated octaves produce
-	# vanilla-shape terrain. Trade: ~2× slower per noise sample (GDScript
-	# Perlin vs C++ FastNoiseLite). Only affects 3D density mode.
-	var vnoise_raw: String = _resolve_str("MC_CLONE_VANILLA_NOISE", "0")
-	WorldgenDensity.vanilla_noise_enabled = (vnoise_raw == "1" or vnoise_raw.to_lower() == "true")
-	print("[Game] vanilla_noise_enabled=%s" % WorldgenDensity.vanilla_noise_enabled)
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
-	# Warm the 3D-density noise stack on the main thread. Without this,
-	# the first chunk gen on a worker thread would call FastNoiseLite.new()
-	# inside NoiseOctaves.create, which triggers a /root propagate_notification
-	# Godot forbids from non-main threads → chunks fail to mesh.
-	if Worldgen.terrain_mode == Worldgen.TerrainMode.MODE_3D_DENSITY:
-		WorldgenDensity.warm_main_thread()
-	# Same warming pattern for biome climate noise — 3 FastNoiseLite
-	# constructors that workers can't safely create.
-	if Worldgen.biomes_enabled:
-		BiomeClimate.warm_main_thread()
-	# Worldgen audit dump — `MC_CLONE_WORLDGEN_AUDIT=1` prints a per-chunk
-	# block / surface / decoration breakdown vs vanilla expected values
-	# right after init. Useful for catching tuning regressions (e.g.,
-	# sand-mid-forest, missing mountains) without screenshots. Generates
-	# a fresh 5×5 chunk sample (slow — ~half a second) so do NOT enable
-	# in normal play; it's a dev tool.
-	var audit_flag: String = _resolve_str("MC_CLONE_WORLDGEN_AUDIT", "0")
-	if audit_flag == "1" or audit_flag.to_lower() == "true":
-		# Radius 5 = 11×11 chunks ≈ 176 blocks; bigger than the
-		# elevation-modulator wavelength (~250 blocks) so the sample
-		# spans at least one continental high/low transition.
-		WorldgenAudit.print_report(0, 0, 5)
 	# Opt in to the native mesher + worldgen base-terrain fill (GDExtension).
 	# Silently falls back to GDScript if the extension isn't loaded.
 	# Parity enforced by tests/test_mesher_native.gd and
