@@ -107,6 +107,17 @@ const GUNPOWDER: int = 148
 # hand as a green stick. Vanilla introduced as "reeds" in Alpha v1.0.4.
 # We just carry it as a placeable plant for now (no sugar/paper crafting).
 const SUGAR_CANE: int = 149
+# Compass — Alpha 1.2.6 ItemCompass (id 345 vanilla → 150 here). Stack of 64.
+# Custom icon: needle rotates per frame, pointing at world spawn coord
+# (atan2(spawn.z - player.z, spawn.x - player.x) in icon space). Vanilla
+# recipe is 4 iron ingots + 1 redstone in a + pattern; we ship the item
+# without a recipe until redstone lands and supply via debug spawner.
+const COMPASS: int = 150
+# Clock — Alpha 1.2.6 ItemClock (id 347 vanilla → 151 here). Stack of 64.
+# Dial angle = WorldTime.tick / 24000 * TAU so it sweeps a full rotation
+# over each in-game day. Vanilla recipe: 4 gold ingots + 1 redstone;
+# again, recipe deferred until redstone lands.
+const CLOCK: int = 151
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -292,6 +303,10 @@ static func id_from_name(item_name: String) -> int:
 			return IRON_DOOR
 		"gunpowder":
 			return GUNPOWDER
+		"compass":
+			return COMPASS
+		"clock":
+			return CLOCK
 		"tnt":
 			return Blocks.TNT
 		"air":
@@ -457,6 +472,10 @@ static func display_name(item_id: int) -> String:
 			return "Gunpowder"
 		SUGAR_CANE:
 			return "Sugar Cane"
+		COMPASS:
+			return "Compass"
+		CLOCK:
+			return "Clock"
 		Blocks.TNT:
 			return "TNT"
 		Blocks.AIR:

@@ -122,8 +122,28 @@ const _ITEM_PLACEHOLDER_COLORS: Dictionary = {
 
 static var _cache: Dictionary = {}
 
+# Dynamic compass + clock icons — reused across calls via .update() so we
+# don't churn ImageTexture instances at 60 fps. Created lazily on first
+# render so headless tests that never touch the icon pay no setup cost.
+static var _compass_texture: ImageTexture
+static var _clock_texture: ImageTexture
+# Player + spawn caches. find_child is O(tree); cache the result and
+# re-resolve only when the cached node has been freed (scene transition).
+static var _cached_player: Node3D = null
+static var _cached_spawn: Vector3 = Vector3(0, 70, 0)
+
 
 static func icon_for(item_id: int) -> Texture2D:
+	# Compass / clock — render dynamic icon every call. Both bypass the
+	# cache because the needle / dial angle changes per frame: the
+	# compass needle tracks atan2(spawn - player), the clock dial tracks
+	# WorldTime.tick. The renderers mutate a single ImageTexture per
+	# item (not new allocations per call), so the per-frame cost is one
+	# 16×16 RGBA8 buffer rebuild + a GPU upload.
+	if item_id == Items.COMPASS:
+		return _render_compass_icon(_compass_angle())
+	if item_id == Items.CLOCK:
+		return _render_clock_icon(_clock_angle())
 	# Buckets — canonical Alpha 1.2.6 sprites (gui/items.png tiles 74/75/76,
 	# extracted directly from the vendor jar). Short-circuit above the
 	# cache: a prior call before the bucket branch existed could cache
@@ -291,3 +311,111 @@ static func _build_solid_icon(color: Color) -> Texture2D:
 		img.set_pixel(0, x, border)
 		img.set_pixel(31, x, border)
 	return ImageTexture.create_from_image(img)
+
+
+# --- Dynamic compass + clock icons ---
+
+
+static func _get_player() -> Node3D:
+	if _cached_player != null and is_instance_valid(_cached_player):
+		return _cached_player
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null or tree.root == null:
+		return null
+	_cached_player = tree.root.find_child("Player", true, false) as Node3D
+	return _cached_player
+
+
+# atan2(spawn - player) in icon-space. Inventory open on the main menu (no
+# player in tree) returns 0.0 — the needle just points right; harmless.
+static func _compass_angle() -> float:
+	var player: Node3D = _get_player()
+	if player == null:
+		return 0.0
+	var dx: float = _cached_spawn.x - player.global_position.x
+	var dz: float = _cached_spawn.z - player.global_position.z
+	# atan2(z, x) so dx=1 yields angle 0 and the needle points east at +X.
+	return atan2(dz, dx)
+
+
+# Full rotation per in-game day (24000 ticks). Subtract PI/2 in the
+# renderer so tick 6000 (noon) lands at the top of the dial.
+static func _clock_angle() -> float:
+	return float(WorldTime.tick) / 24000.0 * TAU
+
+
+# Render a 16×16 compass face with a needle pointing along `angle` rad.
+# Mutates _compass_texture in place so the GPU upload is one .update()
+# instead of an allocation. Color palette is solid-Alpha rather than the
+# vanilla 16-frame strip (gui/items.png column 6) because procedural is
+# cheaper to ship than a 16-step rotation atlas.
+static func _render_compass_icon(angle: float) -> Texture2D:
+	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	# Face: dark blue-gray. Mirrors the navy disc on vanilla's sprite.
+	img.fill(Color(0.15, 0.18, 0.25, 1.0))
+	# Outer ring
+	var ring := Color(0.45, 0.5, 0.6, 1.0)
+	for i in range(16):
+		img.set_pixel(i, 0, ring)
+		img.set_pixel(i, 15, ring)
+		img.set_pixel(0, i, ring)
+		img.set_pixel(15, i, ring)
+	# Needle: 6-pixel red line from center. Pixel-walk uses round() per
+	# step which gives a thick-enough line for 16×16 without antialiasing.
+	var cx: float = 7.5
+	var cy: float = 7.5
+	var needle := Color(0.95, 0.2, 0.2, 1.0)
+	for t in range(7):
+		var fx: float = cx + cos(angle) * float(t)
+		var fy: float = cy + sin(angle) * float(t)
+		var x: int = int(round(fx))
+		var y: int = int(round(fy))
+		if x >= 1 and x < 15 and y >= 1 and y < 15:
+			img.set_pixel(x, y, needle)
+	# Center hub — slightly brighter so the needle origin reads cleanly.
+	img.set_pixel(7, 7, Color(1, 1, 1))
+	img.set_pixel(8, 7, Color(1, 1, 1))
+	img.set_pixel(7, 8, Color(1, 1, 1))
+	img.set_pixel(8, 8, Color(1, 1, 1))
+	if _compass_texture == null:
+		_compass_texture = ImageTexture.create_from_image(img)
+	else:
+		_compass_texture.update(img)
+	return _compass_texture
+
+
+# Render a 16×16 clock face with a single hand at `angle` rad. Same
+# in-place .update() pattern as the compass.
+static func _render_clock_icon(angle: float) -> Texture2D:
+	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	# Face: cream / off-white, mimicking vanilla's bone-colored sprite.
+	img.fill(Color(0.92, 0.88, 0.78, 1.0))
+	# Outer ring — darker bronze.
+	var ring := Color(0.45, 0.35, 0.18, 1.0)
+	for i in range(16):
+		img.set_pixel(i, 0, ring)
+		img.set_pixel(i, 15, ring)
+		img.set_pixel(0, i, ring)
+		img.set_pixel(15, i, ring)
+	# Hand: -PI/2 puts angle=0 (tick 0 = midnight) at the top.
+	var cx: float = 7.5
+	var cy: float = 7.5
+	var hand := Color(0.1, 0.1, 0.1, 1.0)
+	var draw_angle: float = angle - PI / 2.0
+	for t in range(7):
+		var fx: float = cx + cos(draw_angle) * float(t)
+		var fy: float = cy + sin(draw_angle) * float(t)
+		var x: int = int(round(fx))
+		var y: int = int(round(fy))
+		if x >= 1 and x < 15 and y >= 1 and y < 15:
+			img.set_pixel(x, y, hand)
+	# Pivot dot.
+	img.set_pixel(7, 7, ring)
+	img.set_pixel(8, 7, ring)
+	img.set_pixel(7, 8, ring)
+	img.set_pixel(8, 8, ring)
+	if _clock_texture == null:
+		_clock_texture = ImageTexture.create_from_image(img)
+	else:
+		_clock_texture.update(img)
+	return _clock_texture
