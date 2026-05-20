@@ -23,6 +23,7 @@ extends Control
 const _BG_TINT: Color = Color(0x40 / 255.0, 0x40 / 255.0, 0x40 / 255.0, 1.0)
 const _MAIN_SCENE_PATH: String = "res://main.tscn"
 const _SETTINGS_SCENE_PATH: String = "res://scenes/ui/settings_menu.tscn"
+const _SELECT_WORLD_SCENE_PATH: String = "res://scenes/ui/select_world_screen.tscn"
 # Vanilla renders the version text in 0x505050 on a brighter-tinted
 # backdrop, which we can't quite reproduce over our 0x404040 dirt tile
 # without the text vanishing. Brightened to 0xC0C0C0 + black outline so
@@ -192,7 +193,7 @@ func _build_buttons() -> void:
 	# 16 px between rows.
 	vbox.add_theme_constant_override("separation", 16)
 	add_child(vbox)
-	var play_btn := _add_button(vbox, "Play Game", _on_play_pressed)
+	var play_btn := _add_button(vbox, "Select World", _on_select_world_pressed)
 	_add_button(vbox, "Settings...", _on_settings_pressed)
 	_add_button(vbox, "Quit", _on_quit_pressed)
 	# Pre-focus the first button so the menu is usable via Tab / arrow keys +
@@ -253,8 +254,13 @@ func _build_footer_label() -> void:
 	add_child(label)
 
 
-func _on_play_pressed() -> void:
-	get_tree().change_scene_to_file(_MAIN_SCENE_PATH)
+func _on_select_world_pressed() -> void:
+	# Opens the world-selector screen (5 fixed slots, ports Alpha le.java).
+	# Alpha labelled this entry "Singleplayer" because they had Multiplayer
+	# next to it (dj.java:67-68); we don't, so the button just describes
+	# what clicking actually does. The Select World screen sets
+	# Game.active_world based on the clicked slot, then loads main.tscn.
+	get_tree().change_scene_to_file(_SELECT_WORLD_SCENE_PATH)
 
 
 func _on_settings_pressed() -> void:
