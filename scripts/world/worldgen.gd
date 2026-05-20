@@ -1560,8 +1560,11 @@ static func _scatter_sugar_cane(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 				break
 		if not has_water:
 			continue
-		# Place 1-3 stacked sugar cane blocks above surface.
+		# Place 1-3 stacked sugar cane blocks above surface. Track the
+		# top of the stack so chunk_manager can enqueue cane growth from
+		# this list instead of re-scanning the chunk on materialize.
 		var stack_height: int = 1 + ((seed_h >> 8) % 3)
+		var top_py: int = -1
 		for dy in range(stack_height):
 			var py: int = sy + 1 + dy
 			if py >= Chunk.SIZE_Y - 1:
@@ -1569,6 +1572,11 @@ static func _scatter_sugar_cane(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 			if chunk.get_block_unchecked(lx, py, lz) != Blocks.AIR:
 				break
 			chunk.set_block_unchecked(lx, py, lz, Blocks.SUGAR_CANE)
+			top_py = py
+		if top_py >= 0:
+			chunk.cane_tops.append(
+				Vector3i(chunk_x * Chunk.SIZE_X + lx, top_py, chunk_z * Chunk.SIZE_Z + lz)
+			)
 	PerfProbe.end("worldgen.sugar_cane", probe_token)
 
 

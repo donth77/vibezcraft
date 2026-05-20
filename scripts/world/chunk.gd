@@ -45,6 +45,12 @@ var max_y: int = 0
 # for no visible difference, and worldgen never sets it so the hot path
 # stays on the native cube fast-path.
 var has_non_cube_blocks: bool = false
+# World coords of the top SUGAR_CANE cell in each cane column. Populated by
+# worker-thread paths (Worldgen._scatter_sugar_cane + _decode_saved_entry)
+# so chunk materialize can drain the list straight into the growth queue
+# instead of scanning all 32 KB of chunk.blocks on the main thread —
+# `_enqueue_existing_canes` used to be ~12 ms per materialize.
+var cane_tops: Array[Vector3i] = []
 # Sticky flag set when any water cell exists in the chunk. Mesher uses it
 # to build the water sub-mesh; chunk_node.gd uses it to spawn the second
 # MeshInstance3D with the water shader material. Same sticky-only-grows
@@ -102,7 +108,7 @@ func _init() -> void:
 	# consistent with an empty (all-AIR) chunk, so _height_map_dirty
 	# starts FALSE — worldgen incremental writes via set_block_unchecked
 	# keep it correct as blocks land. Restored chunks set the flag back to
-	# true via _restore_saved_chunk, OR persist + restore the array
+	# true via _decode_saved_entry, OR persist + restore the array
 	# directly to skip the rebuild.
 	height_map = PackedByteArray()
 	height_map.resize(SIZE_X * SIZE_Z)

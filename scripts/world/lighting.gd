@@ -753,7 +753,10 @@ static func _relight_chunk_borders_native(
 static func prepare_relight_data(
 	coord: Vector2i, target: Chunk, neighbors: Array[Vector2i], manager
 ) -> Array:
+	var t_hm := PerfProbe.begin("lighting.prepare_relight.height_map")
 	target.is_sky_exposed(0, Chunk.SIZE_Y - 1, 0)
+	PerfProbe.end("lighting.prepare_relight.height_map", t_hm)
+	var t_dup := PerfProbe.begin("lighting.prepare_relight.dup")
 	var chunk_data: Array = [
 		[
 			coord.x,
@@ -764,11 +767,15 @@ static func prepare_relight_data(
 			target.height_map.duplicate(),
 		]
 	]
+	PerfProbe.end("lighting.prepare_relight.dup", t_dup)
 	for n_coord: Vector2i in neighbors:
 		var n: Chunk = manager.get_chunk_at_coord(n_coord)
 		if n == null:
 			continue
+		var t_nhm := PerfProbe.begin("lighting.prepare_relight.height_map")
 		n.is_sky_exposed(0, Chunk.SIZE_Y - 1, 0)
+		PerfProbe.end("lighting.prepare_relight.height_map", t_nhm)
+		var t_ndup := PerfProbe.begin("lighting.prepare_relight.dup")
 		(
 			chunk_data
 			. append(
@@ -782,6 +789,7 @@ static func prepare_relight_data(
 				]
 			)
 		)
+		PerfProbe.end("lighting.prepare_relight.dup", t_ndup)
 	return chunk_data
 
 
