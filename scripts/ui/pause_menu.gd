@@ -115,7 +115,7 @@ func _build_ui() -> void:
 
 	vbox.add_child(_make_button("Back to Game", false, _on_resume))
 	vbox.add_child(_make_button("Options...", false, _on_open_options))
-	vbox.add_child(_make_button("Quit to Title", false, _on_quit_to_title))
+	vbox.add_child(_make_button("Save and quit to title", false, _on_quit_to_title))
 	vbox.add_child(_make_button("Quit to Desktop", false, _on_quit_to_desktop))
 
 
@@ -254,9 +254,12 @@ func _on_options_closed(hud: CanvasLayer) -> void:
 
 
 func _on_quit_to_title() -> void:
-	# Bare "Quit to Title" — we don't persist the world yet, so the vanilla
-	# "Save and quit to title" wording would lie to the player. Rename
-	# once phase-7 save/load lands and we can actually flush state to disk.
+	# Alpha 1.2.6's "Save and quit to title" (jl.java:12). The pause menu
+	# in vanilla iterates chunk-saves over multiple frames while flashing
+	# "Saving level.." at the bottom; our save is synchronous and fast,
+	# but we still show the indicator for one frame so a slow save (many
+	# dirty chunks) doesn't read as a freeze.
+	await _save_world_with_indicator()
 	Music.stop_music()
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -264,7 +267,66 @@ func _on_quit_to_title() -> void:
 
 
 func _on_quit_to_desktop() -> void:
-	# Modern convenience — vanilla Alpha only exposed this via the title
-	# screen. Skip world-save hook (same deferred-to-phase-7 story).
+	# Modern convenience — vanilla Alpha only exposed Quit via the title
+	# screen. We save before quitting so closing the game directly from
+	# the pause menu doesn't drop the session.
+	await _save_world_with_indicator()
 	Music.stop_music()
 	get_tree().quit()
+
+
+# Flush the world to disk before changing scenes. Shows a "Saving level..."
+# overlay for one frame so a slow save (many dirty chunks) doesn't read
+# as a freeze. The overlay paints first (deferred via process_frame),
+# THEN the actual save runs, then we return.
+#
+# Save covers: in-memory region cache → region files, entities.bin,
+# player.bin, world.json (refreshes last_played + adds session-delta to
+# play_time_seconds). Mirrors the autosave path on ChunkManager but
+# triggered manually on quit instead of by the 5-min timer.
+func _save_world_with_indicator() -> void:
+	var overlay := _make_saving_overlay()
+	add_child(overlay)
+	# Yield one frame so the overlay paints before the synchronous save
+	# locks the main thread. Without this, the overlay is invisible.
+	await get_tree().process_frame
+	SaveLoad.flush_all_regions()
+	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
+	if chunk_manager != null:
+		EntitySave.save_all(chunk_manager)
+	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D
+	if player != null:
+		PlayerSave.save_player(player)
+	var meta: Dictionary = WorldMeta.load_meta()
+	if meta.is_empty():
+		meta = WorldMeta.make_initial(Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.tick)
+	meta["seed"] = Worldgen.WORLD_SEED
+	meta["time_ticks"] = WorldTime.tick
+	WorldMeta.save_meta(meta)
+	overlay.queue_free()
+
+
+# CanvasLayer + low-contrast "Saving level..." label, bottom-center.
+# Mirrors Alpha jl.java:50's location + low-key styling. We don't
+# implement the brightness pulse animation — the overlay flashes for
+# only ~1 frame in practice (save is sub-100ms typical) so the pulse
+# wouldn't have time to read.
+func _make_saving_overlay() -> CanvasLayer:
+	var layer := CanvasLayer.new()
+	layer.layer = 16  # above pause menu (default ~4)
+	var label := Label.new()
+	label.text = "Saving level..."
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.anchor_left = 0.0
+	label.anchor_right = 1.0
+	label.anchor_top = 1.0
+	label.anchor_bottom = 1.0
+	label.offset_top = -32
+	label.offset_bottom = -8
+	label.add_theme_font_size_override("font_size", 24)
+	label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0, 0.8))
+	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1))
+	label.add_theme_constant_override("shadow_offset_x", 2)
+	label.add_theme_constant_override("shadow_offset_y", 2)
+	layer.add_child(label)
+	return layer

@@ -140,7 +140,35 @@ func _on_chunk_progress(loaded: int, total: int) -> void:
 	if _bar_fill_rect != null:
 		_bar_fill_rect.offset_right = pct * _BAR_WIDTH
 	if loaded >= total:
+		_restore_world_state()
 		# Clear the loading-screen flag so in-game SFX (footsteps, block
 		# break/place, ambience) start playing only after world is ready.
 		Game.is_loading = false
 		queue_free()
+
+
+# Step 7.9 of the save/load plan. Runs after all initial chunks have
+# materialized so the player has terrain to stand on before we move them
+# to their saved position. Restores in dependency order:
+#
+#   1. WorldMeta.time_ticks (overrides the noon default set in _ready
+#      so a saved world resumes at whatever time it was paused).
+#   2. PlayerSave (position, head, health, inventory).
+#   3. EntitySave (dropped items respawn with their original age, so the
+#      5-min despawn timer keeps counting forward).
+#
+# Fresh worlds (no save files yet) silently keep the defaults — each
+# load_* call returns 0/false and the player drops in at the spawn
+# coord that ChunkManager / Worldgen already picked.
+func _restore_world_state() -> void:
+	if _status_label != null:
+		_status_label.text = "Restoring world..."
+	var meta: Dictionary = WorldMeta.load_meta()
+	if not meta.is_empty():
+		WorldTime.set_time_ticks(int(meta.get("time_ticks", WorldTime.tick)))
+	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D
+	if player != null:
+		PlayerSave.load_player(player)
+	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
+	if chunk_manager != null:
+		EntitySave.load_all(chunk_manager)
