@@ -162,6 +162,17 @@ const CACTUS := 44
 # decoration block. Drops nothing for now (vanilla drops snowball,
 # which we don't have).
 const SNOW_LAYER := 45
+# Pumpkin (Alpha 1.2.0 Halloween Update — `BlockPumpkin`, id 86 vanilla).
+# 4-direction meta encodes which side carries the carved face (set at
+# placement from player yaw). Hardness 1.0, axe is the preferred tool.
+# Drops itself. Wearable in the helmet slot — when equipped, draws
+# misc/pumpkinblur.png as a vignette HUD overlay (interaction.gd hook).
+const PUMPKIN := 46
+# Jack O'Lantern (Alpha 1.2.0 — `BlockPumpkinLantern`, id 91 vanilla).
+# Identical to PUMPKIN except the face texture is `jack_o_lantern_face`
+# (glowing eyes) and the block emits light level 15 (highest tier,
+# alongside lava). Crafted from 1 pumpkin + 1 torch (shapeless).
+const JACK_O_LANTERN := 47
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -465,6 +476,8 @@ static func light_emission(id: int) -> int:
 			return 15  # qh.java:47 `d() return 10` on Alpha 0-30 → 15 on our 0-15 scale
 		TORCH:
 			return 14  # vanilla nq.aE BlockTorch `d() return 14`
+		JACK_O_LANTERN:
+			return 15  # vanilla BlockPumpkinLantern.lightEmission = 15
 	return 0
 
 
@@ -733,6 +746,10 @@ static func hardness(id: int) -> float:
 			return 3.0
 		OBSIDIAN:
 			return 50.0
+		PUMPKIN, JACK_O_LANTERN:
+			# Vanilla BlockPumpkin / BlockPumpkinLantern both `c(1.0f)`.
+			# Axe-preferred but breakable by hand.
+			return 1.0
 	return 1.0
 
 
@@ -769,6 +786,10 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_PICKAXE
 		DIRT, GRASS, SAND, FARMLAND, GRAVEL:
 			return Items.TOOL_TYPE_SHOVEL
+		PUMPKIN, JACK_O_LANTERN:
+			# Vanilla BlockPumpkin sets `b("axe")` via Block.b(String) —
+			# axe gets the break-speed bonus, but any tool / bare hand drops.
+			return Items.TOOL_TYPE_AXE
 	return 0
 
 
@@ -1006,10 +1027,51 @@ static func name_of(id: int) -> String:
 			return "mushroom_red"
 		SUGAR_CANE:
 			return "sugar_cane"
+		PUMPKIN:
+			return "pumpkin"
+		JACK_O_LANTERN:
+			return "jack_o_lantern"
 	return "unknown"
 
 
 # Returns the texture name for a given block face. face ∈ {"top", "bottom", "side"}
+# Blocks whose 4 side faces aren't identical — the mesher pulls per-face
+# textures via directional_face_texture below instead of the
+# get_face_texture(id, "side") fast path. Currently pumpkin family;
+# future furnace meta-aware front face, beds, etc. would extend this.
+static func has_directional_face(id: int) -> bool:
+	return id == PUMPKIN or id == JACK_O_LANTERN
+
+
+# Per-face texture for directional blocks. `face_idx` is the mesher's
+# 0..5 enum: 0=+Y, 1=-Y, 2=+X, 3=-X, 4=+Z, 5=-Z. `meta` is the block's
+# stored facing (0..3 for pumpkins, mapping 0=-Z, 1=-X, 2=+Z, 3=+X to
+# match the chest convention in _chest_meta_from_yaw).
+static func directional_face_texture(id: int, face_idx: int, meta: int) -> String:
+	if id == PUMPKIN or id == JACK_O_LANTERN:
+		# Top + bottom share the stem texture regardless of meta.
+		if face_idx == 0 or face_idx == 1:
+			return "pumpkin_top"
+		# Map the stored meta to the face_idx of the side it faces.
+		# Inverse of the table in _chest_meta_from_yaw / pumpkin placement.
+		var front_face_idx: int = 5  # default -Z when meta=0
+		match meta:
+			0:
+				front_face_idx = 5  # -Z (north)
+			1:
+				front_face_idx = 3  # -X (west)
+			2:
+				front_face_idx = 4  # +Z (south)
+			3:
+				front_face_idx = 2  # +X (east)
+		if face_idx == front_face_idx:
+			return "jack_o_lantern_face" if id == JACK_O_LANTERN else "pumpkin_face"
+		return "pumpkin_side"
+	# Fallback for any future directional block that hits this path without
+	# a special-case branch — render side as if it were non-directional.
+	return get_face_texture(id, "side")
+
+
 static func get_face_texture(id: int, face: String) -> String:
 	match id:
 		BEDROCK:
@@ -1096,6 +1158,30 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "cactus_bottom"
 				_:
 					return "cactus_side"
+		PUMPKIN:
+			match face:
+				"top", "bottom":
+					return "pumpkin_top"
+				_:
+					# Carved face on every side — used by the auxiliary
+					# render paths (BlockIconRenderer iso bake, held-in-
+					# hand mini-cube, DroppedItem world entity). Matches
+					# vanilla Alpha's 2D inventory icon, which shows the
+					# carved face from every angle.
+					#
+					# IN-WORLD rendering takes a different path: the chunk
+					# mesher dispatches PUMPKIN / JACK_O_LANTERN through
+					# directional_face_texture(), which reads block_meta
+					# and only puts the carved face on the single side the
+					# pumpkin was placed facing. So world geometry is
+					# meta-accurate even though this fallback isn't.
+					return "pumpkin_face"
+		JACK_O_LANTERN:
+			match face:
+				"top", "bottom":
+					return "pumpkin_top"
+				_:
+					return "jack_o_lantern_face"
 		SAPLING:
 			return "sapling"
 		WATER_FLOWING, WATER_STILL:

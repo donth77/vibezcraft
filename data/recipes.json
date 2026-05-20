@@ -287,9 +287,27 @@
       "pattern": ["GSG", "SGS", "GSG"],
       "key": {"G": "gunpowder", "S": "sand"},
       "result": {"id": "tnt", "count": 1}
+    },
+    {
+      "id": "compass",
+      "pattern": [" I ", "IRI", " I "],
+      "key": {"I": "iron_ingot", "R": "redstone"},
+      "result": {"id": "compass", "count": 1}
+    },
+    {
+      "id": "clock",
+      "pattern": [" G ", "GRG", " G "],
+      "key": {"G": "gold_ingot", "R": "redstone"},
+      "result": {"id": "clock", "count": 1}
     }
   ],
-  "shapeless": [],
+  "shapeless": [
+    {
+      "id": "jack_o_lantern",
+      "ingredients": ["pumpkin", "torch"],
+      "result": {"id": "jack_o_lantern", "count": 1}
+    }
+  ],
   "_disabled": [
     {
       "_reason": "Beta 1.6 addition; not in Alpha 1.2.6. Move into 'shaped' to re-enable.",

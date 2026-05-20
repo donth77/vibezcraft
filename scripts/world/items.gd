@@ -118,6 +118,12 @@ const COMPASS: int = 150
 # over each in-game day. Vanilla recipe: 4 gold ingots + 1 redstone;
 # again, recipe deferred until redstone lands.
 const CLOCK: int = 151
+# Redstone dust — Alpha 1.2.6 ItemRedstone (id 331 vanilla → 152 here).
+# Drops from breaking redstone ore (Beta added that block; for now supply
+# via debug spawner). Used as the catalyst in compass + clock recipes;
+# the power-system semantics (signal propagation, repeaters, etc.) come
+# in a later phase — for now this is just a craft ingredient item.
+const REDSTONE: int = 152
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -307,6 +313,8 @@ static func id_from_name(item_name: String) -> int:
 			return COMPASS
 		"clock":
 			return CLOCK
+		"redstone":
+			return REDSTONE
 		"tnt":
 			return Blocks.TNT
 		"air":
@@ -363,6 +371,10 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.COBBLESTONE_STAIRS
 		"ladder":
 			return Blocks.LADDER
+		"pumpkin":
+			return Blocks.PUMPKIN
+		"jack_o_lantern":
+			return Blocks.JACK_O_LANTERN
 	return -1
 
 
@@ -476,6 +488,8 @@ static func display_name(item_id: int) -> String:
 			return "Compass"
 		CLOCK:
 			return "Clock"
+		REDSTONE:
+			return "Redstone"
 		Blocks.TNT:
 			return "TNT"
 		Blocks.AIR:
@@ -544,6 +558,10 @@ static func display_name(item_id: int) -> String:
 			return "Snow Layer"
 		Blocks.CACTUS:
 			return "Cactus"
+		Blocks.PUMPKIN:
+			return "Pumpkin"
+		Blocks.JACK_O_LANTERN:
+			return "Jack o'Lantern"
 	return ""
 
 

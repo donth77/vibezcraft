@@ -93,6 +93,12 @@ const _LAYOUT := {
 	"cactus_top": 49,
 	"cactus_side": 50,
 	"cactus_bottom": 51,
+	# Pumpkin tiles (Alpha 1.2.0 Halloween Update). 4 distinct sprites
+	# from vanilla terrain.png cells (6, 6) + (6..8, 7).
+	"pumpkin_top": 52,
+	"pumpkin_side": 53,
+	"pumpkin_face": 54,
+	"jack_o_lantern_face": 55,
 }
 
 static var active_pack: String = DEFAULT_PACK

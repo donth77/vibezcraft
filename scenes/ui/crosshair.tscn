@@ -1,4 +1,4 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=14 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 [ext_resource type="Script" path="res://scripts/ui/inventory_screen.gd" id="2_inv"]
@@ -13,6 +13,8 @@
 [ext_resource type="Script" path="res://scripts/ui/water_overlay.gd" id="10_water"]
 [ext_resource type="Script" path="res://scripts/ui/debug_item_spawner.gd" id="11_spawner"]
 [ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
+[ext_resource type="Script" path="res://scripts/ui/pumpkin_overlay.gd" id="16_pumpkin"]
+[ext_resource type="Texture2D" path="res://assets/textures/gui/pumpkinblur.png" id="17_pumpkin_tex"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/icons.png" id="13_icons"]
 [ext_resource type="Shader" path="res://shaders/crosshair.gdshader" id="14_xhair_sh"]
 
@@ -79,6 +81,13 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("12_fire")
+
+[node name="PumpkinOverlay" type="TextureRect" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+texture = ExtResource("17_pumpkin_tex")
+script = ExtResource("16_pumpkin")
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
 

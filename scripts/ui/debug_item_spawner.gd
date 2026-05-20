@@ -58,6 +58,8 @@ const _BLOCKS: Array = [
 	Blocks.CACTUS,
 	Blocks.SNOW_LAYER,
 	Blocks.TNT,
+	Blocks.PUMPKIN,
+	Blocks.JACK_O_LANTERN,
 ]
 
 const _ITEMS: Array = [
@@ -71,6 +73,9 @@ const _ITEMS: Array = [
 	Items.LEATHER,
 	Items.BONEMEAL,
 	Items.GUNPOWDER,
+	Items.REDSTONE,
+	Items.COMPASS,
+	Items.CLOCK,
 	Items.BUCKET_EMPTY,
 	Items.BUCKET_WATER,
 	Items.BUCKET_LAVA,

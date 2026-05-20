@@ -898,6 +898,17 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		SFX.play_place(stack.item_id)
 		inv.consume_one_selected()
 		return true
+	# Pumpkin / Jack O'Lantern — vanilla BlockPumpkin orients the carved
+	# face toward the player (BlockPumpkin.b sets meta from EntityLiving
+	# yaw). Same convention as chest, so the same yaw quadrant helper
+	# applies. meta 0..3 maps -Z / -X / +Z / +X to which side carries
+	# the face — see Blocks.directional_face_texture.
+	if stack.item_id == Blocks.PUMPKIN or stack.item_id == Blocks.JACK_O_LANTERN:
+		var pumpkin_meta: int = _chest_meta_from_yaw()
+		_chunk_manager.set_world_block_with_meta(place, stack.item_id, pumpkin_meta)
+		SFX.play_place(stack.item_id)
+		inv.consume_one_selected()
+		return true
 	_chunk_manager.set_world_block(place, stack.item_id)
 	SFX.play_place(stack.item_id)
 	inv.consume_one_selected()

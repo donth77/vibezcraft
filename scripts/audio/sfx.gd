@@ -566,6 +566,11 @@ func _material_for(block_id: int) -> String:
 			return "sand"  # vanilla snow uses 'cloth' but sand is closest crunch
 		Blocks.CACTUS:
 			return "grass"  # vanilla: cloth/grass-like
+		Blocks.PUMPKIN, Blocks.JACK_O_LANTERN:
+			# Vanilla Alpha nq.java:109,114 — both pumpkin variants set
+			# stepSound = hb.e (wood material), same as planks / log /
+			# chest / ladder. cx(86, 102, false).a(e) and the lit form.
+			return "wood"
 	return ""
 
 

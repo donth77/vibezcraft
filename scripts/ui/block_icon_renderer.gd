@@ -68,6 +68,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	# TNT renders as a full cube with 3 distinct faces (top fuse plate, side
 	# lettering, plain red bottom). Iso bake shows the top + 2 sides cleanly.
 	Blocks.TNT,
+	# Pumpkin + Jack O'Lantern — both full cubes with distinct top vs side
+	# textures (carved face + plain panel + stem-up top). Iso bake gives a
+	# recognizable inventory icon.
+	Blocks.PUMPKIN,
+	Blocks.JACK_O_LANTERN,
 ]
 
 static var _viewport: SubViewport

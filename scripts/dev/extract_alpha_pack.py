@@ -68,6 +68,15 @@ TERRAIN_TILES = {
 	"flower_yellow": (13, 0),
 	"mushroom_red": (12, 1),
 	"mushroom_brown": (13, 1),
+	# Pumpkins (Alpha 1.2.0 Halloween Update). 4 tiles:
+	#   pumpkin_top  (6, 6) — stem-up disc, shared with bottom face
+	#   pumpkin_side (6, 7) — plain ribbed panel for the 3 non-face sides
+	#   pumpkin_face (7, 7) — carved face, dark interior (unlit)
+	#   jack_o_lantern_face (8, 7) — same cut, yellow glow inside (lit)
+	"pumpkin_top": (6, 6),
+	"pumpkin_side": (6, 7),
+	"pumpkin_face": (7, 7),
+	"jack_o_lantern_face": (8, 7),
 	# `furnace_top` is intentionally NOT here. Vanilla Alpha 1.2.6
 	# BlockFurnace.getBlockTextureFromSide (mj.java:46-52) returns
 	# `nq.t.bg` (= the STONE texture index) for both top (n5=1) and
@@ -142,6 +151,19 @@ ITEM_TILES = {
 	"iron_boots": (2, 3),
 	"diamond_boots": (3, 3),
 	"gold_boots": (4, 3),
+	# Redstone dust — Alpha 1.2.6 items.png (col=8, row=3). Static sprite
+	# in inventory; the powered/path connection rendering is a worldgen
+	# block job, deferred until we ship the redstone power system.
+	"redstone": (8, 3),
+	# Clock — items.png (col=6, row=4). Vanilla has a 16-frame strip for
+	# the rotating dial; we pull the first frame as the static sprite
+	# (held + dropped + recipe icon). Inventory icon uses a procedural
+	# dynamic dial driven by WorldTime.current_tick — see item_icons.gd.
+	"clock": (6, 4),
+	# Compass — items.png (col=12, row=4). Same deal as clock: first
+	# frame of a 16-frame rotation strip; held/dropped use this static
+	# sprite, inventory uses procedural dynamic needle.
+	"compass": (12, 4),
 }
 
 # Items with no Alpha 1.2.6 source — fall back by aliasing another sprite.

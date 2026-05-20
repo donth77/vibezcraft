@@ -41,6 +41,11 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	# TNT — flat-sprite fallback before BlockIconRenderer's iso-cube bake
 	# lands. Uses the side face (lettering) which is the most recognizable.
 	Blocks.TNT: "tnt_side",
+	# Pumpkin / Jack O'Lantern fallback. Side face (carved) is the most
+	# recognizable. BlockIconRenderer's 3D iso bake replaces this once
+	# baking finishes.
+	Blocks.PUMPKIN: "pumpkin_face",
+	Blocks.JACK_O_LANTERN: "jack_o_lantern_face",
 }
 
 # Item sprite basenames. Resolved at load time: first try
@@ -107,6 +112,15 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.FLINT_AND_STEEL: "flint_and_steel",
 	Items.WOODEN_DOOR: "wooden_door",
 	Items.IRON_DOOR: "iron_door",
+	# Compass + clock + redstone. Compass/clock have a STATIC sprite here
+	# for held + dropped rendering (sprite_extruder voxelizes the 2D
+	# sprite into a 3D mesh once at pickup). icon_for() short-circuits
+	# above this map for COMPASS / CLOCK to render the dynamic dial
+	# directly in inventory, so this entry only feeds the world-render
+	# paths. Redstone has no special render path — straight sprite.
+	Items.COMPASS: "compass",
+	Items.CLOCK: "clock",
+	Items.REDSTONE: "redstone",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.
@@ -127,6 +141,20 @@ static var _cache: Dictionary = {}
 # render so headless tests that never touch the icon pay no setup cost.
 static var _compass_texture: ImageTexture
 static var _clock_texture: ImageTexture
+# Base sprite buffers (16×16 RGBA) loaded once from disk. Vanilla
+# ae.java / gp.java pull these from items.png + misc/dial.png at
+# construction time; we extract them at boot.
+static var _compass_base: Image = null
+static var _clock_base: Image = null
+static var _clock_dial: Image = null
+# Smoothed angle + angular velocity for the spring-damped needle motion.
+# Mirrors vanilla ae.java's `this.i` (angle) + `this.j` (velocity) and
+# gp.java's same pair for the clock. Persisted across frames so the
+# needle eases into changes rather than snapping.
+static var _compass_smoothed: float = 0.0
+static var _compass_velocity: float = 0.0
+static var _clock_smoothed: float = 0.0
+static var _clock_velocity: float = 0.0
 # Player + spawn caches. find_child is O(tree); cache the result and
 # re-resolve only when the cached node has been freed (scene transition).
 static var _cached_player: Node3D = null
@@ -141,9 +169,9 @@ static func icon_for(item_id: int) -> Texture2D:
 	# item (not new allocations per call), so the per-frame cost is one
 	# 16×16 RGBA8 buffer rebuild + a GPU upload.
 	if item_id == Items.COMPASS:
-		return _render_compass_icon(_compass_angle())
+		return _render_compass_icon(_compass_target_angle())
 	if item_id == Items.CLOCK:
-		return _render_clock_icon(_clock_angle())
+		return _render_clock_icon(_clock_target_angle())
 	# Buckets — canonical Alpha 1.2.6 sprites (gui/items.png tiles 74/75/76,
 	# extracted directly from the vendor jar). Short-circuit above the
 	# cache: a prior call before the bucket branch existed could cache
@@ -326,57 +354,97 @@ static func _get_player() -> Node3D:
 	return _cached_player
 
 
-# atan2(spawn - player) in icon-space. Inventory open on the main menu (no
-# player in tree) returns 0.0 — the needle just points right; harmless.
-static func _compass_angle() -> float:
+# Target compass needle angle in icon-space. Mirrors ae.java:62-69:
+#   d3 = (player_yaw - 90°) * PI/180 - atan2(spawn_z - player_z, spawn_x - player_x)
+# Player yaw is already radians in Godot, so the deg→rad conversion
+# collapses to (yaw - PI/2). Main menu / no-player fallback returns 0.
+static func _compass_target_angle() -> float:
 	var player: Node3D = _get_player()
 	if player == null:
 		return 0.0
 	var dx: float = _cached_spawn.x - player.global_position.x
 	var dz: float = _cached_spawn.z - player.global_position.z
-	# atan2(z, x) so dx=1 yields angle 0 and the needle points east at +X.
-	return atan2(dz, dx)
+	return player.rotation.y - PI / 2.0 - atan2(dz, dx)
 
 
-# Full rotation per in-game day (24000 ticks). Subtract PI/2 in the
-# renderer so tick 6000 (noon) lands at the top of the dial.
-static func _clock_angle() -> float:
-	return float(WorldTime.current_tick()) / 24000.0 * TAU
+# Target clock angle. Vanilla gp.java:38-39 reads world.b(1.0) (sky-angle
+# fraction 0..1) and computes d3 = -f * 2 * PI. Our WorldTime.phase()
+# returns 0..1 in the same convention (0=sunrise).
+static func _clock_target_angle() -> float:
+	return -WorldTime.phase() * TAU
 
 
-# Render a 16×16 compass face with a needle pointing along `angle` rad.
-# Mutates _compass_texture in place so the GPU upload is one .update()
-# instead of an allocation. Color palette is solid-Alpha rather than the
-# vanilla 16-frame strip (gui/items.png column 6) because procedural is
-# cheaper to ship than a 16-step rotation atlas.
-static func _render_compass_icon(angle: float) -> Texture2D:
-	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
-	# Face: dark blue-gray. Mirrors the navy disc on vanilla's sprite.
-	img.fill(Color(0.15, 0.18, 0.25, 1.0))
-	# Outer ring
-	var ring := Color(0.45, 0.5, 0.6, 1.0)
-	for i in range(16):
-		img.set_pixel(i, 0, ring)
-		img.set_pixel(i, 15, ring)
-		img.set_pixel(0, i, ring)
-		img.set_pixel(15, i, ring)
-	# Needle: 6-pixel red line from center. Pixel-walk uses round() per
-	# step which gives a thick-enough line for 16×16 without antialiasing.
-	var cx: float = 7.5
-	var cy: float = 7.5
-	var needle := Color(0.95, 0.2, 0.2, 1.0)
-	for t in range(7):
-		var fx: float = cx + cos(angle) * float(t)
-		var fy: float = cy + sin(angle) * float(t)
-		var x: int = int(round(fx))
-		var y: int = int(round(fy))
-		if x >= 1 and x < 15 and y >= 1 and y < 15:
-			img.set_pixel(x, y, needle)
-	# Center hub — slightly brighter so the needle origin reads cleanly.
-	img.set_pixel(7, 7, Color(1, 1, 1))
-	img.set_pixel(8, 7, Color(1, 1, 1))
-	img.set_pixel(7, 8, Color(1, 1, 1))
-	img.set_pixel(8, 8, Color(1, 1, 1))
+# Ensure base sprites are loaded into Image buffers. The set_pixelv calls
+# below need direct Image access, not Texture2D. Loaded lazily on first
+# compass/clock render so headless tests + main menu pay nothing.
+static func _ensure_compass_base() -> void:
+	if _compass_base != null:
+		return
+	var tex: Texture2D = _load_item_sprite("compass")
+	if tex == null:
+		return
+	_compass_base = tex.get_image()
+	if _compass_base != null and _compass_base.get_format() != Image.FORMAT_RGBA8:
+		_compass_base.convert(Image.FORMAT_RGBA8)
+
+
+static func _ensure_clock_base() -> void:
+	if _clock_base == null:
+		var tex: Texture2D = _load_item_sprite("clock")
+		if tex != null:
+			_clock_base = tex.get_image()
+			if _clock_base != null and _clock_base.get_format() != Image.FORMAT_RGBA8:
+				_clock_base.convert(Image.FORMAT_RGBA8)
+	if _clock_dial == null:
+		var dial_tex: Texture2D = load("res://assets/textures/gui/dial.png") as Texture2D
+		if dial_tex != null:
+			_clock_dial = dial_tex.get_image()
+			if _clock_dial != null and _clock_dial.get_format() != Image.FORMAT_RGBA8:
+				_clock_dial.convert(Image.FORMAT_RGBA8)
+
+
+# Vanilla ae.java:31-129 port. Spring-damped angle update + needle draw
+# on top of the loaded compass.png base sprite. Two needle loops:
+#   1. n12 ∈ [-4, 4]:  gray hub crossbar perpendicular to the needle
+#   2. n12 ∈ [-8, 16]: needle itself; red for forward half, gray for back
+# Compress the y-step by 0.5 — vanilla's perspective trick that makes
+# the needle look like it's tilted into the bezel rather than flat-on.
+static func _render_compass_icon(target_angle: float) -> Texture2D:
+	_ensure_compass_base()
+	# Spring-damped update toward target. Wrap delta to [-PI, PI] then
+	# clamp velocity-step input to ±1 so a 180° flip doesn't blow up.
+	var d2: float = target_angle - _compass_smoothed
+	while d2 < -PI:
+		d2 += TAU
+	while d2 >= PI:
+		d2 -= TAU
+	d2 = clampf(d2, -1.0, 1.0)
+	_compass_velocity += d2 * 0.1
+	_compass_velocity *= 0.8
+	_compass_smoothed += _compass_velocity
+	var d6: float = sin(_compass_smoothed)
+	var d7: float = cos(_compass_smoothed)
+	# Start from base sprite (gives us the navy bezel + cardinal marks).
+	var img: Image
+	if _compass_base != null:
+		img = _compass_base.duplicate()
+	else:
+		img = Image.create(16, 16, false, Image.FORMAT_RGBA8)
+		img.fill(Color(0.1, 0.12, 0.2))
+	# Needle hub crossbar — gray, perpendicular to needle axis.
+	var hub := Color8(100, 100, 100)
+	for n12 in range(-4, 5):
+		var nx: int = int(8.5 + d7 * float(n12) * 0.3)
+		var ny: int = int(7.5 - d6 * float(n12) * 0.3 * 0.5)
+		if nx >= 0 and nx < 16 and ny >= 0 and ny < 16:
+			img.set_pixel(nx, ny, hub)
+	# Needle pointer — red front (n12 >= 0), gray back.
+	var fwd := Color8(255, 20, 20)
+	for n12 in range(-8, 17):
+		var nx: int = int(8.5 + d6 * float(n12) * 0.3)
+		var ny: int = int(7.5 + d7 * float(n12) * 0.3 * 0.5)
+		if nx >= 0 and nx < 16 and ny >= 0 and ny < 16:
+			img.set_pixel(nx, ny, fwd if n12 >= 0 else hub)
 	if _compass_texture == null:
 		_compass_texture = ImageTexture.create_from_image(img)
 	else:
@@ -384,36 +452,59 @@ static func _render_compass_icon(angle: float) -> Texture2D:
 	return _compass_texture
 
 
-# Render a 16×16 clock face with a single hand at `angle` rad. Same
-# in-place .update() pattern as the compass.
-static func _render_clock_icon(angle: float) -> Texture2D:
-	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
-	# Face: cream / off-white, mimicking vanilla's bone-colored sprite.
-	img.fill(Color(0.92, 0.88, 0.78, 1.0))
-	# Outer ring — darker bronze.
-	var ring := Color(0.45, 0.35, 0.18, 1.0)
-	for i in range(16):
-		img.set_pixel(i, 0, ring)
-		img.set_pixel(i, 15, ring)
-		img.set_pixel(0, i, ring)
-		img.set_pixel(15, i, ring)
-	# Hand: -PI/2 puts angle=0 (tick 0 = midnight) at the top.
-	var cx: float = 7.5
-	var cy: float = 7.5
-	var hand := Color(0.1, 0.1, 0.1, 1.0)
-	var draw_angle: float = angle - PI / 2.0
-	for t in range(7):
-		var fx: float = cx + cos(draw_angle) * float(t)
-		var fy: float = cy + sin(draw_angle) * float(t)
-		var x: int = int(round(fx))
-		var y: int = int(round(fy))
-		if x >= 1 and x < 15 and y >= 1 and y < 15:
-			img.set_pixel(x, y, hand)
-	# Pivot dot.
-	img.set_pixel(7, 7, ring)
-	img.set_pixel(8, 7, ring)
-	img.set_pixel(7, 8, ring)
-	img.set_pixel(8, 8, ring)
+# Vanilla gp.java:34-89 port. Spring-damped angle update + per-pixel
+# substitution: for every pixel in the clock base that's a "marker"
+# (red-magenta, i.e. R == B and G == 0 and R > 0), sample the dial
+# sprite at the rotated UV and blit it through the marker's intensity.
+# Non-marker pixels copy from the base unchanged.
+static func _render_clock_icon(target_angle: float) -> Texture2D:
+	_ensure_clock_base()
+	# Spring damping (same as compass).
+	var d2: float = target_angle - _clock_smoothed
+	while d2 < -PI:
+		d2 += TAU
+	while d2 >= PI:
+		d2 -= TAU
+	d2 = clampf(d2, -1.0, 1.0)
+	_clock_velocity += d2 * 0.1
+	_clock_velocity *= 0.8
+	_clock_smoothed += _clock_velocity
+	var d4: float = sin(_clock_smoothed)
+	var d5: float = cos(_clock_smoothed)
+	# Fallback if base sprites missing (shouldn't normally happen).
+	if _clock_base == null or _clock_dial == null:
+		var fallback := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+		fallback.fill(Color(0.92, 0.88, 0.78))
+		if _clock_texture == null:
+			_clock_texture = ImageTexture.create_from_image(fallback)
+		else:
+			_clock_texture.update(fallback)
+		return _clock_texture
+	var img: Image = _clock_base.duplicate()
+	for y in range(16):
+		for x in range(16):
+			var base_color: Color = _clock_base.get_pixel(x, y)
+			var r: int = int(base_color.r * 255.0)
+			var g: int = int(base_color.g * 255.0)
+			var b: int = int(base_color.b * 255.0)
+			# Vanilla marker test: r == b AND g == 0 AND r > 0.
+			# Those pixels get replaced by the rotated dial sample,
+			# modulated by the marker's red intensity.
+			if r == b and g == 0 and r > 0:
+				var d6: float = -(float(x) / 15.0 - 0.5)
+				var d7: float = float(y) / 15.0 - 0.5
+				var n7: int = int((d6 * d5 + d7 * d4 + 0.5) * 16.0)
+				var n8: int = int((d7 * d5 - d6 * d4 + 0.5) * 16.0)
+				var dx_i: int = n7 & 0xF
+				var dy_i: int = n8 & 0xF
+				var dial_color: Color = _clock_dial.get_pixel(dx_i, dy_i)
+				var modulated := Color(
+					dial_color.r * base_color.r,
+					dial_color.g * base_color.r,
+					dial_color.b * base_color.r,
+					dial_color.a
+				)
+				img.set_pixel(x, y, modulated)
 	if _clock_texture == null:
 		_clock_texture = ImageTexture.create_from_image(img)
 	else:

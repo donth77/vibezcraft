@@ -404,7 +404,17 @@ static func _emit_block_faces(
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
-		var rect: Rect2 = BlockAtlas.uv_rect_for(id, _FACE_KIND[face_idx])
+		var rect: Rect2
+		if Blocks.has_directional_face(id):
+			# Directional blocks (pumpkin, jack o'lantern) need per-face-
+			# index + meta lookup so the carved face only appears on the
+			# side the player placed it facing. Slower string-keyed
+			# atlas lookup, but rare enough that the cost is negligible.
+			var meta_d: int = chunk.get_block_meta_unchecked(x, y, z)
+			var tex_d: String = Blocks.directional_face_texture(id, face_idx, meta_d)
+			rect = BlockAtlas.uv_rect(tex_d)
+		else:
+			rect = BlockAtlas.uv_rect_for(id, _FACE_KIND[face_idx])
 		var base := verts.size()
 		var v0 := origin + (face_verts[0] as Vector3)
 		var v1 := origin + (face_verts[1] as Vector3)
