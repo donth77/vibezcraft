@@ -122,7 +122,6 @@ func _read_dotenv() -> Dictionary:
 
 func _ready() -> void:
 	InputActions.register_defaults()
-	_apply_resolution_override()
 	# Install the bitmap MC font as the global fallback so every Control that
 	# doesn't override its font picks it up automatically — no per-scene wiring.
 	var mc_font := MinecraftFont.get_font()
@@ -142,6 +141,13 @@ func _ready() -> void:
 	# survives relaunches; env / .env still win so devs can override without
 	# editing the saved profile.
 	var cfg := SettingsMenu.load_config()
+	# Resolution: apply the cfg-saved value first, then env override wins.
+	# Order matters — _apply_resolution_override is a no-op when the env var
+	# isn't set, so cfg always lands; when it IS set, the env call overrides.
+	var cfg_resolution: String = cfg.get_value("graphics", "resolution", "")
+	if cfg_resolution != "":
+		SettingsMenu.apply_resolution_value(cfg_resolution)
+	_apply_resolution_override()
 	var settings_pack: String = cfg.get_value("graphics", "texture_pack", texture_pack)
 	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", settings_pack)
 	BlockAtlas.active_pack = resolved_pack

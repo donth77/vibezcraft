@@ -28,6 +28,16 @@ const _PACKS: Array[String] = ["alpha_vanilla", "pixel_perfection", "pixellab", 
 const _CLOUD_QUALITY_LABELS: Array[String] = ["Off", "Fast", "Fancy"]
 const _FPS_CAPS: Array[int] = [0, 60, 90, 120, 144]
 const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
+# Resolution dropdown. Stored as "WxH" or "fullscreen" in settings.cfg so the
+# string round-trips cleanly with the MC_CLONE_RESOLUTION env-var format
+# (Game._apply_resolution_override). Env still wins at boot for one-off
+# overrides; cfg is what the settings UI persists.
+const _RESOLUTION_VALUES: Array[String] = [
+	"1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160", "fullscreen"
+]
+const _RESOLUTION_LABELS: Array[String] = [
+	"1280×720", "1600×900", "1920×1080", "2560×1440", "3840×2160 (4K)", "Fullscreen"
+]
 # VSync is exposed as a simple on/off checkbox — the Adaptive/Mailbox
 # modes are power-user territory that added UI complexity for no 95%-
 # case benefit. Advanced users can set graphics.vsync directly in
@@ -37,6 +47,11 @@ const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
 
 var _music_slider: HSlider
 var _music_label: Label
+var _resolution_option: OptionButton
+# Active option list — usually == _RESOLUTION_VALUES, but drops "fullscreen"
+# when running in the editor's embedded play window (DisplayServer rejects
+# the mode change). Built in `_build_panel`, read by load / save.
+var _active_resolution_values: Array[String]
 var _distance_option: OptionButton
 var _pack_option: OptionButton
 var _cloud_option: OptionButton
@@ -113,16 +128,28 @@ func _build_panel() -> void:
 	# 88 px below the title's anchor — title is 48 px tall, plus a 40 px
 	# breathing gap so the heading reads as a separate block from the rows.
 	vbox.offset_top = 88
-	# 9 rows × 60 px + 8 × 10 separation = 620 px. Row height is 60 (not 52)
+	# 10 rows × 60 px + 9 × 10 separation = 690 px. Row height is 60 (not 52)
 	# because CheckBox + HSlider have intrinsic minimum heights from Godot's
 	# default theme that exceed the controls' explicit custom_minimum_size,
 	# so under-sizing here used to push the bottom rows past the Save button.
-	vbox.offset_bottom = 88 + 620
+	vbox.offset_bottom = 88 + 690
 	vbox.add_theme_constant_override("separation", 10)
 	add_child(vbox)
 
 	_add_music_row(vbox)
 	_sfx_checkbox = _add_checkbox_row(vbox, "Sound effects")
+	# Drop the "Fullscreen" entry when embedded — DisplayServer.window_set_mode
+	# is rejected ("Embedded window can't be resized."), so offering it would
+	# just dead-end the user. Other sizes stay visible (apply_resolution_value
+	# silently no-ops them too, but at least they're not actively broken-looking).
+	_active_resolution_values = _RESOLUTION_VALUES.duplicate()
+	var labels: Array[String] = _RESOLUTION_LABELS.duplicate()
+	if _window_is_embedded():
+		var fs_idx: int = _active_resolution_values.find("fullscreen")
+		if fs_idx >= 0:
+			_active_resolution_values.remove_at(fs_idx)
+			labels.remove_at(fs_idx)
+	_resolution_option = _add_option_row(vbox, "Resolution", labels)
 	var dist_labels: Array = []
 	for i in range(_RENDER_DISTANCES.size()):
 		dist_labels.append("%s (%d)" % [_RENDER_DISTANCE_LABELS[i], _RENDER_DISTANCES[i]])
@@ -141,8 +168,8 @@ func _build_panel() -> void:
 	button_col.anchor_bottom = 0.03
 	button_col.offset_left = -400
 	button_col.offset_right = 400
-	button_col.offset_top = 724
-	button_col.offset_bottom = 724 + 176
+	button_col.offset_top = 794
+	button_col.offset_bottom = 794 + 176
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
@@ -394,11 +421,62 @@ static func apply_config(cfg: ConfigFile) -> void:
 	DisplayServer.window_set_vsync_mode(
 		int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
 	)
+	var resolution: String = cfg.get_value("graphics", "resolution", "")
+	if resolution != "":
+		apply_resolution_value(resolution)
 	Game.fog_enabled = bool(cfg.get_value("graphics", "fog_enabled", true))
 	Game.sfx_enabled = bool(cfg.get_value("audio", "sfx_enabled", true))
 	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
 	if Music != null:
 		Music.set_volume(music_vol)
+
+
+# Apply a resolution string ("WxH" or "fullscreen") to the live window.
+# Shared by Game._ready (boot-time cfg load) and _on_save_pressed (live
+# apply). Skipped in headless mode and when the game is running in the
+# editor's embedded play window — Godot prints "Embedded window can't
+# be resized." and the resize is rejected, so we no-op cleanly instead
+# of triggering the warning. Run from terminal (godot --path . main.tscn)
+# or unset Editor → Run → Window Placement → "Embed Subwindows" to use
+# Fullscreen / custom sizes.
+static func apply_resolution_value(value: String) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	# Embedded play silently skips: DisplayServer rejects the call, the
+	# Fullscreen dropdown entry is already hidden in this mode, and the
+	# user can't meaningfully test the change without leaving embedded.
+	# A warning here just noisies the console on every Save / boot.
+	if _window_is_embedded():
+		return
+	if value.to_lower() == "fullscreen":
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		return
+	# Toggling fullscreen → windowed first; otherwise window_set_size is a
+	# no-op while the window is still fullscreen.
+	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	var parts: PackedStringArray = value.to_lower().split("x")
+	if parts.size() != 2:
+		return
+	var w: int = int(parts[0])
+	var h: int = int(parts[1])
+	if w < 320 or h < 240:
+		return
+	DisplayServer.window_set_size(Vector2i(w, h))
+	var screen_size: Vector2i = DisplayServer.screen_get_size()
+	var window_size: Vector2i = DisplayServer.window_get_size()
+	DisplayServer.window_set_position((screen_size - window_size) / 2)
+
+
+# True when the game is running under the Godot editor (the common case
+# where the play window is embedded and DisplayServer resize / mode calls
+# are rejected with "Embedded window can't be resized."). Exported builds
+# return false. Heuristic, not a direct embedded-check — there's no clean
+# API for that across Godot 4.x versions — but it's safe: editor users
+# always have the option to run from terminal or disable Embed Subwindows
+# in Editor → Settings → Run → Window Placement.
+static func _window_is_embedded() -> bool:
+	return OS.has_feature("editor")
 
 
 func _load_settings() -> void:
@@ -408,10 +486,17 @@ func _load_settings() -> void:
 	var clouds: int = int(cfg.get_value("graphics", "cloud_quality", Game.CLOUD_QUALITY_FANCY))
 	var fps_cap: int = int(cfg.get_value("graphics", "fps_cap", 90))
 	var vsync_mode: int = int(cfg.get_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED))
+	# Default selection mirrors the project.godot 1920×1080 window size so
+	# first-launch users see their actual current resolution preselected.
+	var resolution: String = cfg.get_value("graphics", "resolution", "1920x1080")
 	_distance_option.selected = maxi(_RENDER_DISTANCES.find(dist), 0)
 	_pack_option.selected = maxi(_PACKS.find(pack), 0)
 	_cloud_option.selected = clamp(clouds, 0, _CLOUD_QUALITY_LABELS.size() - 1)
 	_fps_option.selected = maxi(_FPS_CAPS.find(fps_cap), 0)
+	# Look up against the filtered list — when fullscreen was previously
+	# saved but we're now embedded (so it's not in the dropdown), find()
+	# returns -1 → clamp to 0 (first available size).
+	_resolution_option.selected = maxi(_active_resolution_values.find(resolution.to_lower()), 0)
 	# Treat anything non-DISABLED as "on" — if the user had Adaptive or
 	# Mailbox saved before this UI simplified, flipping the checkbox to
 	# On preserves the gist; manual editing of settings.cfg can restore
@@ -439,6 +524,7 @@ func _on_save_pressed() -> void:
 	cfg.set_value("graphics", "texture_pack", _PACKS[_pack_option.selected])
 	cfg.set_value("graphics", "cloud_quality", _cloud_option.selected)
 	cfg.set_value("graphics", "fps_cap", _FPS_CAPS[_fps_option.selected])
+	cfg.set_value("graphics", "resolution", _active_resolution_values[_resolution_option.selected])
 	var vsync_value: int = (
 		DisplayServer.VSYNC_ENABLED
 		if _vsync_checkbox.button_pressed
