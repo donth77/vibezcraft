@@ -10,6 +10,9 @@ const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
 # preload() sidesteps a Godot editor class-index race on fresh class_name.
 const _TICK_SCHEDULER: GDScript = preload("res://scripts/world/tick_scheduler.gd")
 const _BLOCK_FX: GDScript = preload("res://scripts/world/block_fx.gd")
+const _SAVE_LOAD: GDScript = preload("res://scripts/persistence/save_load.gd")
+const _AUTOSAVE_INTERVAL_SEC: float = 300.0
+const _AUTOSAVE_INDICATOR_VISIBLE_SEC: float = 1.0
 
 # Leaf-decay + sapling-growth delays. Exponential-distributed to
 # approximate Alpha random-tick pacing. MIN clamps avoid same-frame
@@ -130,6 +133,16 @@ var _spawn_queue_set: Dictionary = {}
 var _last_chunk_set_coord: Vector2i = Vector2i(2147483647, 2147483647)
 var _cached_player_chunk: Vector2i = Vector2i.ZERO
 
+# Autosave (step 7.4 — BETA exception per .claude/pre-mob-roadmap.md).
+# Alpha 1.2.6 had no autosave — saved only on pause menu open + save-
+# and-quit (jl.java + cy.java:250). Constants live at the top with the
+# rest; the timer / label / session start live here.
+var _autosave_timer: Timer
+var _autosave_label: Label
+# Wall-clock at session start, used to add session duration to the
+# cumulative play_time_seconds field in world.json each autosave.
+var _session_start_msec: int = 0
+
 
 func _ready() -> void:
 	_player = get_node_or_null(player_path) as Node3D
@@ -148,6 +161,7 @@ func _ready() -> void:
 	var cfg := SettingsMenu.load_config()
 	render_distance = int(cfg.get_value("graphics", "render_distance", render_distance))
 	ChunkView.apply_alpha_fog(get_tree(), render_distance)
+	_setup_autosave()
 	# Spawn the player's current chunk synchronously so they have ground
 	# under them the moment the scene comes up. The rest of the render-
 	# distance ring spawns one chunk per frame so the LoadingScreen can
@@ -340,10 +354,15 @@ func _dispatch_workers() -> void:
 		# Pop the compressed save entry (microseconds — dict has + erase).
 		# Worker does decompress + rescan; main thread applies the side
 		# effects (sapling enqueue, pending-tick restore) in _materialize_chunk.
+		# Cache miss falls back to disk via SaveLoad (step 7.1 — disk read
+		# is one var_to_bytes-decoded region per first access, cached after).
+		# Empty dict from both means "this is fresh worldgen, no saved data".
 		var saved_entry: Dictionary = {}
 		if _saved_chunks.has(coord):
 			saved_entry = _saved_chunks[coord]
 			_saved_chunks.erase(coord)
+		else:
+			saved_entry = _SAVE_LOAD.load_chunk(coord)
 		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_entry))
 
 
@@ -386,6 +405,7 @@ func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary) -> void:
 		"from_save": not saved_entry.is_empty(),
 		"saplings": sapling_positions,
 		"pending_ticks": saved_entry.get("pending_ticks", []),
+		"tile_entities": saved_entry.get("tile_entities", {}),
 	}
 	_result_mutex.unlock()
 	PerfProbe.end("chunk_mgr.worker_total", probe_token)
@@ -443,6 +463,25 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 		var ticks: Array = data.get("pending_ticks", []) as Array
 		if not ticks.is_empty():
 			TickScheduler.restore_ticks(ticks)
+		# Tile entities (chests, furnaces). Split the worker's flat
+		# tile_entities dict back into per-type buckets and route to the
+		# respective singleton's restore_chunk. Empty dict = no TEs to
+		# restore (fresh worldgen chunks always land here).
+		var tile_entities: Dictionary = data.get("tile_entities", {}) as Dictionary
+		if not tile_entities.is_empty():
+			var chests: Dictionary = {}
+			var furnaces: Dictionary = {}
+			for local_pos: Vector3i in tile_entities:
+				var te: Dictionary = tile_entities[local_pos]
+				match te.get("type", ""):
+					"chest":
+						chests[local_pos] = te.get("items", [])
+					"furnace":
+						furnaces[local_pos] = te.get("data", {})
+			if not chests.is_empty():
+				ChestStorage.restore_chunk(coord, chests)
+			if not furnaces.is_empty():
+				FurnaceManager.restore_chunk(coord, furnaces)
 	# Drain cane tops collected during worldgen / decode (worker thread).
 	# Was a 32k-cell column walk on every materialize before — now a small
 	# list iteration (typical chunks: 0-4 entries).
@@ -582,6 +621,77 @@ func _drain_relight_results() -> void:
 	Lighting.apply_relight_result(result, self)
 
 
+# --- Autosave (step 7.4) ---
+
+
+# Build the 5-min autosave timer + the "Auto-saving..." overlay label.
+# Called from _ready. The label lives on a dedicated CanvasLayer so it
+# renders above the 3D world without being affected by camera or HUD
+# layout. Visible for 1 second per autosave, low-contrast white so it's
+# noticeable but not distracting.
+func _setup_autosave() -> void:
+	_session_start_msec = Time.get_ticks_msec()
+	_autosave_timer = Timer.new()
+	_autosave_timer.wait_time = _AUTOSAVE_INTERVAL_SEC
+	_autosave_timer.one_shot = false
+	_autosave_timer.autostart = true
+	_autosave_timer.timeout.connect(_on_autosave_tick)
+	add_child(_autosave_timer)
+	var layer := CanvasLayer.new()
+	layer.layer = 8  # above HUD (default 1) and pause menu (4-ish)
+	add_child(layer)
+	_autosave_label = Label.new()
+	_autosave_label.text = "Auto-saving..."
+	_autosave_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
+	_autosave_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1))
+	_autosave_label.add_theme_constant_override("shadow_offset_x", 1)
+	_autosave_label.add_theme_constant_override("shadow_offset_y", 1)
+	# Anchor bottom-left, 16 px in / 32 px up so it sits clear of the hotbar.
+	_autosave_label.anchor_left = 0.0
+	_autosave_label.anchor_right = 0.0
+	_autosave_label.anchor_top = 1.0
+	_autosave_label.anchor_bottom = 1.0
+	_autosave_label.offset_left = 16
+	_autosave_label.offset_top = -32
+	_autosave_label.offset_right = 200
+	_autosave_label.offset_bottom = -8
+	_autosave_label.visible = false
+	layer.add_child(_autosave_label)
+
+
+# Autosave fire callback. Flushes dirty regions, player, entities, and
+# world.json. Synchronous — at ~25 dirty chunks max in a render-distance-
+# 8 ring, the total cost is bounded (~50ms worst case from FastLZ +
+# var_to_bytes work). Indicator label appears for 1s so the player
+# notices the brief hitch isn't a freeze.
+func _on_autosave_tick() -> void:
+	if _autosave_label != null:
+		_autosave_label.visible = true
+	SaveLoad.flush_all_regions()
+	if _player != null:
+		PlayerSave.save_player(_player)
+	EntitySave.save_all(self)
+	var meta: Dictionary = WorldMeta.load_meta()
+	if meta.is_empty():
+		meta = WorldMeta.make_initial(Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.tick)
+	meta["seed"] = Worldgen.WORLD_SEED
+	meta["time_ticks"] = WorldTime.tick
+	var session_seconds: int = (Time.get_ticks_msec() - _session_start_msec) / 1000
+	meta["play_time_seconds"] = int(meta.get("play_time_seconds", 0)) + session_seconds
+	_session_start_msec = Time.get_ticks_msec()  # avoid double-counting on the next tick
+	WorldMeta.save_meta(meta)
+	if _autosave_label != null:
+		# Hide the indicator after a short visibility window. SceneTreeTimer
+		# is fire-and-forget; if the label was freed before timeout (shutdown
+		# race), is_instance_valid guards it.
+		var fade: SceneTreeTimer = get_tree().create_timer(_AUTOSAVE_INDICATOR_VISIBLE_SEC)
+		fade.timeout.connect(
+			func() -> void:
+				if is_instance_valid(_autosave_label):
+					_autosave_label.visible = false
+		)
+
+
 # Compress a chunk's blocks and stash them in `_saved_chunks`. Called only
 # when an edited chunk is about to be unloaded, so the per-edit hot path
 # never pays for compression. Light arrays compress cheaply (long runs of
@@ -593,7 +703,20 @@ func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
 	# `pending_ticks` harvests any BlockFluids/etc. ticks still queued for
 	# cells in this chunk so mid-flow fluid resumes on reload instead of
 	# freezing (vanilla keeps chunk tick state via NBT's TileTicks).
-	_saved_chunks[coord] = {
+	# Harvest tile-entity state (chests, furnaces) for cells inside this
+	# chunk, then drop them from the live singletons. Step 7.2 — the
+	# singletons stay around as the runtime owners; persistence is bundled
+	# into the chunk's saved entry so it round-trips through region files.
+	var tile_entities: Dictionary = {}
+	var chest_data: Dictionary = ChestStorage.serialize_chunk(coord)
+	for local_pos: Vector3i in chest_data:
+		tile_entities[local_pos] = {"type": "chest", "items": chest_data[local_pos]}
+	var furnace_data: Dictionary = FurnaceManager.serialize_chunk(coord)
+	for local_pos: Vector3i in furnace_data:
+		tile_entities[local_pos] = {"type": "furnace", "data": furnace_data[local_pos]}
+	ChestStorage.forget_chunk(coord)
+	FurnaceManager.forget_chunk(coord)
+	var entry: Dictionary = {
 		"bytes": chunk.blocks.compress(_COMPRESS_MODE),
 		"block_meta": chunk.block_meta.compress(_COMPRESS_MODE),
 		"sky_light": chunk.sky_light.compress(_COMPRESS_MODE),
@@ -601,7 +724,14 @@ func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
 		"height_map": chunk.height_map.compress(_COMPRESS_MODE),
 		"max_y": chunk.max_y,
 		"pending_ticks": TickScheduler.take_for_chunk(coord.x, coord.y),
+		"tile_entities": tile_entities,
 	}
+	_saved_chunks[coord] = entry
+	# Write-through to disk (step 7.1). The in-memory cache stays as a fast
+	# layer in front; on next dispatch we'll hit it before disk. SaveLoad's
+	# region cache means subsequent edits in the same region only pay one
+	# file rewrite per evict, not one full deserialize + reserialize cycle.
+	_SAVE_LOAD.save_chunk(coord, entry)
 
 
 # Worker-thread decoder for a saved entry: decompresses + rescans into a

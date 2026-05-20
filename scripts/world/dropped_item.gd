@@ -330,3 +330,37 @@ func _player_can_accept() -> bool:
 	if inv == null:
 		return false
 	return inv.can_accept(item_id, 1)
+
+
+# --- Persistence (step 7.3) ---
+
+
+# Pack the entity's state into a Dictionary that EntitySave can serialize
+# via var_to_bytes. `age_seconds` is the elapsed time since spawn — saving
+# this (instead of the raw `_spawn_time` wall clock) means the despawn
+# timer keeps counting from where it left off across save/load cycles
+# instead of resetting to 0 on every reload.
+func to_save_dict() -> Dictionary:
+	var now: float = Time.get_ticks_msec() / 1000.0
+	var age: float = maxf(0.0, now - _spawn_time)
+	return {
+		"pos": global_position,
+		"vel": _velocity,
+		"item_id": item_id,
+		"age_seconds": age,
+		"pickup_delay": _pickup_delay,
+	}
+
+
+# Inverse of to_save_dict. Caller must add_child + set global_position
+# BEFORE calling restore_from_dict (matches the existing spawn pattern:
+# new() → add_child → setup()). Internally calls setup() to handle mesh
+# build + field init, then rewinds _spawn_time so the saved despawn
+# countdown picks up where it left off instead of restarting from 0.
+func restore_from_dict(dict: Dictionary) -> void:
+	var item: int = int(dict.get("item_id", 0))
+	var vel: Vector3 = dict.get("vel", Vector3.ZERO) as Vector3
+	var delay: float = float(dict.get("pickup_delay", PICKUP_DELAY_SEC))
+	setup(item, vel, delay)
+	var age: float = float(dict.get("age_seconds", 0.0))
+	_spawn_time = Time.get_ticks_msec() / 1000.0 - age

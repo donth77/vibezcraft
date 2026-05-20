@@ -21,6 +21,13 @@ const CLOUD_QUALITY_FANCY: int = 2
 @export var fog_enabled: bool = true
 @export var sfx_enabled: bool = true
 
+# Active world slot for this session. Set by the Select World screen
+# (step 7.6) when the player clicks a slot; persistence modules
+# (SaveLoad / EntitySave / PlayerSave / WorldMeta) default to this when
+# no explicit world_name is passed. Stays on World1 until the multi-
+# world UI lands so single-world testing keeps working today.
+var active_world: String = "World1"
+
 # True only while the in-game LoadingScreen (chunk-gen progress bar)
 # is displayed. Defaults to false so the main menu, settings, etc.
 # can play SFX normally. LoadingScreen sets this true in its _ready,
@@ -122,6 +129,9 @@ func _read_dotenv() -> Dictionary:
 
 func _ready() -> void:
 	InputActions.register_defaults()
+	# One-shot migration of any pre-7.5 single-world data layout
+	# (user://world/) to the multi-world layout (user://World1/). Idempotent.
+	SaveLoad.migrate_legacy_world()
 	# Install the bitmap MC font as the global fallback so every Control that
 	# doesn't override its font picks it up automatically — no per-scene wiring.
 	var mc_font := MinecraftFont.get_font()

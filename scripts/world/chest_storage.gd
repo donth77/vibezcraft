@@ -56,3 +56,72 @@ func contents_snapshot(pos: Vector3i) -> Array:
 			clone.copy_from(stack)
 			out.append(clone)
 	return out
+
+
+# --- Persistence hooks (step 7.2) ---
+
+
+# Build a chunk-local serialization of every chest whose world coord falls
+# inside the chunk at `chunk_coord`. Returns {Vector3i_local: items_array}
+# where items_array is 27 entries of `[item_id, count, damage]`. Used by
+# ChunkManager._persist_chunk to bundle TE state into the saved chunk dict.
+func serialize_chunk(chunk_coord: Vector2i) -> Dictionary:
+	var result: Dictionary = {}
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	for world_pos: Vector3i in _chests.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		var local_pos := Vector3i(world_pos.x - min_x, world_pos.y, world_pos.z - min_z)
+		var items: Array = []
+		items.resize(_SLOT_COUNT)
+		var slots: Array = _chests[world_pos]
+		for i in range(_SLOT_COUNT):
+			var stack: ItemStack = slots[i]
+			items[i] = [stack.item_id, stack.count, stack.damage]
+		result[local_pos] = items
+	return result
+
+
+# Drop every chest in the given chunk from the live store. Called by
+# ChunkManager._persist_chunk right after serialize_chunk so the unloaded
+# chunk's TEs don't linger in memory.
+func forget_chunk(chunk_coord: Vector2i) -> void:
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	var to_remove: Array[Vector3i] = []
+	for world_pos: Vector3i in _chests.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		to_remove.append(world_pos)
+	for pos: Vector3i in to_remove:
+		_chests.erase(pos)
+
+
+# Inverse of serialize_chunk. `dict` is {Vector3i_local: items_array}.
+# Called from ChunkManager._materialize_chunk after a saved chunk loads.
+func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:
+	var origin_x: int = chunk_coord.x * Chunk.SIZE_X
+	var origin_z: int = chunk_coord.y * Chunk.SIZE_Z
+	for local_pos: Vector3i in dict.keys():
+		var world_pos := Vector3i(origin_x + local_pos.x, local_pos.y, origin_z + local_pos.z)
+		var items_data: Array = dict[local_pos]
+		var slots: Array = []
+		slots.resize(_SLOT_COUNT)
+		for i in range(_SLOT_COUNT):
+			if i < items_data.size():
+				var d: Array = items_data[i]
+				var stack := ItemStack.new(int(d[0]), int(d[1]))
+				stack.damage = int(d[2])
+				slots[i] = stack
+			else:
+				slots[i] = ItemStack.new()
+		_chests[world_pos] = slots

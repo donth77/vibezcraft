@@ -68,6 +68,85 @@ func forget(pos: Vector3i) -> void:
 	_furnaces.erase(pos)
 
 
+# --- Persistence hooks (step 7.2) ---
+
+
+# Build a chunk-local serialization of every furnace inside `chunk_coord`.
+# Returns {Vector3i_local: state_dict} where state_dict's ItemStacks are
+# flattened to `[item_id, count, damage]` arrays so it round-trips through
+# var_to_bytes cleanly. Used by ChunkManager._persist_chunk.
+func serialize_chunk(chunk_coord: Vector2i) -> Dictionary:
+	var result: Dictionary = {}
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	for world_pos: Vector3i in _furnaces.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		var state: Dictionary = _furnaces[world_pos]
+		var local_pos := Vector3i(world_pos.x - min_x, world_pos.y, world_pos.z - min_z)
+		result[local_pos] = {
+			"input": _pack_stack(state.input),
+			"fuel": _pack_stack(state.fuel),
+			"output": _pack_stack(state.output),
+			"cook_time": state.cook_time,
+			"burn_time": state.burn_time,
+			"burn_total": state.burn_total,
+		}
+	return result
+
+
+# Drop every furnace in the given chunk from the live store. Called by
+# ChunkManager._persist_chunk right after serialize_chunk.
+func forget_chunk(chunk_coord: Vector2i) -> void:
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	var to_remove: Array[Vector3i] = []
+	for world_pos: Vector3i in _furnaces.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		to_remove.append(world_pos)
+	for pos: Vector3i in to_remove:
+		_furnaces.erase(pos)
+
+
+# Inverse of serialize_chunk. `dict` is {Vector3i_local: state_dict}.
+# Called from ChunkManager._materialize_chunk after a saved chunk loads.
+func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:
+	var origin_x: int = chunk_coord.x * Chunk.SIZE_X
+	var origin_z: int = chunk_coord.y * Chunk.SIZE_Z
+	for local_pos: Vector3i in dict.keys():
+		var world_pos := Vector3i(origin_x + local_pos.x, local_pos.y, origin_z + local_pos.z)
+		var s: Dictionary = dict[local_pos]
+		_furnaces[world_pos] = {
+			"input": _unpack_stack(s.input),
+			"fuel": _unpack_stack(s.fuel),
+			"output": _unpack_stack(s.output),
+			"cook_time": int(s.cook_time),
+			"burn_time": int(s.burn_time),
+			"burn_total": int(s.burn_total),
+		}
+
+
+# ItemStack → [item_id, count, damage] for var_to_bytes safety.
+func _pack_stack(stack: ItemStack) -> Array:
+	return [stack.item_id, stack.count, stack.damage]
+
+
+# Inverse of _pack_stack.
+func _unpack_stack(packed: Array) -> ItemStack:
+	var stack := ItemStack.new(int(packed[0]), int(packed[1]))
+	stack.damage = int(packed[2])
+	return stack
+
+
 # --- Ticker ---
 
 
