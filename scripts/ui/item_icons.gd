@@ -137,7 +137,7 @@ static func icon_for(item_id: int) -> Texture2D:
 	# Compass / clock — render dynamic icon every call. Both bypass the
 	# cache because the needle / dial angle changes per frame: the
 	# compass needle tracks atan2(spawn - player), the clock dial tracks
-	# WorldTime.tick. The renderers mutate a single ImageTexture per
+	# WorldTime.current_tick(). The renderers mutate a single ImageTexture per
 	# item (not new allocations per call), so the per-frame cost is one
 	# 16×16 RGBA8 buffer rebuild + a GPU upload.
 	if item_id == Items.COMPASS:
@@ -341,7 +341,7 @@ static func _compass_angle() -> float:
 # Full rotation per in-game day (24000 ticks). Subtract PI/2 in the
 # renderer so tick 6000 (noon) lands at the top of the dial.
 static func _clock_angle() -> float:
-	return float(WorldTime.tick) / 24000.0 * TAU
+	return float(WorldTime.current_tick()) / 24000.0 * TAU
 
 
 # Render a 16×16 compass face with a needle pointing along `angle` rad.

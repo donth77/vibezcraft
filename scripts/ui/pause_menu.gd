@@ -290,8 +290,15 @@ func _save_world_with_indicator() -> void:
 	# Yield one frame so the overlay paints before the synchronous save
 	# locks the main thread. Without this, the overlay is invisible.
 	await get_tree().process_frame
-	SaveLoad.flush_all_regions()
+	# Flush dirty LIVE chunks first. Without this, edits made to chunks
+	# that never evicted (i.e. anything near where the player was
+	# standing) live only in the live ChunkNodes and would die with the
+	# scene change. flush_all_regions only flushes the in-memory region
+	# cache, which doesn't see live unflushed dirty chunks.
 	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
+	if chunk_manager != null and chunk_manager.has_method("flush_dirty_loaded"):
+		chunk_manager.flush_dirty_loaded()
+	SaveLoad.flush_all_regions()
 	if chunk_manager != null:
 		EntitySave.save_all(chunk_manager)
 	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D
@@ -299,9 +306,11 @@ func _save_world_with_indicator() -> void:
 		PlayerSave.save_player(player)
 	var meta: Dictionary = WorldMeta.load_meta()
 	if meta.is_empty():
-		meta = WorldMeta.make_initial(Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.tick)
+		meta = WorldMeta.make_initial(
+			Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.current_tick()
+		)
 	meta["seed"] = Worldgen.WORLD_SEED
-	meta["time_ticks"] = WorldTime.tick
+	meta["time_ticks"] = WorldTime.current_tick()
 	WorldMeta.save_meta(meta)
 	overlay.queue_free()
 

@@ -145,6 +145,32 @@ static func _tick_all(manager) -> void:
 # no-ops (manager.get_world_block is OOB → AIR → id mismatch in
 # on_scheduled_tick). That's both a leak AND a correctness bug: fluid
 # mid-flow freezes on chunk reload since no tick re-enters the cell.
+# Non-destructive variant of take_for_chunk: returns the same Array of
+# dicts but leaves the scheduler queue intact. Used by ChunkManager's
+# autosave + save-and-quit flush_dirty_loaded path, where the live
+# chunk keeps running after the save so we don't want to drain its
+# pending ticks. Same dict shape as take_for_chunk (pos, block_id,
+# delay) so save/load callers can use either interchangeably.
+static func peek_for_chunk(cx: int, cz: int) -> Array:
+	var harvested: Array = []
+	for entry: Dictionary in _pending:
+		var pos: Vector3i = entry.pos
+		var entry_cx: int = int(floor(float(pos.x) / float(Chunk.SIZE_X)))
+		var entry_cz: int = int(floor(float(pos.z) / float(Chunk.SIZE_Z)))
+		if entry_cx == cx and entry_cz == cz:
+			(
+				harvested
+				. append(
+					{
+						"pos": pos,
+						"block_id": entry.block_id,
+						"delay": max(1, entry.fire_tick - _current_tick),
+					}
+				)
+			)
+	return harvested
+
+
 static func take_for_chunk(cx: int, cz: int) -> Array:
 	var harvested: Array = []
 	var write: int = 0

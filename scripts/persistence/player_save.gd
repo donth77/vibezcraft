@@ -69,12 +69,12 @@ static func _build_payload(player: Node3D) -> Dictionary:
 				slots_out[i] = [0, 0, 0]
 			else:
 				slots_out[i] = [stack.item_id, stack.count, stack.damage]
-	# Head rotation: the player's camera/head is a child node usually
-	# named "Head"; fall back to the body yaw if not present so the save
-	# still survives a missing-head edge case.
-	var head: Node3D = player.get_node_or_null("Head") as Node3D
+	# Camera pitch lives on the player's "Camera3D" child (see player.gd's
+	# _apply_mouse_motion + the @onready _camera). Yaw is on the player
+	# Node3D itself (rotate_y in _apply_mouse_motion).
+	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	var yaw: float = player.rotation.y
-	var pitch: float = head.rotation.x if head != null else 0.0
+	var pitch: float = camera.rotation.x if camera != null else 0.0
 	return {
 		"pos": player.global_position,
 		"yaw": yaw,
@@ -123,9 +123,9 @@ static func load_player(player: Node3D, world_name: String = "") -> bool:
 static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 	player.global_position = payload.get("pos", Vector3.ZERO) as Vector3
 	player.rotation.y = float(payload.get("yaw", 0.0))
-	var head: Node3D = player.get_node_or_null("Head") as Node3D
-	if head != null:
-		head.rotation.x = float(payload.get("pitch", 0.0))
+	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
+	if camera != null:
+		camera.rotation.x = float(payload.get("pitch", 0.0))
 	if "health" in player:
 		player.set("health", int(payload.get("health", 20)))
 	var inv: Inventory = player.get("inventory") as Inventory

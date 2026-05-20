@@ -117,6 +117,20 @@ func forget_chunk(chunk_coord: Vector2i) -> void:
 		_furnaces.erase(pos)
 
 
+# Distinct chunk coords containing any live furnace. See the matching
+# helper in chest_storage.gd for why this exists — same content-only-
+# edit-not-flagged-dirty issue.
+func get_active_chunks() -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	for world_pos: Vector3i in _furnaces.keys():
+		var coord := Vector2i(world_pos.x >> 4, world_pos.z >> 4)
+		if not seen.has(coord):
+			seen[coord] = true
+			result.append(coord)
+	return result
+
+
 # Inverse of serialize_chunk. `dict` is {Vector3i_local: state_dict}.
 # Called from ChunkManager._materialize_chunk after a saved chunk loads.
 func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:

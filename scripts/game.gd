@@ -27,6 +27,12 @@ const CLOUD_QUALITY_FANCY: int = 2
 # no explicit world_name is passed. Stays on World1 until the multi-
 # world UI lands so single-world testing keeps working today.
 var active_world: String = "World1"
+# True when the active world had no data on disk before this session
+# (player clicked an empty slot). LoadingScreen reads this to pick
+# between "Building terrain" (fresh) and "Loading World N" (existing).
+# Reset to true when ChunkManager exits so the next world load defaults
+# correctly even if Select World didn't run (dev cold-boot into main.tscn).
+var world_is_fresh: bool = true
 
 # True only while the in-game LoadingScreen (chunk-gen progress bar)
 # is displayed. Defaults to false so the main menu, settings, etc.

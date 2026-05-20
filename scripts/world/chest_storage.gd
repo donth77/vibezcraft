@@ -106,6 +106,23 @@ func forget_chunk(chunk_coord: Vector2i) -> void:
 		_chests.erase(pos)
 
 
+# Distinct chunk coords containing any live chest. ChunkManager.flush_
+# dirty_loaded calls this so chunks whose only "edit" was chest-content
+# changes (no block placement → never flagged in _dirty_loaded) still
+# get persisted on autosave + save-and-quit.
+func get_active_chunks() -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	for world_pos: Vector3i in _chests.keys():
+		# Arithmetic right shift gives the correct chunk for negative
+		# world coords too (-1 >> 4 == -1, not 0).
+		var coord := Vector2i(world_pos.x >> 4, world_pos.z >> 4)
+		if not seen.has(coord):
+			seen[coord] = true
+			result.append(coord)
+	return result
+
+
 # Inverse of serialize_chunk. `dict` is {Vector3i_local: items_array}.
 # Called from ChunkManager._materialize_chunk after a saved chunk loads.
 func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:

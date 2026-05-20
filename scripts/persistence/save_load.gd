@@ -269,7 +269,16 @@ static func _load_region(rcoord: Vector2i, world_name: String) -> Dictionary:
 
 
 # Serialize + atomic-write a region's chunk dict. Updates the cache entry.
+# Empty region dicts skip the write entirely — _load_region caches empty
+# {} for never-saved regions to short-circuit re-reads, but those don't
+# need to land on disk. Also ensures the region/ dir exists; without
+# this, a save_chunk-free path (autosave on a fresh world where no
+# eviction happened yet) would atomic_write with err=7 because the
+# directory hadn't been created via _ensure_region_dir.
 static func _flush_region(rcoord: Vector2i, region: Dictionary, world_name: String) -> bool:
+	if region.is_empty():
+		return false
+	_ensure_region_dir(world_name)
 	var path: String = region_path(rcoord.x, rcoord.y, world_name)
 	var body: PackedByteArray = var_to_bytes(region)
 	if not pack_and_write(path, _magic, _FORMAT_VERSION, body):

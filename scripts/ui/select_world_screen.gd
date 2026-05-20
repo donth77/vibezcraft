@@ -153,6 +153,10 @@ func _on_slot_pressed(slot_index: int) -> void:
 		_show_delete_confirm(slot_index)
 		return
 	var world_name: String = "World%d" % slot_index
+	# Sample existence BEFORE _prepare_world_seed — that helper writes
+	# world.json for fresh slots, which would flip world_exists to true
+	# and confuse the LoadingScreen's "fresh vs loaded" message picker.
+	Game.world_is_fresh = not SaveLoad.world_exists(world_name)
 	Game.active_world = world_name
 	_prepare_world_seed(world_name)
 	get_tree().change_scene_to_file(_MAIN_SCENE_PATH)

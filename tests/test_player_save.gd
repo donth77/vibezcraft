@@ -29,19 +29,18 @@ func _world(slug: String) -> String:
 
 
 # Build a minimal Player-shaped Node3D: position + rotation + a real
-# Inventory + a health int. Has a "Head" child Node3D for pitch round-
-# trip. PlayerSave reads everything through `.get(...)` so duck-typed
-# fields are all we need.
+# Inventory + a health int. Has a "Camera3D" child for pitch round-trip
+# (matches the real player.tscn, where pitch lives on the camera and
+# yaw on the player Node3D itself). PlayerSave reads everything through
+# `.get(...)` so duck-typed fields are all we need.
 func _make_stub_player() -> Node3D:
 	var p := Node3D.new()
 	p.set_script(GDScript.new())
-	# Inject fields via direct dict mutation since GDScript's `set()` on
-	# a bare Node3D would fail for undeclared props.
 	p.set_meta("inventory", Inventory.new())
 	p.set_meta("health", 20)
-	var head := Node3D.new()
-	head.name = "Head"
-	p.add_child(head)
+	var camera := Camera3D.new()
+	camera.name = "Camera3D"
+	p.add_child(camera)
 	return p
 
 
@@ -74,19 +73,19 @@ func test_save_then_load_returns_true_and_restores_position() -> void:
 	_patch_for_get(_player, inv, 20)
 	_player.global_position = Vector3(101.5, 70.0, -23.25)
 	_player.rotation.y = 0.75
-	(_player.get_node("Head") as Node3D).rotation.x = -0.3
+	(_player.get_node("Camera3D") as Camera3D).rotation.x = -0.3
 	assert_true(PlayerSave.save_player(_player, world))
 	# Move the player + zap inventory between save and load to prove
 	# load actually mutates state instead of just no-oping.
 	_player.global_position = Vector3.ZERO
 	_player.rotation.y = 0.0
-	(_player.get_node("Head") as Node3D).rotation.x = 0.0
+	(_player.get_node("Camera3D") as Camera3D).rotation.x = 0.0
 	assert_true(PlayerSave.load_player(_player, world))
 	assert_almost_eq(_player.global_position.x, 101.5, 0.001)
 	assert_almost_eq(_player.global_position.y, 70.0, 0.001)
 	assert_almost_eq(_player.global_position.z, -23.25, 0.001)
 	assert_almost_eq(_player.rotation.y, 0.75, 0.001)
-	assert_almost_eq((_player.get_node("Head") as Node3D).rotation.x, -0.3, 0.001)
+	assert_almost_eq((_player.get_node("Camera3D") as Camera3D).rotation.x, -0.3, 0.001)
 
 
 func test_load_when_no_file_returns_false_and_leaves_state_unchanged() -> void:

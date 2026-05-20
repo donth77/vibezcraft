@@ -706,15 +706,20 @@ func _setup_autosave() -> void:
 func _on_autosave_tick() -> void:
 	if _autosave_label != null:
 		_autosave_label.visible = true
+	# Persist dirty live chunks before flushing the region cache —
+	# otherwise edits to chunks that haven't evicted yet are missed.
+	flush_dirty_loaded()
 	SaveLoad.flush_all_regions()
 	if _player != null:
 		PlayerSave.save_player(_player)
 	EntitySave.save_all(self)
 	var meta: Dictionary = WorldMeta.load_meta()
 	if meta.is_empty():
-		meta = WorldMeta.make_initial(Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.tick)
+		meta = WorldMeta.make_initial(
+			Worldgen.WORLD_SEED, Vector3i(0, 70, 0), WorldTime.current_tick()
+		)
 	meta["seed"] = Worldgen.WORLD_SEED
-	meta["time_ticks"] = WorldTime.tick
+	meta["time_ticks"] = WorldTime.current_tick()
 	var session_seconds: int = (Time.get_ticks_msec() - _session_start_msec) / 1000
 	meta["play_time_seconds"] = int(meta.get("play_time_seconds", 0)) + session_seconds
 	_session_start_msec = Time.get_ticks_msec()  # avoid double-counting on the next tick
@@ -737,40 +742,87 @@ func _on_autosave_tick() -> void:
 # 15s above ground, 0s in caves) so adding them ~doubles the payload but
 # stays under a couple KB per typical edited chunk.
 func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
-	# Heightmap is only 256 bytes — compresses to nothing, but persisting
-	# saves a 32 KB rebuild on the next is_sky_exposed call after restore.
-	# `pending_ticks` harvests any BlockFluids/etc. ticks still queued for
-	# cells in this chunk so mid-flow fluid resumes on reload instead of
-	# freezing (vanilla keeps chunk tick state via NBT's TileTicks).
-	# Harvest tile-entity state (chests, furnaces) for cells inside this
-	# chunk, then drop them from the live singletons. Step 7.2 — the
-	# singletons stay around as the runtime owners; persistence is bundled
-	# into the chunk's saved entry so it round-trips through region files.
-	var tile_entities: Dictionary = {}
-	var chest_data: Dictionary = ChestStorage.serialize_chunk(coord)
-	for local_pos: Vector3i in chest_data:
-		tile_entities[local_pos] = {"type": "chest", "items": chest_data[local_pos]}
-	var furnace_data: Dictionary = FurnaceManager.serialize_chunk(coord)
-	for local_pos: Vector3i in furnace_data:
-		tile_entities[local_pos] = {"type": "furnace", "data": furnace_data[local_pos]}
-	ChestStorage.forget_chunk(coord)
-	FurnaceManager.forget_chunk(coord)
-	var entry: Dictionary = {
-		"bytes": chunk.blocks.compress(_COMPRESS_MODE),
-		"block_meta": chunk.block_meta.compress(_COMPRESS_MODE),
-		"sky_light": chunk.sky_light.compress(_COMPRESS_MODE),
-		"block_light": chunk.block_light.compress(_COMPRESS_MODE),
-		"height_map": chunk.height_map.compress(_COMPRESS_MODE),
-		"max_y": chunk.max_y,
-		"pending_ticks": TickScheduler.take_for_chunk(coord.x, coord.y),
-		"tile_entities": tile_entities,
-	}
+	# Eviction path: builds the destructive entry (pulls TE state into the
+	# entry + clears it from singletons, takes pending ticks out of the
+	# scheduler). The chunk node is about to be freed so the live state
+	# would be lost anyway — moving it to disk is exactly right.
+	var entry: Dictionary = _build_chunk_save_entry(coord, chunk, true)
 	_saved_chunks[coord] = entry
 	# Write-through to disk (step 7.1). The in-memory cache stays as a fast
 	# layer in front; on next dispatch we'll hit it before disk. SaveLoad's
 	# region cache means subsequent edits in the same region only pay one
 	# file rewrite per evict, not one full deserialize + reserialize cycle.
 	_SAVE_LOAD.save_chunk(coord, entry)
+
+
+# Persist every dirty live chunk to disk WITHOUT freeing it. Called by
+# autosave + save-and-quit so player edits made between evictions don't
+# get lost (which they were — _dirty_loaded chunks live in _chunks[]
+# only, never in _saved_chunks or disk until eviction). Non-destructive:
+# TickScheduler ticks stay in the queue, chest/furnace state stays in
+# the singletons. The chunk_manager keeps running normally afterward.
+# Returns the count of chunks written.
+func flush_dirty_loaded() -> int:
+	# Union _dirty_loaded with chunks that have live tile entities.
+	# Chest / furnace content changes mutate the singletons directly via
+	# the inventory UI — there's no set_world_block hook to flag the
+	# chunk dirty. So we'd miss content-only edits if we only looked at
+	# _dirty_loaded. get_active_chunks() on each singleton is O(N) over
+	# its entries; small for realistic worlds.
+	var coords_to_flush: Dictionary = {}
+	for coord: Vector2i in _dirty_loaded.keys():
+		coords_to_flush[coord] = true
+	for coord: Vector2i in ChestStorage.get_active_chunks():
+		coords_to_flush[coord] = true
+	for coord: Vector2i in FurnaceManager.get_active_chunks():
+		coords_to_flush[coord] = true
+	var written: int = 0
+	for coord: Vector2i in coords_to_flush.keys():
+		if not _chunks.has(coord):
+			continue
+		var chunk: Chunk = _chunks[coord].chunk
+		var entry: Dictionary = _build_chunk_save_entry(coord, chunk, false)
+		_SAVE_LOAD.save_chunk(coord, entry)
+		written += 1
+	# Clear the dirty set — these chunks are now in sync with disk. If
+	# the player edits more cells later, set_world_block re-flags them.
+	_dirty_loaded.clear()
+	return written
+
+
+# Build the saved entry dict for a chunk. `destructive=true` (eviction
+# path) takes pending ticks out of the scheduler and clears chest /
+# furnace state from the singletons. `destructive=false` (autosave +
+# save-and-quit) copies pending ticks (peek) and leaves singletons
+# alone so the live chunk keeps working after the save.
+func _build_chunk_save_entry(coord: Vector2i, chunk: Chunk, destructive: bool) -> Dictionary:
+	var tile_entities: Dictionary = {}
+	# serialize_chunk is read-only on both singletons — safe to call in
+	# either mode. Only the forget_chunk calls below distinguish.
+	var chest_data: Dictionary = ChestStorage.serialize_chunk(coord)
+	for local_pos: Vector3i in chest_data:
+		tile_entities[local_pos] = {"type": "chest", "items": chest_data[local_pos]}
+	var furnace_data: Dictionary = FurnaceManager.serialize_chunk(coord)
+	for local_pos: Vector3i in furnace_data:
+		tile_entities[local_pos] = {"type": "furnace", "data": furnace_data[local_pos]}
+	if destructive:
+		ChestStorage.forget_chunk(coord)
+		FurnaceManager.forget_chunk(coord)
+	var pending_ticks: Array
+	if destructive:
+		pending_ticks = TickScheduler.take_for_chunk(coord.x, coord.y)
+	else:
+		pending_ticks = TickScheduler.peek_for_chunk(coord.x, coord.y)
+	return {
+		"bytes": chunk.blocks.compress(_COMPRESS_MODE),
+		"block_meta": chunk.block_meta.compress(_COMPRESS_MODE),
+		"sky_light": chunk.sky_light.compress(_COMPRESS_MODE),
+		"block_light": chunk.block_light.compress(_COMPRESS_MODE),
+		"height_map": chunk.height_map.compress(_COMPRESS_MODE),
+		"max_y": chunk.max_y,
+		"pending_ticks": pending_ticks,
+		"tile_entities": tile_entities,
+	}
 
 
 # Worker-thread decoder for a saved entry: decompresses + rescans into a

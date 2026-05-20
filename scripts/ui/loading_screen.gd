@@ -93,7 +93,7 @@ func _build_title(root: Control) -> void:
 
 func _build_status(root: Control) -> void:
 	_status_label = Label.new()
-	_status_label.text = "Building terrain"
+	_status_label.text = _initial_status_text()
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_status_label.anchor_left = 0.0
 	_status_label.anchor_right = 1.0
@@ -136,7 +136,7 @@ func _build_progress_bar(root: Control) -> void:
 func _on_chunk_progress(loaded: int, total: int) -> void:
 	var pct: float = 0.0 if total <= 0 else clampf(float(loaded) / float(total), 0.0, 1.0)
 	if _status_label != null:
-		_status_label.text = "Building terrain  (%d / %d)" % [loaded, total]
+		_status_label.text = "%s  (%d / %d)" % [_initial_status_text(), loaded, total]
 	if _bar_fill_rect != null:
 		_bar_fill_rect.offset_right = pct * _BAR_WIDTH
 	if loaded >= total:
@@ -160,12 +160,24 @@ func _on_chunk_progress(loaded: int, total: int) -> void:
 # Fresh worlds (no save files yet) silently keep the defaults — each
 # load_* call returns 0/false and the player drops in at the spawn
 # coord that ChunkManager / Worldgen already picked.
+# "Building terrain" for fresh slots (matches Alpha hu.java's status
+# verbatim), "Loading World N" for existing slots so the player gets a
+# visual confirmation that disk read is happening. Picks based on
+# Game.world_is_fresh, which Select-World sets before scene-change.
+# Slot number is parsed off the active_world name ("World3" → 3).
+func _initial_status_text() -> String:
+	if Game.world_is_fresh:
+		return "Building terrain"
+	var slot: String = Game.active_world.replace("World", "")
+	return "Loading World %s" % slot
+
+
 func _restore_world_state() -> void:
 	if _status_label != null:
 		_status_label.text = "Restoring world..."
 	var meta: Dictionary = WorldMeta.load_meta()
 	if not meta.is_empty():
-		WorldTime.set_time_ticks(int(meta.get("time_ticks", WorldTime.tick)))
+		WorldTime.set_time_ticks(int(meta.get("time_ticks", WorldTime.current_tick())))
 	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D
 	if player != null:
 		PlayerSave.load_player(player)
