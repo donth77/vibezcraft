@@ -56,13 +56,6 @@ var _mesh: MeshInstance3D
 # White-flash overlay child — see file-level comment. Created in setup()
 # alongside the body mesh; visibility pulsed in _apply_visual_flash.
 var _flash_mesh: MeshInstance3D
-# Smoke trail child — vanilla kr.java:51 emits one "smoke" particle per
-# tick from the entity's center+0.5y. CPUParticles3D (not GPU) so it
-# renders immediately without a shader-compile delay; vanilla 8-frame
-# animation comes from the material's particles_anim_h_frames. Re-
-# parented to chunk_manager on detonation so in-flight puffs survive
-# the entity's queue_free.
-var _smoke_trail: CPUParticles3D
 
 
 # fuse_seconds: optional override. Chain-reaction primings pass a
@@ -127,12 +120,6 @@ func _ready() -> void:
 	var player: CharacterBody3D = get_tree().root.get_node_or_null("Main/Player") as CharacterBody3D
 	if player != null:
 		_ray_query.exclude = [player.get_rid()]
-	# Smoke trail child — vanilla kr.java:51 emits one smoke particle per
-	# tick from the entity center+0.5y. As a child node, the emitter
-	# follows the entity through gravity / bounces automatically.
-	_smoke_trail = ExplosionFx.build_smoke_trail()
-	_smoke_trail.position = Vector3(0, 0.5, 0)
-	add_child(_smoke_trail)
 	# Fuse SFX at spawn. Volume gets quieter for chain-reaction primings
 	# so a 9-block stack doesn't lay 9 simultaneous full-volume hisses
 	# on top of the explosion's own boom.
@@ -150,6 +137,10 @@ func _process(delta: float) -> void:
 		return
 	_apply_physics(delta)
 	_apply_visual_flash()
+	# Smoke disabled — could never get the particles to render correctly
+	# (squished sprite look on TNT/fire smoke even via lava-fizz pool
+	# path). Vanilla kr.java:51 emits one smoke per tick from entity
+	# center+0.5y; revisit when a dedicated emitter looks right.
 
 
 func _apply_physics(delta: float) -> void:
@@ -209,27 +200,5 @@ func _detonate() -> void:
 	# stack; we queue_free on return so the entity is alive as the
 	# blast's `source` (lets future entity-damage code skip self-damage).
 	visible = false
-	# Detach the smoke trail and let its in-flight puffs finish naturally
-	# instead of vanishing when the entity queue_frees. Reparent to the
-	# chunk_manager (lives for the whole session), stop emitting, and
-	# schedule its own cleanup on a SceneTreeTimer.
-	_release_smoke_trail()
 	Explosion.detonate(_chunk_manager, global_position, _EXPLOSION_POWER, self)
 	queue_free()
-
-
-func _release_smoke_trail() -> void:
-	if _smoke_trail == null or not is_instance_valid(_smoke_trail):
-		return
-	var world_pos: Vector3 = _smoke_trail.global_position
-	# Reparent to chunk_manager so the smoke survives our queue_free.
-	# Without this, child node frees with parent and any in-flight puffs
-	# pop out of existence — visible disconnect from the actual blast.
-	remove_child(_smoke_trail)
-	_chunk_manager.add_child(_smoke_trail)
-	_smoke_trail.global_position = world_pos
-	_smoke_trail.emitting = false
-	var tree: SceneTree = _chunk_manager.get_tree()
-	if tree != null:
-		var grace := tree.create_timer(2.5)
-		grace.timeout.connect(ExplosionFx._free_if_valid.bind(_smoke_trail))

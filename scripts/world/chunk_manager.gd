@@ -110,6 +110,10 @@ var _light_defer_depth: int = 0
 var _deferred_sky_seeds: Dictionary = {}  # Vector3i → true
 var _deferred_block_seeds: Dictionary = {}  # Vector3i → true
 var _deferred_fizz: Array = []
+# Frame-coalesced immediate-rebuild dedup. set_world_block_immediate
+# accumulates chunk coords here; call_deferred flushes each unique
+# chunk once per frame. See set_world_block_immediate for context.
+var _pending_immediate_rebuild: Dictionary = {}
 # Last player chunk we ran _update_collision_activity against. Skip the
 # sweep until the player actually crosses a chunk boundary.
 var _last_collision_center: Vector2i = Vector2i(2147483647, 2147483647)
@@ -861,11 +865,25 @@ func set_world_block_immediate(world_pos: Vector3i, id: int) -> void:
 	var coord := Vector2i(chunk_x, chunk_z)
 	if not _chunks.has(coord):
 		return
+	# Coalesce per-frame: many FallingBlocks landing in the same chunk
+	# (TNT on a sand pile lands 50+ entities the same frame) used to
+	# trigger N full-chunk mesh rebuilds inline — each ~10–50 ms. We
+	# now mark the chunk for deferred rebuild and dedup via the dict;
+	# call_deferred fires before the frame renders, so the "block
+	# appears same frame as entity hides" guarantee still holds and a
+	# burst pays one rebuild per chunk instead of N.
+	if not _pending_immediate_rebuild.has(coord):
+		_pending_immediate_rebuild[coord] = true
+		call_deferred("_flush_immediate_rebuild", coord)
+
+
+# Drained at end of frame for each unique chunk that received an
+# immediate write. See set_world_block_immediate.
+func _flush_immediate_rebuild(coord: Vector2i) -> void:
+	_pending_immediate_rebuild.erase(coord)
+	if not _chunks.has(coord):
+		return
 	var chunk_node: Node3D = _chunks[coord]
-	# Synchronous same-frame rebuild — `FallingBlock` relies on the
-	# freshly-placed block being visible the moment the entity hides.
-	# Chunk re-meshes otherwise go through the worker dispatch in
-	# chunk_node._process; this bypasses it on purpose.
 	chunk_node._apply_mesh_data(Mesher.mesh_chunk_fast(chunk_node.chunk))
 	chunk_node.chunk.dirty = false
 

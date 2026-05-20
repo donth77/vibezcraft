@@ -100,11 +100,10 @@ static func _fire(manager: Node, wx: int, wy: int, wz: int) -> void:
 	if randi() % 4 == 0:
 		if not _fire_about_to_die(manager, wx, wy, wz):
 			SFX.play_fire_crackle()
-	# Smoke re-enabled with a dedicated single-puff emitter (vanilla
-	# 8-frame animated sprite). The old version reused the fizz pool's
-	# flat-disc emission which read as a squished plate.
-	if randi() % 2 == 0:
-		FluidFx.spawn_fire_smoke(manager, Vector3i(wx, wy, wz))
+	# Smoke disabled — never got the particles to render right (squished
+	# sprite look even through the lava-fizz pool). Vanilla qh.java:189-
+	# 236 emits one `largesmoke` per flammable-adjacent face per random
+	# tick; revisit when a dedicated emitter looks correct.
 
 
 # True if the fire cell will extinguish within ~1 tick. Used to skip the

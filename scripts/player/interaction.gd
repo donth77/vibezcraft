@@ -642,6 +642,24 @@ func _try_bucket(hit: Dictionary, hit_id: int) -> bool:
 				return false
 			place_pos = empty_cell.pos
 		var dest_id: int = _chunk_manager.get_world_block(place_pos)
+		# Water bucket on FIRE — vanilla ag.java:74-79 short-circuits the
+		# place: clicking water-bucket onto a fire cell extinguishes it
+		# with the fizz SFX + smoke puff instead of writing water. Also
+		# extinguish when the hit-cell ITSELF is fire (player clicked
+		# directly on the flame quad). Consumes the bucket either way.
+		if item_id == Items.BUCKET_WATER:
+			var fire_cell: Vector3i = place_pos
+			if dest_id != Blocks.FIRE and not hit.is_empty():
+				var clicked_id: int = _chunk_manager.get_world_block(hit.block_pos)
+				if clicked_id == Blocks.FIRE:
+					fire_cell = hit.block_pos
+					dest_id = Blocks.FIRE
+			if dest_id == Blocks.FIRE:
+				_chunk_manager.set_world_block(fire_cell, Blocks.AIR)
+				SFX.play_fizz(false)
+				inv.replace_selected(Items.BUCKET_EMPTY, 1)
+				_trigger_player_use_swing()
+				return true
 		if not Blocks.is_replaceable(dest_id) and dest_id != Blocks.AIR:
 			return false
 		var source_id: int = (
