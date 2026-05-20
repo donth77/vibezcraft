@@ -616,9 +616,21 @@ func _build_held_tool(id: int) -> void:
 		# compact item pulls it upward off the hand; centering + shrinking
 		# keeps it nestled in the fist without clipping the arm mesh.
 		if Items.is_tool_item(id):
-			_held_tool_tp.scale = Vector3(tp_ps, tp_ps, tp_ps)
+			# Flint-and-steel's sprite occupies only ~half the 16×16
+			# canvas (the rest is transparent), so the same _tp_held_tool_
+			# pixel_size that suits a full-canvas pickaxe makes flint-
+			# and-steel read as comically oversized in the fist. Halve
+			# the per-pixel scale for this specific item so the visible
+			# voxels sit at roughly the same hand-relative size as a
+			# pickaxe head.
+			var effective_ps: float = tp_ps
+			if id == Items.FLINT_AND_STEEL:
+				effective_ps = tp_ps * 0.5
+			_held_tool_tp.scale = Vector3(effective_ps, effective_ps, effective_ps)
 			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			_held_tool_tp.position = Vector3(-tp_pivot_px.x * tp_ps, -tp_pivot_px.y * tp_ps, 0)
+			_held_tool_tp.position = Vector3(
+				-tp_pivot_px.x * effective_ps, -tp_pivot_px.y * effective_ps, 0
+			)
 			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
 				_held_tool_tp.rotation = _axe_tp_mesh_rotation
 		else:
@@ -1435,6 +1447,15 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 		Music.set_paused(true)
 		died.emit()
 		_show_death_screen()
+
+
+# Adds an instantaneous impulse to the player's velocity — used by
+# Explosion._apply_entity_damage to fling the player away from a TNT
+# blast. Vanilla ks.java:96-98 adds (d4, d3, d2) × d13 directly to the
+# entity's velocity; we receive the pre-scaled impulse vector and apply
+# it the same way. Gravity + air drag handle the arc on subsequent frames.
+func apply_explosion_knockback(impulse: Vector3) -> void:
+	velocity += impulse
 
 
 # Vanilla EntityPlayer.dropAllItems / inventoryDrops — every non-empty

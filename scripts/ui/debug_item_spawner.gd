@@ -57,6 +57,7 @@ const _BLOCKS: Array = [
 	Blocks.SNOW_BLOCK,
 	Blocks.CACTUS,
 	Blocks.SNOW_LAYER,
+	Blocks.TNT,
 ]
 
 const _ITEMS: Array = [
@@ -69,6 +70,7 @@ const _ITEMS: Array = [
 	Items.FLINT,
 	Items.LEATHER,
 	Items.BONEMEAL,
+	Items.GUNPOWDER,
 	Items.BUCKET_EMPTY,
 	Items.BUCKET_WATER,
 	Items.BUCKET_LAVA,

@@ -111,13 +111,16 @@ const IRON_DOOR := 34
 # 0.4, axe-preferred, wood material. Player climbing physics clamp fall
 # speed and allow upward movement when overlapping the ladder cell.
 const LADDER := 35
-# Vanilla Alpha BlockTNT (v.java, id 46). Hardness 0 = instant break, drops
-# itself (NOT primed-TNT-on-mine — vanilla a(Random)=0 only suppresses the
-# random drop when the block is broken by an explosion shockwave). Right-
-# click with flint and steel ignites: replace block with kr (EntityTNTPrimed),
-# 80-tick fuse → explosion power 4 at the entity position. Faces use 3
-# distinct atlas tiles (top fuse plate, side TNT lettering, plain red bottom)
-# extracted from the Alpha terrain.png at row 0 cols 8-10.
+# Vanilla Alpha BlockTNT (v.java, id 46). Hardness 0 = instant break. Vanilla
+# `a(Random) { return 0; }` (v.java:29-31) means the block drops nothing on
+# any break path — Alpha TNT was strictly craft-only. We intentionally
+# deviate to modern-MC behavior and drop the block on hand-mine so it's
+# acquirable without first reaching a creeper-source for gunpowder (no mobs
+# yet — see `drops()` fall-through). Right-click with flint and steel
+# ignites: replace block with kr (EntityTNTPrimed), 80-tick fuse →
+# explosion power 4 at the entity position. Faces use 3 distinct atlas
+# tiles (top fuse plate, side TNT lettering, plain red bottom) extracted
+# from the Alpha terrain.png at row 0 cols 8-10.
 const TNT := 36
 # Vanilla Alpha BlockFlowers (mr.java) — red poppy (nq.ad, id 37) and yellow
 # dandelion (nq.ae, id 38). Cross-quad render like SAPLING. Hardness 0,
@@ -196,12 +199,24 @@ const MESH_SHAPE_LADDER: int = 7
 # Thin 2/16-tall slab on the floor — used by snow_layer. Bottom face
 # hugs the supporting block below; top face + 4 sides at y=2/16.
 const MESH_SHAPE_SNOW_LAYER: int = 8
+# Vanilla Alpha BlockFire render type 3 (bk.java::d). Two leaning vertical
+# planes if the cell below is opaque (X-cross with tops offset 0.2 inward),
+# or wall-hugging quads against each opaque/flammable side neighbor when
+# the floor is non-solid. All quads use the same animated fire atlas tile
+# (chunk shader does time-based UV strip lookup), so no extra material.
+const MESH_SHAPE_FIRE: int = 9
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
 # match in GDScript — called ~30K times per worldgen chunk + ~30K times
 # per lighting BFS pass.
 static var _light_opacity_lut: PackedByteArray
+# Lazy-init explosion-resistance LUT (PackedFloat32Array of 256 entries).
+# explosion_resistance() is called once per non-AIR cell per ray step in
+# an explosion (~5000+ calls per TNT detonation). The match statement
+# version is ~10× slower than a direct array index, and the BFS-shaped
+# explosion ray-cast is the hot path during chained TNT cascades.
+static var _resistance_lut: PackedFloat32Array
 
 
 # Dispatch a scheduled block-tick fired by `TickScheduler`. `manager` is
@@ -585,7 +600,6 @@ static func _door_facing(meta: int) -> int:
 static func mesh_shape(id: int) -> int:
 	if (
 		id == SAPLING
-		or id == FIRE
 		or id == FLOWER_RED
 		or id == FLOWER_YELLOW
 		or id == MUSHROOM_BROWN
@@ -593,6 +607,8 @@ static func mesh_shape(id: int) -> int:
 		or id == SUGAR_CANE
 	):
 		return MESH_SHAPE_CROSS
+	if id == FIRE:
+		return MESH_SHAPE_FIRE
 	if id == TORCH:
 		return MESH_SHAPE_TORCH
 	if id == CHEST:
@@ -627,6 +643,19 @@ static func needs_gdscript_mesher(id: int) -> bool:
 # and obsidian use absurd values so they're effectively immune to TNT.
 # Numbers come from Bukkit/mc-dev (Beta-faithful; Alpha used the same
 # values for the few blocks it had).
+# Direct LUT lookup for the explosion ray-cast hot path. Lazy-builds the
+# table on first call by walking every block id through the slower match
+# below. PackedFloat32Array index = block_id; returns 0.0 for unknown ids
+# (matches the match's fallthrough).
+static func explosion_resistance_fast(id: int) -> float:
+	if _resistance_lut.is_empty():
+		_resistance_lut = PackedFloat32Array()
+		_resistance_lut.resize(256)
+		for i in range(256):
+			_resistance_lut[i] = explosion_resistance(i)
+	return _resistance_lut[id] if id >= 0 and id < 256 else 0.0
+
+
 static func explosion_resistance(id: int) -> float:
 	match id:
 		BEDROCK:

@@ -537,6 +537,9 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
 		return false
 	_chunk_manager.set_world_block(fire_pos, Blocks.FIRE)
+	# Kickstart the spread/decay loop — without this, fire just sits
+	# there static and never spreads to adjacent flammables.
+	TickScheduler.schedule(fire_pos, Blocks.FIRE, BlockFire.TICK_RATE)
 	# `random.click` at pitch 0.9 — see SFX.play_flint_and_steel for the
 	# vanilla audio note (Alpha was silent; modern MC plays a metallic
 	# strike). Click-at-low-pitch is the closest tactile substitute we

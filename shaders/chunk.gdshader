@@ -11,6 +11,16 @@ render_mode cull_back, unshaded;
 
 uniform sampler2D atlas_texture : filter_nearest, source_color;
 
+// Animated fire strip — vanilla fire_layer_0.png at 16×512 (32 frames of
+// 16×16 stacked vertically). When a fragment's UV falls inside the fire
+// tile's atlas region (`fire_uv`), we sample from THIS texture instead
+// of the atlas, with V offset by TIME × FPS so frames cycle. Single tex
+// + single shader branch — avoids a per-chunk material or re-meshing.
+uniform sampler2D fire_strip : filter_nearest, source_color;
+uniform vec4 fire_uv = vec4(-1.0);  // (x, y, w, h) in atlas space; (-1,-1,-1,-1) = disabled
+const float FIRE_FRAMES = 32.0;
+const float FIRE_FPS = 24.0;
+
 // Sky-light multiplier driven by WorldTime.sky_factor() (0.05 midnight,
 // 1.0 noon). Applied to the per-vertex sky_light value packed in COLOR.r.
 // Default 1.0 keeps the shader functional when no driver is attached
@@ -50,7 +60,20 @@ void vertex() {
 
 
 void fragment() {
-	vec4 c = texture(atlas_texture, UV);
+	vec4 c;
+	// Fire animation — UV check against the fire tile's atlas region.
+	// If inside, remap to the fire_strip texture with TIME-based V offset
+	// so frames cycle. Outside, sample the atlas as normal.
+	if (fire_uv.x >= 0.0
+			&& UV.x >= fire_uv.x && UV.x < fire_uv.x + fire_uv.z
+			&& UV.y >= fire_uv.y && UV.y < fire_uv.y + fire_uv.w) {
+		vec2 local_uv = (UV - fire_uv.xy) / fire_uv.zw;
+		float frame = floor(mod(TIME * FIRE_FPS, FIRE_FRAMES));
+		vec2 strip_uv = vec2(local_uv.x, (frame + local_uv.y) / FIRE_FRAMES);
+		c = texture(fire_strip, strip_uv);
+	} else {
+		c = texture(atlas_texture, UV);
+	}
 	if (c.a < 0.5) {
 		discard;
 	}

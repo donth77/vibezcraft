@@ -280,6 +280,17 @@ static func material() -> ShaderMaterial:
 				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
 			)
 		)
+		# Animated fire — pass the atlas region the static fire tile occupies
+		# (the shader uses it as a UV gate) plus the multi-frame strip the
+		# shader samples from on a hit. fire_layer_0.png is 16×512 (32 frames).
+		var fire_rect: Rect2 = uv_rect("fire")
+		_material.set_shader_parameter(
+			"fire_uv",
+			Vector4(fire_rect.position.x, fire_rect.position.y, fire_rect.size.x, fire_rect.size.y)
+		)
+		var fire_strip: Texture2D = load("res://assets/textures/particles/fire_layer_0.png")
+		if fire_strip != null:
+			_material.set_shader_parameter("fire_strip", fire_strip)
 	return _material
 
 

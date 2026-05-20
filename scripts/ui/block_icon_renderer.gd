@@ -65,6 +65,9 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.ICE,
 	Blocks.SNOW_BLOCK,
 	Blocks.CACTUS,
+	# TNT renders as a full cube with 3 distinct faces (top fuse plate, side
+	# lettering, plain red bottom). Iso bake shows the top + 2 sides cleanly.
+	Blocks.TNT,
 ]
 
 static var _viewport: SubViewport

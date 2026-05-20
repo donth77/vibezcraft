@@ -617,10 +617,19 @@ Dictionary MesherNative::mesh_chunk_data(
 					norms.append(normal);
 					// UVs: V-flipped so the top of the face samples the top
 					// of the texture (matches GDScript Mesher winding).
-					uvs.append(Vector2(uv_x, uv_y + uv_h));
-					uvs.append(Vector2(uv_x, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					// Side faces (idx 2-5) also swap U so asymmetric text
+					// (e.g. TNT's "N" on the side) renders un-mirrored.
+					if (face < 2) {
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					} else {
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+					}
 					// Reversed winding for cull_back: triangles are (0,2,1)
 					// and (0,3,2) in vertex space → (v0,v2,v1) and (v0,v3,v2).
 					indices.append(base);
@@ -861,10 +870,20 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					norms.append(normal);
 					norms.append(normal);
 					norms.append(normal);
-					uvs.append(Vector2(uv_x, uv_y + uv_h));
-					uvs.append(Vector2(uv_x, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y));
-					uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					// Side faces (idx 2-5) swap U so asymmetric horizontal
+					// detail (TNT's "N") renders un-mirrored. Top/bottom keep
+					// the original order.
+					if (face < 2) {
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+					} else {
+						uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+						uvs.append(Vector2(uv_x + uv_w, uv_y));
+						uvs.append(Vector2(uv_x, uv_y));
+						uvs.append(Vector2(uv_x, uv_y + uv_h));
+					}
 					// Per-vertex face light = neighbor cell's sky/block. Flat
 					// per-face — Alpha 1.2.6 had no smooth lighting (added
 					// Beta 1.6); all 4 verts get the same value.

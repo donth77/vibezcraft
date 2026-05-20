@@ -520,16 +520,67 @@ static func _spawn_lava_smoke_burst(parent: Node, world_pos: Vector3) -> void:
 
 
 # Fire smoke — mirrors qh.java:189-236 BlockFire.randomDisplayTick's
-# `largesmoke` spawns on flammable-adjacent faces of a FIRE cell. Single
-# puff per call, drifts up + disperses. Shares the largesmoke material
-# with spawn_fizz so no extra shader / material.
+# `largesmoke` spawns. CPUParticles3D (not GPU) so the particles render
+# immediately without a per-instance shader compile delay; the vanilla
+# 8-frame animation comes from the shared material's
+# `particles_anim_h_frames=8` cycling on particle age.
+# Emits 4 particles per call (vanilla spawned ~2-3 in a tight burst);
+# previous single-particle version was too sparse to notice on the
+# ambient-roll cadence.
 static func spawn_fire_smoke(parent: Node, pos: Vector3i) -> void:
-	var particles := _acquire(parent, 3, Vector3(0.3, 0.1, 0.3))
-	particles.position = Vector3(pos) + Vector3(0.5, 0.5, 0.5)
-	particles.lifetime = 1.5
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+	var p := CPUParticles3D.new()
+	parent.add_child(p)
+	p.position = Vector3(pos) + Vector3(0.5, 0.3, 0.5)
+	p.amount = 4
+	p.lifetime = 1.4
+	p.one_shot = true
+	p.explosiveness = 0.6
+	p.local_coords = false
+	# Tight emission box around the fire cell center so the puffs cluster
+	# rather than scatter across the whole cell. Was a flat disc before
+	# (squished plate). Small Y extent lets the burst rise as a column.
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	p.emission_box_extents = Vector3(0.15, 0.05, 0.15)
+	# Vanilla pi.java rising accel (`aA += 0.004` per tick × 20 TPS ≈ 1.6).
+	p.gravity = Vector3(0, 1.5, 0)
+	p.direction = Vector3(0, 1, 0)
+	p.spread = 20.0
+	p.initial_velocity_min = 0.15
+	p.initial_velocity_max = 0.35
+	p.damping_min = 0.5
+	p.damping_max = 1.0
+	p.scale_amount_min = 0.5
+	p.scale_amount_max = 0.9
+	# CPUParticles3D uses `scale_amount_curve` (raw Curve, not CurveTexture).
+	var scale_curve := Curve.new()
+	scale_curve.add_point(Vector2(0.0, 0.3))
+	scale_curve.add_point(Vector2(0.4, 1.0))
+	scale_curve.add_point(Vector2(1.0, 1.0))
+	p.scale_amount_curve = scale_curve
+	var grad := Gradient.new()
+	grad.remove_point(1)
+	grad.remove_point(0)
+	grad.add_point(0.0, Color(1.0, 1.0, 1.0, 0.9))
+	grad.add_point(0.7, Color(1.0, 1.0, 1.0, 0.5))
+	grad.add_point(1.0, Color(1.0, 1.0, 1.0, 0.0))
+	p.color_ramp = grad
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.4, 0.4)
+	p.mesh = quad
+	(p.mesh as QuadMesh).material = get_largesmoke_material()
+	p.emitting = true
+	var tree: SceneTree = parent.get_tree()
+	if tree != null:
+		var cleanup := tree.create_timer(p.lifetime + 0.3)
+		cleanup.timeout.connect(_free_smoke_if_valid.bind(p))
+
+
+# Free helper for fire-smoke cleanup — extracted so the SceneTreeTimer
+# timeout binding has a stable target (an inline lambda with an if-check
+# inside a binding can't be parsed by gdformat).
+static func _free_smoke_if_valid(node: Node) -> void:
+	if is_instance_valid(node):
+		node.queue_free()
 
 
 # Vanilla EntityFlameFX (ko.java:23) samples particles.png tile 48 — an

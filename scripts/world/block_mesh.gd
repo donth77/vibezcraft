@@ -102,10 +102,22 @@ static func _build(block_id: int, size: float) -> ArrayMesh:
 		var face_name: String = FACE_NAMES[face_idx]
 		var tex_name: String = Blocks.get_face_texture(block_id, face_name)
 		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
-		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		# Side faces (idx 2-5) get U swapped so the texture renders
+		# un-mirrored on the cube — without this, asymmetric horizontal
+		# detail (like the "N" in TNT's side lettering) reads backwards
+		# because the +X face's screen-right axis is -Z, but the v0 vertex
+		# (at -Z) was being mapped to texture LEFT. Top/bottom keep the
+		# original order (their U axis is world-X, not screen-mirrored).
+		if face_idx < 2:
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		else:
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
 		indices.append_array(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)

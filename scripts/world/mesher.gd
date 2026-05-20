@@ -176,6 +176,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_cross_quads(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_FIRE:
+					_emit_fire_quads(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
 				elif ms == Blocks.MESH_SHAPE_TORCH:
 					_emit_torch_quads(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
@@ -416,10 +420,21 @@ static func _emit_block_faces(
 		norms.append(normal)
 		# V is flipped so the top of each cube face samples the top of the
 		# texture — keeps grass_side's green strip on top, dirt on bottom.
-		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		# Side faces (idx 2-5) also need U swapped: v0/v1 are on the -axis
+		# end of the face's secondary direction, which corresponds to the
+		# RIGHT side of the screen when viewing that face from outside.
+		# Without the swap, asymmetric text (TNT side "N") renders mirrored.
+		# Top/bottom keep the original order (their U axis isn't mirrored).
+		if face_idx < 2:
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		else:
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
 		# Per-vertex face light: sky/15 in R, block/15 in G. Sample from the
 		# neighbor cell — the "open" side this face looks at, which holds
 		# the light reaching it. Vanilla / native parity: same rule mirrored
@@ -1239,6 +1254,324 @@ static func _emit_cross_quads(
 	var aabb: AABB = Blocks.selection_aabb(id)
 	var box_min := Vector3(x, y, z) + aabb.position
 	_emit_collision_box(plant_faces, box_min, box_min + aabb.size)
+
+
+# Vanilla Alpha BlockFire render (bk.java::d, render-type 3). Fire visually
+# "leans" — on an opaque floor it renders as two perpendicular leaning
+# planes (an X with tops offset 0.2 inward from the cell center), and
+# stretches up to y+1.4 so flames extend past the cell top. With no
+# opaque floor it renders one wall-hugging quad against each opaque or
+# flammable side neighbor, plus a ceiling quad if the cell above is
+# opaque. All quads are double-sided (front + back winding emitted, same
+# trick as cross-quad) and share the fire atlas tile — the chunk shader
+# does the time-based UV strip lookup, so no extra material or geometry
+# variations needed. Perf: at most 2 quads on a floor or 5 wall/ceiling
+# quads per fire cell × ~30 fire cells in a burning tree = ~150 extra
+# triangles, well under the per-frame budget.
+static func _emit_fire_quads(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array
+) -> void:
+	var origin := Vector3(x, y, z)
+	var rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.FIRE, BlockAtlas.FACE_SIDE)
+	var flame_normal := Vector3(0, 1, 0)
+	# Self-cell light — fire is always lit (block_light=15 from FIRE itself)
+	# but sample anyway so caves with no torches around a small fire still
+	# read with the fire's own block-light contribution.
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var below_id := chunk.get_block(x, y - 1, z)
+	if Blocks.is_opaque(below_id):
+		# Path A — opaque floor. Vanilla bk.java::d emits 8 distinct
+		# leaning planes per fire cell, NOT 2: an inner X-cross of 4
+		# planes at offsets 0.2/0.3/0.7/0.8 plus an outer X-cross of 4
+		# planes near the walls at offsets 0/0.1/0.9/1.0. Together they
+		# form a flame "asterisk" with curls visible in all 4 cardinal
+		# directions — much denser than a simple 2-plane X. Top Y = +1.4
+		# so flame tips extend past the cell. All planes double-sided
+		# (front+back winding) so cull_back keeps them visible from any
+		# angle (vanilla disables culling globally for fire).
+		var top_y: float = 1.4
+		# Inner cross planes 1-2 — along Z, opposing leans
+		# Plane 1: bottom X=0.7 → top X=0.2 (leans -X)
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(0.7, 0.0, 0.0),
+			origin + Vector3(0.2, top_y, 0.0),
+			origin + Vector3(0.2, top_y, 1.0),
+			origin + Vector3(0.7, 0.0, 1.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Plane 2: bottom X=0.3 → top X=0.8 (leans +X)
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(0.3, 0.0, 1.0),
+			origin + Vector3(0.8, top_y, 1.0),
+			origin + Vector3(0.8, top_y, 0.0),
+			origin + Vector3(0.3, 0.0, 0.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Inner cross planes 3-4 — along X, opposing leans
+		# Plane 3: bottom Z=0.7 → top Z=0.2 (leans -Z)
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(0.0, 0.0, 0.7),
+			origin + Vector3(0.0, top_y, 0.2),
+			origin + Vector3(1.0, top_y, 0.2),
+			origin + Vector3(1.0, 0.0, 0.7),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Plane 4: bottom Z=0.3 → top Z=0.8 (leans +Z)
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(1.0, 0.0, 0.3),
+			origin + Vector3(1.0, top_y, 0.8),
+			origin + Vector3(0.0, top_y, 0.8),
+			origin + Vector3(0.0, 0.0, 0.3),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Outer cross planes 5-6 — along Z, near walls
+		# Plane 5: bottom X=0.0 (west wall) → top X=0.1
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(0.0, 0.0, 0.0),
+			origin + Vector3(0.1, top_y, 0.0),
+			origin + Vector3(0.1, top_y, 1.0),
+			origin + Vector3(0.0, 0.0, 1.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Plane 6: bottom X=1.0 (east wall) → top X=0.9
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(1.0, 0.0, 1.0),
+			origin + Vector3(0.9, top_y, 1.0),
+			origin + Vector3(0.9, top_y, 0.0),
+			origin + Vector3(1.0, 0.0, 0.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Outer cross planes 7-8 — along X, near walls
+		# Plane 7: bottom Z=0.0 (north wall) → top Z=0.1
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(1.0, 0.0, 0.0),
+			origin + Vector3(1.0, top_y, 0.1),
+			origin + Vector3(0.0, top_y, 0.1),
+			origin + Vector3(0.0, 0.0, 0.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+		# Plane 8: bottom Z=1.0 (south wall) → top Z=0.9
+		_emit_fire_plane(
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			origin + Vector3(0.0, 0.0, 1.0),
+			origin + Vector3(0.0, top_y, 0.9),
+			origin + Vector3(1.0, top_y, 0.9),
+			origin + Vector3(1.0, 0.0, 1.0),
+			rect,
+			flame_normal,
+			face_light,
+		)
+	else:
+		# Path B — no opaque floor → up to 5 wall-hugging quads. Vanilla
+		# `f4 = 0.2` (lean amount), `f3 = 1.4` (top y), `f5 = 0.0625` (bottom lift).
+		var lean: float = 0.2
+		var top_y_b: float = 1.4
+		var lift: float = 0.0625
+		# -X wall (quad against the west face, leans east at top)
+		if _fire_attaches_to(chunk.get_block(x - 1, y, z)):
+			_emit_fire_plane(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				origin + Vector3(0.0, lift, 1.0),
+				origin + Vector3(lean, top_y_b + lift, 1.0),
+				origin + Vector3(lean, top_y_b + lift, 0.0),
+				origin + Vector3(0.0, lift, 0.0),
+				rect,
+				flame_normal,
+				face_light,
+			)
+		# +X wall (leans west at top)
+		if _fire_attaches_to(chunk.get_block(x + 1, y, z)):
+			_emit_fire_plane(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				origin + Vector3(1.0, lift, 0.0),
+				origin + Vector3(1.0 - lean, top_y_b + lift, 0.0),
+				origin + Vector3(1.0 - lean, top_y_b + lift, 1.0),
+				origin + Vector3(1.0, lift, 1.0),
+				rect,
+				flame_normal,
+				face_light,
+			)
+		# -Z wall (leans south at top)
+		if _fire_attaches_to(chunk.get_block(x, y, z - 1)):
+			_emit_fire_plane(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				origin + Vector3(0.0, lift, 0.0),
+				origin + Vector3(0.0, top_y_b + lift, lean),
+				origin + Vector3(1.0, top_y_b + lift, lean),
+				origin + Vector3(1.0, lift, 0.0),
+				rect,
+				flame_normal,
+				face_light,
+			)
+		# +Z wall (leans north at top)
+		if _fire_attaches_to(chunk.get_block(x, y, z + 1)):
+			_emit_fire_plane(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				origin + Vector3(1.0, lift, 1.0),
+				origin + Vector3(1.0, top_y_b + lift, 1.0 - lean),
+				origin + Vector3(0.0, top_y_b + lift, 1.0 - lean),
+				origin + Vector3(0.0, lift, 1.0),
+				rect,
+				flame_normal,
+				face_light,
+			)
+		# Ceiling quad — flat plane near the top of the cell, flipped so
+		# it reads as the "underside" of fire burning on a ceiling.
+		if Blocks.is_opaque(chunk.get_block(x, y + 1, z)):
+			var ceiling_y: float = top_y_b - 0.2
+			_emit_fire_plane(
+				verts,
+				norms,
+				uvs,
+				colors,
+				indices,
+				origin + Vector3(0.0, ceiling_y, 0.0),
+				origin + Vector3(0.0, ceiling_y, 1.0),
+				origin + Vector3(1.0, ceiling_y, 1.0),
+				origin + Vector3(1.0, ceiling_y, 0.0),
+				rect,
+				flame_normal,
+				face_light,
+			)
+	# Selection AABB so the player's targeting raycast can hit the fire
+	# even though the visual quads are tilted thin sheets. Same trick as
+	# cross-quads — vanilla MC uses Block.selection_aabb (a box) for
+	# cursor targeting regardless of render shape.
+	var aabb: AABB = Blocks.selection_aabb(Blocks.FIRE)
+	var box_min := Vector3(x, y, z) + aabb.position
+	_emit_collision_box(plant_faces, box_min, box_min + aabb.size)
+
+
+# True if a fire cell should attach to (render a leaning quad against)
+# the given neighbor. Vanilla `qh.h()` checks for opaque OR flammable
+# neighbors — either anchors the flame visually.
+static func _fire_attaches_to(neighbor_id: int) -> bool:
+	if Blocks.is_opaque(neighbor_id):
+		return true
+	return BlockFire.can_catch_fire(neighbor_id)
+
+
+# Emit one double-sided fire quad given 4 corner positions in BL → TL →
+# TR → BR order. UVs map texture-bottom to quad-bottom (V is flipped per
+# the chunk mesher's convention so the atlas tile reads upright). Front
+# + back winding both emitted so the flame is visible from either side
+# without disabling cull_back globally.
+static func _emit_fire_plane(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	bl: Vector3,
+	tl: Vector3,
+	tr: Vector3,
+	br: Vector3,
+	rect: Rect2,
+	normal: Vector3,
+	face_light: Color
+) -> void:
+	var base := verts.size()
+	verts.append(bl)
+	verts.append(tl)
+	verts.append(tr)
+	verts.append(br)
+	norms.append(normal)
+	norms.append(normal)
+	norms.append(normal)
+	norms.append(normal)
+	uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+	uvs.append(Vector2(rect.position.x, rect.position.y))
+	uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+	uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+	colors.append(face_light)
+	colors.append(face_light)
+	colors.append(face_light)
+	colors.append(face_light)
+	# Front winding (matches cross-quad).
+	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
+	# Back winding — same triangles flipped so cull_back keeps the
+	# reverse side too.
+	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
 
 
 # Vanilla bk.java:673-715 (RenderBlocks.renderTorchAtAngle), dispatched

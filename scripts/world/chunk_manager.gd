@@ -108,6 +108,7 @@ var _inside_fluid_notify: bool = false
 # unwind via FluidFx.flush_deferred.
 var _light_defer_depth: int = 0
 var _deferred_sky_seeds: Dictionary = {}  # Vector3i → true
+var _deferred_block_seeds: Dictionary = {}  # Vector3i → true
 var _deferred_fizz: Array = []
 # Last player chunk we ran _update_collision_activity against. Skip the
 # sweep until the player actually crosses a chunk boundary.
@@ -712,6 +713,30 @@ func find_chest_node_at(world_pos: Vector3i) -> ChestNode:
 	return null
 
 
+# Batch begin — defers per-edit lighting BFS updates so a multi-block
+# operation (explosion, future area-fill commands) runs ONE BFS per unique
+# seed at end_batch() instead of N inline BFS calls. Pair with end_batch().
+# Calls nest safely: only the outermost flush drains the seeds.
+func begin_batch() -> void:
+	_light_defer_depth += 1
+
+
+# Batch end — drains accumulated sky/block-light seeds via one BFS each.
+# A typical TNT explosion affects ~100 cells; this turns 200 inline BFS
+# calls into ~100 batched ones (often fewer after dedup by world_pos),
+# eliminating the per-detonation frame spike.
+func end_batch() -> void:
+	_light_defer_depth -= 1
+	if _light_defer_depth > 0:
+		return
+	for world_pos: Vector3i in _deferred_sky_seeds:
+		Lighting.update_sky_light_around_world(world_pos, self)
+	for world_pos: Vector3i in _deferred_block_seeds:
+		Lighting.update_block_light_around_world(world_pos, self)
+	_deferred_sky_seeds.clear()
+	_deferred_block_seeds.clear()
+
+
 # World-coord block edit. Looks up the right chunk, converts to local coords,
 # applies. Silently no-ops if the target is outside the currently loaded area.
 # Marks the chunk as "modified" so it's preserved across unload/reload.
@@ -769,10 +794,16 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 			Lighting.update_sky_light_around_world(world_pos, self)
 	# Block-light update mirrors the sky branch — lava (bucket + flow)
 	# emits 15 and needs this BFS to light surrounding cells on edit.
+	# Deferred during a batch (begin_batch / end_batch) so an N-block
+	# explosion runs the BFS once per unique seed at flush time instead
+	# of N times inline.
 	var em_diff: bool = Blocks.light_emission(old_id) != Blocks.light_emission(id)
 	var op_diff: bool = Blocks.light_opacity(old_id) != Blocks.light_opacity(id)
 	if old_id != id and (em_diff or op_diff):
-		Lighting.update_block_light_around_world(world_pos, self)
+		if _light_defer_depth > 0:
+			_deferred_block_seeds[world_pos] = true
+		else:
+			Lighting.update_block_light_around_world(world_pos, self)
 	# Plant detach — vanilla BlockPlant.doPhysics fires when a neighbor
 	# changes; if the support directly below is no longer grass/dirt/
 	# farmland, the plant pops off and drops itself. We trigger on any

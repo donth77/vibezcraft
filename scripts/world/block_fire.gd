@@ -20,9 +20,13 @@ extends RefCounted
 const TICK_RATE: int = 10  # Beta tickRate() = 10 ticks (0.5 s)
 const MAX_AGE: int = 15
 
+# PrimedTNT preload — fire auto-prime path. Vanilla qh.java:102-103 calls
+# BlockTNT.b() on the consumed cell, which spawns an EntityTNTPrimed.
+const _PRIMED_TNT := preload("res://scripts/world/primed_tnt.gd")
+
 # Beta per-block tables (chance_to_encourage / ability_to_catch).
 # Block.planks(7) -> 5/20, Block.wood(17 = LOG) -> 5/5,
-# Block.leaves(18 = LEAVES) -> 30/60.
+# Block.leaves(18 = LEAVES) -> 30/60, Block.tnt(46) -> 15/100.
 static var _encourage: Dictionary = {}
 static var _catch: Dictionary = {}
 static var _tables_built: bool = false
@@ -39,10 +43,23 @@ static func _ensure_tables() -> void:
 	_catch[Blocks.LOG] = 5
 	_encourage[Blocks.LEAVES] = 30
 	_catch[Blocks.LEAVES] = 60
+	# Vanilla qh.java:17 — TNT registers with encourage=15, catch=100.
+	# High catch means fire trying to ignite a TNT cell is very likely to
+	# succeed; encourage=15 means a TNT cell is itself a moderate fuel
+	# source for surrounding fires.
+	_encourage[Blocks.TNT] = 15
+	_catch[Blocks.TNT] = 100
 	_tables_built = true
 
 
 static func _can_block_catch_fire(id: int) -> bool:
+	return can_catch_fire(id)
+
+
+# Public predicate — true if this block id is in the flammability table.
+# Exposed so ambient_fx can gate the crackle SFX on whether neighbors
+# could keep the fire alive (see ambient_fx._fire_about_to_die).
+static func can_catch_fire(id: int) -> bool:
 	_ensure_tables()
 	return _encourage.get(id, 0) > 0
 
@@ -95,6 +112,12 @@ static func _can_neighbor_burn(manager, pos: Vector3i) -> bool:
 # rolls < var5 to ignite. On hit: 50/50 between FIRE and AIR (the AIR
 # branch is vanilla's "burn out without leaving fire" path for blocks
 # with high catch + low encourage like wood).
+#
+# TNT auto-prime: vanilla qh.java:102-103 captures whether the consumed
+# block was TNT before clearing it, then calls BlockTNT.b() to spawn a
+# primed entity AT that cell — independently of the FIRE/AIR coin flip.
+# So a fire that catches TNT leaves either FIRE or AIR in the cell PLUS
+# a primed entity that flies out on its spawn impulse.
 static func _try_to_catch_block_on_fire(manager, target: Vector3i, var5: int) -> void:
 	_ensure_tables()
 	var id: int = manager.get_world_block(target)
@@ -103,11 +126,17 @@ static func _try_to_catch_block_on_fire(manager, target: Vector3i, var5: int) ->
 		return
 	if randi() % var5 >= ability:
 		return
+	var was_tnt: bool = id == Blocks.TNT
 	if randi() % 2 == 0:
 		manager.set_world_block_with_meta(target, Blocks.FIRE, 0)
 		TickScheduler.schedule(target, Blocks.FIRE, TICK_RATE)
 	else:
 		manager.set_world_block(target, Blocks.AIR)
+	if was_tnt:
+		var primed = _PRIMED_TNT.new()
+		manager.add_child(primed)
+		primed.global_position = Vector3(target) + Vector3(0.5, 0.5, 0.5)
+		primed.setup()
 
 
 # Entry point from Blocks.on_scheduled_tick — direct port of Beta

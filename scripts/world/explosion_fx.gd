@@ -102,63 +102,63 @@ static func _explode_mat() -> StandardMaterial3D:
 
 
 # Build a continuous low-rate smoke emitter — used as a child of the
-# primed-TNT entity for the during-fuse smoke trail. Caller is responsible
-# for parenting and freeing it (typically: parent on `_ready`, queue_free
-# on `_detonate`).
+# primed-TNT entity for the during-fuse smoke trail.
+#
+# CPUParticles3D rather than GPUParticles3D: GPU emitters incur a shader
+# compile on first spawn (every fresh ParticleProcessMaterial creates a
+# unique shader), which manifests as "particles invisible for the first
+# frame or two" — a 4-second fuse can have lots of those if multiple
+# TNTs chain. The CPU path uses Godot's built-in particle shader (no
+# per-instance compile), and CPUParticles3D + a BILLBOARD_PARTICLES
+# material with `particles_anim_h_frames=8` still cycles the strip per
+# particle via INSTANCE_CUSTOM age data — same vanilla 8-frame animation
+# as GPU, just immediately visible. local_coords=false so the smoke
+# stays in world space when the TNT bounces / falls.
 static func build_smoke_trail() -> CPUParticles3D:
 	var p := CPUParticles3D.new()
-	# Continuous, not one-shot — keeps puffing every frame while the fuse
-	# burns. one_shot=false + amount/lifetime ratio sets emission rate.
+	# Continuous emission while the fuse burns. amount = lifetime × rate.
+	# 1.2 s × 8 alive = ~7 Hz emission rate, a steady ribbon of puffs.
 	p.one_shot = false
-	p.amount = _TRAIL_AMOUNT
-	p.lifetime = _TRAIL_LIFETIME
 	p.explosiveness = 0.0
-	# Spawn AT the entity (zero box extents) so puffs appear from a single
-	# point and drift apart on per-particle velocity. Vanilla emits at
-	# `entity.pos + (0, 0.5, 0)`; we match by offsetting the emitter
-	# upward 0.5 in PrimedTNT.
+	p.amount = 8
+	p.lifetime = 1.2
+	p.local_coords = false  # world-space trail, not glued to the entity
+	# Single-point spawn so each puff originates at the entity's center+0.5
+	# (PrimedTNT offsets the emitter upward to match vanilla kr.java:51).
 	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_POINT
-	# pi.java:47 `aA += 0.004` per tick → ~+1.6 m/s per second after damp.
-	# Negative gravity in our coord system = upward drift.
+	# Vanilla pi.java:47 `aA += 0.004` per tick → +1.6 m/s² rising accel.
 	p.gravity = Vector3(0, 1.5, 0)
-	# Mild outward jitter so the column has shape rather than a vertical
-	# line of identical puffs. Vanilla particle init randomizes velocity
-	# slightly via Entity construction (lw.java spawn-speed).
 	p.direction = Vector3(0, 1, 0)
-	p.spread = 30.0
-	p.initial_velocity_min = 0.05
-	p.initial_velocity_max = 0.25
-	# pi.java per-tick damping 0.96 → ≈55%/sec velocity decay. CPUParticles3D
-	# damping is in m/s²; ~0.5 gives a similar curve at our velocity scale.
-	p.damping_min = 0.3
-	p.damping_max = 0.7
-	# Scale ramp — vanilla pi.java:28-36 `g = a × (e/f × 32)` clamped
-	# [0,1]; in plain English: particle starts tiny, ramps to full size
-	# over its lifetime. CPUParticles3D doesn't expose a per-particle
-	# size curve directly; the scale_amount range gives us a static
-	# random size per particle, which reads as "varying puff sizes" —
-	# similar visual impression even if the per-particle ramp is missed.
-	p.scale_amount_min = 0.15
-	p.scale_amount_max = 0.45
-	# Color modulation — light to dark grey. CPUParticles3D's color_ramp
-	# fades via gradient over particle lifetime; without one set, we get
-	# constant alpha until cull. Use a 2-stop ramp from full grey to fully
-	# transparent so puffs naturally fade out instead of popping.
-	var grad := Gradient.new()
-	grad.add_point(0.0, Color(0.25, 0.25, 0.25, 0.85))
-	grad.add_point(1.0, Color(0.10, 0.10, 0.10, 0.0))
-	# Replace the default 0/1 stops gradient created on add_point.
-	grad.remove_point(0)
-	grad.remove_point(0)
-	grad.add_point(0.0, Color(0.25, 0.25, 0.25, 0.85))
-	grad.add_point(1.0, Color(0.10, 0.10, 0.10, 0.0))
-	p.color_ramp = grad
+	p.spread = 25.0
+	p.initial_velocity_min = 0.1
+	p.initial_velocity_max = 0.3
+	p.damping_min = 0.5
+	p.damping_max = 1.0
+	# Per-particle scale + age-driven sprite frame (the material's
+	# particles_anim_h_frames=8 reads INSTANCE_CUSTOM age 0..1 and picks
+	# the right frame — no anim_speed knob needed on CPUParticles3D).
+	p.scale_amount_min = 0.5
+	p.scale_amount_max = 0.8
+	# CPUParticles3D takes a raw Curve via `scale_amount_curve` — NOT a
+	# CurveTexture and NOT the GPU's `scale_curve` property name.
+	var scale_curve := Curve.new()
+	scale_curve.add_point(Vector2(0.0, 0.3))
+	scale_curve.add_point(Vector2(0.3, 1.0))
+	scale_curve.add_point(Vector2(1.0, 1.0))
+	p.scale_amount_curve = scale_curve
+	# Alpha fade so puffs don't pop out at end-of-life.
+	var color_ramp := Gradient.new()
+	color_ramp.remove_point(1)
+	color_ramp.remove_point(0)
+	color_ramp.add_point(0.0, Color(1.0, 1.0, 1.0, 0.9))
+	color_ramp.add_point(0.7, Color(1.0, 1.0, 1.0, 0.5))
+	color_ramp.add_point(1.0, Color(1.0, 1.0, 1.0, 0.0))
+	p.color_ramp = color_ramp
+	# Quad mesh — vanilla animated 8-frame smoke sprite (FluidFx material).
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.25, 0.25)
+	quad.size = Vector2(0.4, 0.4)
 	p.mesh = quad
-	# Material applied AFTER mesh assignment — CPUParticles3D resolves
-	# `mesh.material` for the draw pass.
-	(p.mesh as QuadMesh).material = _smoke_mat()
+	(p.mesh as QuadMesh).material = FluidFx.get_largesmoke_material()
 	p.emitting = true
 	return p
 
@@ -167,11 +167,15 @@ static func build_smoke_trail() -> CPUParticles3D:
 # cell, with velocity pointing away from the explosion origin. Lifetime
 # self-cleans via queue_free on a SceneTreeTimer.
 #
-# Vanilla ks.java:127-141 emits a per-block explode + smoke pair with a
-# falloff-scaled outward velocity. We collapse to one particle per cell
-# (using the brighter "explode" material) — visually it reads as the
-# expected dust cloud plus directional spray without two pool entries
-# per detonation.
+# Vanilla ks.java:127-141 emits a per-block "explode + smoke" pair with
+# a falloff-scaled outward velocity. We collapse to one particle per
+# cell using the same vanilla 8-frame animated smoke sprite as the TNT
+# fuse trail (via FluidFx.get_largesmoke_material), so the burst reads
+# as a cloud of fluttering smoke puffs flying outward — much closer to
+# vanilla than the prior flat-colored quads. CPUParticles3D's
+# EMISSION_SHAPE_POINTS still drives per-cell position + velocity, and
+# the material's `particles_anim_h_frames` + `BILLBOARD_PARTICLES` give
+# us per-particle frame cycling tied to particle age.
 static func spawn_burst(parent: Node, origin: Vector3, affected: Dictionary) -> void:
 	if affected.is_empty():
 		return
@@ -179,8 +183,7 @@ static func spawn_burst(parent: Node, origin: Vector3, affected: Dictionary) -> 
 	parent.add_child(p)
 	# EMISSION_SHAPE_POINTS lets us spawn each particle at a SPECIFIC cell
 	# position with its own velocity — the only way to mirror vanilla's
-	# "one particle per affected block" pattern in CPUParticles3D without
-	# spawning N separate emitters.
+	# "one particle per affected block" pattern without N separate emitters.
 	var points := PackedVector3Array()
 	var velocities := PackedVector3Array()
 	# Vanilla power for falloff math — we don't have it as a parameter
@@ -211,40 +214,53 @@ static func spawn_burst(parent: Node, origin: Vector3, affected: Dictionary) -> 
 		# than at the original cell (avoids the visual "puffs appearing
 		# offset from the crater" issue).
 		points.append((cell_center + origin) * 0.5)
-		# Convert to m/s. Vanilla's velocity is per-tick (× 20 for m/s),
-		# but the CPUParticles3D drag/lifetime defaults are tuned for our
-		# m/s coords, so use a scaled-down magnitude.
+		# Convert to m/s. Vanilla's velocity is per-tick (× 20 for m/s).
 		velocities.append(dir * falloff * jitter * 8.0)
 	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_POINTS
 	p.emission_points = points
-	p.emission_point_velocities = velocities
+	# CPUParticles3D doesn't expose per-emission-point velocities directly;
+	# we encode each cell's outward direction-magnitude vector into
+	# emission_normals (which the engine multiplies by initial_velocity
+	# to get the per-particle starting velocity). Setting
+	# initial_velocity_min/max=1.0 turns the normal into the velocity
+	# verbatim, preserving the falloff×jitter math above.
+	p.emission_normals = velocities
+	p.direction = Vector3.ZERO
+	p.spread = 0.0
+	p.initial_velocity_min = 1.0
+	p.initial_velocity_max = 1.0
 	p.amount = points.size()
 	p.lifetime = _BURST_LIFETIME
 	p.one_shot = true
 	# 1.0 = burst-all-at-once; matches the visual impression of "the
 	# explosion happens NOW" rather than a slow spawn.
 	p.explosiveness = 1.0
-	# Slight downward gravity so the dust cloud falls after the initial
-	# outward push — vanilla's `aA -= 0.04` on smoke would normally rise,
-	# but the explode particles use a different curve. Read as "dust
-	# settling" with mild gravity.
-	p.gravity = Vector3(0, -2.5, 0)
-	p.damping_min = 1.5
-	p.damping_max = 3.0
+	# Slight downward gravity — explosion smoke settles after the initial
+	# outward push. (Vanilla's pi.java smoke rises +0.004/tick, but the
+	# explode burst reads better with a "dust falling" curve.)
+	p.gravity = Vector3(0, -1.5, 0)
+	p.damping_min = 1.0
+	p.damping_max = 2.0
 	p.scale_amount_min = _BURST_PARTICLE_SCALE * 0.7
 	p.scale_amount_max = _BURST_PARTICLE_SCALE * 1.3
 	# Fade-to-transparent ramp so particles disappear cleanly.
 	var grad := Gradient.new()
 	grad.remove_point(1)
 	grad.remove_point(0)
-	grad.add_point(0.0, Color(1.0, 0.95, 0.85, 0.95))
-	grad.add_point(0.4, Color(0.7, 0.65, 0.55, 0.7))
-	grad.add_point(1.0, Color(0.3, 0.3, 0.3, 0.0))
+	grad.add_point(0.0, Color(1.0, 0.95, 0.9, 1.0))
+	grad.add_point(0.5, Color(0.8, 0.75, 0.7, 0.7))
+	grad.add_point(1.0, Color(0.4, 0.4, 0.4, 0.0))
 	p.color_ramp = grad
+	# Per-particle frame animation pulled from particle age 0..1.
+	# Matches the material's particles_anim_h_frames=8 cycling once over
+	# the lifetime — same animation curve as the TNT fuse trail / fire
+	# smoke (vanilla pi.java per-age frame pick).
+	p.anim_speed_min = 1.0
+	p.anim_speed_max = 1.0
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.6, 0.6)
+	quad.size = Vector2(0.4, 0.4)
 	p.mesh = quad
-	(p.mesh as QuadMesh).material = _explode_mat()
+	(p.mesh as QuadMesh).material = FluidFx.get_largesmoke_material()
 	# emitting=true + one_shot=true emits the full burst on the next frame
 	# and then stops. queue_free on a timer = lifetime + grace.
 	p.emitting = true

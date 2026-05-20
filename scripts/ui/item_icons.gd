@@ -38,6 +38,9 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.SNOW_BLOCK: "snow",
 	Blocks.CACTUS: "cactus_side",
 	Blocks.SNOW_LAYER: "snow",
+	# TNT — flat-sprite fallback before BlockIconRenderer's iso-cube bake
+	# lands. Uses the side face (lettering) which is the most recognizable.
+	Blocks.TNT: "tnt_side",
 }
 
 # Item sprite basenames. Resolved at load time: first try
