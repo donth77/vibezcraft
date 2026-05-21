@@ -492,6 +492,14 @@ func _try_place() -> void:
 				if _try_eat_food(held_id):
 					_last_place_ms = now
 				return
+			# Fishing rod — cast / reel. Vanilla bj.java::a checks
+			# player.fishEntity; if set, reels in (catches if bite
+			# active), else casts a new bobber. Hit-irrelevant so this
+			# fires regardless of what the player is pointing at.
+			if held_id == Items.FISHING_ROD:
+				if _try_fishing_rod():
+					_last_place_ms = now
+				return
 			if (
 				held_id == Items.BUCKET_EMPTY
 				or held_id == Items.BUCKET_WATER
@@ -599,6 +607,10 @@ func _try_eat_food(item_id: int) -> bool:
 		inv.replace_selected(Items.BOWL, 1)
 	else:
 		inv.consume_one_selected()
+	# Eating arm-swing — vanilla shows the held food bobbing during the
+	# eat animation (Beta 1.8 added the multi-frame chew; Alpha was a
+	# single swing).
+	_trigger_player_use_swing()
 	return true
 
 
@@ -729,6 +741,7 @@ func _try_bonemeal(hit: Dictionary, hit_id: int) -> bool:
 		if randf() < 0.45:
 			_chunk_manager.grow_tree_at(hit.block_pos)
 		inv.consume_one_selected()
+		_trigger_player_use_swing()
 		return true
 	# Crops — vanilla BlockCrops.fertilize advances meta straight to
 	# mature (7). Always succeeds (no random roll) and consumes one
@@ -740,6 +753,7 @@ func _try_bonemeal(hit: Dictionary, hit_id: int) -> bool:
 			# Cancel the pending growth tick — the crop is mature now.
 			TickScheduler.cancel(hit.block_pos, Blocks.CROPS)
 		inv.consume_one_selected()
+		_trigger_player_use_swing()
 		return true
 	return false
 
@@ -1278,6 +1292,73 @@ func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
 	return true
 
 
+# Fishing rod — vanilla bj.java::a. Branches on player.fishing_bobber:
+#   * nil  → cast: spawn FishingBobber at camera pos with vel toward
+#     look direction. Play "random.bow" sfx (vanilla pi.bj does the
+#     same — bow sfx is the cast whoosh in Alpha).
+#   * set  → reel: if bobber.reel() returns true (bite active), spawn
+#     a raw_fish dropped item at the bobber position with velocity
+#     toward the player + small Y bias. Damage the rod by 1.
+#
+# Returns true so the cooldown advances; player.fishing_bobber holds
+# the single-bobber state.
+func _try_fishing_rod() -> bool:
+	var player_node: Node3D = _player_node() as Node3D
+	if player_node == null:
+		return false
+	var existing: Node = player_node.get("fishing_bobber") as Node
+	if existing != null and is_instance_valid(existing):
+		var caught: bool = existing.reel()
+		var bobber_pos: Vector3 = existing.get_bobber_position()
+		player_node.set("fishing_bobber", null)
+		if caught:
+			# Spawn raw_fish entity at bobber, vanilla velocity toward
+			# player + slight upward bias.
+			var to_player: Vector3 = player_node.global_position + Vector3(0, 1.6, 0) - bobber_pos
+			var dist: float = to_player.length()
+			var vel: Vector3 = to_player * 0.5
+			vel.y += sqrt(maxf(dist, 0.0)) * 0.5
+			_spawn_dropped_item_with_velocity(bobber_pos, Items.RAW_FISH, vel)
+		# Always damage rod on reel (vanilla returns n2 from k(); we
+		# simplify to 1).
+		var inv: Inventory = _player_inventory()
+		if inv != null and inv.damage_selected_tool():
+			SFX.play_tool_break()
+		_trigger_player_use_swing()
+		return true
+	# Cast — spawn bobber from camera position along look direction.
+	var camera: Camera3D = player_node.get_node_or_null("Camera3D") as Camera3D
+	if camera == null:
+		return false
+	var cam_pos: Vector3 = camera.global_position
+	var look_dir: Vector3 = -camera.global_transform.basis.z
+	var bobber_script: GDScript = load("res://scripts/world/fishing_bobber.gd")
+	var bobber: Node3D = bobber_script.new()
+	# Parent to the chunk manager so the bobber outlives the player
+	# transform but unloads cleanly with the scene.
+	_chunk_manager.add_child(bobber)
+	bobber.setup(player_node, _chunk_manager, cam_pos, look_dir)
+	player_node.set("fishing_bobber", bobber)
+	# Vanilla bj.java plays "random.bow" — we don't have a bow sound
+	# yet so reuse splash with a low-amplitude velocity for the cast
+	# whoosh; not perfect but better than silence.
+	SFX.play_splash(Vector3(0, 0.4, 0))
+	_trigger_player_use_swing()
+	return true
+
+
+# Spawn a dropped item at `pos` with an initial velocity (used by
+# fishing-rod reel to fling a fish toward the player). Mirrors the
+# regular _spawn_dropped_item but takes a custom velocity instead of
+# the default break-pop randomization.
+func _spawn_dropped_item_with_velocity(pos: Vector3, item_id: int, vel: Vector3) -> void:
+	var item_script: GDScript = load("res://scripts/world/dropped_item.gd")
+	var item: Node3D = item_script.new()
+	_chunk_manager.add_child(item)
+	item.setup(item_id, pos, _player_node() as Node3D, _chunk_manager)
+	item.set("_velocity", vel)
+
+
 # Variable-count drops for the farming family.
 #   CROPS mature (meta=7): 1 wheat + 0..3 seeds. Vanilla BlockCrops
 #     loops 0..3 with a 1/(15-i) chance per seed slot; we use the
@@ -1333,6 +1414,7 @@ func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()
+	_trigger_player_use_swing()
 	return true
 
 

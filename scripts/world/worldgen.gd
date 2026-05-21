@@ -1659,11 +1659,28 @@ static func _scatter_tall_grass(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 	if not terrain_3d_enabled:
 		return
 	var probe_token := PerfProbe.begin("worldgen.tall_grass")
+	# Biome short-circuit. Desert / ice chunks have no grass surface so
+	# the per-attempt column scan can't land a tall-grass cell — skip
+	# the whole pass. Saves 16 × (column scan = up to 128 reads) = ~2K
+	# get_block_unchecked calls per desert chunk.
+	var center_x: float = float(chunk_x * Chunk.SIZE_X + 8)
+	var center_z: float = float(chunk_z * Chunk.SIZE_Z + 8)
+	var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
+	if (
+		biome_id == Worldgen3D.Biome.DESERT
+		or biome_id == Worldgen3D.Biome.ICE_DESERT
+		or biome_id == Worldgen3D.Biome.TUNDRA
+	):
+		PerfProbe.end("worldgen.tall_grass", probe_token)
+		return
 	for attempt in range(_TALL_GRASS_ATTEMPTS):
 		var seed_h: int = _hash4(chunk_x, chunk_z, _TALL_GRASS_SALT, attempt)
 		var lx: int = seed_h & 0xF
 		var lz: int = (seed_h >> 4) & 0xF
-		# Find topmost surface column
+		# Find topmost surface column. Could use height_map for an O(1)
+		# lookup but the per-cell read loop is already capped at SIZE_Y
+		# (= 128) and only 16 attempts run per chunk — not hot enough to
+		# justify dragging chunk._height_map_dirty handling in here.
 		var sy: int = -1
 		for y in range(Chunk.SIZE_Y - 1, 0, -1):
 			if chunk.get_block_unchecked(lx, y, lz) != Blocks.AIR:

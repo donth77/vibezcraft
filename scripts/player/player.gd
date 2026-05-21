@@ -212,6 +212,10 @@ var inventory: Inventory
 var creative_mode: bool = false
 var perspective: int = PERSPECTIVE_FIRST
 var is_mining: bool = false  # set by Interaction; drives mining-swing animation
+# Active fishing bobber, if any — Interaction sets this on cast and
+# clears it on reel. Single bobber per player (vanilla parity:
+# eb.n holds the bobber ref; spawning a new one auto-reels the old).
+var fishing_bobber: Node = null
 
 
 # One-shot arm swing for right-click item-use (bucket fill/place, etc.).
