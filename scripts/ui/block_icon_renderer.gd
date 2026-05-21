@@ -102,11 +102,13 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.WOOL_BLACK,
 	# Clay block — gray-blue full cube.
 	Blocks.CLAY,
-	# Double-slab is a regular cube, bakes cleanly with the slab
-	# textures.  HALF_SLAB is non-cube (half-height) so we let it fall
-	# through to the flat-sprite path (cube bake would mis-represent
-	# the half height).
+	# Double-slab is a regular cube, bakes cleanly with the slab textures.
+	# HALF_SLAB has a custom half-height mesh in BlockMesh._build_slab so
+	# the bake reads as half-height with the top face visible, matching
+	# vanilla's inventory icon (the old fall-through to the flat side
+	# sprite showed a full-square cobblestone-looking face — wrong).
 	Blocks.DOUBLE_SLAB,
+	Blocks.HALF_SLAB,
 ]
 
 static var _viewport: SubViewport

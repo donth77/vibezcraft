@@ -1235,6 +1235,18 @@ func _physics_process(delta: float) -> void:
 			if _mounted_to.has_method("dismount"):
 				_mounted_to.dismount()
 		return
+	# While the sign-edit screen is open the player is typing text and
+	# Input.is_action_pressed("jump") / get_vector still see WASD + Space
+	# (LineEdit consumes the InputEvent but the underlying poll state
+	# stays latched). Freeze the body so keystrokes don't leak into
+	# movement. Vanilla pauses the world entirely on GUI open in
+	# singleplayer; we pause just the player. Only SignEditScreen needs
+	# this — inventory/chest/furnace are click-only and the player can
+	# walk away from them freely.
+	var sign_edit: Node = get_node_or_null("Crosshair/SignEditScreen")
+	if sign_edit != null and sign_edit.has_method("is_open") and sign_edit.is_open():
+		velocity = Vector3.ZERO
+		return
 	# Post-spawn safety: relocate-if-in-water with throttle. The spiral
 	# search inside _relocate_if_unsafe_spawn is ~130k block lookups
 	# (radius 32, column scans), so running it per-tick caused <30 fps
@@ -2142,12 +2154,20 @@ func _relocate_if_unsafe_spawn() -> bool:
 
 
 # Last-resort spawn fallback when the spiral search fails to find dry
-# land within radius (open ocean spawn). Drops a 5x5 SAND platform at
+# land within radius (open ocean spawn). Drops a 5x5 GRASS platform at
 # y = SEA_LEVEL just above the water surface, clears the air column
 # above so the player can stand, and teleports the player on top.
 # Only overwrites WATER / AIR — never destroys existing terrain (so a
 # tiny island that the spiral missed because of a chunk-load race
 # stays intact).
+#
+# Vanilla Alpha treats water as is_replaceable for falling blocks, so
+# sand/gravel sinks through it (BlockFalling.h sees fluid below as
+# unsupported). Using SAND for the platform meant the moment a
+# neighbour-update fired (e.g. the water clear at +1) the sand would
+# spawn a FallingBlock and disappear into the seabed, dropping the
+# player back into the water. GRASS has no gravity → platform stays
+# put regardless of neighbour updates.
 func _create_emergency_spawn_platform() -> void:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("set_world_block"):
@@ -2155,7 +2175,7 @@ func _create_emergency_spawn_platform() -> void:
 	var px: int = int(floor(global_position.x))
 	var pz: int = int(floor(global_position.z))
 	# SEA_LEVEL = 64; water tops out at y=63 (cell at y=63 is the topmost
-	# water layer, top edge at y=64). Place SAND at y=64 — sits at the
+	# water layer, top edge at y=64). Place GRASS at y=64 — sits at the
 	# water surface, player stands on top at y=65.
 	var platform_y: int = Worldgen.SEA_LEVEL
 	for dx in range(-2, 3):
@@ -2164,7 +2184,7 @@ func _create_emergency_spawn_platform() -> void:
 			var gz: int = pz + dz
 			var here: int = cm.get_world_block(Vector3i(gx, platform_y, gz))
 			if here == Blocks.AIR or Blocks.is_water(here):
-				cm.set_world_block(Vector3i(gx, platform_y, gz), Blocks.SAND)
+				cm.set_world_block(Vector3i(gx, platform_y, gz), Blocks.GRASS)
 			# Clear the cell above so the player has head clearance.
 			var above: int = cm.get_world_block(Vector3i(gx, platform_y + 1, gz))
 			if Blocks.is_water(above):

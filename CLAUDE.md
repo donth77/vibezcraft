@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repo.
 
 ## Project
 
-A from-scratch clone of **Minecraft Java Edition Alpha v1.2.6 (late 2010)** in **Godot 4, GDScript, and C++**. Strict Alpha-core mechanics with tasteful modern QoL. Targeting v1.2.6's full feature set with two deliberate exceptions — the **Nether** and **multiplayer / SMP** are both out of scope. Purpose-built binary save format (not Anvil-compatible).
+A from-scratch clone of MC Alpha in **Godot 4, GDScript, and C++**. Alpha-core mechanics with some modern QoL. Targeting v1.2.6's full feature set with exceptions — **multiplayer / SMP** are both out of scope. Purpose-built binary save format (not Anvil-compatible).
 
 Gameplay and scene-graph logic is GDScript. Two performance-critical paths are native C++ via GDExtension:
 - `MesherNative.mesh_chunk_data` (`src/mesher_native.cpp`) — chunk meshing + collision face soup.

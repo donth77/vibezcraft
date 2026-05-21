@@ -426,7 +426,7 @@ static func apply_config(cfg: ConfigFile) -> void:
 		apply_resolution_value(resolution)
 	Game.fog_enabled = bool(cfg.get_value("graphics", "fog_enabled", true))
 	Game.sfx_enabled = bool(cfg.get_value("audio", "sfx_enabled", true))
-	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.5))
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.25))
 	if Music != null:
 		Music.set_volume(music_vol)
 
@@ -509,7 +509,7 @@ func _load_settings() -> void:
 	var sfx_on: bool = bool(cfg.get_value("audio", "sfx_enabled", true))
 	_sfx_checkbox.button_pressed = sfx_on
 	_sfx_checkbox.text = "On" if sfx_on else "Off"
-	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.5))
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.25))
 	_music_slider.value = music_vol
 	_on_music_slider_changed(music_vol)
 	_pending_seed = int(cfg.get_value("world", "seed", 0))

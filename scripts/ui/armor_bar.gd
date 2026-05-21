@@ -31,6 +31,13 @@ func _ready() -> void:
 	_build_icons()
 	_player = get_tree().root.get_node_or_null("Main/Player")
 	if _player != null:
+		# Godot fires `_ready` bottom-up, so this HUD's `_ready` runs BEFORE
+		# Player._ready — at this moment `_player.inventory` is still null
+		# because Player creates it in its own _ready. Without the await,
+		# the changed.connect below silently no-ops and the bar never
+		# updates when armor is equipped.
+		if not _player.is_node_ready():
+			await _player.ready
 		# Inventory changes drive armor updates — same signal the held-item
 		# overlay listens to. Cheap (only walks 4 slots when it fires).
 		var inv: Inventory = _player.get("inventory") as Inventory

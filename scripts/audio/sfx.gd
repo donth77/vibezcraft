@@ -44,6 +44,17 @@ const _DIG_SOUNDS: Dictionary = {
 		"res://assets/audio/sfx/Gravel_dig3.ogg",
 		"res://assets/audio/sfx/Gravel_dig4.ogg",
 	],
+	# Vanilla reuses the cloth step files for wool/sponge dig+place too —
+	# no separate Cloth_dig*.ogg shipped. Without this entry, placing or
+	# breaking wool crashes _play_random with a missing-key Dictionary
+	# error (see _material_for returning "cloth" for is_wool / sponge).
+	"cloth":
+	[
+		"res://assets/audio/sfx/step/cloth1.ogg",
+		"res://assets/audio/sfx/step/cloth2.ogg",
+		"res://assets/audio/sfx/step/cloth3.ogg",
+		"res://assets/audio/sfx/step/cloth4.ogg",
+	],
 }
 
 const _PICKUP_SOUND: String = "res://assets/audio/sfx/Pop.ogg"
@@ -54,6 +65,13 @@ const _CLICK_SOUND: String = "res://assets/audio/sfx/click.ogg"
 # at ignition (vanilla v.java line 45 `cy.a(kr2, "random.fuse", 1.0f, 1.0f)`),
 # NOT looped during the 4-second fuse — the audio is a one-shot crackle.
 const _FUSE_SOUND: String = "res://assets/audio/sfx/random/fuse.ogg"
+# Alpha 1.2.6 `sound/random/bow.ogg` — bow-string release whoosh.
+# Vanilla bj.java::a (ItemFishingRod) plays this at cast:
+#   cy.a(player, "random.bow", 0.5f, 0.4f / (rand() * 0.4 + 0.8))
+# Volume 0.5, pitch ~0.44..0.56. Sourced via InventivetalentDev
+# minecraft-assets branch 1.0 (Beta 1.0 = same asset as Alpha 1.2.6,
+# the bow sound wasn't changed across the Alpha→Beta cut).
+const _BOW_SOUND: String = "res://assets/audio/sfx/random/bow.ogg"
 # Alpha 1.2.6 `sound3/random/explode{1..4}.ogg` — vanilla picks one
 # uniformly per detonation. ks.java::b() pitch jitter envelope is
 # `(1 + (rand-rand) × 0.2) × 0.7` ≈ 0.7 ± 0.14, giving the explosion a
@@ -123,6 +141,51 @@ const _PIG_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/pig/step4.ogg",
 	"res://assets/audio/sfx/mob/pig/step5.ogg",
 ]
+# Cow audio — vanilla Alpha 1.2.6 sound3/mob/cow/. `as.java::d()` returns
+# "mob.cow" (idle = say1-4). `as.java::f_()` AND `as.java::f()` both
+# return "mob.cowhurt" (hurt + death share the same hurt1-3 pool — cow
+# doesn't have a distinct death clip in Alpha). Pitch override 0.4
+# (vanilla `as.h() = 0.4f`) makes the cow sound LOW-pitched — a deep
+# moo vs the pig's higher squeal.
+const _COW_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/cow/say1.ogg",
+	"res://assets/audio/sfx/mob/cow/say2.ogg",
+	"res://assets/audio/sfx/mob/cow/say3.ogg",
+	"res://assets/audio/sfx/mob/cow/say4.ogg",
+]
+const _COW_HURT_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/cow/hurt1.ogg",
+	"res://assets/audio/sfx/mob/cow/hurt2.ogg",
+	"res://assets/audio/sfx/mob/cow/hurt3.ogg",
+]
+const _COW_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/cow/step1.ogg",
+	"res://assets/audio/sfx/mob/cow/step2.ogg",
+	"res://assets/audio/sfx/mob/cow/step3.ogg",
+	"res://assets/audio/sfx/mob/cow/step4.ogg",
+]
+# Vanilla `as.h()` returns 0.4 — that's the VOLUME scalar (third arg
+# to `cy.a(entity, name, volume, pitch)` per hf.java:319), NOT pitch.
+# 0.4 linear → ~-8 dB. Pitch stays at the entity default 1.0 with the
+# standard ±0.2 vanilla jitter (we use ±0.1 here since the 0.2 vanilla
+# envelope sometimes produces uncomfortable pitch swings).
+const _COW_SOUND_VOLUME_DB: float = -8.0
+# Chicken audio — vanilla Alpha 1.2.6 sound3/mob/chicken/. `ou.java::d()`
+# returns "mob.chicken" (say1-3). `ou.java::f_()` AND `f()` both return
+# "mob.chickenhurt" (hurt + death share hurt1-2). `ou.java::k()` line 42
+# plays "mob.chickenplop" on egg-lay (every 6000-12000 ticks per the
+# nextInt(6000) + 6000 timer at line 19/44). Chicken doesn't override
+# `h()` so volume stays at the default 1.0 = ~0 dB (vanilla `hf.h() = 1.0`).
+const _CHICKEN_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/chicken/say1.ogg",
+	"res://assets/audio/sfx/mob/chicken/say2.ogg",
+	"res://assets/audio/sfx/mob/chicken/say3.ogg",
+]
+const _CHICKEN_HURT_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/chicken/hurt1.ogg",
+	"res://assets/audio/sfx/mob/chicken/hurt2.ogg",
+]
+const _CHICKEN_PLOP_SOUND: String = "res://assets/audio/sfx/mob/chicken/plop.ogg"
 # Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
 # water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
 # by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
@@ -192,9 +255,20 @@ const _STEP_SOUNDS: Dictionary = {
 	],
 }
 
+# Separate 3D-positional pool for mob sounds. Vanilla MC mob audio
+# attenuates with distance — pigs are audible to ~16 blocks, then
+# silent. AudioStreamPlayer3D handles falloff; the non-positional
+# pool above is only for player-frame sounds (UI clicks, player hurt,
+# block break at cursor, etc.) that should always be full volume.
+const POOL_SIZE_3D: int = 4
+const MOB_SOUND_MAX_DISTANCE: float = 16.0  # vanilla mob audio range
+const MOB_SOUND_UNIT_SIZE: float = 4.0  # closer = louder; tuned for clarity
+
 var _players: Array = []
 var _next_player: int = 0
 var _stream_cache: Dictionary = {}
+var _players_3d: Array = []
+var _next_player_3d: int = 0
 
 
 func _ready() -> void:
@@ -202,6 +276,13 @@ func _ready() -> void:
 		var p := AudioStreamPlayer.new()
 		add_child(p)
 		_players.append(p)
+	for i in range(POOL_SIZE_3D):
+		var p3 := AudioStreamPlayer3D.new()
+		p3.max_distance = MOB_SOUND_MAX_DISTANCE
+		p3.unit_size = MOB_SOUND_UNIT_SIZE
+		# Default falloff is logarithmic; matches MC's perceptual rolloff.
+		add_child(p3)
+		_players_3d.append(p3)
 
 
 func play_break(block_id: int) -> void:
@@ -245,6 +326,22 @@ func play_chest_close() -> void:
 func play_door_toggle() -> void:
 	var path: String = _DOOR_OPEN_SOUND if randf() < 0.5 else _DOOR_CLOSE_SOUND
 	_play_one(path, 0.0, randf_range(0.9, 1.0))
+
+
+# 3D-positional block-step sound for mobs walking. Vanilla
+# `lw.java::a_(x, y, z, blockId)` plays `step.<material>` for the
+# block under the entity — NOT a mob-specific step. So pigs/cows on
+# grass play `step.grass.*`, same as the player. The mob/<species>/step
+# files in client.jar are used elsewhere (impact thuds, not walking)
+# — using them for walking sounded like "punching" per user feedback.
+func play_block_step_3d(block_id: int, pos: Vector3) -> void:
+	if not Game.sfx_enabled or Game.is_loading:
+		return
+	var mat := _step_material_for(block_id)
+	if mat == "":
+		return
+	var paths: Array = _STEP_SOUNDS[mat]
+	_play_mob_sound_3d(paths, pos, _STEP_VOLUME_DB)
 
 
 # Footstep — picks a random variant for the block's material.
@@ -321,6 +418,15 @@ func _play_one(path: String, volume_db: float, pitch: float) -> void:
 # entity transitions from !inWater to inWater (lw.java:160-184). Volume is
 # `clamp(sqrt(vx²·0.2 + vy² + vz²·0.2) · 0.2, 0, 1)` — vertical impact
 # weighted 5× horizontal so cannonball jumps are loud and gentle wades are
+# Vanilla bj.java::a fishing-rod cast. Volume 0.5, pitch
+# 0.4 / (rand * 0.4 + 0.8) → range ~0.36..0.50, centered ~0.43. The
+# pitch envelope is intentionally low so the bow sound reads as a
+# "rod whip" rather than a high-pitched arrow shot.
+func play_bow_cast() -> void:
+	var pitch: float = 0.4 / (randf_range(0.0, 0.4) + 0.8)
+	_play_one(_BOW_SOUND, linear_to_db(0.5), pitch)
+
+
 # soft but audible. Pitch jitter is `1.0 + (rand - rand) * 0.4`.
 func play_splash(velocity: Vector3) -> void:
 	var weighted: float = (
@@ -539,23 +645,78 @@ func play_pickup() -> void:
 # Pig say (idle + hurt — vanilla op.java::d and f_ both return "mob.pig").
 # Picks a random say1/2/3 clip with ±0.1 pitch jitter, matching the
 # vanilla pitch envelope in `lw.java::P` (per-entity sound pitch).
-func play_pig_say() -> void:
-	_play_mob_sound(_PIG_SAY_SOUNDS)
+# Position-aware: caller passes the pig's world position so audio
+# attenuates with distance (vanilla pig sounds fall off past ~16 m).
+func play_pig_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_PIG_SAY_SOUNDS, pos)
 
 
 # Pig death — vanilla op.java::f returns "mob.pigdeath".
-func play_pig_death() -> void:
-	_play_mob_sound([_PIG_DEATH_SOUND])
+func play_pig_death(pos: Vector3) -> void:
+	_play_mob_sound_3d([_PIG_DEATH_SOUND], pos)
 
 
 # Pig footstep — vanilla rotates step1-5 randomly per stride.
-func play_pig_step() -> void:
-	_play_mob_sound(_PIG_STEP_SOUNDS, -4.0)
+func play_pig_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_PIG_STEP_SOUNDS, pos, -4.0)
 
 
-# Generic random-clip mob-sound helper. Loads + caches each path the
-# same way every other SFX function in this file does.
-func _play_mob_sound(paths: Array, volume_db: float = -1.0) -> void:
+# Cow ambient moo — vanilla `as.java::d() = "mob.cow"`. Quieter than
+# pig per `as.h() = 0.4` (volume scalar, ~-8 dB).
+func play_cow_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_COW_SAY_SOUNDS, pos, _COW_SOUND_VOLUME_DB)
+
+
+# Cow hurt — vanilla `as.java::f_() = "mob.cowhurt"`. Same pool used
+# for death since vanilla `f()` also returns "mob.cowhurt" (Alpha cows
+# lack a distinct death clip).
+func play_cow_hurt(pos: Vector3) -> void:
+	_play_mob_sound_3d(_COW_HURT_SOUNDS, pos, _COW_SOUND_VOLUME_DB)
+
+
+# Cow death — reuses the hurt pool, matching vanilla.
+func play_cow_death(pos: Vector3) -> void:
+	_play_mob_sound_3d(_COW_HURT_SOUNDS, pos, _COW_SOUND_VOLUME_DB)
+
+
+# Cow step — extra -4 dB on top of the species volume (mob steps are
+# always quieter than vocalizations).
+func play_cow_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_COW_STEP_SOUNDS, pos, _COW_SOUND_VOLUME_DB - 4.0)
+
+
+# Chicken ambient cluck — vanilla `ou.java::d() = "mob.chicken"`.
+func play_chicken_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_CHICKEN_SAY_SOUNDS, pos)
+
+
+# Chicken hurt — vanilla `ou.java::f_() = "mob.chickenhurt"`. Reused
+# for death since vanilla `f()` returns the same.
+func play_chicken_hurt(pos: Vector3) -> void:
+	_play_mob_sound_3d(_CHICKEN_HURT_SOUNDS, pos)
+
+
+func play_chicken_death(pos: Vector3) -> void:
+	_play_mob_sound_3d(_CHICKEN_HURT_SOUNDS, pos)
+
+
+# Egg-lay "plop" — vanilla `ou.k()` line 42 plays "mob.chickenplop"
+# at full volume with the standard ±0.2 vanilla pitch jitter.
+func play_chicken_plop(pos: Vector3) -> void:
+	_play_mob_sound_3d([_CHICKEN_PLOP_SOUND], pos)
+
+
+# 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D
+# pool so falloff with distance kicks in automatically (max_distance =
+# 16 m, unit_size = 4 m for the perceptual sweet-spot). Pool round-
+# robins like the 2D pool — POOL_SIZE_3D = 4 entries is plenty for the
+# 6-mob cap since most mobs are silent most ticks.
+# `base_pitch` is the species-level pitch scalar (vanilla `lw.java::h`).
+# Combined with the ±0.1 random jitter so a base of 0.4 (cow) gives
+# clips in [0.3, 0.5] — distinctly low-pitched vs the pig's [0.9, 1.1].
+func _play_mob_sound_3d(
+	paths: Array, pos: Vector3, volume_db: float = -1.0, base_pitch: float = 1.0
+) -> void:
 	if not Game.sfx_enabled or Game.is_loading or paths.is_empty():
 		return
 	var path: String = paths[randi() % paths.size()]
@@ -565,11 +726,12 @@ func _play_mob_sound(paths: Array, volume_db: float = -1.0) -> void:
 		_stream_cache[path] = stream
 	if stream == null:
 		return
-	var player: AudioStreamPlayer = _players[_next_player]
-	_next_player = (_next_player + 1) % POOL_SIZE
+	var player: AudioStreamPlayer3D = _players_3d[_next_player_3d]
+	_next_player_3d = (_next_player_3d + 1) % POOL_SIZE_3D
+	player.global_position = pos
 	player.stream = stream
 	player.volume_db = volume_db
-	player.pitch_scale = 1.0 + randf_range(-0.1, 0.1)
+	player.pitch_scale = base_pitch + randf_range(-0.1, 0.1)
 	player.play()
 
 

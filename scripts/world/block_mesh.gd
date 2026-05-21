@@ -25,6 +25,8 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 			_cache[key] = _build_door(block_id, size)
 		elif block_id == Blocks.LADDER:
 			_cache[key] = _build_ladder(size)
+		elif block_id == Blocks.HALF_SLAB:
+			_cache[key] = _build_slab(block_id, size)
 		else:
 			_cache[key] = _build(block_id, size)
 	return _cache[key] as ArrayMesh
@@ -118,6 +120,105 @@ static func _build(block_id: int, size: float) -> ArrayMesh:
 			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
 			uvs.append(Vector2(rect.position.x, rect.position.y))
 			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(0, BlockAtlas.entity_material())
+	return mesh
+
+
+# Half-slab — full-width, half-height cube. Same per-face texture lookup
+# as `_build` (top/bottom = stone_slab_top, sides = stone_slab_side), but
+# the top vertex is at y=0 instead of y=+s. Used for inventory icons and
+# dropped/held items so a half-slab in those contexts visually reads as
+# half-height instead of a full cube. Without this, the icon renderer
+# skipped HALF_SLAB and the inventory fell back to the flat side sprite,
+# which looked wrong (no top face, no isometric).
+static func _build_slab(block_id: int, size: float) -> ArrayMesh:
+	var s: float = size * 0.5
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	# Same face order as `_build`. Top y = 0 (half-height); bottom y = -s.
+	var faces: Array = [
+		[
+			Vector3(-s, 0, -s),
+			Vector3(-s, 0, s),
+			Vector3(s, 0, s),
+			Vector3(s, 0, -s),
+			Vector3(0, 1, 0)
+		],
+		[
+			Vector3(-s, -s, s),
+			Vector3(-s, -s, -s),
+			Vector3(s, -s, -s),
+			Vector3(s, -s, s),
+			Vector3(0, -1, 0)
+		],
+		[
+			Vector3(s, -s, -s),
+			Vector3(s, 0, -s),
+			Vector3(s, 0, s),
+			Vector3(s, -s, s),
+			Vector3(1, 0, 0)
+		],
+		[
+			Vector3(-s, -s, s),
+			Vector3(-s, 0, s),
+			Vector3(-s, 0, -s),
+			Vector3(-s, -s, -s),
+			Vector3(-1, 0, 0)
+		],
+		[
+			Vector3(s, -s, s),
+			Vector3(s, 0, s),
+			Vector3(-s, 0, s),
+			Vector3(-s, -s, s),
+			Vector3(0, 0, 1)
+		],
+		[
+			Vector3(-s, -s, -s),
+			Vector3(-s, 0, -s),
+			Vector3(s, 0, -s),
+			Vector3(s, -s, -s),
+			Vector3(0, 0, -1)
+		],
+	]
+	for face_idx: int in range(6):
+		var face: Array = faces[face_idx]
+		var base: int = verts.size()
+		for i: int in range(4):
+			verts.append(face[i])
+			norms.append(face[4])
+		var face_name: String = FACE_NAMES[face_idx]
+		var tex_name: String = Blocks.get_face_texture(block_id, face_name)
+		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+		# Side faces (idx 2-5) only span the bottom half of the cube vertically,
+		# so we sample the BOTTOM half of the slab_side texture (v ∈ [mid, max])
+		# rather than stretching the full tile across the short face. Matches
+		# vanilla qj.java::a which assigns stone_slab_side index 5 — designed
+		# to read from the lower-half region of its own 16×16 sprite.
+		if face_idx < 2:
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		else:
+			var v_mid: float = rect.position.y + rect.size.y * 0.5
+			var v_max: float = rect.position.y + rect.size.y
+			uvs.append(Vector2(rect.position.x + rect.size.x, v_max))
+			uvs.append(Vector2(rect.position.x + rect.size.x, v_mid))
+			uvs.append(Vector2(rect.position.x, v_mid))
+			uvs.append(Vector2(rect.position.x, v_max))
 		indices.append_array(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)

@@ -224,7 +224,25 @@ func _show_delete_confirm(slot_index: int) -> void:
 	dialog.confirmed.connect(_on_delete_confirmed.bind(slot_index, dialog))
 	dialog.canceled.connect(dialog.queue_free)
 	add_child(dialog)
-	dialog.popup_centered()
+	# Inherit the screen's default font (title label + VanillaButton don't
+	# override either, so we don't here either) — just bump the size up so the
+	# body text and buttons aren't dwarfed next to the size-48 title / size-40
+	# VanillaButtons behind the modal.
+	var body_label: Label = dialog.get_label()
+	if body_label != null:
+		body_label.add_theme_font_size_override("font_size", 32)
+		body_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		body_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	for btn: Button in [dialog.get_ok_button(), dialog.get_cancel_button()]:
+		if btn == null:
+			continue
+		btn.add_theme_font_size_override("font_size", 40)
+	# Scale with viewport so the dialog stays readable across MC_CLONE_RESOLUTION
+	# overrides (default 1920×1080 → ~620×280; 2560×1440 → ~830×370). Otherwise
+	# ConfirmationDialog auto-sizes to fit the default label and clips noticeably.
+	var vp: Vector2 = get_viewport_rect().size
+	var popup_size := Vector2i(int(vp.x * 0.32), int(vp.y * 0.26))
+	dialog.popup_centered(popup_size)
 
 
 # Yes pressed — wipe the world directory (region files, player.bin,

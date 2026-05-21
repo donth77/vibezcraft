@@ -272,7 +272,7 @@ static func _make_option_panel(fill: Color) -> StyleBoxFlat:
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(_SETTINGS_PATH)
-	var music_vol: float = float(cfg.get_value("audio", "music_volume", 1.0))
+	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.25))
 	_music_slider.value = music_vol
 	_on_music_slider_changed(music_vol)
 	var fps_cap: int = int(cfg.get_value("graphics", "fps_cap", 90))

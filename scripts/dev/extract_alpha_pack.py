@@ -348,25 +348,42 @@ def _tint_white_wool(white_img: "Image.Image", tint: tuple) -> "Image.Image":
 
 
 def _draw_sugar() -> Image.Image:
-	"""6x6 white block centered in a 16x16 transparent canvas, with a
-	2px shadow on the bottom and right for depth — matches vanilla's
-	off-white sugar pile."""
+	"""Canonical Beta-era sugar sprite — diamond-shaped pile of white
+	granules with a 1-px dark outline and right-side shadow. Pixel-for-
+	pixel reproduction of Mojang's items/sugar.png (taken from MC 1.6.4,
+	unchanged since Beta 1.2 added the item). The earlier 8×7 white block
+	read as a generic "tile" in the inventory and was indistinguishable
+	from bone meal at a glance."""
+	D = (84, 84, 104, 255)   # outline
+	b = (185, 185, 203, 255) # heavy shadow
+	l = (213, 213, 223, 255) # mid shadow
+	L = (234, 234, 234, 255) # near-white
+	W = (255, 255, 255, 255) # highlight
+	N = (0, 0, 0, 0)         # transparent
+	M = {'.': N, 'D': D, 'b': b, 'l': l, 'L': L, 'W': W}
+	rows = [
+		"................",
+		"................",
+		"................",
+		".......DD.......",
+		"......DWlD......",
+		".....DWWllD.....",
+		"....DLWLLllD....",
+		"...DWWLWWlblD...",
+		"..DWLLWWLLlblD..",
+		"..DWLWWLWWlblD..",
+		"..DlWWLLWbllbD..",
+		"...DllWWllbbD...",
+		"....DDllblDD....",
+		"......DDDD......",
+		"................",
+		"................",
+	]
 	img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
 	px = img.load()
-	# Body (light grey-white)
-	for y in range(5, 12):
-		for x in range(4, 12):
-			px[x, y] = (240, 240, 240, 255)
-	# Highlight on the top-left edge
-	for x in range(4, 11):
-		px[x, 5] = (255, 255, 255, 255)
-	for y in range(5, 11):
-		px[4, y] = (255, 255, 255, 255)
-	# Shadow on the bottom + right edge
-	for x in range(5, 12):
-		px[x, 11] = (200, 200, 200, 255)
-	for y in range(5, 12):
-		px[11, y] = (200, 200, 200, 255)
+	for y, row in enumerate(rows):
+		for x, ch in enumerate(row):
+			px[x, y] = M[ch]
 	return img
 
 # Items with no Alpha 1.2.6 source — fall back by aliasing another sprite.

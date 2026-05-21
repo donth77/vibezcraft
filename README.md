@@ -7,7 +7,7 @@
   <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/language-GDScript%20%2B%20C%2B%2B-blue" alt="GDScript + C++"></a>
 </p>
 
-A single-player clone of Minecraft Java Edition **Alpha v1.2.6** (late 2010), built in **Godot 4, GDScript, and C++**. 
+A single-player clone of MC Alpha, built in **Godot 4, GDScript, and C++**. 
 
 Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base-terrain are native C++ via GDExtension (with byte-identical GDScript fallbacks). 
 
@@ -72,7 +72,6 @@ Backtick (`` ` ``) toggles debug mode. These shortcuts only work while debug mod
 |---|---|
 | Toggle debug mode | **`** (backtick) |
 | Toggle Creative mode | **G** |
-| Fill hotbar with all blocks | **H** |
 | Open item spawner | **J** |
 | Tool tuner (held-item pose) | **T** |
 | Fast day cycle (30s) | **N** |
