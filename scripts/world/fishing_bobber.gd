@@ -39,13 +39,18 @@ const BITE_DURATION_RANGE: int = 30
 const INITIAL_WAIT_TICKS_MIN: int = 200  # 10s
 const INITIAL_WAIT_TICKS_RANGE: int = 600  # +0..30s
 
+const _BOBBER_SPRITE_PATH: String = "res://assets/textures/entities/packs/alpha_vanilla/bobber.png"
+# Vanilla jw.java scales the bobber quad by 0.5 — bobber appears as
+# a half-block-tall billboard. Keep this in sync with extract output.
+const _BOBBER_WORLD_SIZE: float = 0.5
+
 var velocity: Vector3 = Vector3.ZERO
 var _owner_player: Node3D = null
 var _chunk_manager: Node = null
 var _bite_countdown: int = 0  # ticks until bite (when in water)
 var _bite_active: int = 0  # ticks of active-bite remaining
 var _in_water: bool = false
-var _mesh: MeshInstance3D
+var _sprite: Sprite3D
 var _tick_accum: float = 0.0
 
 
@@ -64,19 +69,25 @@ func setup(player: Node3D, chunk_manager: Node, camera_pos: Vector3, look_dir: V
 	# advances while bobber is settled in water (vanilla hj.java drives
 	# the random-tick check from the in-water branch).
 	_bite_countdown = INITIAL_WAIT_TICKS_MIN + (randi() % INITIAL_WAIT_TICKS_RANGE)
-	# Visual: a small floating red-tipped bobber. Vanilla MC's bobber is
-	# a 4x4 sprite per frame; we use a tiny cube here for simplicity.
-	# Replace with a proper extruded sprite later if it reads too plain.
-	_mesh = MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(0.12, 0.12, 0.12)
-	_mesh.mesh = box
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.95, 0.18, 0.15)  # vanilla bobber red
-	mat.metallic = 0.0
-	mat.roughness = 0.6
-	_mesh.material_override = mat
-	add_child(_mesh)
+	# Vanilla jw.java (RenderFish) pulls an 8×8 tile from particles.png
+	# at (8, 16)→(16, 24), scales 0.5 (half-block billboard) and rotates
+	# to face the camera each frame. Sprite3D's BILLBOARD_ENABLED gives
+	# us the auto-rotation; texture_filter NEAREST keeps the pixel art
+	# crisp; pixel_size translates the 8-pixel sprite to 0.5 world units.
+	_sprite = Sprite3D.new()
+	_sprite.texture = load(_BOBBER_SPRITE_PATH) as Texture2D
+	_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	_sprite.pixel_size = _BOBBER_WORLD_SIZE / 8.0  # 8 px sprite → 0.5 m
+	# Force transparency (alpha-tested) — the trailing fishing-line
+	# pixels are transparent in the sprite, so we want them not to
+	# render. Sprite3D defaults to opaque cube around the quad which
+	# clobbers depth ordering against water/terrain.
+	_sprite.transparent = true
+	_sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+	# No shadow casting — bobbers are visual-only.
+	_sprite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_sprite)
 
 
 # Returns true when reeling-in produced a successful catch (i.e. the
@@ -151,10 +162,15 @@ func _tick_in_water_check() -> void:
 func _trigger_bite() -> void:
 	_bite_active = BITE_DURATION_MIN + BITE_DURATION_RANGE  # full duration
 	# Splash sfx — vanilla "random.splash" plays at 0.25 vol; play_splash
-	# scales by velocity^2, so we feed a synthetic Y impulse that maps to
-	# audible-but-soft volume.
-	SFX.play_splash(Vector3(0, 0.8, 0))
+	# scales by velocity^2 internally. Feed a 2.0 Y impulse so the
+	# resulting volume is ~-8 dB instead of the -16 dB the previous 0.8
+	# magnitude produced (was inaudible over ambient water/footstep).
+	SFX.play_splash(Vector3(0, 2.0, 0))
 	# Spawn 6-8 bubbles at the bobber surface so the player sees a
 	# tell when the bite starts. Existing pool handles emit + cleanup.
+	# Upward motion (Y=0.6) — without explicit motion, the bubbles
+	# spawn with near-zero velocity and barely move, defeating the
+	# "look, fish biting!" cue. Vanilla emits a 1-tall stack of bubble
+	# + splash particles that floats up over ~1s, then re-settles.
 	var n: int = 6 + randi() % 3
-	FluidFx.spawn_water_bubble(_chunk_manager, global_position, Vector3.ZERO, n)
+	FluidFx.spawn_water_bubble(_chunk_manager, global_position, Vector3(0, 0.6, 0), n)

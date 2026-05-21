@@ -268,38 +268,8 @@ PROCEDURAL_ITEMS: dict = {
 
 # Procedural terrain tiles — same idea but emitted into the pack dir
 # (next to the rest of terrain.png extractions), not into items/.
-PROCEDURAL_TERRAIN: dict = {
-	# Tall grass [BETA 1.6 exception]. Vanilla terrain.png (7, 2) added
-	# in Beta — Alpha 1.2.6 has wood-plank pixels in that slot, no
-	# tall-grass tile. Draw a few vertical green strands on a transparent
-	# 16×16; rendered as a cross-quad it reads as a small grass tuft.
-	"tall_grass": "tall_grass_strands",
-}
-
-
-def _draw_tall_grass() -> Image.Image:
-	"""A handful of vertical grass strands of varying heights/shades
-	on a transparent 16×16. Drawn as a cross-quad billboard in-world it
-	reads as a small grass tuft. Approximates vanilla Beta tall_grass
-	colors (the unbiomed grayscale form before tint)."""
-	img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
-	px = img.load()
-	# Each tuple = (x, top_y, color). Strands grow upward from y=15.
-	strands = [
-		(2, 9, (60, 110, 30, 255)),
-		(4, 6, (80, 140, 40, 255)),
-		(5, 8, (50, 100, 25, 255)),
-		(7, 4, (90, 160, 50, 255)),
-		(8, 7, (70, 130, 35, 255)),
-		(10, 5, (85, 150, 45, 255)),
-		(11, 9, (55, 105, 28, 255)),
-		(13, 7, (75, 135, 38, 255)),
-	]
-	for x, top_y, color in strands:
-		for y in range(top_y, 16):
-			if 0 <= x < 16 and 0 <= y < 16:
-				px[x, y] = color
-	return img
+# (tall_grass entry removed — Beta 1.6 block, not Alpha 1.2.6)
+PROCEDURAL_TERRAIN: dict = {}
 
 
 def _draw_sugar() -> Image.Image:
@@ -440,10 +410,10 @@ def main() -> None:
 			_draw_sugar().save(ITEMS / f"{name}.png")
 
 	# Procedural terrain tiles — same idea, but written into PACK/ next
-	# to the rest of terrain.png extractions.
-	for name in PROCEDURAL_TERRAIN:
-		if name == "tall_grass":
-			_draw_tall_grass().save(PACK / f"{name}.png")
+	# to the rest of terrain.png extractions. (Empty after tall_grass
+	# removal; left as the extension hook for future Beta exceptions.)
+	for _name in PROCEDURAL_TERRAIN:
+		pass
 
 	# Alpha's Steve skin is 64×32 — the left arm and left leg don't exist in
 	# the texture; the game renders them by mirroring the right side. Our
@@ -459,6 +429,26 @@ def main() -> None:
 	right_leg = char.crop((0, 16, 16, 32))
 	upgraded.paste(_mirror_limb_block(right_leg), (16, 48))
 	upgraded.save(ENTITIES / "steve.png")
+
+	# Bobber sprite — vanilla jw.java (RenderFish) pulls an 8×8 tile from
+	# particles.png at (col=1, row=2) = pixel (8, 16)→(16, 24). Sprite is
+	# the bobber body (white + red stripe) plus the trailing fishing line
+	# below. Rendered in vanilla as a 0.5-m camera-facing billboard.
+	particles_path = SRC / "particles.png"
+	if not particles_path.exists():
+		# Some Alpha mirrors put particles.png inside the jar only.
+		jar = SRC / "client.jar"
+		if jar.exists():
+			import zipfile
+			with zipfile.ZipFile(jar) as zf:
+				try:
+					particles_data = zf.read("particles.png")
+					(SRC / "particles.png").write_bytes(particles_data)
+				except KeyError:
+					particles_data = None
+	if particles_path.exists():
+		particles = Image.open(particles_path).convert("RGBA")
+		particles.crop((8, 16, 16, 24)).save(ENTITIES / "bobber.png")
 
 	count = len(TERRAIN_TILES) + len(TERRAIN_ALIASES)
 	item_count = len(ITEM_TILES) + len(ITEM_ALIASES)

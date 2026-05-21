@@ -2,6 +2,11 @@ class_name Blocks
 extends RefCounted
 
 # gdlint: disable=max-file-lines
+# Preload-based dispatch for MobSpawnerManager. class_name registration
+# can race on first run (headless tests skip the editor scan that
+# populates the class cache), so we resolve the script statically here.
+const _MOB_SPAWNER_MGR: GDScript = preload("res://scripts/world/mob_spawner_manager.gd")
+
 # Block IDs (Uint8 0-255). IDs are stable — append to the end, never renumber.
 # File length cap is intentionally lifted: this is the canonical block
 # registry — IDs, hardness, drops, light opacity, atlas-face mapping, and
@@ -189,15 +194,23 @@ const BOOKSHELF := 48
 # like surfaces). Bonemeal advances to mature like saplings.
 # We allocate id 49 because vanilla 59 is in our reserved 0..99 range
 # but our existing IDs are densely packed up to 47; 49 keeps the
-# growth/plant family contiguous (50 = TALL_GRASS).
+# growth/plant family contiguous.
 const CROPS := 49
-# Tall grass [BETA 1.6 exception] — vanilla nq.aB = BlockTallGrass,
-# id 31. Cross-quad render like saplings/flowers. Broken with shears
-# drops 1 tall grass; broken with anything else drops 0-1 wheat seeds
-# at the standard 1/8 vanilla rate. Worldgen scatter on grass blocks.
-# Ships pre-shears: any break (bare hand / pickaxe / sword) rolls
-# the seed chance — same as Beta 1.6 pre-Beta-1.7 behavior.
-const TALL_GRASS := 50
+# Slot 50 intentionally LEFT BURNED. Briefly held a TALL_GRASS [Beta
+# 1.6] block as a "natural seed source" exception, but tall grass
+# doesn't exist in Alpha 1.2.6 — Mojang shipped it in Beta 1.6 to
+# solve exactly the same gap. We chose strict Alpha fidelity:
+# wheat seeds remain debug-spawn only (J menu), matching how Alpha-
+# era players actually obtained them (creative-mode item spawn).
+# Chunk saves from the brief tall-grass commits may persist id=50;
+# the unknown-id default (AIR) silently strips those on load.
+# Vanilla BlockMobSpawner (eb.java, id 52) — the mossy stone cage with
+# a rotating mini-mob inside, found in dungeons. We use it as the
+# primary debug tool for triggering mob spawns at a specific location
+# during development. Single tile-entity stores which mob to spawn
+# (see mob_spawner_manager.gd). Hardness 5.0, pickaxe-harvest, drops
+# nothing on break (vanilla — keeps spawners non-renewable).
+const MOB_SPAWNER := 51
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -282,6 +295,11 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		BlockFire.update(manager, pos)
 	elif block_id == CROPS:
 		_tick_crops(manager, pos)
+	elif block_id == MOB_SPAWNER:
+		# Preload-based dispatch dodges the class_name registry race —
+		# new files aren't in the cache until the editor scans them,
+		# and headless test runs skip that scan.
+		_MOB_SPAWNER_MGR.on_tick(manager, pos)
 
 
 # Crops growth tick. Advances meta by 1 each fire if conditions hold,
@@ -354,12 +372,11 @@ static func is_opaque(id: int) -> bool:
 		and id != MUSHROOM_BROWN
 		and id != MUSHROOM_RED
 		and id != SUGAR_CANE
-		# CROPS + TALL_GRASS render as cross-quads (same reason as the
-		# flower family above). Neighbor cubes must keep emitting their
-		# faces or the cross-shader's discard punches a hole through to
-		# the world background.
+		# CROPS renders as a cross-quad (same reason as the flower
+		# family above). Neighbor cubes must keep emitting their faces
+		# or the cross-shader's discard punches a hole through to the
+		# world background.
 		and id != CROPS
-		and id != TALL_GRASS
 	)
 
 
@@ -433,7 +450,6 @@ static func is_replaceable(id: int) -> bool:
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
 		or id == SUGAR_CANE
-		or id == TALL_GRASS
 		or id == CROPS
 	)
 
@@ -509,9 +525,8 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[MUSHROOM_BROWN] = 0
 	_light_opacity_lut[MUSHROOM_RED] = 0
 	_light_opacity_lut[SUGAR_CANE] = 0
-	# Crops + tall grass — both non-solid cross-quads, pass full light.
+	# Crops — non-solid cross-quad, passes full light.
 	_light_opacity_lut[CROPS] = 0
-	_light_opacity_lut[TALL_GRASS] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -575,12 +590,6 @@ static func can_place_at(id: int, support_id: int) -> bool:
 		# Nothing else accepted (not grass / dirt) so the player has to
 		# till first.
 		return support_id == FARMLAND
-	if id == TALL_GRASS:
-		# Vanilla BlockTallGrass uses canPlaceBlockOn(grass / dirt /
-		# farmland). Farmland accepted so worldgen scatter can land on
-		# fields that turned to dirt-then-tilled, though in practice
-		# tall grass spawns on grass blocks during worldgen.
-		return support_id == GRASS or support_id == DIRT or support_id == FARMLAND
 	return true
 
 
@@ -690,14 +699,12 @@ static func mesh_shape(id: int) -> int:
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
 		or id == SUGAR_CANE
-		or id == TALL_GRASS
 		or id == CROPS
 	):
-		# Tall grass uses CROSS (same as sapling). Crops technically uses
-		# a flat-faced "wheat" mesh in vanilla (4 vertical quads per cell)
-		# but CROSS is visually close enough at our texture resolution and
-		# reuses the existing mesher path. Per-stage texture swap below
-		# differentiates the 8 growth stages.
+		# Crops technically uses a flat-faced "wheat" mesh in vanilla
+		# (4 vertical quads per cell) but CROSS is visually close enough
+		# at our texture resolution and reuses the existing mesher path.
+		# Per-stage texture swap below differentiates the 8 growth stages.
 		return MESH_SHAPE_CROSS
 	if id == FIRE:
 		return MESH_SHAPE_FIRE
@@ -800,9 +807,9 @@ static func hardness(id: int) -> float:
 			return 0.1  # vanilla BlockSnowLayer instant break
 		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
-		CROPS, TALL_GRASS:
-			# Vanilla BlockCrops + BlockTallGrass both inherit hardness 0
-			# from BlockBush. Instant break by any tool / bare hand.
+		CROPS:
+			# Vanilla BlockCrops inherits hardness 0 from BlockBush.
+			# Instant break by any tool / bare hand.
 			return 0.0
 		DIRT, SAND:
 			return 0.5
@@ -836,6 +843,10 @@ static func hardness(id: int) -> float:
 		BOOKSHELF:
 			# Vanilla BlockBookshelf `c(1.5f)`. Axe-preferred.
 			return 1.5
+		MOB_SPAWNER:
+			# Vanilla BlockMobSpawner `c(5.0f)`. Pickaxe-preferred,
+			# drops nothing on break (handled in drops()).
+			return 5.0
 	return 1.0
 
 
@@ -1004,6 +1015,11 @@ static func drops(id: int) -> int:
 			return Items.SUGAR_CANE  # drops as ITEM (re-place via item)
 		BEDROCK:
 			return AIR
+		MOB_SPAWNER:
+			# Vanilla BlockMobSpawner.a(Random) returns 0 — spawner
+			# blocks drop nothing on break (keeps them non-renewable,
+			# only obtainable via creative/debug placement).
+			return AIR
 		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
 			# Fluids and fire have no item form. When displaced (e.g. a block
 			# placed on a water cell) `_place_block_from_held` drops the
@@ -1136,8 +1152,8 @@ static func name_of(id: int) -> String:
 			return "bookshelf"
 		CROPS:
 			return "crops_stage_7"  # 1-arg fallback (mature); meta-aware path below picks the per-stage tile
-		TALL_GRASS:
-			return "tall_grass"
+		MOB_SPAWNER:
+			return "mob_spawner"
 	return "unknown"
 
 
@@ -1240,9 +1256,11 @@ static func get_face_texture(id: int, face: String) -> String:
 			# meta-aware path (directional_face_texture) picks the actual
 			# stage at render time — see has_directional_face.
 			return "crops_stage_7"
-		TALL_GRASS:
-			# All 6 faces share the same cross-quad sprite.
-			return "tall_grass"
+		MOB_SPAWNER:
+			# All 6 faces share the mossy cage tile. Vanilla
+			# BlockMobSpawner.getBlockTextureFromSide returns the same
+			# index for every face.
+			return "mob_spawner"
 		FARMLAND:
 			match face:
 				"top":

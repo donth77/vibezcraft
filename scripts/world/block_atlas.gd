@@ -6,7 +6,16 @@ extends RefCounted
 # 16×16 / 32×32 / any-square packs all work without code changes. Active
 # pack is configured in the Game autoload.
 
-const GRID_SIZE := 8  # 8x8 = 64 slots; plenty of room for new blocks
+# 16x16 = 256 slots. Previously 8x8 (= 64 slots) but new tiles
+# (crops_stage_7=64, tall_grass=65, mob_spawner=66) overflowed the 64
+# cap. Those slots' UVs were computed at row 8 which is outside the
+# 128x128 atlas image — the texture-REPEAT wrap mode then sampled UV
+# y=1.x as y=0.x, mapping to whatever was in row 0 of the atlas. For
+# tall_grass (slot 65, col 1, row "8") the UV.x = 1/8 landed on the
+# COBBLESTONE tile (slot 1) → worldgen-placed tall grass rendered as
+# walk-through cobblestone X-crosses. Bumping to 16x16 puts all
+# existing slots well inside the valid range.
+const GRID_SIZE := 16
 const PACK_BASE := "res://assets/textures/blocks/packs/"
 const DEFAULT_PACK := "alpha_vanilla"
 
@@ -114,10 +123,11 @@ const _LAYOUT := {
 	"crops_stage_5": 62,
 	"crops_stage_6": 63,
 	"crops_stage_7": 64,
-	# Tall grass [BETA 1.6 exception] — procedurally drawn since Alpha
-	# 1.2.6 has wood planks at (7, 2), not tall grass. Cross-quad
-	# billboard rendered the same as saplings/flowers.
-	"tall_grass": 65,
+	# Slot 65 burned (tall_grass — removed for Alpha-fidelity, see
+	# blocks.gd TALL_GRASS slot 50 comment).
+	# Mob spawner — vanilla terrain.png cell (1, 4): mossy cage all 6
+	# faces. Tile entity stores the configured mob (mob_spawner_manager).
+	"mob_spawner": 66,
 }
 
 static var active_pack: String = DEFAULT_PACK

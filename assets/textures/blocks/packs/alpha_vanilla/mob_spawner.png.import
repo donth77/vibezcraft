@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://u8ya1eetkrte"
-path="res://.godot/imported/tall_grass.png-1dd786d80ad186de7bc81a31b40eb24a.ctex"
+uid="uid://cym0hqo3w61sl"
+path="res://.godot/imported/mob_spawner.png-df01b0c122a417c8f3d90c66a6cb0e00.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/blocks/packs/alpha_vanilla/tall_grass.png"
-dest_files=["res://.godot/imported/tall_grass.png-1dd786d80ad186de7bc81a31b40eb24a.ctex"]
+source_file="res://assets/textures/blocks/packs/alpha_vanilla/mob_spawner.png"
+dest_files=["res://.godot/imported/mob_spawner.png-df01b0c122a417c8f3d90c66a6cb0e00.ctex"]
 
 [params]
 

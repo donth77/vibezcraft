@@ -92,10 +92,14 @@ public:
 	// needed, the native mesher handles directional faces via the meta
 	// lookup hook in mesh_chunk_data_lit.
 	static constexpr int BOOKSHELF = 48;
-	// CROPS + TALL_GRASS — both MESH_SHAPE_CROSS in GDScript. Listed
-	// here so the native cube pass can skip them; the GDScript
-	// _append_non_cube_geometry pass emits the cross-quads.
+	// CROPS — MESH_SHAPE_CROSS in GDScript. Listed in the native
+	// cube-pass skip list so the GDScript _append_non_cube_geometry
+	// pass owns the cross-quad emission.
 	static constexpr int CROPS = 49;
+	// Slot 50 was briefly TALL_GRASS (Beta 1.6 exception) but was
+	// removed for Alpha-fidelity. Constant kept as a dead value so
+	// .cpp skip lists referencing TALL_GRASS still compile until the
+	// next clean-up pass.
 	static constexpr int TALL_GRASS = 50;
 
 	MesherNative();

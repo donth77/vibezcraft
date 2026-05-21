@@ -361,10 +361,9 @@ func _complete_break(target: Vector3i) -> void:
 	# slot rolls independently — preserves leaves-sapling / gravel-flint
 	# semantics for any future multi-drop block that wants the random
 	# tier mixed in.
-	# CROPS + TALL_GRASS have variable-item drops (wheat + seeds at
-	# random counts) — route through a special-case helper instead of
-	# the uniform-count loop above.
-	if broken_id == Blocks.CROPS or broken_id == Blocks.TALL_GRASS:
+	# CROPS has variable-item drops (wheat + 0..3 seeds) — route through
+	# a special-case helper instead of the uniform-count loop above.
+	if broken_id == Blocks.CROPS:
 		for item_id in _farm_drops(broken_id, target):
 			_spawn_dropped_item(target, item_id)
 	else:
@@ -1359,16 +1358,12 @@ func _spawn_dropped_item_with_velocity(pos: Vector3, item_id: int, vel: Vector3)
 	item.set("_velocity", vel)
 
 
-# Variable-count drops for the farming family.
-#   CROPS mature (meta=7): 1 wheat + 0..3 seeds. Vanilla BlockCrops
-#     loops 0..3 with a 1/(15-i) chance per seed slot; we use the
-#     simpler 1/4-per-slot approximation that gives the same ~3
-#     average drop value.
-#   CROPS immature: 1 seed back (vanilla: return your seed when the
-#     plant isn't fully grown).
-#   TALL_GRASS: 1/8 chance of 1 seed. Anything else drops nothing.
-#     Matches Beta 1.6 pre-shears behavior — the only practical seed
-#     source in survival until tools land.
+# Variable-count drops for CROPS.
+#   Mature (meta=7): 1 wheat + 0..3 seeds. Vanilla BlockCrops loops
+#     0..3 with a 1/(15-i) chance per seed slot; we use the simpler
+#     1/4-per-slot approximation that gives the same ~3 average drop.
+#   Immature: 1 seed back (vanilla: return your seed when the plant
+#     isn't fully grown).
 func _farm_drops(broken_id: int, pos: Vector3i) -> Array:
 	var drops: Array = []
 	if broken_id == Blocks.CROPS:
@@ -1379,9 +1374,6 @@ func _farm_drops(broken_id: int, pos: Vector3i) -> Array:
 				if randi() % 4 == 0:
 					drops.append(Items.WHEAT_SEEDS)
 		else:
-			drops.append(Items.WHEAT_SEEDS)
-	elif broken_id == Blocks.TALL_GRASS:
-		if randi() % 8 == 0:
 			drops.append(Items.WHEAT_SEEDS)
 	return drops
 
