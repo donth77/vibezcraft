@@ -39,7 +39,10 @@ func _ready() -> void:
 	_gap_timer.timeout.connect(_on_gap_timeout)
 	add_child(_gap_timer)
 	var cfg := SettingsMenu.load_config()
-	_volume_linear = float(cfg.get_value("audio", "music_volume", 1.0))
+	# Default 0.5 — vanilla MC ships music slider at roughly mid; 1.0
+	# was loud enough to drown out footstep / break SFX. User can still
+	# crank it back to max via the audio menu.
+	_volume_linear = float(cfg.get_value("audio", "music_volume", 0.5))
 	_apply_volume()
 
 

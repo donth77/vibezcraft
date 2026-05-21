@@ -234,7 +234,47 @@ ITEM_TILES = {
 	"egg": (12, 0),
 	"milk_bucket": (13, 4),
 	"sugar": (13, 0),
+	# Gunpowder — vanilla Alpha dx.K(33).a(40) → sprite 40 = (8, 2).
+	# The existing assets/textures/items/gunpowder.png was extracted
+	# from (7, 8) which is actually MINECART, so the inventory icon
+	# was wrong. This entry overrides via the per-pack items dir
+	# (item_icons.gd's _load_item_sprite tries the pack dir FIRST,
+	# then falls back to assets/textures/items/).
+	"gunpowder": (8, 2),
 }
+
+# Items added in Beta+ that don't have an Alpha 1.2.6 sprite. Drawn
+# procedurally below at `main` time so they at least get a recognizable
+# inventory icon instead of an empty TextureRect.
+PROCEDURAL_ITEMS: dict = {
+	# Sugar — Beta 1.2. White granules approximation: solid white centered
+	# on a transparent 16×16, with a slight off-white speckle for texture.
+	# Replace with vendored Beta sprite when we have one.
+	"sugar": "sugar_white_granules",
+}
+
+
+def _draw_sugar() -> Image.Image:
+	"""6x6 white block centered in a 16x16 transparent canvas, with a
+	2px shadow on the bottom and right for depth — matches vanilla's
+	off-white sugar pile."""
+	img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+	px = img.load()
+	# Body (light grey-white)
+	for y in range(5, 12):
+		for x in range(4, 12):
+			px[x, y] = (240, 240, 240, 255)
+	# Highlight on the top-left edge
+	for x in range(4, 11):
+		px[x, 5] = (255, 255, 255, 255)
+	for y in range(5, 11):
+		px[4, y] = (255, 255, 255, 255)
+	# Shadow on the bottom + right edge
+	for x in range(5, 12):
+		px[x, 11] = (200, 200, 200, 255)
+	for y in range(5, 12):
+		px[11, y] = (200, 200, 200, 255)
+	return img
 
 # Items with no Alpha 1.2.6 source — fall back by aliasing another sprite.
 ITEM_ALIASES = {
@@ -305,6 +345,23 @@ def main() -> None:
 	PACK.mkdir(parents=True, exist_ok=True)
 	ITEMS.mkdir(parents=True, exist_ok=True)
 	ENTITIES.mkdir(parents=True, exist_ok=True)
+	# Leather armor textures — vanilla Alpha names them cloth_{1,2}.png
+	# (the armor was originally called "Studded Leather"). Pulled into
+	# our armor dir as leather_layer_{1,2}.png to match item-id naming.
+	# We extract once and only re-copy if the source jar is present,
+	# since this lives in vendor/ which is git-ignored.
+	armor_dst = ROOT / "assets" / "textures" / "entities" / "armor"
+	armor_dst.mkdir(parents=True, exist_ok=True)
+	jar = SRC / "client.jar"
+	if jar.exists():
+		import zipfile
+		with zipfile.ZipFile(jar) as zf:
+			for src, dst in [("armor/cloth_1.png", "leather_layer_1.png"),
+								("armor/cloth_2.png", "leather_layer_2.png")]:
+				try:
+					(armor_dst / dst).write_bytes(zf.read(src))
+				except KeyError:
+					pass  # jar variant without that file — skip silently
 
 	terrain = Image.open(SRC / "terrain.png").convert("RGBA")
 	items = Image.open(SRC / "gui" / "items.png").convert("RGBA")
@@ -326,6 +383,13 @@ def main() -> None:
 	for alias, source in ITEM_ALIASES.items():
 		src_img = Image.open(ITEMS / f"{source}.png")
 		src_img.save(ITEMS / f"{alias}.png")
+
+	# Procedural items — Beta-era additions with no Alpha sprite source.
+	# Drawn locally so the pack still gets a recognizable icon. Each
+	# generator below returns a 16×16 PIL Image written to ITEMS/.
+	for name in PROCEDURAL_ITEMS:
+		if name == "sugar":
+			_draw_sugar().save(ITEMS / f"{name}.png")
 
 	# Alpha's Steve skin is 64×32 — the left arm and left leg don't exist in
 	# the texture; the game renders them by mirroring the right side. Our

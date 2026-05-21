@@ -1,6 +1,7 @@
-[gd_scene load_steps=14 format=3]
+[gd_scene load_steps=15 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
+[ext_resource type="Script" path="res://scripts/ui/armor_bar.gd" id="18_armor"]
 [ext_resource type="Script" path="res://scripts/ui/inventory_screen.gd" id="2_inv"]
 [ext_resource type="Script" path="res://scripts/ui/crafting_table_screen.gd" id="3_table"]
 [ext_resource type="Script" path="res://scripts/ui/pause_menu.gd" id="4_pause"]
@@ -102,6 +103,18 @@ offset_top = -136.0
 offset_bottom = -100.0
 mouse_filter = 2
 script = ExtResource("6_hp")
+
+[node name="ArmorBar" type="Control" parent="."]
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = -364.0
+offset_right = -44.0
+offset_top = -176.0
+offset_bottom = -140.0
+mouse_filter = 2
+script = ExtResource("18_armor")
 
 [node name="AirBar" type="Control" parent="."]
 anchor_left = 0.5

@@ -73,6 +73,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# recognizable inventory icon.
 	Blocks.PUMPKIN,
 	Blocks.JACK_O_LANTERN,
+	# Bookshelf [BETA 1.3 exception] — full cube with planks top/bottom
+	# and bookshelf_side on the 4 sides. Iso bake reads as wooden cube
+	# with a book strip, recognizable in inventory.
+	Blocks.BOOKSHELF,
 ]
 
 static var _viewport: SubViewport

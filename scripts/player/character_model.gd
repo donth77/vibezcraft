@@ -503,6 +503,13 @@ func _armor_tier_name(item_id: int) -> String:
 		return "gold"
 	if item_id >= Items.DIAMOND_HELMET and item_id <= Items.DIAMOND_BOOTS:
 		return "diamond"
+	if item_id >= Items.LEATHER_HELMET and item_id <= Items.LEATHER_BOOTS:
+		# Vanilla Alpha named the texture "cloth" (the armor was originally
+		# "Studded Leather"); we keep our existing "leather_" naming for
+		# consistency with the item IDs / sprites. cloth_1.png / cloth_2.png
+		# from the Alpha 1.2.6 jar are renamed to leather_layer_{1,2}.png
+		# in assets/textures/entities/armor/ at extraction time.
+		return "leather"
 	return ""
 
 
@@ -511,6 +518,7 @@ func _is_leggings(item_id: int) -> bool:
 		item_id == Items.IRON_LEGGINGS
 		or item_id == Items.GOLD_LEGGINGS
 		or item_id == Items.DIAMOND_LEGGINGS
+		or item_id == Items.LEATHER_LEGGINGS
 	)
 
 

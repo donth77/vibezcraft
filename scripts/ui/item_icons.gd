@@ -99,8 +99,11 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# version that introduced the dye system). Sprite is unchanged in
 	# every later version, so this is the canonical look.
 	Items.BONEMEAL: "bonemeal",
-	# Gunpowder — canonical Alpha 1.2.6 sprite at items.png (7,8). Used in
-	# the TNT recipe; sourced via debug spawner only until creepers ship.
+	# Gunpowder — canonical Alpha 1.2.6 sprite at items.png (8, 2) per
+	# dx.K(33).a(40). An earlier extract had this at (7, 8) which is
+	# actually the minecart sprite — fixed in extract_alpha_pack.py.
+	# Used in the TNT recipe; sourced via debug spawner only until
+	# creepers ship.
 	Items.GUNPOWDER: "gunpowder",
 	# Sugar cane (vanilla "reeds"). Sprite at items.png (11, 1). Held in
 	# hand and placeable into a SUGAR_CANE block via interaction.gd.
