@@ -338,16 +338,29 @@ var _fp_hand_base_position: Vector3 = Vector3.ZERO
 var _fp_hand_base_rotation: Vector3 = Vector3.ZERO
 var _held_block: MeshInstance3D  # FP cube shown in lieu of the hand when holding a block
 var _held_block_tp: MeshInstance3D  # third-person cube parented to arm_r
-var _held_tool: MeshInstance3D  # FP voxel-extruded 3D tool mesh (vanilla ItemModelGenerator)
+# Loosened to GeometryInstance3D so the held node can be either a
+# MeshInstance3D (voxel-extruded tools) OR a Sprite3D (flat 2D items
+# like signs — matches vanilla Alpha's af.java "item" branch).
+var _held_tool: GeometryInstance3D
 var _held_tool_pivot: Node3D  # parent of _held_tool — sits at the fist; rotation pivots here
 var _held_tool_orient: Node3D  # carries the vanilla 50°Y / -25°Z inner sprite tilt
-var _held_tool_tp: MeshInstance3D  # third-person tool mesh, parented to arm_r
+var _held_tool_tp: GeometryInstance3D  # third-person tool mesh / sprite, parented to arm_r
 var _held_tool_tp_pivot: Node3D  # parent of _held_tool_tp at the wrist (so rotation pivots there)
 var _held_tool_tp_orient: Node3D  # TP orient node (mirrors _held_tool_orient role)
 var _held_block_id: int = 0  # 0 = AIR = nothing held; show the hand instead
 var _tool_tuner: Control  # debug-only slider panel; toggled with T
 
 @onready var _camera: Camera3D = $Camera3D
+
+# Currently-mounted mob (set by Pig.mount via set_mount), or null. While
+# non-null, player physics is suspended: position is driven by the mob's
+# saddle transform, WASD input flows to the mob, and pressing sneak
+# dismounts. Restored to free movement on set_mount(null).
+var _mounted_to: Node3D = null
+# Saved collision-shape disabled state so set_mount(null) can restore
+# whatever it was before mounting (in case dev tools / cheats disabled
+# it elsewhere). Defaults to "was enabled" — the typical case.
+var _pre_mount_collision_disabled: bool = false
 
 
 func _ready() -> void:
@@ -565,15 +578,45 @@ func _build_held_tool(id: int) -> void:
 	_apply_orient_to(_held_tool_orient, _use_vanilla_orient_fp)
 	_held_tool_pivot.add_child(_held_tool_orient)
 
+	var ps: float = _held_tool_pixel_size
+	# Vanilla Alpha af.java::RenderItem draws non-block held items as a
+	# FLAT 2D sprite — see the "item" branch. Our default voxel-extrusion
+	# path makes most items look chunky-3D, which is acceptable for tools
+	# but the sign sprite specifically voxelizes into a misshapen blob.
+	# For signs we use Sprite3D (purpose-built for 2D-sprite-in-3D-space
+	# with alpha-cut + texture filter handled natively, and no cull_back
+	# clipping like the MeshInstance3D + shader path).
+	if id == Items.SIGN:
+		var sprite := Sprite3D.new()
+		sprite.texture = tex
+		sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		sprite.pixel_size = ps
+		sprite.transparent = true
+		sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+		sprite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# render_priority + no_depth_test so the held sprite always
+		# draws on top of world geometry (matches the held_item shader's
+		# render_priority/depth_test_disabled combo for the other path).
+		sprite.render_priority = 100
+		sprite.no_depth_test = true
+		# Lift the sprite so its BOTTOM sits at the orient pivot —
+		# matches the voxel-mesh convention where the handle tip lands
+		# at the pivot and the body extends upward from there. Without
+		# this the sprite center sat at the pivot (orient y=-0.63m),
+		# putting the held sign visually below where tools land.
+		sprite.position = Vector3(0, 8.0 * ps, 0)
+		_held_tool_orient.add_child(sprite)
+		_held_tool = sprite
+		return
 	_held_tool = MeshInstance3D.new()
 	var mesh: ArrayMesh = SpriteExtruder.build(tex)
 	_held_tool.mesh = mesh
-	var ps: float = _held_tool_pixel_size
 	_held_tool.scale = Vector3(ps, ps, ps)
-	# Find the actual handle tip (bottom-most opaque pixel — for the pickaxe
-	# that's the lower-left corner) and offset the mesh so THAT point lands
-	# at the pivot origin. Without this, rotating around bounding-box center
-	# made the handle visibly slide out of the fist as the head arced forward.
+	# Find the actual handle tip (bottom-most opaque pixel — for the
+	# pickaxe that's the lower-left corner) and offset the mesh so THAT
+	# point lands at the pivot origin. Without this, rotating around
+	# bounding-box center made the handle visibly slide out of the fist
+	# as the head arced forward.
 	var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
 	_held_tool.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
 	# Custom shader: textured + per-face Notch shading + depth_test_disabled
@@ -612,6 +655,24 @@ func _build_held_tool(id: int) -> void:
 		_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp)
 		_held_tool_tp_pivot.add_child(_held_tool_tp_orient)
 
+		# Same Sprite3D treatment for the third-person sign (matches
+		# the FP path above so the held sign stays vanilla-Alpha shaped
+		# regardless of perspective). Build sprite + early-return so we
+		# skip the scale / position logic that's tailored to the
+		# voxel-extruded mesh path.
+		if id == Items.SIGN:
+			var tp_sprite := Sprite3D.new()
+			tp_sprite.texture = tex
+			tp_sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+			# Slightly larger than FP — TP held tools render at ~1.5×
+			# the FP pixel size (per _tp_held_tool_pixel_size default).
+			tp_sprite.pixel_size = _tp_held_tool_pixel_size * 0.6
+			tp_sprite.transparent = true
+			tp_sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+			tp_sprite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			_held_tool_tp_orient.add_child(tp_sprite)
+			_held_tool_tp = tp_sprite
+			return
 		_held_tool_tp = MeshInstance3D.new()
 		_held_tool_tp.mesh = SpriteExtruder.build(tex)
 		var tp_ps: float = _tp_held_tool_pixel_size
@@ -1164,6 +1225,16 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Mount short-circuit — when riding a mob, the mob's _process drives
+	# our global_position to the saddle and the mob reads WASD input
+	# directly. Skip everything else (gravity, water, jump, move_and_slide,
+	# fall tracking). Sneak key dismounts.
+	if _mounted_to != null:
+		velocity = Vector3.ZERO
+		if Input.is_action_just_pressed("sneak"):
+			if _mounted_to.has_method("dismount"):
+				_mounted_to.dismount()
+		return
 	# Post-spawn safety: relocate-if-in-water with throttle. The spiral
 	# search inside _relocate_if_unsafe_spawn is ~130k block lookups
 	# (radius 32, column scans), so running it per-tick caused <30 fps
@@ -2130,3 +2201,27 @@ func _find_safe_spawn_in_chunk() -> Vector2i:
 				best_y = surface_y
 				fallback = Vector2i(x, z)
 	return fallback
+
+
+# Called by a mob (currently Pig) when the player mounts/dismounts.
+# Disables the player's collision shape while riding so the mob's
+# CharacterBody3D doesn't push us off the saddle, and clears velocity
+# so we don't carry residual momentum from the moment of mounting.
+func set_mount(mob: Node3D) -> void:
+	_mounted_to = mob
+	var cshape: CollisionShape3D = _find_collision_shape()
+	if mob != null:
+		velocity = Vector3.ZERO
+		if cshape != null:
+			_pre_mount_collision_disabled = cshape.disabled
+			cshape.disabled = true
+	else:
+		if cshape != null:
+			cshape.disabled = _pre_mount_collision_disabled
+
+
+func _find_collision_shape() -> CollisionShape3D:
+	for child in get_children():
+		if child is CollisionShape3D:
+			return child
+	return null

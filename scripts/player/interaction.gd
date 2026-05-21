@@ -1509,8 +1509,13 @@ func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	if hit.is_empty():
 		return false
+	# Vanilla ni.java doesn't override canPlaceBlockAt — Block default
+	# only rejects fluids / fire / air. We mirror that: any non-air,
+	# non-fluid block can support a sign. Previous opaque-only check
+	# wrongly rejected placement on leaves / glass / fences (vanilla
+	# allows those).
 	var support_id: int = _chunk_manager.get_world_block(hit.block_pos)
-	if not Blocks.is_opaque(support_id):
+	if support_id == Blocks.AIR or Blocks.is_water(support_id) or Blocks.is_lava(support_id):
 		return false
 	var place: Vector3i = hit.block_pos + hit.normal_i
 	var dest_id: int = _chunk_manager.get_world_block(place)
@@ -1527,8 +1532,20 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	var meta: int
 	if hit.normal_i.y == 1:
 		block_id = Blocks.SIGN_STANDING
-		var yaw_deg: float = rad_to_deg(_player_yaw()) + 180.0
+		# Vanilla ni.java: meta = floor((yaw + 180) * 16 / 360 + 0.5) & 15
+		# That `+ 180` converts the player's FACING direction into the
+		# sign's INSCRIBED-face direction (opposite). Godot's player
+		# rotation.y already differs from vanilla MC's yaw by exactly π
+		# (Godot.y=0 → looking -Z = MC yaw=180), so the two 180° offsets
+		# cancel and we use the raw Godot yaw directly. Without this we
+		# were always landing 8 meta-steps off (180° error).
+		var yaw_deg: float = rad_to_deg(_player_yaw())
 		meta = int(round(yaw_deg * 16.0 / 360.0)) & 0x0F
+	elif hit.normal_i.y == -1:
+		# Bottom-face click — vanilla nv.java rejects this (can't attach
+		# a sign to the underside of a block). Bail so the player gets
+		# the "nothing happened" feedback rather than a misplaced sign.
+		return false
 	else:
 		block_id = Blocks.SIGN_WALL
 		meta = _wall_sign_meta_from_normal(hit.normal_i)

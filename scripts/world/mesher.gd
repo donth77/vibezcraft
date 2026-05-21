@@ -904,12 +904,17 @@ static func _emit_slab_geometry(
 	_emit_collision_box(collision_faces, mn, mx)
 
 
-# Sign — vanilla ni.java (BlockSign) renders a post + flat panel.
-# Stage 1 placeholder: thin vertical plank (0.5 wide × 0.5 tall ×
-# 0.1 thick) centered in the cell. Stage 2 adds the proper post +
-# panel mesh + 3D text via a per-sign SubViewport texture.
-# Selection collision goes into plant_faces so the cursor can target
-# the sign (vanilla allows right-click to open the edit GUI).
+# Sign — vanilla ni.java (BlockSign). Two variants:
+#   SIGN_STANDING — short central post (0.125×0.5×0.125, y 0..0.5)
+#     plus a flat panel (0.875×0.5×0.125) mounted at the top of the
+#     post, rotated by yaw meta. The post is a regular AABB; the
+#     panel is a rotated quad pair (since 22.5° increments don't
+#     align with grid axes, we compute corners after rotation).
+#   SIGN_WALL — panel only, mounted flush against one cell face
+#     (no post). Meta 0..3 maps to -Z / +Z / -X / +X (chest-style
+#     convention). Since these are axis-aligned, no rotation math.
+# Selection collision wraps the whole bbox so right-click / mine-aim
+# can target signs without worrying about the rotated panel offset.
 static func _emit_sign_geometry(
 	chunk: Chunk,
 	x: int,
@@ -922,20 +927,184 @@ static func _emit_sign_geometry(
 	indices: PackedInt32Array,
 	plant_faces: PackedVector3Array,
 ) -> void:
+	var id: int = chunk.get_block(x, y, z)
+	var meta: int = chunk.get_block_meta_unchecked(x, y, z)
 	var fx: float = float(x)
 	var fy: float = float(y)
 	var fz: float = float(z)
-	# Flat plank centered in the cell — vertical orientation. 0.5×0.5×0.1
-	# is roughly half-cube tall, half-cube wide, very thin.
-	var mn := Vector3(fx + 0.25, fy + 0.25, fz + 0.45)
-	var mx := Vector3(fx + 0.75, fy + 0.75, fz + 0.55)
 	var rect: Rect2 = BlockAtlas.uv_rect("planks")
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
 	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	if id == Blocks.SIGN_STANDING:
+		_emit_standing_sign(
+			fx, fy, fz, meta, rect, face_color, verts, norms, uvs, colors, indices, plant_faces
+		)
+	else:
+		_emit_wall_sign(
+			fx, fy, fz, meta, rect, face_color, verts, norms, uvs, colors, indices, plant_faces
+		)
+
+
+# Post + rotated panel. Vanilla ni.java yaw meta is 16 increments
+# (0..15 → 0°..337.5°). Standing on a fence post; panel mounted on
+# top at the rotated angle.
+static func _emit_standing_sign(
+	fx: float,
+	fy: float,
+	fz: float,
+	meta: int,
+	rect: Rect2,
+	face_color: Color,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+) -> void:
+	# Post AABB — centered (0.5±0.0625, 0..0.5, 0.5±0.0625).
+	var post_mn := Vector3(fx + 0.4375, fy, fz + 0.4375)
+	var post_mx := Vector3(fx + 0.5625, fy + 0.5, fz + 0.5625)
+	_emit_box(verts, norms, uvs, colors, indices, post_mn, post_mx, rect, face_color)
+	# Panel — 0.875 wide × 0.5 tall × 0.125 thick, mounted on top of
+	# the post (centered at y=0.75). Vanilla's yaw=0 faces -Z (a sign
+	# placed by a south-facing player). Each 1-step of meta rotates
+	# 22.5° clockwise (viewed from above).
+	#
+	# Compute the 8 panel corners by rotating the local-frame corners
+	# around the cell-center Y axis by yaw_rad, then translating to
+	# world space.
+	var yaw_rad: float = float(meta) * (TAU / 16.0)
+	var cs: float = cos(yaw_rad)
+	var sn: float = sin(yaw_rad)
+	# Local-frame corners (panel center at origin, post at +y down):
+	# X = width (along sign face), Z = thickness (perpendicular).
+	var half_w: float = 0.4375
+	var half_t: float = 0.0625
+	var y0: float = 0.5  # panel bottom in cell-local space
+	var y1: float = 1.0  # panel top
+	# 8 corners — index bits xtb: x=±half_w, t=±half_t, b=top/bottom.
+	# Rotate (lx, lz) around Y by yaw_rad → (rx, rz). Translate to
+	# (fx + 0.5 + rx, fy + ly, fz + 0.5 + rz).
+	var corners: Array[Vector3] = []
+	corners.resize(8)
+	var i: int = 0
+	for sx in [-half_w, half_w]:
+		for sz in [-half_t, half_t]:
+			for sy in [y0, y1]:
+				var rx: float = sx * cs - sz * sn
+				var rz: float = sx * sn + sz * cs
+				corners[i] = Vector3(fx + 0.5 + rx, fy + sy, fz + 0.5 + rz)
+				i += 1
+	# Corners indexed: bit 2 = x-sign, bit 1 = z-sign, bit 0 = top.
+	# c[i] = corner with (x = bit2*2-1, z = bit1*2-1, y = bit0 ? top : bot)
+	# Build 6 quads with the same vertex layout convention as _emit_box.
+	# Face order: +Y top, -Y bottom, +X front, -X back, +Z right, -Z left.
+	# (After rotation "front" is whichever side the panel faces.)
+	var c000: Vector3 = corners[0]  # -x, -z, bottom
+	var c001: Vector3 = corners[1]  # -x, -z, top
+	var c010: Vector3 = corners[2]  # -x, +z, bottom
+	var c011: Vector3 = corners[3]  # -x, +z, top
+	var c100: Vector3 = corners[4]  # +x, -z, bottom
+	var c101: Vector3 = corners[5]  # +x, -z, top
+	var c110: Vector3 = corners[6]  # +x, +z, bottom
+	var c111: Vector3 = corners[7]  # +x, +z, top
+	# Normals after rotation: front=(-sin, 0, +cos), right=(+cos, 0, +sin)
+	var n_front := Vector3(-sn, 0, cs)
+	var n_right := Vector3(cs, 0, sn)
+	# Quads: each is [v0, v1, v2, v3, normal] in winding-consistent order.
+	var quads: Array = [
+		[c001, c011, c111, c101, Vector3.UP],
+		[c000, c100, c110, c010, Vector3.DOWN],
+		[c001, c101, c100, c000, -n_front],  # -Z local face
+		[c011, c010, c110, c111, n_front],  # +Z local face
+		[c101, c111, c110, c100, n_right],  # +X local face
+		[c001, c000, c010, c011, -n_right],  # -X local face
+	]
+	_emit_rotated_quads(verts, norms, uvs, colors, indices, quads, rect, face_color)
+	# Collision wraps the whole sign (post + panel) as an axis-aligned
+	# bbox — close enough for selection, vanilla does the same on the
+	# rotated panel.
+	var sel_mn := Vector3(fx, fy, fz)
+	var sel_mx := Vector3(fx + 1.0, fy + 1.0, fz + 1.0)
+	_emit_collision_box(plant_faces, sel_mn, sel_mx)
+
+
+# Wall sign — panel mounted on one of 4 axis-aligned faces. Meta:
+# 0 = panel on -Z face (normal -Z, sign visible from -Z side)
+# 1 = panel on +Z face
+# 2 = panel on -X face
+# 3 = panel on +X face
+static func _emit_wall_sign(
+	fx: float,
+	fy: float,
+	fz: float,
+	meta: int,
+	rect: Rect2,
+	face_color: Color,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+) -> void:
+	# Panel: 0.875 wide × 0.5 tall × 0.125 thick. Centered on the
+	# mounted face at y=0.25..0.75 (vanilla puts wall signs slightly
+	# lower than the cell top — eye-height for the player).
+	var half_w: float = 0.4375
+	var thick: float = 0.125
+	var y0: float = 0.25
+	var y1: float = 0.75
+	var mn: Vector3
+	var mx: Vector3
+	match meta:
+		0:  # -Z face — panel hangs on the +Z side of the support, facing -Z
+			mn = Vector3(fx + 0.5 - half_w, fy + y0, fz + 1.0 - thick)
+			mx = Vector3(fx + 0.5 + half_w, fy + y1, fz + 1.0)
+		1:  # +Z face
+			mn = Vector3(fx + 0.5 - half_w, fy + y0, fz)
+			mx = Vector3(fx + 0.5 + half_w, fy + y1, fz + thick)
+		2:  # -X face
+			mn = Vector3(fx + 1.0 - thick, fy + y0, fz + 0.5 - half_w)
+			mx = Vector3(fx + 1.0, fy + y1, fz + 0.5 + half_w)
+		_:  # +X face (meta 3)
+			mn = Vector3(fx, fy + y0, fz + 0.5 - half_w)
+			mx = Vector3(fx + thick, fy + y1, fz + 0.5 + half_w)
 	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
-	# Selection-only collision (player can right-click / break-aim it).
 	_emit_collision_box(plant_faces, mn, mx)
+
+
+# Helper to emit 6 quads with a per-quad normal (used by rotated
+# standing-sign panel where face axes don't align with world axes).
+static func _emit_rotated_quads(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	quads: Array,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	for q in quads:
+		var base: int = verts.size()
+		var nv: Vector3 = q[4]
+		for vi in range(4):
+			verts.append(q[vi])
+			norms.append(nv)
+		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+		uvs.append(Vector2(rect.position.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
 
 
 static func _emit_snow_layer_geometry(
