@@ -210,6 +210,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_slab_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_SIGN:
+					_emit_sign_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -898,6 +902,40 @@ static func _emit_slab_geometry(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)
 	_emit_collision_box(collision_faces, mn, mx)
+
+
+# Sign — vanilla ni.java (BlockSign) renders a post + flat panel.
+# Stage 1 placeholder: thin vertical plank (0.5 wide × 0.5 tall ×
+# 0.1 thick) centered in the cell. Stage 2 adds the proper post +
+# panel mesh + 3D text via a per-sign SubViewport texture.
+# Selection collision goes into plant_faces so the cursor can target
+# the sign (vanilla allows right-click to open the edit GUI).
+static func _emit_sign_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array,
+) -> void:
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	# Flat plank centered in the cell — vertical orientation. 0.5×0.5×0.1
+	# is roughly half-cube tall, half-cube wide, very thin.
+	var mn := Vector3(fx + 0.25, fy + 0.25, fz + 0.45)
+	var mx := Vector3(fx + 0.75, fy + 0.75, fz + 0.55)
+	var rect: Rect2 = BlockAtlas.uv_rect("planks")
+	var sky: int = chunk.get_sky_light(x, y, z)
+	var blk: int = chunk.get_block_light(x, y, z)
+	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
+	# Selection-only collision (player can right-click / break-aim it).
+	_emit_collision_box(plant_faces, mn, mx)
 
 
 static func _emit_snow_layer_geometry(

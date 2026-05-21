@@ -211,6 +211,13 @@ const SUGAR: int = 177
 # break (vanilla lj.java::a returns dx.aG, drop_quantity=4). Smelted
 # 1:1 into BRICK item. Items.png tile (9, 3).
 const CLAY_BALL: int = 178
+# Sign item — vanilla dx.as = nv(67). Vanilla item id 323. Items.png
+# tile (10, 2) per `.a(42)`. Place rule: clicking top face spawns
+# SIGN_STANDING with yaw meta from player rotation; clicking a side
+# face spawns SIGN_WALL with directional meta. Stack=16 (vanilla
+# nv.java aX = 16). Recipe: 6 planks in a top-2-row layout + 1 stick
+# below (3 stacked planks ×3 then 1 stick in the bottom center).
+const SIGN: int = 179
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -556,6 +563,10 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.HALF_SLAB
 		"double_slab":
 			return Blocks.DOUBLE_SLAB
+		"sign_standing":
+			return Blocks.SIGN_STANDING
+		"sign_wall":
+			return Blocks.SIGN_WALL
 		"flower_red":
 			return Blocks.FLOWER_RED
 		"flower_yellow":
@@ -618,6 +629,8 @@ static func id_from_name(item_name: String) -> int:
 			return SUGAR
 		"clay_ball":
 			return CLAY_BALL
+		"sign":
+			return SIGN
 	return -1
 
 
@@ -853,6 +866,10 @@ static func display_name(item_id: int) -> String:
 			return "Stone Slab"
 		Blocks.DOUBLE_SLAB:
 			return "Stone Slabs"
+		Blocks.SIGN_STANDING:
+			return "Sign"
+		Blocks.SIGN_WALL:
+			return "Sign"
 		APPLE:
 			return "Apple"
 		BREAD:
@@ -905,6 +922,8 @@ static func display_name(item_id: int) -> String:
 			return "Sugar"
 		CLAY_BALL:
 			return "Clay"
+		SIGN:
+			return "Sign"
 	return ""
 
 

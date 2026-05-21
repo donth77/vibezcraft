@@ -279,6 +279,18 @@ const HALF_SLAB := 73
 # directly — formed by stacking two HALF_SLABs. Broken with a pickaxe
 # drops 2 HALF_SLABs (vanilla — see drop_quantity).
 const DOUBLE_SLAB := 74
+# Sign — vanilla nq.aD = ni(63, qc.class, true) for the standing
+# floor-post variant and nq.aI = ni(68, qc.class, false) for the wall-
+# mounted variant. Both use TileEntitySign (qc.class) storing 4 lines
+# × 15 chars of editable text. Material wood (`hb.e`), hardness 1.0,
+# axe-preferred. Drops the sign ITEM (not the block) on break.
+# Stage 1 ships the block ids + persistence + basic placement; stage 2
+# adds the non-cube post/wall mesh + 3D text via SubViewport.
+const SIGN_STANDING := 75
+# Standing sign meta: 4 bits encode 16 yaw rotations (0..15 maps to
+# 0°..337.5° in 22.5° increments — vanilla ni.java). Wall sign meta
+# is only 0..3 (the 4 cardinal directions; see SIGN_WALL).
+const SIGN_WALL := 76
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -327,6 +339,10 @@ const MESH_SHAPE_FIRE: int = 9
 # side faces only span the bottom half. Vanilla qj.java::a(true) sets
 # bbox via Block.a(0,0,0,1,0.5,1).
 const MESH_SHAPE_SLAB: int = 10
+# Sign — stage 1 ships as a thin vertical post in the cell center
+# (placeholder). Stage 2 replaces with the full post + flat-panel mesh
+# and routes the panel face through the tile-entity text texture.
+const MESH_SHAPE_SIGN: int = 11
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -455,6 +471,9 @@ static func is_opaque(id: int) -> bool:
 		# the visible side-of-slab area shows the void. Same reason
 		# as snow_layer.
 		and id != HALF_SLAB
+		# Signs are non-cube — neighbor cubes must keep their faces.
+		and id != SIGN_STANDING
+		and id != SIGN_WALL
 	)
 
 
@@ -615,6 +634,9 @@ static func _build_light_opacity_lut() -> void:
 	# half. Set opacity 0 so sky light reaches the cell below.
 	# DOUBLE_SLAB (full cube) keeps the default 15.
 	_light_opacity_lut[HALF_SLAB] = 0
+	# Signs — thin plank, light passes through the surrounding air.
+	_light_opacity_lut[SIGN_STANDING] = 0
+	_light_opacity_lut[SIGN_WALL] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -812,6 +834,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_SNOW_LAYER
 	if id == HALF_SLAB:
 		return MESH_SHAPE_SLAB
+	if id == SIGN_STANDING or id == SIGN_WALL:
+		return MESH_SHAPE_SIGN
 	return MESH_SHAPE_CUBE
 
 
@@ -889,6 +913,8 @@ static func explosion_resistance(id: int) -> float:
 			return 3.0  # vanilla nq.aW — soft gravel-like
 		HALF_SLAB, DOUBLE_SLAB:
 			return 6.0  # vanilla qj — same as stone (Material.stone)
+		SIGN_STANDING, SIGN_WALL:
+			return 5.0  # vanilla ni.java — same as wood family
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
 	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
 	# so a TNT cell offers no shielding to the next chained TNT — keeps
@@ -989,6 +1015,10 @@ static func hardness(id: int) -> float:
 			# (via `nq(id, 6, hb.d)`). Block.c is default 2.0 for stone
 			# but qj overrides nothing — hits the default 2.0.
 			return 2.0
+		SIGN_STANDING, SIGN_WALL:
+			# Vanilla ni.java `c(1.0f)` — fast break with axe, slow bare-
+			# handed but still possible.
+			return 1.0
 	return 1.0
 
 
@@ -1042,6 +1072,9 @@ static func preferred_tool_type(id: int) -> int:
 		HALF_SLAB, DOUBLE_SLAB:
 			# Stone material → pickaxe-preferred. Required-level 0.
 			return Items.TOOL_TYPE_PICKAXE
+		SIGN_STANDING, SIGN_WALL:
+			# Vanilla ni.java sets material wood → axe-preferred.
+			return Items.TOOL_TYPE_AXE
 	return 0
 
 
@@ -1211,6 +1244,11 @@ static func drops(id: int) -> int:
 		HALF_SLAB:
 			# Vanilla half-slab drops itself unchanged.
 			return HALF_SLAB
+		SIGN_STANDING, SIGN_WALL:
+			# Vanilla ni.java::a returns dx.as (sign item, our Items.SIGN).
+			# The text on the sign is discarded — vanilla doesn't preserve
+			# it through item form either.
+			return Items.SIGN
 	return id
 
 
@@ -1377,6 +1415,10 @@ static func name_of(id: int) -> String:
 			return "half_slab"
 		DOUBLE_SLAB:
 			return "double_slab"
+		SIGN_STANDING:
+			return "sign_standing"
+		SIGN_WALL:
+			return "sign_wall"
 	return "unknown"
 
 
@@ -1440,6 +1482,11 @@ static func get_face_texture(id: int, face: String) -> String:
 		if face == "top" or face == "bottom":
 			return "stone_slab_top"
 		return "stone_slab_side"
+	if id == SIGN_STANDING or id == SIGN_WALL:
+		# Stage 1 placeholder: full-cube planks render. Stage 2 swaps to
+		# the non-cube sign-post / wall-panel mesh with the wood texture
+		# on the post and a procedural plank face for the inscribed area.
+		return "planks"
 	match id:
 		BEDROCK:
 			return "bedrock"

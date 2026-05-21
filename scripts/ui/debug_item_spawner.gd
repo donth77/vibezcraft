@@ -99,6 +99,8 @@ const _BLOCKS: Array = [
 	Blocks.HALF_SLAB,
 	Blocks.DOUBLE_SLAB,
 ]
+# Sign item — separate from block list since the item-place handler
+# decides standing vs wall sign at right-click time.
 
 const _ITEMS: Array = [
 	Items.STICK,
@@ -190,6 +192,10 @@ const _ITEMS: Array = [
 	Items.MILK_BUCKET,
 	Items.SUGAR,
 	Items.CLAY_BALL,
+	# Sign item — right-click on a cube to place SIGN_STANDING (top
+	# face) or SIGN_WALL (side face). Stage 1: empty text. Stage 2:
+	# opens the edit GUI on placement.
+	Items.SIGN,
 ]
 
 var _player: Node

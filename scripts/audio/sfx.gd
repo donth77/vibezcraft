@@ -657,6 +657,9 @@ func _material_for(block_id: int) -> String:
 			# Vanilla qj.java uses hb.d (Material.stone) but with no
 			# step-sound override — defaults to stone SFX pool.
 			return "stone"
+		Blocks.SIGN_STANDING, Blocks.SIGN_WALL:
+			# Vanilla ni.java uses hb.e (Material.wood) → wood SFX.
+			return "wood"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"

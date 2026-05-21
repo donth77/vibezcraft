@@ -268,6 +268,9 @@ ITEM_TILES = {
 	# Clay ball — vanilla dx.aG(81).a(57) → items.png index 57 = (9, 3).
 	# Drops 4 per clay-block break; smelts 1:1 into brick item.
 	"clay_ball": (9, 3),
+	# Sign item — vanilla dx.as(67).a(42) → items.png index 42 = (10, 2).
+	# Wooden sign sprite; placed by right-clicking a face.
+	"sign": (10, 2),
 	# Gunpowder — vanilla Alpha dx.K(33).a(40) → sprite 40 = (8, 2).
 	# The existing assets/textures/items/gunpowder.png was extracted
 	# from (7, 8) which is actually MINECART, so the inventory icon

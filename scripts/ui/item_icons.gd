@@ -191,6 +191,7 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.MILK_BUCKET: "milk_bucket",
 	Items.SUGAR: "sugar",
 	Items.CLAY_BALL: "clay_ball",
+	Items.SIGN: "sign",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

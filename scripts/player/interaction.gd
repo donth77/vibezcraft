@@ -1049,6 +1049,12 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# handler that performs the support check + block write.
 	if stack.item_id == Items.SUGAR_CANE:
 		return _try_place_sugar_cane(hit, stack)
+	# Sign item (vanilla dx.as = nv(67)) — clicked-top-face spawns
+	# SIGN_STANDING with yaw meta from player rotation; clicked-side-
+	# face spawns SIGN_WALL with directional meta. Both create an
+	# empty 4-line text entry in SignStorage.
+	if stack.item_id == Items.SIGN:
+		return _try_place_sign(hit, stack)
 	# Wheat seeds → CROPS at stage 0. Vanilla la.java (ItemSeeds)
 	# checks the targeted cell is FARMLAND + the cell above is AIR,
 	# then places nq.az (BlockCrops) at meta=0 above the farmland.
@@ -1494,6 +1500,66 @@ func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 		inv.consume_one_selected()
 	_trigger_player_use_swing()
 	return true
+
+
+# Sign placement — vanilla ItemSign (nv.java) places SIGN_STANDING on
+# top of a support cube and SIGN_WALL on a vertical face. Both get
+# meta encoding orientation (16-rotation yaw for standing, 4-direction
+# for wall) and an empty 4-line text entry in SignStorage.
+func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	var support_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	if not Blocks.is_opaque(support_id):
+		return false
+	var place: Vector3i = hit.block_pos + hit.normal_i
+	var dest_id: int = _chunk_manager.get_world_block(place)
+	if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
+		return false
+	# Player-occupancy guard.
+	var player: Node3D = get_parent() as Node3D
+	if player != null:
+		var pp: Vector3 = player.global_position
+		var pb := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
+		if place == pb or place == pb + Vector3i(0, 1, 0):
+			return false
+	var block_id: int
+	var meta: int
+	if hit.normal_i.y == 1:
+		block_id = Blocks.SIGN_STANDING
+		var yaw_deg: float = rad_to_deg(_player_yaw()) + 180.0
+		meta = int(round(yaw_deg * 16.0 / 360.0)) & 0x0F
+	else:
+		block_id = Blocks.SIGN_WALL
+		meta = _wall_sign_meta_from_normal(hit.normal_i)
+	_chunk_manager.set_world_block_with_meta(place, block_id, meta)
+	SignStorage.get_or_create(place)
+	SFX.play_place(Blocks.SIGN_STANDING)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	_trigger_player_use_swing()
+	return true
+
+
+# Returns the player's yaw in radians. Used by sign placement.
+func _player_yaw() -> float:
+	var player: Node3D = get_parent() as Node3D
+	if player == null:
+		return 0.0
+	return player.rotation.y
+
+
+# Maps a wall-face hit normal to our 4-direction meta encoding:
+# 0=-Z, 1=+Z, 2=-X, 3=+X. Same convention as _chest_meta_from_yaw.
+func _wall_sign_meta_from_normal(normal: Vector3i) -> int:
+	if normal.z < 0:
+		return 0
+	if normal.z > 0:
+		return 1
+	if normal.x < 0:
+		return 2
+	return 3
 
 
 # Stone slab combine — vanilla qj.java::e(). Returns true if the

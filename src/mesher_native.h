@@ -106,6 +106,11 @@ public:
 	// half-height mesh + collision. DOUBLE_SLAB (74) is a full cube,
 	// no skip needed.
 	static constexpr int HALF_SLAB = 73;
+	// SIGN_STANDING (75) + SIGN_WALL (76) — vanilla ni.java. Non-cube
+	// (post + flat panel). Native skips the cube pass; GDScript
+	// _emit_sign_geometry handles the placeholder plank visual.
+	static constexpr int SIGN_STANDING = 75;
+	static constexpr int SIGN_WALL = 76;
 
 	MesherNative();
 	~MesherNative();

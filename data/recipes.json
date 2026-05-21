@@ -380,6 +380,13 @@
       "pattern": ["SSS"],
       "key": {"S": "stone"},
       "result": {"id": "half_slab", "count": 3}
+    },
+    {
+      "_comment": "Sign — vanilla Alpha CraftingManager: 6 planks in a 3x2 block + 1 stick centered below. Yields 1 sign.",
+      "id": "sign",
+      "pattern": ["PPP", "PPP", " S "],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "sign", "count": 1}
     }
   ],
   "shapeless": [
