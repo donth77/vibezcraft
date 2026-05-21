@@ -833,6 +833,45 @@ static func tool_durability(item_id: int) -> int:
 # `maxStackSize` to 1 — without this, two pickaxes in one slot would
 # share a single damage value and burn out together. Non-tool items
 # stack to ItemStack.MAX_SIZE (64).
+# Alpha-style food heal value. Returns HP restored when the player
+# right-clicks the item in hand. 0 for non-food. Pre-Beta 1.8 — no
+# hunger system; eating heals directly. Values verified against
+# Alpha vendor/alpha-1.2.6-src/src/dx.java constructor args, where
+# `qk(id, food_value)` passes food_value into qk.b (heal amount).
+#
+#   apple           dx.h = qk(4, 4)    → 4
+#   bread           dx.S = qk(41, 5)   → 5
+#   raw porkchop    dx.ao = qk(63, 3)  → 3
+#   cooked porkchop dx.ap = qk(64, 8)  → 8
+#   golden apple    dx.ar = qk(66, 42) → 42
+#   raw fish        dx.aS = qk(93, 2)  → 2
+#   cooked fish     dx.aT = qk(94, 5)  → 5
+#   mushroom stew   dx.D  = au(26, 10) → 10  (returns bowl after)
+static func food_value(item_id: int) -> int:
+	match item_id:
+		APPLE:
+			return 4
+		BREAD:
+			return 5
+		RAW_PORKCHOP:
+			return 3
+		COOKED_PORKCHOP:
+			return 8
+		GOLDEN_APPLE:
+			return 42
+		RAW_FISH:
+			return 2
+		COOKED_FISH:
+			return 5
+		MUSHROOM_STEW:
+			return 10
+	return 0
+
+
+static func is_food(item_id: int) -> bool:
+	return food_value(item_id) > 0
+
+
 static func max_stack_size(item_id: int) -> int:
 	if is_tool_item(item_id):
 		return 1

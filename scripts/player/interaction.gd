@@ -30,6 +30,10 @@ const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.p
 const HOE_TILL_ENABLED: bool = true
 
 var _last_place_ms: int = 0
+# Cached player ref for the food-eating handler. find_child walks the
+# tree, so we cache the result and re-resolve only when the cached
+# node has been freed (scene transition). Same pattern as ItemIcons.
+var _cached_player: Node = null
 var _highlight: MeshInstance3D
 var _crack: MeshInstance3D
 var _crack_material: ShaderMaterial
@@ -417,6 +421,14 @@ func _try_place() -> void:
 		var held_stack: ItemStack = held_inv.selected()
 		if held_stack != null and not held_stack.is_empty():
 			var held_id: int = held_stack.item_id
+			# Food — Alpha-style instant eat: right-click → restore HP +
+			# decrement stack. Runs BEFORE the hit-required branches so
+			# the player can eat while pointing at sky / no target block.
+			# Vanilla qk.a (ItemFood) — see Items.food_value for source.
+			if Items.is_food(held_id):
+				if _try_eat_food(held_id):
+					_last_place_ms = now
+				return
 			if (
 				held_id == Items.BUCKET_EMPTY
 				or held_id == Items.BUCKET_WATER
@@ -477,6 +489,66 @@ func _try_place() -> void:
 
 
 # Returns true if a hoe-till happened (caller should then update cooldown).
+# Alpha-style instant eat. Mirrors vanilla qk.a (ItemFood):
+#   --au.a;          // stack count -= 1
+#   ay.j(this.b);    // player.heal(food_value)
+#   return au;
+# Mushroom stew is a special case (au.java extends qk): the stew is
+# consumed but the slot is replaced with an empty bowl instead of
+# decrementing to zero (au.java line 8: au.a == 0 ? new au(dx.C) : au).
+# Returns true if the item was eaten (so caller can refresh cooldown +
+# inventory state).
+#
+# Skips the heal when the player is already at full HP — vanilla qk
+# does NOT skip (the heal is just clamped in player.j()), but eating
+# at full HP would waste the food with no visible effect, which is a
+# common QoL deviation; mirror that here.
+func _try_eat_food(item_id: int) -> bool:
+	var player_node: Node = _player_node()
+	if player_node == null:
+		return false
+	var heal: int = Items.food_value(item_id)
+	if heal <= 0:
+		return false
+	# Skip when full — common QoL deviation from strict vanilla (which
+	# wastes the food regardless). If you want bit-exact Alpha, drop
+	# this guard and the heal-at-cap line below.
+	#
+	# Node.get("CONST_NAME") doesn't see GDScript consts (only vars), so
+	# we read MAX_HEALTH by literal — kept in sync with player.gd:73.
+	const MAX_HP_CAP: int = 20
+	var cur_hp: int = int(player_node.get("health"))
+	if cur_hp >= MAX_HP_CAP:
+		return false
+	var max_hp: int = MAX_HP_CAP
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	# Apply heal first, then mutate the inventory. The order doesn't
+	# matter functionally but keeps the player.health_changed signal
+	# firing before the inventory.changed signal — UI repaint order.
+	player_node.set("health", mini(max_hp, cur_hp + heal))
+	if player_node.has_signal("health_changed"):
+		player_node.emit_signal("health_changed", int(player_node.get("health")), max_hp)
+	if item_id == Items.MUSHROOM_STEW:
+		# Stack-of-1 by definition; swap the single stew for an empty bowl
+		# in place so the player still holds something edible-adjacent.
+		inv.replace_selected(Items.BOWL, 1)
+	else:
+		inv.consume_one_selected()
+	return true
+
+
+func _player_node() -> Node:
+	if _cached_player != null and is_instance_valid(_cached_player):
+		return _cached_player
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null or tree.root == null:
+		return null
+	_cached_player = tree.root.find_child("Player", true, false)
+	return _cached_player
+
+
 # Mirrors vanilla ItemHoe.interactWith: requires dirt/grass at hit.block_pos,
 # air directly above it, top face was clicked. On success: replace with
 # FARMLAND, damage hoe, play gravel-step sound.
