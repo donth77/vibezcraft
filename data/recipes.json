@@ -373,6 +373,13 @@
       "pattern": ["PPP", "BBB", "PPP"],
       "key": {"P": "planks", "B": "book"},
       "result": {"id": "bookshelf", "count": 1}
+    },
+    {
+      "_comment": "Stone slab — vanilla Alpha qj.java. 3 stone in a row -> 3 half-slabs.",
+      "id": "stone_slab",
+      "pattern": ["SSS"],
+      "key": {"S": "stone"},
+      "result": {"id": "half_slab", "count": 3}
     }
   ],
   "shapeless": [

@@ -79,6 +79,11 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	# (block_icon_renderer entry below), but this fallback name is the
 	# pre-bake sprite path.
 	Blocks.CLAY: "clay",
+	# Slabs — flat-sprite fallback uses the side texture (bevel
+	# visible), iso bake handles the half-height vs full-height
+	# rendering distinction.
+	Blocks.HALF_SLAB: "stone_slab_side",
+	Blocks.DOUBLE_SLAB: "stone_slab_side",
 }
 
 # Item sprite basenames. Resolved at load time: first try

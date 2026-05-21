@@ -93,6 +93,11 @@ const _BLOCKS: Array = [
 	# Clay block — also worldgen-placed in lakes; spawnable here for
 	# convenience.
 	Blocks.CLAY,
+	# Stone slabs — half-slab is the placeable form; double-slab is
+	# normally only formed by stacking two halves but exposed here so
+	# testers can place it directly.
+	Blocks.HALF_SLAB,
+	Blocks.DOUBLE_SLAB,
 ]
 
 const _ITEMS: Array = [

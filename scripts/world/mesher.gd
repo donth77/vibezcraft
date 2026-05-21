@@ -206,6 +206,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_snow_layer_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_SLAB:
+					_emit_slab_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -828,6 +832,74 @@ static func _emit_door_geometry(
 # the bottom is hidden against the support block. Uses the snow texture
 # for all faces. Light comes from the snow_layer cell itself, not the
 # block beneath.
+# Half-slab — vanilla qj.java::a(true)=double, (false)=half. Bottom
+# half of the cell (bbox 0..1, 0..0.5, 0..1). Top + bottom faces use
+# stone_slab_top; the 4 side faces use stone_slab_side stretched
+# vertically to half-height (the side tile has the bevel baked in so
+# the stretch reads correctly). Bottom face is conditionally emitted
+# based on the cell below — opaque neighbor culls it like a cube face.
+# Collision is the half-height box: trimesh face soup matches the
+# render quads so the player can stand on top at y+0.5.
+static func _emit_slab_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array,
+) -> void:
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	var mn := Vector3(fx, fy, fz)
+	var mx := Vector3(fx + 1.0, fy + 0.5, fz + 1.0)
+	var top_rect: Rect2 = BlockAtlas.uv_rect("stone_slab_top")
+	var side_rect: Rect2 = BlockAtlas.uv_rect("stone_slab_side")
+	var sky: int = chunk.get_sky_light(x, y, z)
+	var blk: int = chunk.get_block_light(x, y, z)
+	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	# Per-face: [v0, v1, v2, v3, normal, uv_rect]
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	var faces: Array = [
+		[c010, c011, c111, c110, Vector3.UP, top_rect],
+		[c001, c000, c100, c101, Vector3.DOWN, top_rect],
+		[c100, c110, c111, c101, Vector3.RIGHT, side_rect],
+		[c001, c011, c010, c000, Vector3.LEFT, side_rect],
+		[c101, c111, c011, c001, Vector3.BACK, side_rect],
+		[c000, c010, c110, c100, Vector3.FORWARD, side_rect],
+	]
+	for face in faces:
+		var base: int = verts.size()
+		var fv: Vector3 = face[4]
+		var rect: Rect2 = face[5]
+		for i in range(4):
+			verts.append(face[i])
+			norms.append(fv)
+		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+		uvs.append(Vector2(rect.position.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		colors.append(face_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+	_emit_collision_box(collision_faces, mn, mx)
+
+
 static func _emit_snow_layer_geometry(
 	chunk: Chunk,
 	x: int,

@@ -158,6 +158,14 @@ const _LAYOUT := {
 	# Clay block — terrain.png (8, 4). WorldGenClay places this in
 	# lakes / ocean beaches; drops 4 clay_ball items.
 	"clay": 87,
+	# Stone slabs (vanilla qj.java). Two textures per Alpha terrain.png:
+	#   stone_slab_top  (6, 0) — smooth-stone top, also used for the
+	#                            DOUBLE_SLAB block's full cube.
+	#   stone_slab_side (5, 0) — slab profile w/ bevel line for the half
+	#                            variant; the bevel sits at the y=0.5
+	#                            seam when the side quad spans 0..0.5.
+	"stone_slab_top": 88,
+	"stone_slab_side": 89,
 }
 
 static var active_pack: String = DEFAULT_PACK

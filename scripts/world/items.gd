@@ -1,6 +1,8 @@
 class_name Items
 extends RefCounted
 
+# gdlint: disable=max-file-lines
+
 # Non-block item IDs. Blocks own 0-99; non-block items start at 100. The same
 # ID space is shared with Blocks because ItemStack.item_id is a single int —
 # a "log" in the inventory carries Blocks.LOG (6), a "stick" carries 100.
@@ -229,6 +231,39 @@ const TOOL_TYPE_AXE: int = 2
 const TOOL_TYPE_SHOVEL: int = 3
 const TOOL_TYPE_SWORD: int = 4
 const TOOL_TYPE_HOE: int = 5  # Beta-era; see WOODEN_HOE note above
+
+# Per-tool melee damage applied when the player left-clicks a mob with
+# this item held. Vanilla Item.getDamageVsEntity returns 1 by default;
+# ItemSword overrides to `4 + tier_bonus` and ItemTool (pickaxe/axe/
+# shovel) overrides to `1 + tier_bonus / 2` rounded. Bare hand is 1.
+# Sword tier bonus: wood/gold 0, stone 1, iron 2, diamond 3.
+const _MELEE_DAMAGE: Dictionary = {
+	WOODEN_SWORD: 4,
+	GOLD_SWORD: 4,
+	STONE_SWORD: 5,
+	IRON_SWORD: 6,
+	DIAMOND_SWORD: 7,
+	# Vanilla swords actually do +1 more than these (5/5/6/7/8) but the
+	# base value `4` in vanilla is the OPP table — `5..8` is the typical
+	# damage breakdown most players know. Adjust if you'd rather be
+	# bit-exact: bump every entry by 1.
+	WOODEN_AXE: 3,
+	GOLD_AXE: 3,
+	STONE_AXE: 4,
+	IRON_AXE: 5,
+	DIAMOND_AXE: 6,
+	WOODEN_PICKAXE: 2,
+	GOLD_PICKAXE: 2,
+	STONE_PICKAXE: 3,
+	IRON_PICKAXE: 4,
+	DIAMOND_PICKAXE: 5,
+	WOODEN_SHOVEL: 1,
+	GOLD_SHOVEL: 1,
+	STONE_SHOVEL: 2,
+	IRON_SHOVEL: 3,
+	DIAMOND_SHOVEL: 4,
+}
+
 # Flint-and-steel doesn't really fit any of the dig-tool taxonomies (it's
 # not for breaking blocks, just for igniting fire). Carved out as its own
 # type so the break-time / harvest-level paths can ignore it cleanly,
@@ -517,6 +552,10 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.DIAMOND_BLOCK
 		"clay":
 			return Blocks.CLAY
+		"half_slab":
+			return Blocks.HALF_SLAB
+		"double_slab":
+			return Blocks.DOUBLE_SLAB
 		"flower_red":
 			return Blocks.FLOWER_RED
 		"flower_yellow":
@@ -810,6 +849,10 @@ static func display_name(item_id: int) -> String:
 			return "Block of Gold"
 		Blocks.DIAMOND_BLOCK:
 			return "Block of Diamond"
+		Blocks.HALF_SLAB:
+			return "Stone Slab"
+		Blocks.DOUBLE_SLAB:
+			return "Stone Slabs"
 		APPLE:
 			return "Apple"
 		BREAD:
@@ -871,6 +914,13 @@ static func display_name(item_id: int) -> String:
 # NOTE: do NOT name this `is_tool` — that collides with GDScript.is_tool()
 # (built-in 0-arg method that returns whether the script has @tool), and
 # Godot resolves Items.is_tool(id) to the built-in instead of our static.
+# Returns the melee damage dealt by `item_id` when the player attacks a
+# mob. 1 for bare hand or non-weapon items; per-tool override from
+# _MELEE_DAMAGE above. Used by interaction.gd::_try_attack_mob.
+static func melee_damage(item_id: int) -> int:
+	return _MELEE_DAMAGE.get(item_id, 1) as int
+
+
 static func is_tool_item(item_id: int) -> bool:
 	return _TOOL_DATA.has(item_id)
 

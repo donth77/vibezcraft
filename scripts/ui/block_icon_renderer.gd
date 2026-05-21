@@ -102,6 +102,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.WOOL_BLACK,
 	# Clay block — gray-blue full cube.
 	Blocks.CLAY,
+	# Double-slab is a regular cube, bakes cleanly with the slab
+	# textures.  HALF_SLAB is non-cube (half-height) so we let it fall
+	# through to the flat-sprite path (cube bake would mis-represent
+	# the half height).
+	Blocks.DOUBLE_SLAB,
 ]
 
 static var _viewport: SubViewport

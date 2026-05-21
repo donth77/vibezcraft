@@ -266,6 +266,19 @@ const DIAMOND_BLOCK := 71
 # Texture at terrain.png (8, 4). Material gravel → "gravel" SFX.
 # Shovel-preferred. Smelt 1 clay_ball → 1 brick item.
 const CLAY := 72
+# Stone half-slab — vanilla nq.ak = qj(44, false). Half-height cube
+# (bbox 0..1, 0..0.5, 0..1). Placed by clicking on a face; clicking
+# on top of an existing half-slab converts it to a DOUBLE_SLAB and
+# drops nothing. Vanilla qj.java::e() handles the combine; ours runs
+# in interaction.gd::_try_place_slab. Hardness 2.0, pickaxe-preferred.
+# Drops itself even when broken from a double-slab (vanilla
+# qj.java::a returns nq.ak.bh).
+const HALF_SLAB := 73
+# Stone double-slab — vanilla nq.aj = qj(43, true). Full cube rendered
+# with the slab side texture on the X/Z faces. Not normally placeable
+# directly — formed by stacking two HALF_SLABs. Broken with a pickaxe
+# drops 2 HALF_SLABs (vanilla — see drop_quantity).
+const DOUBLE_SLAB := 74
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -309,6 +322,11 @@ const MESH_SHAPE_SNOW_LAYER: int = 8
 # the floor is non-solid. All quads use the same animated fire atlas tile
 # (chunk shader does time-based UV strip lookup), so no extra material.
 const MESH_SHAPE_FIRE: int = 9
+# Half-slab — bottom-half cube (bbox 0..1, 0..0.5, 0..1). Emits 6
+# faces like a normal cube but the top face is at y=0.5 and the 4
+# side faces only span the bottom half. Vanilla qj.java::a(true) sets
+# bbox via Block.a(0,0,0,1,0.5,1).
+const MESH_SHAPE_SLAB: int = 10
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -432,6 +450,11 @@ static func is_opaque(id: int) -> bool:
 		# or the cross-shader's discard punches a hole through to the
 		# world background.
 		and id != CROPS
+		# HALF_SLAB exposes the upper half-cell — neighbor cubes need
+		# to keep emitting their faces against the open half, else
+		# the visible side-of-slab area shows the void. Same reason
+		# as snow_layer.
+		and id != HALF_SLAB
 	)
 
 
@@ -506,6 +529,11 @@ static func is_replaceable(id: int) -> bool:
 		or id == MUSHROOM_RED
 		or id == SUGAR_CANE
 		or id == CROPS
+		# Vanilla ji.java (BlockSnow) overrides isBlockReplaceable to
+		# return true — placing a block onto a snow-layer cell stomps
+		# the snow flat and stacks the new block in its place rather
+		# than floating above it. Same behavior as tall grass / saplings.
+		or id == SNOW_LAYER
 	)
 
 
@@ -582,6 +610,11 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[SUGAR_CANE] = 0
 	# Crops — non-solid cross-quad, passes full light.
 	_light_opacity_lut[CROPS] = 0
+	# Half-slab — half-height cube; vanilla qj.java::a() returns
+	# false (isOpaqueCube), so light passes through the open top
+	# half. Set opacity 0 so sky light reaches the cell below.
+	# DOUBLE_SLAB (full cube) keeps the default 15.
+	_light_opacity_lut[HALF_SLAB] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -777,6 +810,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_LADDER
 	if id == SNOW_LAYER:
 		return MESH_SHAPE_SNOW_LAYER
+	if id == HALF_SLAB:
+		return MESH_SHAPE_SLAB
 	return MESH_SHAPE_CUBE
 
 
@@ -852,6 +887,8 @@ static func explosion_resistance(id: int) -> float:
 			return 3.0  # vanilla nq.L — light + brittle
 		CLAY:
 			return 3.0  # vanilla nq.aW — soft gravel-like
+		HALF_SLAB, DOUBLE_SLAB:
+			return 6.0  # vanilla qj — same as stone (Material.stone)
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
 	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
 	# so a TNT cell offers no shielding to the next chained TNT — keeps
@@ -947,6 +984,11 @@ static func hardness(id: int) -> float:
 			# Vanilla nq.aW `c(0.6f)`. Shovel-preferred, instant
 			# with shovel, fairly fast bare-hand.
 			return 0.6
+		HALF_SLAB, DOUBLE_SLAB:
+			# Vanilla qj.java inherits from BlockSandStone-style stone
+			# (via `nq(id, 6, hb.d)`). Block.c is default 2.0 for stone
+			# but qj overrides nothing — hits the default 2.0.
+			return 2.0
 	return 1.0
 
 
@@ -997,6 +1039,9 @@ static func preferred_tool_type(id: int) -> int:
 		CLAY:
 			# Vanilla nq.aW uses gravel material → shovel break-speed bonus.
 			return Items.TOOL_TYPE_SHOVEL
+		HALF_SLAB, DOUBLE_SLAB:
+			# Stone material → pickaxe-preferred. Required-level 0.
+			return Items.TOOL_TYPE_PICKAXE
 	return 0
 
 
@@ -1158,6 +1203,14 @@ static func drops(id: int) -> int:
 			# Vanilla lj.java::a returns dx.aG (clay_ball item) — 4 per
 			# break via drop_quantity(). Hand vs shovel: any tool drops.
 			return Items.CLAY_BALL
+		DOUBLE_SLAB:
+			# Vanilla qj.java::a always returns nq.ak (half-slab id),
+			# even when broken from a double-slab. Drop count = 2 via
+			# drop_quantity to recover both halves.
+			return HALF_SLAB
+		HALF_SLAB:
+			# Vanilla half-slab drops itself unchanged.
+			return HALF_SLAB
 	return id
 
 
@@ -1175,6 +1228,10 @@ static func drop_quantity(id: int) -> int:
 		# so interaction.gd's loop spawns 4 separate dropped items
 		# (matches vanilla's per-item-spread on break-drop).
 		return 4
+	if id == DOUBLE_SLAB:
+		# Vanilla qj.java — double-slab is two stacked halves; breaking
+		# drops both back as separate half-slab items.
+		return 2
 	return 1
 
 
@@ -1316,6 +1373,10 @@ static func name_of(id: int) -> String:
 			return "diamond_block"
 		CLAY:
 			return "clay"
+		HALF_SLAB:
+			return "half_slab"
+		DOUBLE_SLAB:
+			return "double_slab"
 	return "unknown"
 
 
@@ -1373,6 +1434,12 @@ static func get_face_texture(id: int, face: String) -> String:
 		return "diamond_block"
 	if id == CLAY:
 		return "clay"
+	if id == HALF_SLAB or id == DOUBLE_SLAB:
+		# Vanilla qj.java::a(int) returns texture index 6 for top/bottom
+		# (stone_slab_top) and 5 for sides (stone_slab_side).
+		if face == "top" or face == "bottom":
+			return "stone_slab_top"
+		return "stone_slab_side"
 	match id:
 		BEDROCK:
 			return "bedrock"

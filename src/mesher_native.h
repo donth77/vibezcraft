@@ -101,6 +101,11 @@ public:
 	// .cpp skip lists referencing TALL_GRASS still compile until the
 	// next clean-up pass.
 	static constexpr int TALL_GRASS = 50;
+	// HALF_SLAB — vanilla qj.java half-height variant. Native skips
+	// the cube pass; GDScript _emit_slab_geometry handles the
+	// half-height mesh + collision. DOUBLE_SLAB (74) is a full cube,
+	// no skip needed.
+	static constexpr int HALF_SLAB = 73;
 
 	MesherNative();
 	~MesherNative();

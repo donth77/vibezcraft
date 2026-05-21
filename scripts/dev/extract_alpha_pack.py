@@ -96,6 +96,12 @@ TERRAIN_TILES = {
 	# at terrain.png index 72 = (8, 4). Mid-gray-blue, light texture
 	# variation gives it a "clay deposit" look in lakes / beaches.
 	"clay": (8, 4),
+	# Stone slab — vanilla qj.java::a(int n2) returns 6 for top/bottom
+	# face (= terrain.png (6, 0)) and 5 for sides (= (5, 0)). The side
+	# tile has a baked bevel line so the half-slab variant reads
+	# correctly when stretched vertically.
+	"stone_slab_top": (6, 0),
+	"stone_slab_side": (5, 0),
 	# Crop growth stages (BlockCrops, vanilla nq.az). 8 sprites at
 	# terrain.png row 5, cols 8..15 (vanilla terrain.png convention).
 	# Stage 0 is mostly transparent (tiny sprouts); stage 7 is mature

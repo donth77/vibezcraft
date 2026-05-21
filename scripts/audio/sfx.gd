@@ -645,10 +645,18 @@ func _material_for(block_id: int) -> String:
 			# its own step sound in modern MC, but Alpha mapped metal
 			# to the stone step pool — keep that for fidelity.
 			return "stone"
+		Blocks.MOB_SPAWNER:
+			# Vanilla eb.java (BlockMobSpawner) uses Material.rock (hb.d),
+			# same as cobblestone — mossy cage cracks like stone.
+			return "stone"
 		Blocks.CLAY:
 			# Vanilla nq.aW `.a(f)` = gravel sound material. Squishy
 			# crunchy break — same as gravel.
 			return "gravel"
+		Blocks.HALF_SLAB, Blocks.DOUBLE_SLAB:
+			# Vanilla qj.java uses hb.d (Material.stone) but with no
+			# step-sound override — defaults to stone SFX pool.
+			return "stone"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"

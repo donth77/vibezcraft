@@ -120,13 +120,26 @@ func _try_attack_mob() -> bool:
 		node = node.get_parent()
 	if mob == null:
 		return false
-	# Damage amount = bare-hand 1 (vanilla EntityPlayer.damageEntity for
-	# bare-fist hit is 1 HP). Tools / swords increase this later.
+	# Damage amount = held tool's melee value (vanilla
+	# ItemSword.getDamageVsEntity returns 4..7 by tier; non-weapon items
+	# return 1). Items.melee_damage encapsulates the lookup.
 	var attacker_xz := -_camera.global_transform.basis.z
 	attacker_xz.y = 0.0
-	mob.call("take_damage", 1, attacker_xz)
+	var inv: Inventory = _player_inventory()
+	var held_id: int = 0
+	if inv != null:
+		var stack: ItemStack = inv.selected()
+		if stack != null and not stack.is_empty():
+			held_id = stack.item_id
+	var damage: int = Items.melee_damage(held_id)
+	mob.call("take_damage", damage, attacker_xz)
 	_trigger_player_use_swing()
 	SFX.play_player_hit()
+	# Tool durability — vanilla swords + tools take 1 durability per
+	# attack (ItemSword.hitEntity). Other items (hand, food, etc.) don't.
+	if inv != null and held_id != 0 and Items.is_tool_item(held_id):
+		if inv.damage_selected_tool():
+			SFX.play_tool_break()
 	return true
 
 
@@ -141,6 +154,56 @@ static func _script_extends(script: Script, target: Script) -> bool:
 	return false
 
 
+# True if the raycast hit's collider is (or is a child of) a MobBase.
+# Used by _update_highlight to suppress the block-selection cube on
+# mobs and by _try_attack_mob to route LMB to take_damage.
+func _hit_collider_is_mob(hit: Dictionary) -> bool:
+	return _find_mob_from_hit(hit) != null
+
+
+# Walk the collider's ancestor chain looking for a MobBase descendant.
+# Returns the mob node or null. Used by both the highlight suppress
+# and the right-click mount/saddle path.
+func _find_mob_from_hit(hit: Dictionary) -> Node:
+	var collider: Node = hit.get("collider") as Node
+	if collider == null:
+		return null
+	var node: Node = collider
+	while node != null:
+		var script: Script = node.get_script()
+		if script != null and _script_extends(script, _MOB_BASE_SCRIPT):
+			return node
+		node = node.get_parent()
+	return null
+
+
+# Returns true if the right-click was consumed by a mob (saddle apply,
+# mount, etc.). The mob decides what to do — Pig.right_click_with
+# checks for SADDLE in hand to saddle itself, or swallows the click if
+# already saddled (defers mount until M1c). Falling through to a block
+# place is suppressed when this returns true.
+func _try_right_click_mob(hit: Dictionary) -> bool:
+	var mob: Node = _find_mob_from_hit(hit)
+	if mob == null:
+		return false
+	if not mob.has_method("right_click_with"):
+		return false
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	var held_id: int = stack.item_id if stack != null and not stack.is_empty() else 0
+	var consumed: bool = mob.call("right_click_with", held_id, get_parent())
+	if not consumed:
+		return false
+	# If the mob accepted a saddle, decrement the held stack so the
+	# player can't infinitely re-saddle. Other items (mount-without-
+	# consume case) leave the stack alone.
+	if held_id == Items.SADDLE and stack != null and not stack.is_empty():
+		inv.consume_one_selected()
+	return true
+
+
 func _world_input_active() -> bool:
 	# Mouse-captured == playing the game; visible == a UI screen owns input.
 	return Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
@@ -148,6 +211,14 @@ func _world_input_active() -> bool:
 
 func _update_highlight(hit: Dictionary) -> void:
 	if hit.is_empty():
+		_highlight.visible = false
+		return
+	# Suppress the block-selection wireframe when the cursor is over a
+	# mob. The mob's CharacterBody3D collision shape registers as a hit
+	# the same way a block does; without this check the highlight cube
+	# would render around whatever AIR cell the mob's body happens to
+	# occupy. Vanilla MC also doesn't show the block outline on mobs.
+	if _hit_collider_is_mob(hit):
 		_highlight.visible = false
 		return
 	_highlight.visible = true
@@ -474,6 +545,12 @@ func _try_place() -> void:
 		return
 	var hit := _raycast()
 	if _chunk_manager == null:
+		return
+	# Mob right-click (saddle, mount, etc.) — runs before block-place so
+	# right-clicking a pig with a saddle doesn't try to place the saddle
+	# as a block. Returns true if the mob consumed the click.
+	if _try_right_click_mob(hit):
+		_last_place_ms = now
 		return
 	# Buckets run even when `hit` is empty — the bucket's fluid-aware scan
 	# handles pointing at open water (no collider → raycast passes through)
@@ -977,6 +1054,15 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# then places nq.az (BlockCrops) at meta=0 above the farmland.
 	if stack.item_id == Items.WHEAT_SEEDS:
 		return _try_place_wheat_seeds(hit)
+	# Stone slab combine — vanilla qj.java::e(). Placing a HALF_SLAB
+	# onto a cell that already holds a HALF_SLAB (from the top face)
+	# upgrades the cell to DOUBLE_SLAB and consumes the held slab
+	# without spawning a new cell above. Returns true if the combine
+	# fired; falls through to normal placement otherwise (e.g. side-
+	# face click puts a new slab in the neighbor cell as usual).
+	if stack.item_id == Blocks.HALF_SLAB:
+		if _try_slab_combine(hit, stack):
+			return true
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
@@ -1403,6 +1489,29 @@ func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 	# of 200 ticks (~10 seconds at 20 TPS) — see _on_crop_tick.
 	TickScheduler.schedule(place, Blocks.CROPS, 200)
 	SFX.play_place(Blocks.FARMLAND)  # soft "till" sound; no dedicated seed-plant sfx in Alpha
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	_trigger_player_use_swing()
+	return true
+
+
+# Stone slab combine — vanilla qj.java::e(). Returns true if the
+# clicked cell was a HALF_SLAB AND the player clicked its top face,
+# converting that cell to DOUBLE_SLAB. Side / bottom clicks return
+# false so the regular block-placement path puts the new slab in the
+# neighbor cell.
+func _try_slab_combine(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	# Must be clicking the top face for the combine to fire.
+	if hit.normal_i.y != 1:
+		return false
+	var existing_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	if existing_id != Blocks.HALF_SLAB:
+		return false
+	_chunk_manager.set_world_block(hit.block_pos, Blocks.DOUBLE_SLAB)
+	SFX.play_place(Blocks.HALF_SLAB)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()
