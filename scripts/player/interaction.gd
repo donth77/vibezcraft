@@ -1440,14 +1440,14 @@ func _try_fishing_rod() -> bool:
 
 # Spawn a dropped item at `pos` with an initial velocity (used by
 # fishing-rod reel to fling a fish toward the player). Mirrors the
-# regular _spawn_dropped_item but takes a custom velocity instead of
-# the default break-pop randomization.
+# regular _spawn_dropped_item but takes a custom velocity + the
+# longer player-drop pickup delay so the player can't insta-grab
+# their own catch mid-flight.
 func _spawn_dropped_item_with_velocity(pos: Vector3, item_id: int, vel: Vector3) -> void:
-	var item_script: GDScript = load("res://scripts/world/dropped_item.gd")
-	var item: Node3D = item_script.new()
+	var item := DroppedItem.new()
 	_chunk_manager.add_child(item)
-	item.setup(item_id, pos, _player_node() as Node3D, _chunk_manager)
-	item.set("_velocity", vel)
+	item.global_position = pos
+	item.setup(item_id, vel, DroppedItem.PLAYER_DROP_DELAY_SEC)
 
 
 # Variable-count drops for CROPS.
