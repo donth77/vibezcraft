@@ -142,6 +142,13 @@ const _SUGAR_CANE_SALT: int = 0xC4ED
 # vanilla density.
 const _CACTUS_ATTEMPTS: int = 3
 const _CACTUS_SALT: int = 0xCAC7
+# Clay scatter — vanilla hy.java (WorldGenClay) is called 10×/chunk in
+# px.java:300 with `new hy(4).a(world, rand, x, randInt(127), z)`.
+# Each attempt places one ellipsoid-shaped clay deposit only into SAND
+# cells that are submerged in water. Size 4 matches vanilla.
+const _CLAY_ATTEMPTS: int = 10
+const _CLAY_SIZE: int = 4
+const _CLAY_SALT: int = 0xC1A7
 
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
 # differences in the last argument avalanche into high bits. Without this,
@@ -389,6 +396,10 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# 8. Cactus — places 1-3 stacked CACTUS blocks on SAND in Desert
 	# biomes only. Vanilla BlockCactus placement.
 	_scatter_cactus(chunk, chunk_x, chunk_z)
+	# 8.5. Clay — places ellipsoid-shaped CLAY deposits in submerged
+	# SAND cells (lakes / ocean beaches). Vanilla WorldGenClay called
+	# 10×/chunk in px.java:300.
+	_scatter_clay(chunk, chunk_x, chunk_z)
 	# 9. Cold-biome ICE / snow overlay — must run AFTER trees + cactus
 	# so the topmost-block lookup sees tree leaves / canopy and tops
 	# them with snow too. Vanilla WorldServer's snow step iterates
@@ -1636,6 +1647,71 @@ static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 				break
 			chunk.set_block_unchecked(lx, py, lz, Blocks.CACTUS)
 	PerfProbe.end("worldgen.cactus", probe_token)
+
+
+# Clay deposit scatter — port of vanilla hy.java (WorldGenClay). For
+# each of 10 attempts: pick a random (x, y, z) within the chunk; if
+# that cell is water, carve an oriented ellipsoid of radius ~4 blocks
+# that converts ONLY SAND cells inside the ellipsoid to CLAY. Vanilla
+# px.java:300 wraps this in a `y = rand(0, 127)` outer pick, but our
+# height range is biased toward submerged depths via the water-cell
+# gate so we just iterate the same 10× and let the water check filter.
+# All writes clip to the local 16×128×16 chunk; cross-chunk spillover
+# is dropped (vanilla would dispatch to the neighbor, but our chunks
+# are independent and the lost clay on edges is invisible at our scale).
+static func _scatter_clay(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	if not terrain_3d_enabled:
+		return
+	var probe_token := PerfProbe.begin("worldgen.clay")
+	var origin_x: int = chunk_x * Chunk.SIZE_X
+	var origin_z: int = chunk_z * Chunk.SIZE_Z
+	for attempt in range(_CLAY_ATTEMPTS):
+		var seed_h: int = _hash4(chunk_x, chunk_z, _CLAY_SALT, attempt)
+		# Random local (x, y, z) — vanilla picks worldspace; we sample
+		# inside the chunk and bias y to seabed (sea_level - 4 ± 6).
+		var lx: int = seed_h & 0xF
+		var ly: int = SEA_LEVEL - 4 + (((seed_h >> 4) & 0x07) - 3)
+		var lz: int = (seed_h >> 7) & 0xF
+		if ly < 1 or ly >= Chunk.SIZE_Y - 1:
+			continue
+		# Water gate — vanilla cy.f(x,y,z) checks Material at cell. We
+		# read the block id; only water counts.
+		var center_id: int = chunk.get_block_unchecked(lx, ly, lz)
+		if center_id != Blocks.WATER_STILL and center_id != Blocks.WATER_FLOWING:
+			continue
+		# Vanilla: oriented ellipsoid along a random horizontal axis.
+		# We use a simpler axis-aligned squished sphere with slight
+		# per-axis jitter (close-enough visual to vanilla deposits).
+		var radius_x: float = float(_CLAY_SIZE) * 0.6 + float((seed_h >> 16) & 0x3) * 0.2
+		var radius_y: float = float(_CLAY_SIZE) * 0.3 + float((seed_h >> 18) & 0x3) * 0.1
+		var radius_z: float = float(_CLAY_SIZE) * 0.6 + float((seed_h >> 20) & 0x3) * 0.2
+		var max_rx: int = int(ceil(radius_x))
+		var max_ry: int = int(ceil(radius_y))
+		var max_rz: int = int(ceil(radius_z))
+		for dx in range(-max_rx, max_rx + 1):
+			for dy in range(-max_ry, max_ry + 1):
+				for dz in range(-max_rz, max_rz + 1):
+					var nx_local: int = lx + dx
+					var ny: int = ly + dy
+					var nz_local: int = lz + dz
+					if (
+						nx_local < 0
+						or nx_local >= Chunk.SIZE_X
+						or ny < 1
+						or ny >= Chunk.SIZE_Y - 1
+						or nz_local < 0
+						or nz_local >= Chunk.SIZE_Z
+					):
+						continue
+					var rx: float = float(dx) / radius_x
+					var ry: float = float(dy) / radius_y
+					var rz: float = float(dz) / radius_z
+					if rx * rx + ry * ry + rz * rz > 1.0:
+						continue
+					if chunk.get_block_unchecked(nx_local, ny, nz_local) != Blocks.SAND:
+						continue
+					chunk.set_block_unchecked(nx_local, ny, nz_local, Blocks.CLAY)
+	PerfProbe.end("worldgen.clay", probe_token)
 
 # Tall grass scatter removed for Alpha-fidelity. Tall grass was added
 # in Beta 1.6 as the natural seed source for the (Alpha-shipped) wheat

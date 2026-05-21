@@ -92,6 +92,10 @@ TERRAIN_TILES = {
 	"diamond_block": (8, 1),
 	"sponge": (0, 3),
 	"wool_white": (0, 4),
+	# Clay block — vanilla lj.java spawns from WorldGenClay (hy.java)
+	# at terrain.png index 72 = (8, 4). Mid-gray-blue, light texture
+	# variation gives it a "clay deposit" look in lakes / beaches.
+	"clay": (8, 4),
 	# Crop growth stages (BlockCrops, vanilla nq.az). 8 sprites at
 	# terrain.png row 5, cols 8..15 (vanilla terrain.png convention).
 	# Stage 0 is mostly transparent (tiny sprouts); stage 7 is mature
@@ -255,6 +259,9 @@ ITEM_TILES = {
 	"egg": (12, 0),
 	"milk_bucket": (13, 4),
 	"sugar": (13, 0),
+	# Clay ball — vanilla dx.aG(81).a(57) → items.png index 57 = (9, 3).
+	# Drops 4 per clay-block break; smelts 1:1 into brick item.
+	"clay_ball": (9, 3),
 	# Gunpowder — vanilla Alpha dx.K(33).a(40) → sprite 40 = (8, 2).
 	# The existing assets/textures/items/gunpowder.png was extracted
 	# from (7, 8) which is actually MINECART, so the inventory icon

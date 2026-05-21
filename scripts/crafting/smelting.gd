@@ -27,6 +27,10 @@ const _RESULTS: Dictionary = {
 	# Same 200-tick cycle as any other smelt.
 	Items.RAW_PORKCHOP: Items.COOKED_PORKCHOP,
 	Items.RAW_FISH: Items.COOKED_FISH,
+	# Clay ball → brick (vanilla Alpha — fires brick from clay nuggets,
+	# the only way to obtain BRICK items pre-stripped). 4 clay balls
+	# per clay block → smelt 4 → 4 brick items → 1 brick block.
+	Items.CLAY_BALL: Items.BRICK,
 }
 
 const _FUEL_TICKS: Dictionary = {

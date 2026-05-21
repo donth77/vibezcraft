@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends Node
 
 # Block-sound playback. Maintains a small pool of AudioStreamPlayer nodes so
@@ -103,6 +104,25 @@ const _PLAYER_HIT_SOUNDS: Array = [
 ]
 const _PLAYER_FALL_BIG: String = "res://assets/audio/sfx/damage/fallbig.ogg"
 const _PLAYER_FALL_SMALL: String = "res://assets/audio/sfx/damage/fallsmall.ogg"
+# Pig audio — vanilla Alpha 1.2.6 sound3/mob/pig/. op.java::d() and
+# op.java::f_() both return "mob.pig" so idle + hurt use the same
+# say1/2/3 pool. op.java::f() returns "mob.pigdeath" → death.ogg.
+# step1-5 are the footsteps (vanilla `lw.java::a(int, int, int, int)`
+# play_step_sound dispatches by Block.stepSound, but for mobs the
+# audio system reads the mob-specific override from `mob/<species>/`).
+const _PIG_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/pig/say1.ogg",
+	"res://assets/audio/sfx/mob/pig/say2.ogg",
+	"res://assets/audio/sfx/mob/pig/say3.ogg",
+]
+const _PIG_DEATH_SOUND: String = "res://assets/audio/sfx/mob/pig/death.ogg"
+const _PIG_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/pig/step1.ogg",
+	"res://assets/audio/sfx/mob/pig/step2.ogg",
+	"res://assets/audio/sfx/mob/pig/step3.ogg",
+	"res://assets/audio/sfx/mob/pig/step4.ogg",
+	"res://assets/audio/sfx/mob/pig/step5.ogg",
+]
 # Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
 # water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
 # by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
@@ -516,6 +536,43 @@ func play_pickup() -> void:
 	player.play()
 
 
+# Pig say (idle + hurt — vanilla op.java::d and f_ both return "mob.pig").
+# Picks a random say1/2/3 clip with ±0.1 pitch jitter, matching the
+# vanilla pitch envelope in `lw.java::P` (per-entity sound pitch).
+func play_pig_say() -> void:
+	_play_mob_sound(_PIG_SAY_SOUNDS)
+
+
+# Pig death — vanilla op.java::f returns "mob.pigdeath".
+func play_pig_death() -> void:
+	_play_mob_sound([_PIG_DEATH_SOUND])
+
+
+# Pig footstep — vanilla rotates step1-5 randomly per stride.
+func play_pig_step() -> void:
+	_play_mob_sound(_PIG_STEP_SOUNDS, -4.0)
+
+
+# Generic random-clip mob-sound helper. Loads + caches each path the
+# same way every other SFX function in this file does.
+func _play_mob_sound(paths: Array, volume_db: float = -1.0) -> void:
+	if not Game.sfx_enabled or Game.is_loading or paths.is_empty():
+		return
+	var path: String = paths[randi() % paths.size()]
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = volume_db
+	player.pitch_scale = 1.0 + randf_range(-0.1, 0.1)
+	player.play()
+
+
 func _play_random(material: String, base_pitch: float) -> void:
 	if not Game.sfx_enabled or Game.is_loading:
 		return
@@ -588,6 +645,10 @@ func _material_for(block_id: int) -> String:
 			# its own step sound in modern MC, but Alpha mapped metal
 			# to the stone step pool — keep that for fidelity.
 			return "stone"
+		Blocks.CLAY:
+			# Vanilla nq.aW `.a(f)` = gravel sound material. Squishy
+			# crunchy break — same as gravel.
+			return "gravel"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"

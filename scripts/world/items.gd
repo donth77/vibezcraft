@@ -205,6 +205,10 @@ const MILK_BUCKET: int = 176
 # 1 sugar_cane → 1 sugar (shapeless). Used in cake. We ship this
 # pre-cake so the chain is ready once cake mechanic lands.
 const SUGAR: int = 177
+# Clay ball — vanilla dx.aG = dx(81).a(57). Drops 4 per CLAY block
+# break (vanilla lj.java::a returns dx.aG, drop_quantity=4). Smelted
+# 1:1 into BRICK item. Items.png tile (9, 3).
+const CLAY_BALL: int = 178
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -511,6 +515,8 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.GOLD_BLOCK
 		"diamond_block":
 			return Blocks.DIAMOND_BLOCK
+		"clay":
+			return Blocks.CLAY
 		"flower_red":
 			return Blocks.FLOWER_RED
 		"flower_yellow":
@@ -571,6 +577,8 @@ static func id_from_name(item_name: String) -> int:
 			return MILK_BUCKET
 		"sugar":
 			return SUGAR
+		"clay_ball":
+			return CLAY_BALL
 	return -1
 
 
@@ -852,6 +860,8 @@ static func display_name(item_id: int) -> String:
 			return "Milk Bucket"
 		SUGAR:
 			return "Sugar"
+		CLAY_BALL:
+			return "Clay"
 	return ""
 
 

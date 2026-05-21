@@ -155,6 +155,9 @@ const _LAYOUT := {
 	"iron_block": 84,
 	"gold_block": 85,
 	"diamond_block": 86,
+	# Clay block — terrain.png (8, 4). WorldGenClay places this in
+	# lakes / ocean beaches; drops 4 clay_ball items.
+	"clay": 87,
 }
 
 static var active_pack: String = DEFAULT_PACK

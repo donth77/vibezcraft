@@ -100,6 +100,8 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.WOOL_GREEN,
 	Blocks.WOOL_RED,
 	Blocks.WOOL_BLACK,
+	# Clay block — gray-blue full cube.
+	Blocks.CLAY,
 ]
 
 static var _viewport: SubViewport

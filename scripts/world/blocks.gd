@@ -260,6 +260,12 @@ const GOLD_BLOCK := 70
 # Diamond block — vanilla nq.ax (id 57). Same pattern. 5.0 hardness,
 # pickaxe-harvest, iron-tier required.
 const DIAMOND_BLOCK := 71
+# Clay — vanilla nq.aW = lj(82, 72). Full cube, 0.6 hardness, drops 4
+# clay balls (dx.aG = Items.CLAY_BALL). Generates underwater in lakes
+# and ocean beaches via WorldGenClay (hy.java) — 10 attempts/chunk.
+# Texture at terrain.png (8, 4). Material gravel → "gravel" SFX.
+# Shovel-preferred. Smelt 1 clay_ball → 1 brick item.
+const CLAY := 72
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -844,6 +850,8 @@ static func explosion_resistance(id: int) -> float:
 			return 10.0
 		SPONGE:
 			return 3.0  # vanilla nq.L — light + brittle
+		CLAY:
+			return 3.0  # vanilla nq.aW — soft gravel-like
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
 	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
 	# so a TNT cell offers no shielding to the next chained TNT — keeps
@@ -935,6 +943,10 @@ static func hardness(id: int) -> float:
 		DIAMOND_BLOCK:
 			# Vanilla nq.ax `c(5.0f)`. Pickaxe-harvest, iron+.
 			return 5.0
+		CLAY:
+			# Vanilla nq.aW `c(0.6f)`. Shovel-preferred, instant
+			# with shovel, fairly fast bare-hand.
+			return 0.6
 	return 1.0
 
 
@@ -982,6 +994,9 @@ static func preferred_tool_type(id: int) -> int:
 		IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK, MOB_SPAWNER:
 			# All metal blocks + mossy mob spawner cage are pickaxe-preferred.
 			return Items.TOOL_TYPE_PICKAXE
+		CLAY:
+			# Vanilla nq.aW uses gravel material → shovel break-speed bonus.
+			return Items.TOOL_TYPE_SHOVEL
 	return 0
 
 
@@ -1139,6 +1154,10 @@ static func drops(id: int) -> int:
 			# Vanilla BlockBookshelf returns Item.book — the 3-count comes
 			# from drop_quantity() below, not here.
 			return Items.BOOK
+		CLAY:
+			# Vanilla lj.java::a returns dx.aG (clay_ball item) — 4 per
+			# break via drop_quantity(). Hand vs shovel: any tool drops.
+			return Items.CLAY_BALL
 	return id
 
 
@@ -1150,6 +1169,12 @@ static func drops(id: int) -> int:
 static func drop_quantity(id: int) -> int:
 	if id == BOOKSHELF:
 		return 3
+	if id == CLAY:
+		# Vanilla lj.java::a(Random) returns 4 — every clay block drops
+		# 4 clay balls regardless of tool. Counts towards loop semantics
+		# so interaction.gd's loop spawns 4 separate dropped items
+		# (matches vanilla's per-item-spread on break-drop).
+		return 4
 	return 1
 
 
@@ -1289,6 +1314,8 @@ static func name_of(id: int) -> String:
 			return "gold_block"
 		DIAMOND_BLOCK:
 			return "diamond_block"
+		CLAY:
+			return "clay"
 	return "unknown"
 
 
@@ -1344,6 +1371,8 @@ static func get_face_texture(id: int, face: String) -> String:
 		return "gold_block"
 	if id == DIAMOND_BLOCK:
 		return "diamond_block"
+	if id == CLAY:
+		return "clay"
 	match id:
 		BEDROCK:
 			return "bedrock"

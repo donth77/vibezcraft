@@ -90,6 +90,9 @@ const _BLOCKS: Array = [
 	Blocks.WOOL_GREEN,
 	Blocks.WOOL_RED,
 	Blocks.WOOL_BLACK,
+	# Clay block — also worldgen-placed in lakes; spawnable here for
+	# convenience.
+	Blocks.CLAY,
 ]
 
 const _ITEMS: Array = [
@@ -181,6 +184,7 @@ const _ITEMS: Array = [
 	Items.EGG,
 	Items.MILK_BUCKET,
 	Items.SUGAR,
+	Items.CLAY_BALL,
 ]
 
 var _player: Node
