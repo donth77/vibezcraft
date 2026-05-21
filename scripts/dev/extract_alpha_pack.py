@@ -155,15 +155,18 @@ ITEM_TILES = {
 	# in inventory; the powered/path connection rendering is a worldgen
 	# block job, deferred until we ship the redstone power system.
 	"redstone": (8, 3),
-	# Clock — items.png (col=6, row=4). Vanilla has a 16-frame strip for
-	# the rotating dial; we pull the first frame as the static sprite
-	# (held + dropped + recipe icon). Inventory icon uses a procedural
-	# dynamic dial driven by WorldTime.current_tick — see item_icons.gd.
+	# Clock base — items.png (col=6, row=4). Per dx.aQ(91).a(70) the clock
+	# icon lives at items.png index 70 = (6, 4). Carries the magenta marker
+	# pixels (R==B, G==0, R>0) that vanilla gp.java substitutes with rotated
+	# dial samples to animate the sun/moon disc — see item_icons.gd.
 	"clock": (6, 4),
-	# Compass — items.png (col=12, row=4). Same deal as clock: first
-	# frame of a 16-frame rotation strip; held/dropped use this static
-	# sprite, inventory uses procedural dynamic needle.
-	"compass": (12, 4),
+	# Compass base — items.png (col=6, row=3). Per dx.aO(89).a(54) the
+	# compass icon lives at items.png index 54 = (6, 3). Plain circular
+	# bezel; vanilla ae.java draws the red/gray needle on top each frame
+	# (see _render_compass_icon). Earlier extraction had this at (12, 4)
+	# which is actually the lava_bucket sprite — overwriting it broke the
+	# lava bucket icon.
+	"compass": (6, 3),
 }
 
 # Items with no Alpha 1.2.6 source — fall back by aliasing another sprite.

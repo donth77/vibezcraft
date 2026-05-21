@@ -184,3 +184,58 @@ func _restore_world_state() -> void:
 	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
 	if chunk_manager != null:
 		EntitySave.load_all(chunk_manager)
+	# Wire the compass to the actual world spawn. PlayerSave.load_player
+	# only runs for existing worlds; for fresh worlds the player is still
+	# at the safe-column XZ that player._ready picked. Decide spawn AFTER
+	# the load so we don't capture a fresh safe-column that then gets
+	# overwritten by the save.
+	_resolve_and_publish_world_spawn(player, meta)
+
+
+# Determine the world's spawn point (for the compass needle) and persist
+# it back to world.json on first load. Three cases:
+#  1. Fresh world (no meta on disk yet): use the player's current XZ —
+#     player._ready has already snapped to a safe column inside chunk
+#     (0,0). Write meta out so next session reads the same anchor.
+#  2. Existing meta with a spawn field that isn't the legacy default
+#     Vector3i(0,70,0): use what's stored.
+#  3. Existing meta but spawn is missing OR the legacy default (worlds
+#     saved before this wiring was added): treat as "spawn unknown",
+#     re-anchor on the player's current position, and rewrite meta so
+#     the anchor stays stable from now on.
+func _resolve_and_publish_world_spawn(player: Node3D, meta: Dictionary) -> void:
+	var fallback_pos: Vector3 = player.global_position if player != null else Vector3(0, 70, 0)
+	var spawn: Vector3 = fallback_pos
+	var should_persist: bool = false
+	if meta.is_empty():
+		should_persist = true
+	else:
+		var spawn_dict: Dictionary = meta.get("spawn", {}) as Dictionary
+		if spawn_dict.is_empty():
+			should_persist = true
+		else:
+			spawn = Vector3(
+				float(spawn_dict.get("x", 0)),
+				float(spawn_dict.get("y", 70)),
+				float(spawn_dict.get("z", 0))
+			)
+			if spawn == Vector3(0, 70, 0) and player != null:
+				# Legacy default — re-anchor on the player so the compass
+				# stops permanently pointing at chunk-origin.
+				spawn = fallback_pos
+				should_persist = true
+	ItemIcons.set_world_spawn(spawn)
+	if should_persist:
+		var fresh_meta: Dictionary = (
+			meta
+			if not meta.is_empty()
+			else WorldMeta.make_initial(
+				Worldgen.WORLD_SEED, Vector3i.ZERO, WorldTime.current_tick()
+			)
+		)
+		fresh_meta["spawn"] = {
+			"x": int(round(spawn.x)),
+			"y": int(round(spawn.y)),
+			"z": int(round(spawn.z)),
+		}
+		WorldMeta.save_meta(fresh_meta)

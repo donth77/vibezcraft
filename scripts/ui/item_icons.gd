@@ -157,8 +157,58 @@ static var _clock_smoothed: float = 0.0
 static var _clock_velocity: float = 0.0
 # Player + spawn caches. find_child is O(tree); cache the result and
 # re-resolve only when the cached node has been freed (scene transition).
+# `_cached_spawn` is what the compass needle points at — wired by
+# loading_screen.gd after WorldMeta.load_meta returns, and by the
+# new-world flows in pause_menu.gd / select_world_screen.gd. Default
+# (0, 70, 0) is the pre-world / main-menu fallback only.
 static var _cached_player: Node3D = null
 static var _cached_spawn: Vector3 = Vector3(0, 70, 0)
+
+
+# Update the world spawn the compass tracks. Call once per world load
+# (and again if /setworldspawn-equivalent commands ever exist). The Y
+# component is ignored — the compass is horizontal-only.
+static func set_world_spawn(spawn: Vector3) -> void:
+	_cached_spawn = spawn
+
+
+# Per-frame tick called from Game._process so the compass needle + clock
+# dial advance in realtime instead of only when the inventory UI fires
+# its `changed` signal. Vanilla MC drives TextureFX subclasses from the
+# render loop the same way (ae.java::a(), gp.java::a() — called once per
+# frame). Each tick is ~10-15 µs (one 16×16 in-place ImageTexture.update
+# + ~256 pixel scan for the clock dial substitution); the gate below
+# skips entirely when the player has no compass / clock at all so the
+# vast majority of inventories pay zero per-frame cost.
+static func tick_dynamic_icons() -> void:
+	# Don't bother ticking if neither texture has been rendered yet — saves
+	# the inventory-scan check below for fresh worlds / players who've
+	# never crafted a compass or clock.
+	if _compass_texture == null and _clock_texture == null:
+		return
+	# Skip the actual render when the player isn't carrying one of the
+	# dynamic-icon items. The TextureRect already shows the last rendered
+	# frame; the player can't see a stale needle if there's no needle
+	# being displayed anywhere. Cuts per-frame cost to one inventory walk
+	# when nothing's active.
+	var has_compass: bool = false
+	var has_clock: bool = false
+	var player: Node3D = _get_player()
+	if player != null:
+		var inv: Inventory = player.get("inventory") as Inventory
+		if inv != null:
+			for slot: ItemStack in inv.slots:
+				if slot != null and not slot.is_empty():
+					if slot.item_id == Items.COMPASS:
+						has_compass = true
+					elif slot.item_id == Items.CLOCK:
+						has_clock = true
+					if has_compass and has_clock:
+						break
+	if has_compass and _compass_texture != null:
+		_render_compass_icon(_compass_target_angle())
+	if has_clock and _clock_texture != null:
+		_render_clock_icon(_clock_target_angle())
 
 
 static func icon_for(item_id: int) -> Texture2D:
@@ -367,11 +417,15 @@ static func _compass_target_angle() -> float:
 	return player.rotation.y - PI / 2.0 - atan2(dz, dx)
 
 
-# Target clock angle. Vanilla gp.java:38-39 reads world.b(1.0) (sky-angle
-# fraction 0..1) and computes d3 = -f * 2 * PI. Our WorldTime.phase()
-# returns 0..1 in the same convention (0=sunrise).
+# Target clock angle. Vanilla gp.java:38-39 reads world.b(1.0)
+# (getCelestialAngle, 0=noon, 0.25=sunset, 0.5=midnight, 0.75=sunrise)
+# and computes d3 = -f * 2 * PI. Our WorldTime.phase() uses a DIFFERENT
+# zero (0=sunrise, 0.25=noon, 0.5=sunset, 0.75=midnight), so we apply
+# a -0.25 offset to align with vanilla's celestial-angle convention.
+# Without this, the dial reads about 6 hours behind reality (e.g.
+# shows midnight when the world clock is at sunrise).
 static func _clock_target_angle() -> float:
-	return -WorldTime.phase() * TAU
+	return -(WorldTime.phase() - 0.25) * TAU
 
 
 # Ensure base sprites are loaded into Image buffers. The set_pixelv calls

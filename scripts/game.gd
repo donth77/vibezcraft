@@ -265,3 +265,13 @@ func _ready() -> void:
 	# CharacterPreview.get_model() (armor, head rotation, etc.) auto-updates.
 	CharacterPreview.setup_renderer(self)
 	print("[Game] autoload ready — Minecraft Alpha Clone")
+
+
+# Drive the per-frame texture tick for animated item icons (compass
+# needle, clock dial). Without this the hotbar's TextureRect would
+# show a stale image until the next inventory `changed` signal fires.
+# Vanilla MC ticks its TextureFX subclasses from the render loop;
+# this is our equivalent. ItemIcons.tick_dynamic_icons is a no-op
+# until compass / clock has actually been rendered once.
+func _process(_delta: float) -> void:
+	ItemIcons.tick_dynamic_icons()
