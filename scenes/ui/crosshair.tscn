@@ -1,4 +1,4 @@
-[gd_scene load_steps=15 format=3]
+[gd_scene load_steps=16 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 [ext_resource type="Script" path="res://scripts/ui/armor_bar.gd" id="18_armor"]
@@ -7,12 +7,14 @@
 [ext_resource type="Script" path="res://scripts/ui/pause_menu.gd" id="4_pause"]
 [ext_resource type="Script" path="res://scripts/ui/furnace_screen.gd" id="5_furnace"]
 [ext_resource type="Script" path="res://scripts/ui/chest_screen.gd" id="15_chest"]
+[ext_resource type="Script" path="res://scripts/ui/sign_edit_screen.gd" id="20_sign"]
 [ext_resource type="Script" path="res://scripts/ui/hp_bar.gd" id="6_hp"]
 [ext_resource type="Script" path="res://scripts/ui/death_screen.gd" id="7_death"]
 [ext_resource type="Script" path="res://scripts/ui/damage_overlay.gd" id="8_damage"]
 [ext_resource type="Script" path="res://scripts/ui/air_bar.gd" id="9_air"]
 [ext_resource type="Script" path="res://scripts/ui/water_overlay.gd" id="10_water"]
 [ext_resource type="Script" path="res://scripts/ui/debug_item_spawner.gd" id="11_spawner"]
+[ext_resource type="Script" path="res://scripts/ui/debug_mob_spawner.gd" id="19_mob_spawner"]
 [ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
 [ext_resource type="Script" path="res://scripts/ui/pumpkin_overlay.gd" id="16_pumpkin"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/pumpkinblur.png" id="17_pumpkin_tex"]
@@ -146,6 +148,12 @@ anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("5_furnace")
 
+[node name="SignEditScreen" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("20_sign")
+
 [node name="ChestScreen" type="Control" parent="."]
 anchor_right = 1.0
 anchor_bottom = 1.0
@@ -169,6 +177,12 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("11_spawner")
+
+[node name="DebugMobSpawner" type="Control" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("19_mob_spawner")
 
 [node name="DebugLabel" type="Label" parent="."]
 anchors_preset = 1

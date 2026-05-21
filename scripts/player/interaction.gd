@@ -601,6 +601,13 @@ func _try_place() -> void:
 		_open_chest(hit.block_pos)
 		_last_place_ms = now
 		return
+	# Right-click on an existing sign opens its edit GUI (matches vanilla
+	# qc.java tile-entity GUI flow). Re-runs even if the player isn't
+	# holding the sign item.
+	if hit_id == Blocks.SIGN_STANDING or hit_id == Blocks.SIGN_WALL:
+		_open_sign_editor(hit.block_pos)
+		_last_place_ms = now
+		return
 	if hit_id == Blocks.WOODEN_DOOR:
 		_toggle_door(hit.block_pos, hit_id)
 		_last_place_ms = now
@@ -1005,6 +1012,16 @@ func _open_chest(pos: Vector3i) -> void:
 				node.set_open(false)
 			SFX.play_chest_close()
 	)
+
+
+# Opens the sign editor for the cell at `pos`. Same lookup pattern as
+# the other modal screens (chest, furnace, crafting table) — find the
+# screen by path under Main/Player/Crosshair, call its open(pos). The
+# screen handles prefill (from SignStorage) and write-back on Done.
+func _open_sign_editor(pos: Vector3i) -> void:
+	var screen: Node = get_tree().root.get_node_or_null("Main/Player/Crosshair/SignEditScreen")
+	if screen != null and screen.has_method("open"):
+		screen.open(pos)
 
 
 # Vanilla gv.java:82-103 — toggle door open/close. Only called for wooden
@@ -1556,6 +1573,10 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	if inv != null:
 		inv.consume_one_selected()
 	_trigger_player_use_swing()
+	# Vanilla nv.java::a opens GuiEditSign immediately after a successful
+	# placement so the player can inscribe text right away. Right-click
+	# on an existing sign re-opens this via the hit_id branch above.
+	_open_sign_editor(place)
 	return true
 
 
