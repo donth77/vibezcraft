@@ -77,6 +77,29 @@ const _ICONIFIED_BLOCKS: Array = [
 	# and bookshelf_side on the 4 sides. Iso bake reads as wooden cube
 	# with a book strip, recognizable in inventory.
 	Blocks.BOOKSHELF,
+	# Classic-era solid blocks — same uniform-face story as STONE etc.
+	Blocks.SPONGE,
+	Blocks.IRON_BLOCK,
+	Blocks.GOLD_BLOCK,
+	Blocks.DIAMOND_BLOCK,
+	# Wool family — 16 ids; each gets its own iso bake. Cheap one-time
+	# cost at boot.
+	Blocks.WOOL_WHITE,
+	Blocks.WOOL_ORANGE,
+	Blocks.WOOL_MAGENTA,
+	Blocks.WOOL_LIGHT_BLUE,
+	Blocks.WOOL_YELLOW,
+	Blocks.WOOL_LIME,
+	Blocks.WOOL_PINK,
+	Blocks.WOOL_GRAY,
+	Blocks.WOOL_LIGHT_GRAY,
+	Blocks.WOOL_CYAN,
+	Blocks.WOOL_PURPLE,
+	Blocks.WOOL_BLUE,
+	Blocks.WOOL_BROWN,
+	Blocks.WOOL_GREEN,
+	Blocks.WOOL_RED,
+	Blocks.WOOL_BLACK,
 ]
 
 static var _viewport: SubViewport

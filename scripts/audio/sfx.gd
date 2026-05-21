@@ -579,6 +579,18 @@ func _material_for(block_id: int) -> String:
 			# BlockCrops inherits BlockBush which uses Material.plant →
 			# "grass" SFX (soft rustle, vanilla).
 			return "grass"
+		Blocks.SPONGE:
+			# Vanilla nq.L (BlockSponge) uses Material.cloth (hb.k) →
+			# "cloth" SFX. Soft thump.
+			return "cloth"
+		Blocks.IRON_BLOCK, Blocks.GOLD_BLOCK, Blocks.DIAMOND_BLOCK:
+			# Vanilla metal blocks use Material.metal (hb.i) which has
+			# its own step sound in modern MC, but Alpha mapped metal
+			# to the stone step pool — keep that for fidelity.
+			return "stone"
+	# Wool family (16 colors at contiguous IDs) — cloth material.
+	if Blocks.is_wool(block_id):
+		return "cloth"
 	return ""
 
 

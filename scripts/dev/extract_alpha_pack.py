@@ -84,6 +84,14 @@ TERRAIN_TILES = {
 	# Ships here because books are otherwise useless until enchanting
 	# (Beta 1.9) and decorating with a shelf gives the item a purpose now.
 	"bookshelf_side": (3, 2),
+	# Classic-era solid blocks. Iron/gold/diamond at row 1; sponge at
+	# (0, 3); wool white at (0, 4). Colored wools are procedurally
+	# tinted below since Alpha 1.2.6 only had the white tile.
+	"iron_block": (6, 1),
+	"gold_block": (7, 1),
+	"diamond_block": (8, 1),
+	"sponge": (0, 3),
+	"wool_white": (0, 4),
 	# Crop growth stages (BlockCrops, vanilla nq.az). 8 sprites at
 	# terrain.png row 5, cols 8..15 (vanilla terrain.png convention).
 	# Stage 0 is mostly transparent (tiny sprouts); stage 7 is mature
@@ -269,7 +277,58 @@ PROCEDURAL_ITEMS: dict = {
 # Procedural terrain tiles — same idea but emitted into the pack dir
 # (next to the rest of terrain.png extractions), not into items/.
 # (tall_grass entry removed — Beta 1.6 block, not Alpha 1.2.6)
-PROCEDURAL_TERRAIN: dict = {}
+#
+# Wool — Alpha 1.2.6 had ONE wool tile (white) plus 16 meta values
+# in nq.ab (BlockCloth), but the colored variant TEXTURES weren't
+# added until Beta 1.2 (along with the dye system). We tint the
+# white wool with vanilla MC's per-color dye constants to produce
+# the missing 15 tiles. White is extracted direct (no proc).
+PROCEDURAL_TERRAIN: dict = {
+	# Vanilla BlockCloth color RGB constants (Beta 1.2 EnumDyeColor).
+	# Indexed by meta value 1..15 — 0 is white (extracted from terrain
+	# directly, no tinting).
+	"wool_orange": (0xE0, 0x6D, 0x29),  # meta 1
+	"wool_magenta": (0xBE, 0x49, 0xC8),  # meta 2
+	"wool_light_blue": (0x6B, 0x8A, 0xC9),  # meta 3
+	"wool_yellow": (0xB7, 0xAE, 0x21),  # meta 4
+	"wool_lime": (0x40, 0xC6, 0x33),  # meta 5
+	"wool_pink": (0xD0, 0x80, 0x9A),  # meta 6
+	"wool_gray": (0x42, 0x42, 0x42),  # meta 7
+	"wool_light_gray": (0x9A, 0xA0, 0xA0),  # meta 8
+	"wool_cyan": (0x27, 0x6A, 0x88),  # meta 9
+	"wool_purple": (0x7D, 0x2F, 0xB1),  # meta 10
+	"wool_blue": (0x2F, 0x36, 0x99),  # meta 11
+	"wool_brown": (0x57, 0x33, 0x1B),  # meta 12
+	"wool_green": (0x36, 0x51, 0x1B),  # meta 13
+	"wool_red": (0xA2, 0x2D, 0x29),  # meta 14
+	"wool_black": (0x1A, 0x16, 0x16),  # meta 15
+}
+
+
+def _tint_white_wool(white_img: "Image.Image", tint: tuple) -> "Image.Image":
+	"""Multiply the white-wool tile's RGB by the dye tint, per-pixel.
+	Alpha 1.2.6 (and modern MC) does the same multiply via shader at
+	render time for biome-tinted blocks; doing it at extract time
+	keeps the runtime free of biome-tint plumbing for wool.
+	"""
+	out = Image.new("RGBA", white_img.size)
+	px = out.load()
+	src = white_img.load()
+	for y in range(white_img.height):
+		for x in range(white_img.width):
+			r, g, b, a = src[x, y]
+			# Normalize white to 1.0 then multiply by tint. The white
+			# wool tile has slight per-pixel variation (the "weave"
+			# texture) which the multiply preserves as luminance
+			# variation in the tinted result.
+			lum = r / 255.0  # white-ish, R≈G≈B; pick R as luminance
+			px[x, y] = (
+				int(tint[0] * lum),
+				int(tint[1] * lum),
+				int(tint[2] * lum),
+				a,
+			)
+	return out
 
 
 def _draw_sugar() -> Image.Image:
@@ -409,11 +468,14 @@ def main() -> None:
 		if name == "sugar":
 			_draw_sugar().save(ITEMS / f"{name}.png")
 
-	# Procedural terrain tiles — same idea, but written into PACK/ next
-	# to the rest of terrain.png extractions. (Empty after tall_grass
-	# removal; left as the extension hook for future Beta exceptions.)
-	for _name in PROCEDURAL_TERRAIN:
-		pass
+	# Procedural terrain tiles — currently only the 15 colored wools
+	# (tinted from the white wool tile we just extracted to PACK/).
+	white_wool_path = PACK / "wool_white.png"
+	if white_wool_path.exists():
+		white_wool = Image.open(white_wool_path).convert("RGBA")
+		for name, tint in PROCEDURAL_TERRAIN.items():
+			if name.startswith("wool_"):
+				_tint_white_wool(white_wool, tint).save(PACK / f"{name}.png")
 
 	# Alpha's Steve skin is 64×32 — the left arm and left leg don't exist in
 	# the texture; the game renders them by mirroring the right side. Our

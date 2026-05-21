@@ -471,6 +471,46 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.BOOKSHELF
 		"crops":
 			return Blocks.CROPS
+		"wool_white":
+			return Blocks.WOOL_WHITE
+		"wool_orange":
+			return Blocks.WOOL_ORANGE
+		"wool_magenta":
+			return Blocks.WOOL_MAGENTA
+		"wool_light_blue":
+			return Blocks.WOOL_LIGHT_BLUE
+		"wool_yellow":
+			return Blocks.WOOL_YELLOW
+		"wool_lime":
+			return Blocks.WOOL_LIME
+		"wool_pink":
+			return Blocks.WOOL_PINK
+		"wool_gray":
+			return Blocks.WOOL_GRAY
+		"wool_light_gray":
+			return Blocks.WOOL_LIGHT_GRAY
+		"wool_cyan":
+			return Blocks.WOOL_CYAN
+		"wool_purple":
+			return Blocks.WOOL_PURPLE
+		"wool_blue":
+			return Blocks.WOOL_BLUE
+		"wool_brown":
+			return Blocks.WOOL_BROWN
+		"wool_green":
+			return Blocks.WOOL_GREEN
+		"wool_red":
+			return Blocks.WOOL_RED
+		"wool_black":
+			return Blocks.WOOL_BLACK
+		"sponge":
+			return Blocks.SPONGE
+		"iron_block":
+			return Blocks.IRON_BLOCK
+		"gold_block":
+			return Blocks.GOLD_BLOCK
+		"diamond_block":
+			return Blocks.DIAMOND_BLOCK
 		"flower_red":
 			return Blocks.FLOWER_RED
 		"flower_yellow":
@@ -722,6 +762,46 @@ static func display_name(item_id: int) -> String:
 			return "Bookshelf"
 		Blocks.CROPS:
 			return "Wheat Crops"
+		Blocks.WOOL_WHITE:
+			return "White Wool"
+		Blocks.WOOL_ORANGE:
+			return "Orange Wool"
+		Blocks.WOOL_MAGENTA:
+			return "Magenta Wool"
+		Blocks.WOOL_LIGHT_BLUE:
+			return "Light Blue Wool"
+		Blocks.WOOL_YELLOW:
+			return "Yellow Wool"
+		Blocks.WOOL_LIME:
+			return "Lime Wool"
+		Blocks.WOOL_PINK:
+			return "Pink Wool"
+		Blocks.WOOL_GRAY:
+			return "Gray Wool"
+		Blocks.WOOL_LIGHT_GRAY:
+			return "Light Gray Wool"
+		Blocks.WOOL_CYAN:
+			return "Cyan Wool"
+		Blocks.WOOL_PURPLE:
+			return "Purple Wool"
+		Blocks.WOOL_BLUE:
+			return "Blue Wool"
+		Blocks.WOOL_BROWN:
+			return "Brown Wool"
+		Blocks.WOOL_GREEN:
+			return "Green Wool"
+		Blocks.WOOL_RED:
+			return "Red Wool"
+		Blocks.WOOL_BLACK:
+			return "Black Wool"
+		Blocks.SPONGE:
+			return "Sponge"
+		Blocks.IRON_BLOCK:
+			return "Block of Iron"
+		Blocks.GOLD_BLOCK:
+			return "Block of Gold"
+		Blocks.DIAMOND_BLOCK:
+			return "Block of Diamond"
 		APPLE:
 			return "Apple"
 		BREAD:

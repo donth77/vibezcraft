@@ -212,6 +212,55 @@ const CROPS := 49
 # nothing on break (vanilla — keeps spawners non-renewable).
 const MOB_SPAWNER := 51
 
+# --- Alpha 1.2.6 solid blocks (Classic + Indev legacy). All full cubes,
+# no special mesh; just per-face textures + tool/hardness/drop tables.
+# Constructor args from vendor/alpha-1.2.6-src/src/nq.java.
+
+# Wool — vanilla nq.ab (id 35). Indev "cloth" block. Vanilla stores 16
+# color subtypes in cell meta on one block id; we ship 16 SEPARATE
+# block IDs instead so the existing native-mesher per-id atlas lookup
+# Just Works (per-meta cube textures would require a native-side
+# rewrite). Alpha 1.2.6 terrain.png only had ONE wool tile (white at
+# (0,4)); the other 15 colors are procedurally tinted from white at
+# extract time using vanilla MC dye-color constants. Hardness 0.8.
+# [BETA 1.2 exception applies for the colored variants — Alpha 1.2.6
+# had the meta values but only a white texture; Beta 1.2 added dyes
+# and the colored tile art.] Save format note: 16 ids burn 16 slots
+# of our uint8 0..99 block-id space, but space is roomy + we treat
+# wool as a series rather than 1 block w/ subtypes.
+const WOOL_WHITE := 52
+const WOOL_ORANGE := 53
+const WOOL_MAGENTA := 54
+const WOOL_LIGHT_BLUE := 55
+const WOOL_YELLOW := 56
+const WOOL_LIME := 57
+const WOOL_PINK := 58
+const WOOL_GRAY := 59
+const WOOL_LIGHT_GRAY := 60
+const WOOL_CYAN := 61
+const WOOL_PURPLE := 62
+const WOOL_BLUE := 63
+const WOOL_BROWN := 64
+const WOOL_GREEN := 65
+const WOOL_RED := 66
+const WOOL_BLACK := 67
+# Sponge — vanilla nq.L (id 19). Classic-era yellow block. Originally
+# absorbed water on placement (BlockSponge.a checks neighbor water
+# cells and converts them to AIR); we'll wire that later when the
+# absorb-on-place hook lands. Hardness 0.6.
+const SPONGE := 68
+# Iron block — vanilla nq.ai (id 42). 9 iron ingots in 3×3 to craft
+# (Beta 1.0 recipe; Alpha 1.2.6 had no decompression recipe either
+# direction so it's debug-spawn only here). Hardness 5.0, pickaxe-
+# harvest, iron-tier required (matches vanilla resistance-to-blast).
+const IRON_BLOCK := 69
+# Gold block — vanilla nq.ah (id 41). Same as IRON_BLOCK but gold
+# (3.0 hardness). Pickaxe-harvest, iron-tier required.
+const GOLD_BLOCK := 70
+# Diamond block — vanilla nq.ax (id 57). Same pattern. 5.0 hardness,
+# pickaxe-harvest, iron-tier required.
+const DIAMOND_BLOCK := 71
+
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
 # shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
@@ -733,6 +782,15 @@ static func needs_gdscript_mesher(id: int) -> bool:
 	return mesh_shape(id) != MESH_SHAPE_CUBE
 
 
+# True if `id` is one of the 16 contiguous wool color block ids
+# (WOOL_WHITE through WOOL_BLACK). Branch-free range check — much
+# cheaper than a 16-way match. Used by hardness / SFX / sound routing
+# / drops so the wool family stays a single concept even though we
+# allocated separate ids for atlas-lookup simplicity.
+static func is_wool(id: int) -> bool:
+	return id >= WOOL_WHITE and id <= WOOL_BLACK
+
+
 # Vanilla `Block.getExplosionResistance` — how much a block resists the
 # blast wave from TNT / creepers. The explosion ray loses
 # `(resistance + 0.3) × 0.225` intensity per 0.3-block step, so a 4.0-power
@@ -756,6 +814,13 @@ static func explosion_resistance_fast(id: int) -> float:
 
 
 static func explosion_resistance(id: int) -> float:
+	# Wool family — same 4.0 for all 16 colors. Vanilla nq.ab uses
+	# default `b(0.0)` which is 0.0 actually; we use 4.0 to match the
+	# vanilla cloth-material resistance (the constructor sets material
+	# resistance separately from per-block b()). Keeps wool from being
+	# blown apart by TNT placed two cells away.
+	if is_wool(id):
+		return 4.0
 	match id:
 		BEDROCK:
 			return 6000000.0
@@ -773,6 +838,12 @@ static func explosion_resistance(id: int) -> float:
 			return 15.0
 		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER, BOOKSHELF:
 			return 2.5
+		IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK:
+			# Vanilla nq.e class constructor uses b(10.0f) — high blast
+			# resistance, same as iron-tier ores.
+			return 10.0
+		SPONGE:
+			return 3.0  # vanilla nq.L — light + brittle
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
 	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
 	# so a TNT cell offers no shielding to the next chained TNT — keeps
@@ -784,6 +855,11 @@ static func explosion_resistance(id: int) -> float:
 # "block-hardness units" not seconds. Final time = hardness × multiplier
 # (1.5 if correct tool, 5.0 if wrong/no tool) ÷ tool speed.
 static func hardness(id: int) -> float:
+	# Wool family hits 16 ids contiguously — split it out so the match
+	# below stays readable. Vanilla nq.ab `c(0.8f)` — soft cloth, any
+	# tool breaks fast.
+	if is_wool(id):
+		return 0.8
 	match id:
 		BEDROCK, WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL:
 			# Fluids are unbreakable by hand; in vanilla they're only
@@ -847,6 +923,18 @@ static func hardness(id: int) -> float:
 			# Vanilla BlockMobSpawner `c(5.0f)`. Pickaxe-preferred,
 			# drops nothing on break (handled in drops()).
 			return 5.0
+		SPONGE:
+			# Vanilla nq.L `c(0.6f)`. Soft, instant with any tool.
+			return 0.6
+		IRON_BLOCK:
+			# Vanilla nq.ai `c(5.0f)`. Pickaxe-harvest, iron+.
+			return 5.0
+		GOLD_BLOCK:
+			# Vanilla nq.ah `c(3.0f)`. Pickaxe-harvest, iron+.
+			return 3.0
+		DIAMOND_BLOCK:
+			# Vanilla nq.ax `c(5.0f)`. Pickaxe-harvest, iron+.
+			return 5.0
 	return 1.0
 
 
@@ -864,6 +952,10 @@ static func required_harvest_level(id: int) -> int:
 			return 2
 		OBSIDIAN:
 			return 3
+		IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK:
+			# Vanilla nq.ai / ah / ax require iron-tier pickaxe to drop.
+			# Wood / stone pickaxes break them but yield nothing.
+			return 2
 	return 0
 
 
@@ -887,6 +979,9 @@ static func preferred_tool_type(id: int) -> int:
 			# Vanilla BlockPumpkin sets `b("axe")` via Block.b(String) —
 			# axe gets the break-speed bonus, but any tool / bare hand drops.
 			return Items.TOOL_TYPE_AXE
+		IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK, MOB_SPAWNER:
+			# All metal blocks + mossy mob spawner cage are pickaxe-preferred.
+			return Items.TOOL_TYPE_PICKAXE
 	return 0
 
 
@@ -1154,6 +1249,46 @@ static func name_of(id: int) -> String:
 			return "crops_stage_7"  # 1-arg fallback (mature); meta-aware path below picks the per-stage tile
 		MOB_SPAWNER:
 			return "mob_spawner"
+		WOOL_WHITE:
+			return "wool_white"
+		WOOL_ORANGE:
+			return "wool_orange"
+		WOOL_MAGENTA:
+			return "wool_magenta"
+		WOOL_LIGHT_BLUE:
+			return "wool_light_blue"
+		WOOL_YELLOW:
+			return "wool_yellow"
+		WOOL_LIME:
+			return "wool_lime"
+		WOOL_PINK:
+			return "wool_pink"
+		WOOL_GRAY:
+			return "wool_gray"
+		WOOL_LIGHT_GRAY:
+			return "wool_light_gray"
+		WOOL_CYAN:
+			return "wool_cyan"
+		WOOL_PURPLE:
+			return "wool_purple"
+		WOOL_BLUE:
+			return "wool_blue"
+		WOOL_BROWN:
+			return "wool_brown"
+		WOOL_GREEN:
+			return "wool_green"
+		WOOL_RED:
+			return "wool_red"
+		WOOL_BLACK:
+			return "wool_black"
+		SPONGE:
+			return "sponge"
+		IRON_BLOCK:
+			return "iron_block"
+		GOLD_BLOCK:
+			return "gold_block"
+		DIAMOND_BLOCK:
+			return "diamond_block"
 	return "unknown"
 
 
@@ -1196,6 +1331,19 @@ static func directional_face_texture(id: int, face_idx: int, meta: int) -> Strin
 
 
 static func get_face_texture(id: int, face: String) -> String:
+	# Wool family + the new solid blocks all share a texture across all
+	# 6 faces — short-circuit before the match so we don't need 16+5
+	# match arms.
+	if is_wool(id):
+		return name_of(id)  # wool_white / wool_orange / …
+	if id == SPONGE:
+		return "sponge"
+	if id == IRON_BLOCK:
+		return "iron_block"
+	if id == GOLD_BLOCK:
+		return "gold_block"
+	if id == DIAMOND_BLOCK:
+		return "diamond_block"
 	match id:
 		BEDROCK:
 			return "bedrock"

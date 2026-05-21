@@ -66,6 +66,30 @@ const _BLOCKS: Array = [
 	Blocks.PUMPKIN,
 	Blocks.JACK_O_LANTERN,
 	Blocks.BOOKSHELF,
+	# Classic-era solid blocks (all from Alpha 1.2.6 nq.java).
+	Blocks.SPONGE,
+	Blocks.IRON_BLOCK,
+	Blocks.GOLD_BLOCK,
+	Blocks.DIAMOND_BLOCK,
+	# Wool family — 16 colors. White had a texture in Alpha terrain.png;
+	# the other 15 are procedurally tinted at extract time (Alpha had
+	# the meta values but only Beta 1.2 added the dye system + tile art).
+	Blocks.WOOL_WHITE,
+	Blocks.WOOL_ORANGE,
+	Blocks.WOOL_MAGENTA,
+	Blocks.WOOL_LIGHT_BLUE,
+	Blocks.WOOL_YELLOW,
+	Blocks.WOOL_LIME,
+	Blocks.WOOL_PINK,
+	Blocks.WOOL_GRAY,
+	Blocks.WOOL_LIGHT_GRAY,
+	Blocks.WOOL_CYAN,
+	Blocks.WOOL_PURPLE,
+	Blocks.WOOL_BLUE,
+	Blocks.WOOL_BROWN,
+	Blocks.WOOL_GREEN,
+	Blocks.WOOL_RED,
+	Blocks.WOOL_BLACK,
 ]
 
 const _ITEMS: Array = [

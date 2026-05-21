@@ -52,6 +52,29 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	# carry a CROPS block directly — but the entry guards against the
 	# debug spawner spawning the block id.
 	Blocks.CROPS: "crops_stage_7",
+	# Classic-era solid blocks. Full cubes — 1-arg fallback is fine.
+	# BlockIconRenderer's 3D iso bake replaces these once it iterates
+	# through (see _ICONIFIED_BLOCKS).
+	Blocks.SPONGE: "sponge",
+	Blocks.IRON_BLOCK: "iron_block",
+	Blocks.GOLD_BLOCK: "gold_block",
+	Blocks.DIAMOND_BLOCK: "diamond_block",
+	Blocks.WOOL_WHITE: "wool_white",
+	Blocks.WOOL_ORANGE: "wool_orange",
+	Blocks.WOOL_MAGENTA: "wool_magenta",
+	Blocks.WOOL_LIGHT_BLUE: "wool_light_blue",
+	Blocks.WOOL_YELLOW: "wool_yellow",
+	Blocks.WOOL_LIME: "wool_lime",
+	Blocks.WOOL_PINK: "wool_pink",
+	Blocks.WOOL_GRAY: "wool_gray",
+	Blocks.WOOL_LIGHT_GRAY: "wool_light_gray",
+	Blocks.WOOL_CYAN: "wool_cyan",
+	Blocks.WOOL_PURPLE: "wool_purple",
+	Blocks.WOOL_BLUE: "wool_blue",
+	Blocks.WOOL_BROWN: "wool_brown",
+	Blocks.WOOL_GREEN: "wool_green",
+	Blocks.WOOL_RED: "wool_red",
+	Blocks.WOOL_BLACK: "wool_black",
 }
 
 # Item sprite basenames. Resolved at load time: first try

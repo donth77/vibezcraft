@@ -128,6 +128,33 @@ const _LAYOUT := {
 	# Mob spawner — vanilla terrain.png cell (1, 4): mossy cage all 6
 	# faces. Tile entity stores the configured mob (mob_spawner_manager).
 	"mob_spawner": 66,
+	# Wool family — 16 colors. White is the only one with an Alpha
+	# texture (terrain.png (0, 4)); the rest are procedurally tinted
+	# from white at extract time using vanilla MC dye-color constants.
+	# Slots 67-82 must stay contiguous for the is_wool() range check
+	# on the block-id side to map cleanly to atlas lookup.
+	"wool_white": 67,
+	"wool_orange": 68,
+	"wool_magenta": 69,
+	"wool_light_blue": 70,
+	"wool_yellow": 71,
+	"wool_lime": 72,
+	"wool_pink": 73,
+	"wool_gray": 74,
+	"wool_light_gray": 75,
+	"wool_cyan": 76,
+	"wool_purple": 77,
+	"wool_blue": 78,
+	"wool_brown": 79,
+	"wool_green": 80,
+	"wool_red": 81,
+	"wool_black": 82,
+	# Classic-era solid blocks. Sponge (0, 3), iron block (6, 1), gold
+	# block (7, 1), diamond block (8, 1) all from vanilla terrain.png.
+	"sponge": 83,
+	"iron_block": 84,
+	"gold_block": 85,
+	"diamond_block": 86,
 }
 
 static var active_pack: String = DEFAULT_PACK
