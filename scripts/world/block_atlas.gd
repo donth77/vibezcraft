@@ -99,6 +99,10 @@ const _LAYOUT := {
 	"pumpkin_side": 53,
 	"pumpkin_face": 54,
 	"jack_o_lantern_face": 55,
+	# Bookshelf side [BETA 1.3 exception] — books face on the 4 sides;
+	# top + bottom reuse "planks". Vanilla terrain.png (3, 2) — slot
+	# was reserved in Alpha terrain.png already.
+	"bookshelf_side": 56,
 }
 
 static var active_pack: String = DEFAULT_PACK

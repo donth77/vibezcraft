@@ -299,6 +299,80 @@
       "pattern": [" G ", "GRG", " G "],
       "key": {"G": "gold_ingot", "R": "redstone"},
       "result": {"id": "clock", "count": 1}
+    },
+    {
+      "id": "bread",
+      "pattern": ["WWW"],
+      "key": {"W": "wheat"},
+      "result": {"id": "bread", "count": 1}
+    },
+    {
+      "id": "paper",
+      "pattern": ["RRR"],
+      "key": {"R": "sugar_cane"},
+      "result": {"id": "paper", "count": 3}
+    },
+    {
+      "id": "book",
+      "pattern": ["P", "P", "P"],
+      "key": {"P": "paper"},
+      "result": {"id": "book", "count": 1}
+    },
+    {
+      "id": "bowl",
+      "pattern": ["P P", " P "],
+      "key": {"P": "planks"},
+      "result": {"id": "bowl", "count": 4}
+    },
+    {
+      "id": "leather_helmet",
+      "pattern": ["LLL", "L L"],
+      "key": {"L": "leather"},
+      "result": {"id": "leather_helmet", "count": 1}
+    },
+    {
+      "id": "leather_chestplate",
+      "pattern": ["L L", "LLL", "LLL"],
+      "key": {"L": "leather"},
+      "result": {"id": "leather_chestplate", "count": 1}
+    },
+    {
+      "id": "leather_leggings",
+      "pattern": ["LLL", "L L", "L L"],
+      "key": {"L": "leather"},
+      "result": {"id": "leather_leggings", "count": 1}
+    },
+    {
+      "id": "leather_boots",
+      "pattern": ["L L", "L L"],
+      "key": {"L": "leather"},
+      "result": {"id": "leather_boots", "count": 1}
+    },
+    {
+      "id": "brick_block_from_bricks",
+      "pattern": ["BB", "BB"],
+      "key": {"B": "brick_item"},
+      "result": {"id": "brick", "count": 1}
+    },
+    {
+      "id": "golden_apple",
+      "pattern": ["GGG", "GAG", "GGG"],
+      "key": {"G": "gold_ingot", "A": "apple"},
+      "result": {"id": "golden_apple", "count": 1}
+    },
+    {
+      "_comment": "Fishing rod — Alpha v1.0.17. Sticks diagonal NW→SE + string vertical on the E column.",
+      "id": "fishing_rod",
+      "pattern": ["  S", " SG", "S G"],
+      "key": {"S": "stick", "G": "string"},
+      "result": {"id": "fishing_rod", "count": 1}
+    },
+    {
+      "_comment": "Bookshelf [BETA 1.3]. 6 planks + 3 books.",
+      "id": "bookshelf",
+      "pattern": ["PPP", "BBB", "PPP"],
+      "key": {"P": "planks", "B": "book"},
+      "result": {"id": "bookshelf", "count": 1}
     }
   ],
   "shapeless": [
@@ -306,6 +380,18 @@
       "id": "jack_o_lantern",
       "ingredients": ["pumpkin", "torch"],
       "result": {"id": "jack_o_lantern", "count": 1}
+    },
+    {
+      "_comment": "Vanilla Alpha au.java (ItemSoup) — shapeless: red + brown mushroom + bowl. Returns stew (+ vanilla also returns empty bowl after eat).",
+      "id": "mushroom_stew",
+      "ingredients": ["mushroom_red", "mushroom_brown", "bowl"],
+      "result": {"id": "mushroom_stew", "count": 1}
+    },
+    {
+      "_comment": "Sugar [BETA 1.2]. 1 sugar_cane → 1 sugar. Shapeless single-input.",
+      "id": "sugar",
+      "ingredients": ["sugar_cane"],
+      "result": {"id": "sugar", "count": 1}
     }
   ],
   "_disabled": [

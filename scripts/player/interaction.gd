@@ -297,9 +297,15 @@ func _complete_break(target: Vector3i) -> void:
 	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
 	# Drop is gated by tool tier — bare hand on stone yields nothing,
 	# wrong-tier pick on iron ore yields nothing, etc.
-	var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
-	if dropped_id != Blocks.AIR:
-		_spawn_dropped_item(target, dropped_id)
+	# Multi-drop blocks (bookshelf → 3 books) loop random_drop so each
+	# slot rolls independently — preserves leaves-sapling / gravel-flint
+	# semantics for any future multi-drop block that wants the random
+	# tier mixed in.
+	var n_drops: int = Blocks.drop_quantity(broken_id)
+	for _i in range(n_drops):
+		var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
+		if dropped_id != Blocks.AIR:
+			_spawn_dropped_item(target, dropped_id)
 	# Tool durability — vanilla loses 1 use per block broken (regardless of
 	# whether the break "counted" for a drop). Snap sound on the final hit.
 	var inv: Inventory = _player_inventory()

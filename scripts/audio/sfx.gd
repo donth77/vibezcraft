@@ -571,6 +571,10 @@ func _material_for(block_id: int) -> String:
 			# stepSound = hb.e (wood material), same as planks / log /
 			# chest / ladder. cx(86, 102, false).a(e) and the lit form.
 			return "wood"
+		Blocks.BOOKSHELF:
+			# Vanilla Beta 1.3 BlockBookshelf inherits Material.wood
+			# (same as planks). Wood SFX for dig / step / place.
+			return "wood"
 	return ""
 
 

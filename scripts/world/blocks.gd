@@ -173,6 +173,14 @@ const PUMPKIN := 46
 # (glowing eyes) and the block emits light level 15 (highest tier,
 # alongside lava). Crafted from 1 pumpkin + 1 torch (shapeless).
 const JACK_O_LANTERN := 47
+# Bookshelf [BETA 1.3 exception] — added Feb 2011. Vanilla id 47;
+# here id 48 to avoid collision with JACK_O_LANTERN. Faces: top + bottom
+# are planks (4, 0); the 4 sides are bookshelf_side (3, 2 — slot
+# reserved in Alpha terrain.png already). Hardness 1.5, axe preferred.
+# Recipe: 6 planks + 3 books. Drops 3 books on break (vanilla
+# BlockBookshelf.dropBlockAsItemWithChance). Ships pre-enchanting so
+# the book item has a non-decorative purpose now.
+const BOOKSHELF := 48
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -685,7 +693,7 @@ static func explosion_resistance(id: int) -> float:
 			return 6.0
 		WOODEN_DOOR:
 			return 15.0
-		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER:
+		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER, BOOKSHELF:
 			return 2.5
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
 	# torch, fire, sapling, TNT. Vanilla TNT resistance is 0 specifically
@@ -750,6 +758,9 @@ static func hardness(id: int) -> float:
 			# Vanilla BlockPumpkin / BlockPumpkinLantern both `c(1.0f)`.
 			# Axe-preferred but breakable by hand.
 			return 1.0
+		BOOKSHELF:
+			# Vanilla BlockBookshelf `c(1.5f)`. Axe-preferred.
+			return 1.5
 	return 1.0
 
 
@@ -780,7 +791,7 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_PICKAXE
 		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
-		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR, LADDER:
+		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR, LADDER, BOOKSHELF:
 			return Items.TOOL_TYPE_AXE
 		IRON_DOOR:
 			return Items.TOOL_TYPE_PICKAXE
@@ -938,7 +949,22 @@ static func drops(id: int) -> int:
 			return id  # iron/gold ore drops itself (smelt for ingot)
 		LIT_FURNACE:
 			return FURNACE  # vanilla: lit furnace breaks back into the unlit form
+		BOOKSHELF:
+			# Vanilla BlockBookshelf returns Item.book — the 3-count comes
+			# from drop_quantity() below, not here.
+			return Items.BOOK
 	return id
+
+
+# How many drops the block produces per break. 1 for nearly everything;
+# bookshelf yields 3 books per BlockBookshelf.dropBlockAsItemWithChance
+# (drops getDropQuantity()=3 in Beta). Interaction.gd loops random_drop
+# this many times so each drop hits the same RNG branch as a normal break
+# (gravel-flint, leaves-sapling, etc. still roll per drop slot).
+static func drop_quantity(id: int) -> int:
+	if id == BOOKSHELF:
+		return 3
+	return 1
 
 
 static func name_of(id: int) -> String:
@@ -1031,6 +1057,8 @@ static func name_of(id: int) -> String:
 			return "pumpkin"
 		JACK_O_LANTERN:
 			return "jack_o_lantern"
+		BOOKSHELF:
+			return "bookshelf"
 	return "unknown"
 
 
@@ -1122,6 +1150,12 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "planks"
 				_:
 					return "crafting_table_side"
+		BOOKSHELF:
+			match face:
+				"top", "bottom":
+					return "planks"
+				_:
+					return "bookshelf_side"
 		FARMLAND:
 			match face:
 				"top":

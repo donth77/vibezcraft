@@ -121,6 +121,34 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.COMPASS: "compass",
 	Items.CLOCK: "clock",
 	Items.REDSTONE: "redstone",
+	# Indev / Alpha food + materials added with the items-pre-mobs pass.
+	# Sprites extracted from items.png by scripts/dev/extract_alpha_pack.py;
+	# see that file for per-item tile coords + vanilla provenance.
+	Items.APPLE: "apple",
+	Items.BREAD: "bread",
+	Items.WHEAT: "wheat",
+	Items.WHEAT_SEEDS: "wheat_seeds",
+	Items.STRING: "string",
+	Items.FEATHER: "feather",
+	Items.PAPER: "paper",
+	Items.BOOK: "book",
+	Items.BRICK: "brick_item",
+	Items.SADDLE: "saddle",
+	Items.BOWL: "bowl",
+	Items.MUSHROOM_STEW: "mushroom_stew",
+	Items.LEATHER_HELMET: "leather_helmet",
+	Items.LEATHER_CHESTPLATE: "leather_chestplate",
+	Items.LEATHER_LEGGINGS: "leather_leggings",
+	Items.LEATHER_BOOTS: "leather_boots",
+	Items.RAW_PORKCHOP: "raw_porkchop",
+	Items.COOKED_PORKCHOP: "cooked_porkchop",
+	Items.GOLDEN_APPLE: "golden_apple",
+	Items.FISHING_ROD: "fishing_rod",
+	Items.RAW_FISH: "raw_fish",
+	Items.COOKED_FISH: "cooked_fish",
+	Items.EGG: "egg",
+	Items.MILK_BUCKET: "milk_bucket",
+	Items.SUGAR: "sugar",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

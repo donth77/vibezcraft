@@ -77,6 +77,13 @@ TERRAIN_TILES = {
 	"pumpkin_side": (6, 7),
 	"pumpkin_face": (7, 7),
 	"jack_o_lantern_face": (8, 7),
+	# Bookshelf [BETA 1.3 exception] — block added Feb 2011, after Alpha
+	# 1.2.6 freeze, but the texture slot at (3, 2) was reserved in Alpha
+	# terrain.png already (verified by tile inspection). Faces: top +
+	# bottom use planks (4, 0); the 4 sides use this bookshelf_side tile.
+	# Ships here because books are otherwise useless until enchanting
+	# (Beta 1.9) and decorating with a shelf gives the item a purpose now.
+	"bookshelf_side": (3, 2),
 	# `furnace_top` is intentionally NOT here. Vanilla Alpha 1.2.6
 	# BlockFurnace.getBlockTextureFromSide (mj.java:46-52) returns
 	# `nq.t.bg` (= the STONE texture index) for both top (n5=1) and
@@ -167,6 +174,66 @@ ITEM_TILES = {
 	# which is actually the lava_bucket sprite — overwriting it broke the
 	# lava bucket icon.
 	"compass": (6, 3),
+	# Food + crafting materials added in Indev/Alpha. Tile positions
+	# verified against dx.java item registrations (where `.a(N)` is the
+	# items.png 16×16 sprite index, N = row*16 + col):
+	#   apple           dx.h(4,4).a(10)   → (10, 0)   Indev
+	#   bow             dx.i(5).a(21)     → (5, 1)    Indev
+	#   arrow           dx.j(6).a(37)     → (5, 2)    Indev
+	#   wheat_seeds     dx.Q(39).a(9)     → (9, 0)    Indev
+	#   wheat           dx.R(40).a(25)    → (9, 1)    Indev
+	#   bread           dx.S(41).a(41)    → (9, 2)    Indev
+	#   leather_*       dx.T..W           → (0, 0..3) Indev
+	#   raw_porkchop    dx.ao(63,3).a(87) → (7, 5)    Indev
+	#   cooked_porkchop dx.ap(64,8).a(88) → (8, 5)    Indev
+	#   golden_apple    dx.ar(66,42).a(11)→ (11, 0)   Infdev
+	#   saddle          dx.ay(73).a(104)  → (8, 6)    Infdev (loot only)
+	#   snowball        dx.aB(76).a(14)   → (14, 0)   Alpha v1.0.4
+	#   milk_bucket     dx.aE(79).a(77)   → (13, 4)   Alpha v1.0.5
+	#   brick           dx.aF(80).a(22)   → (6, 1)    Alpha v1.0.6
+	#   clay_ball       dx.aG(81).a(57)   → (9, 3)    Alpha v1.0.6
+	#   paper           dx.aI(83).a(58)   → (10, 3)   Alpha v1.0.6
+	#   book            dx.aJ(84).a(59)   → (11, 3)   Alpha v1.0.6
+	#   slimeball       dx.aK(85).a(30)   → (14, 1)   Alpha v1.0.11
+	#   egg             dx.aN(88).a(12)   → (12, 0)   Alpha v1.0.14
+	#   fishing_rod     dx.aP(90).a(69)   → (5, 4)    Alpha v1.0.17
+	#   raw_fish        dx.aS(93,2).a(89) → (9, 5)    Alpha v1.0.16
+	#   cooked_fish     dx.aT(94,5).a(90) → (10, 5)   Alpha v1.0.16
+	#   string          dx.I(31).a(8)     → (8, 0)    Indev
+	#   feather         dx.J(32).a(24)    → (8, 1)    Indev
+	#   bowl            dx.C(25).a(71)    → (7, 4)    Indev
+	#   mushroom_stew   dx.D(26,10).a(72) → (8, 4)    Indev
+	"apple": (10, 0),
+	"wheat_seeds": (9, 0),
+	"wheat": (9, 1),
+	"bread": (9, 2),
+	"leather_helmet": (0, 0),
+	"leather_chestplate": (0, 1),
+	"leather_leggings": (0, 2),
+	"leather_boots": (0, 3),
+	"raw_porkchop": (7, 5),
+	"cooked_porkchop": (8, 5),
+	"golden_apple": (11, 0),
+	"saddle": (8, 6),
+	"brick_item": (6, 1),
+	"paper": (10, 3),
+	"book": (11, 3),
+	"string": (8, 0),
+	"feather": (8, 1),
+	"bowl": (7, 4),
+	"mushroom_stew": (8, 4),
+	# Fishing — Alpha v1.0.16 (raw/cooked fish) + v1.0.17 (fishing rod).
+	# dx.aP(90).a(69), dx.aS(93,2).a(89), dx.aT(94,5).a(90).
+	"fishing_rod": (5, 4),
+	"raw_fish": (9, 5),
+	"cooked_fish": (10, 5),
+	# Mob drops + Beta sugar.
+	#   egg          dx.aN(88).a(12)  → (12, 0) Alpha v1.0.14 (chicken)
+	#   milk_bucket  dx.aE(79).a(77)  → (13, 4) Alpha v1.0.5 (right-click cow)
+	#   sugar        Beta 1.2 — sprite at items.png (13, 0); 1 sugar_cane → 1 sugar
+	"egg": (12, 0),
+	"milk_bucket": (13, 4),
+	"sugar": (13, 0),
 }
 
 # Items with no Alpha 1.2.6 source — fall back by aliasing another sprite.

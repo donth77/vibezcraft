@@ -21,6 +21,12 @@ const _RESULTS: Dictionary = {
 	Blocks.COBBLESTONE: Blocks.STONE,
 	Blocks.SAND: Blocks.GLASS,
 	Blocks.LOG: Items.CHARCOAL,
+	# Vanilla Alpha — food smelt entries from TileEntityFurnace.smelt():
+	#   raw porkchop  → cooked porkchop (3 HP → 8 HP)
+	#   raw fish      → cooked fish     (2 HP → 5 HP)
+	# Same 200-tick cycle as any other smelt.
+	Items.RAW_PORKCHOP: Items.COOKED_PORKCHOP,
+	Items.RAW_FISH: Items.COOKED_FISH,
 }
 
 const _FUEL_TICKS: Dictionary = {

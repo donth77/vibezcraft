@@ -60,6 +60,7 @@ const _BLOCKS: Array = [
 	Blocks.TNT,
 	Blocks.PUMPKIN,
 	Blocks.JACK_O_LANTERN,
+	Blocks.BOOKSHELF,
 ]
 
 const _ITEMS: Array = [
@@ -116,6 +117,41 @@ const _ITEMS: Array = [
 	Items.DIAMOND_CHESTPLATE,
 	Items.DIAMOND_LEGGINGS,
 	Items.DIAMOND_BOOTS,
+	# Leather armor — lowest defense tier, but recipe-craftable from
+	# leather (debug-spawnable). Vanilla T..W (ItemArmor multi-piece).
+	Items.LEATHER_HELMET,
+	Items.LEATHER_CHESTPLATE,
+	Items.LEATHER_LEGGINGS,
+	Items.LEATHER_BOOTS,
+	# Food + crafting materials shipped with the pre-mob items pass.
+	# Apple/bread/etc. have no eating mechanic yet — they're inventory-
+	# only until food-eating lands with the hunger system.
+	Items.APPLE,
+	Items.BREAD,
+	Items.WHEAT,
+	Items.WHEAT_SEEDS,
+	Items.STRING,
+	Items.FEATHER,
+	Items.PAPER,
+	Items.BOOK,
+	Items.BRICK,
+	Items.SADDLE,
+	Items.BOWL,
+	Items.MUSHROOM_STEW,
+	Items.RAW_PORKCHOP,
+	Items.COOKED_PORKCHOP,
+	Items.GOLDEN_APPLE,
+	# Fishing items — rod is durability-1; cast/reel mechanic follows in
+	# a separate commit. Raw + cooked fish exist so the smelting path is
+	# debug-testable today (drop raw_fish into furnace input).
+	Items.FISHING_ROD,
+	Items.RAW_FISH,
+	Items.COOKED_FISH,
+	# Mob drops + Beta sugar — debug-spawn only until chickens, cows,
+	# and cake mechanic land.
+	Items.EGG,
+	Items.MILK_BUCKET,
+	Items.SUGAR,
 ]
 
 var _player: Node

@@ -125,6 +125,87 @@ const CLOCK: int = 151
 # in a later phase — for now this is just a craft ingredient item.
 const REDSTONE: int = 152
 
+# --- Indev/Alpha food + materials (vanilla item IDs 256-350). Sprite
+# positions verified against dx.java item registrations. No eating /
+# hunger system yet (Alpha used direct HP healing; Beta 1.8 added
+# hunger) — for now food items are inventory-only.
+
+# Apple — vanilla 260 (dx.h). 4 HP heal on eat. Crafting input for
+# golden_apple. No natural source in Alpha (leaves don't drop apples
+# until Beta 1.5); debug-spawn only.
+const APPLE: int = 153
+# Bread — vanilla 297 (dx.S). 5 HP heal. Recipe: 3 wheat horizontal.
+const BREAD: int = 154
+# Wheat — vanilla 296 (dx.R). Harvested from mature crops. Phase B
+# adds the crops block + farming mechanic; for now debug-spawn only.
+# Recipe input for bread.
+const WHEAT: int = 155
+# Wheat seeds — vanilla 295 (dx.Q). Drops from breaking tall grass
+# (also Phase B). Planted on tilled farmland with right-click.
+const WHEAT_SEEDS: int = 156
+# String — vanilla 287 (dx.I). Spider drop in vanilla; debug-spawn
+# until mobs ship. Recipe input for fishing rod, bow, wool.
+const STRING: int = 157
+# Feather — vanilla 288 (dx.J). Chicken drop; debug-spawn until mobs
+# ship. Recipe input for arrows.
+const FEATHER: int = 158
+# Paper — vanilla 339 (dx.aI). Recipe: 3 sugar_cane horizontal.
+const PAPER: int = 159
+# Book — vanilla 340 (dx.aJ). Recipe: 3 paper stacked vertically.
+# Used in vanilla bookshelf recipe (3 books + 6 planks).
+const BOOK: int = 160
+# Brick (item) — vanilla 336 (dx.aF). Smelted from clay ball (Phase C
+# adds clay block + worldgen). 4 → 1 brick block via 2×2 craft.
+const BRICK: int = 161
+# Saddle — vanilla 329 (dx.ay). No recipe in vanilla — chest loot only
+# (Alpha dungeons). aY=1 stack-size. Right-click on pig to mount in
+# vanilla; mounting system is post-mob work.
+const SADDLE: int = 162
+# Bowl — vanilla 281 (dx.C). Recipe: 3 planks in a V shape. Used to
+# craft mushroom stew. Empty bowl returned when stew is eaten in
+# vanilla (no eating yet).
+const BOWL: int = 163
+# Mushroom stew — vanilla 282 (dx.D). 5 HP heal (Alpha). Recipe:
+# 1 red mushroom + 1 brown mushroom + 1 bowl shapeless. stack=1.
+const MUSHROOM_STEW: int = 164
+# Leather armor — vanilla 298-301 (dx.T-W). Lowest defense tier
+# (helmet=1, chest=3, legs=2, boots=1, total=7 vs iron 15 / diamond 20).
+# Recipe: leather in standard armor pattern.
+const LEATHER_HELMET: int = 165
+const LEATHER_CHESTPLATE: int = 166
+const LEATHER_LEGGINGS: int = 167
+const LEATHER_BOOTS: int = 168
+# Porkchop — raw vanilla 319 (dx.ao, 3 HP), cooked vanilla 320 (dx.ap,
+# 8 HP). Pig drop in vanilla. Smelt raw → cooked. Debug-spawn until
+# mobs ship.
+const RAW_PORKCHOP: int = 169
+const COOKED_PORKCHOP: int = 170
+# Golden apple — vanilla 322 (dx.ar, 42 HP). Recipe: 8 gold_ingots
+# surrounding 1 apple (Alpha/early-Beta — pre-nerf to 8-block recipe
+# in Beta 1.9). Debug-craftable once apple is available.
+const GOLDEN_APPLE: int = 171
+# Fishing — Alpha v1.0.16 (raw/cooked fish) + v1.0.17 (fishing rod).
+# Fishing rod has durability 65 (aY=64+1) and aX=1 (stack). Recipe:
+# 3 sticks diagonal + 2 string vertical. Cast/reel/bobber mechanic
+# is a follow-up commit; for now items are debug-spawnable.
+const FISHING_ROD: int = 172
+# Raw fish — vanilla 349 (dx.aS, 2 HP). Caught with fishing rod.
+const RAW_FISH: int = 173
+# Cooked fish — vanilla 350 (dx.aT, 5 HP). Smelt raw_fish → cooked_fish.
+const COOKED_FISH: int = 174
+# Egg — vanilla 344 (dx.aN). Chicken drop in vanilla. Used in cake
+# recipe + throwable entity (Alpha v1.0.14). Both deferred until
+# chickens / cake ship — for now debug-spawn only.
+const EGG: int = 175
+# Milk bucket — vanilla 335 (dx.aE). Right-click cow with empty bucket.
+# Drinking returns empty bucket + clears status effects (no effects
+# system in Alpha). Used in cake recipe.
+const MILK_BUCKET: int = 176
+# Sugar — vanilla 353. [BETA 1.2 exception] — added with cake. Recipe:
+# 1 sugar_cane → 1 sugar (shapeless). Used in cake. We ship this
+# pre-cake so the chain is ready once cake mechanic lands.
+const SUGAR: int = 177
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -149,6 +230,9 @@ const TOOL_TYPE_HOE: int = 5  # Beta-era; see WOODEN_HOE note above
 # type so the break-time / harvest-level paths can ignore it cleanly,
 # while still routing through `_TOOL_DATA` for stack=1 + durability.
 const TOOL_TYPE_FLINT_AND_STEEL: int = 6
+# Fishing rod — bj.java in Alpha 1.2.6 (vanilla 346). Right-click casts,
+# right-click while bobber-out reels. Cast mechanic is a follow-up.
+const TOOL_TYPE_FISHING_ROD: int = 7
 
 # Vanilla armor defense points (Bukkit/mc-dev `EnumArmorMaterial`).
 # Full-set totals: gold 11, iron 15, diamond 20. Damage reduction
@@ -157,6 +241,11 @@ const TOOL_TYPE_FLINT_AND_STEEL: int = 6
 # Hook site: whatever damage-event system lands later calls this per
 # equipped slot and applies the formula; no current caller.
 const _ARMOR_DEFENSE: Dictionary = {
+	# Leather — lowest tier; full set total = 7.
+	LEATHER_HELMET: 1,
+	LEATHER_CHESTPLATE: 3,
+	LEATHER_LEGGINGS: 2,
+	LEATHER_BOOTS: 1,
 	IRON_HELMET: 2,
 	IRON_CHESTPLATE: 6,
 	IRON_LEGGINGS: 5,
@@ -200,6 +289,9 @@ const _TOOL_DATA: Dictionary = {
 	# harvest_level are unused for flint-and-steel since it's not a dig
 	# tool — we pass 1.0/0 as benign defaults.
 	FLINT_AND_STEEL: [TOOL_TYPE_FLINT_AND_STEEL, 1.0, 0, 64],
+	# Vanilla bj.java aY=64 — fishing rod loses durability on each
+	# successful reel-in (not on cast).
+	FISHING_ROD: [TOOL_TYPE_FISHING_ROD, 1.0, 0, 64],
 }
 
 
@@ -375,6 +467,68 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.PUMPKIN
 		"jack_o_lantern":
 			return Blocks.JACK_O_LANTERN
+		"bookshelf":
+			return Blocks.BOOKSHELF
+		"flower_red":
+			return Blocks.FLOWER_RED
+		"flower_yellow":
+			return Blocks.FLOWER_YELLOW
+		"mushroom_red":
+			return Blocks.MUSHROOM_RED
+		"mushroom_brown":
+			return Blocks.MUSHROOM_BROWN
+		"sugar_cane":
+			return SUGAR_CANE
+		"apple":
+			return APPLE
+		"bread":
+			return BREAD
+		"wheat":
+			return WHEAT
+		"wheat_seeds":
+			return WHEAT_SEEDS
+		"string":
+			return STRING
+		"feather":
+			return FEATHER
+		"paper":
+			return PAPER
+		"book":
+			return BOOK
+		"brick_item":
+			return BRICK
+		"saddle":
+			return SADDLE
+		"bowl":
+			return BOWL
+		"mushroom_stew":
+			return MUSHROOM_STEW
+		"leather_helmet":
+			return LEATHER_HELMET
+		"leather_chestplate":
+			return LEATHER_CHESTPLATE
+		"leather_leggings":
+			return LEATHER_LEGGINGS
+		"leather_boots":
+			return LEATHER_BOOTS
+		"raw_porkchop":
+			return RAW_PORKCHOP
+		"cooked_porkchop":
+			return COOKED_PORKCHOP
+		"golden_apple":
+			return GOLDEN_APPLE
+		"fishing_rod":
+			return FISHING_ROD
+		"raw_fish":
+			return RAW_FISH
+		"cooked_fish":
+			return COOKED_FISH
+		"egg":
+			return EGG
+		"milk_bucket":
+			return MILK_BUCKET
+		"sugar":
+			return SUGAR
 	return -1
 
 
@@ -562,6 +716,58 @@ static func display_name(item_id: int) -> String:
 			return "Pumpkin"
 		Blocks.JACK_O_LANTERN:
 			return "Jack o'Lantern"
+		Blocks.BOOKSHELF:
+			return "Bookshelf"
+		APPLE:
+			return "Apple"
+		BREAD:
+			return "Bread"
+		WHEAT:
+			return "Wheat"
+		WHEAT_SEEDS:
+			return "Seeds"
+		STRING:
+			return "String"
+		FEATHER:
+			return "Feather"
+		PAPER:
+			return "Paper"
+		BOOK:
+			return "Book"
+		BRICK:
+			return "Brick"
+		SADDLE:
+			return "Saddle"
+		BOWL:
+			return "Bowl"
+		MUSHROOM_STEW:
+			return "Mushroom Stew"
+		LEATHER_HELMET:
+			return "Leather Cap"
+		LEATHER_CHESTPLATE:
+			return "Leather Tunic"
+		LEATHER_LEGGINGS:
+			return "Leather Pants"
+		LEATHER_BOOTS:
+			return "Leather Boots"
+		RAW_PORKCHOP:
+			return "Raw Porkchop"
+		COOKED_PORKCHOP:
+			return "Cooked Porkchop"
+		GOLDEN_APPLE:
+			return "Golden Apple"
+		FISHING_ROD:
+			return "Fishing Rod"
+		RAW_FISH:
+			return "Raw Fish"
+		COOKED_FISH:
+			return "Cooked Fish"
+		EGG:
+			return "Egg"
+		MILK_BUCKET:
+			return "Milk Bucket"
+		SUGAR:
+			return "Sugar"
 	return ""
 
 
@@ -598,13 +804,13 @@ static func tool_harvest_level(item_id: int) -> int:
 # validate slot placement (helmets only go in the head slot, etc.).
 static func armor_slot_for(item_id: int) -> int:
 	match item_id:
-		IRON_HELMET, GOLD_HELMET, DIAMOND_HELMET:
+		LEATHER_HELMET, IRON_HELMET, GOLD_HELMET, DIAMOND_HELMET:
 			return ARMOR_SLOT_HEAD
-		IRON_CHESTPLATE, GOLD_CHESTPLATE, DIAMOND_CHESTPLATE:
+		LEATHER_CHESTPLATE, IRON_CHESTPLATE, GOLD_CHESTPLATE, DIAMOND_CHESTPLATE:
 			return ARMOR_SLOT_CHEST
-		IRON_LEGGINGS, GOLD_LEGGINGS, DIAMOND_LEGGINGS:
+		LEATHER_LEGGINGS, IRON_LEGGINGS, GOLD_LEGGINGS, DIAMOND_LEGGINGS:
 			return ARMOR_SLOT_LEGS
-		IRON_BOOTS, GOLD_BOOTS, DIAMOND_BOOTS:
+		LEATHER_BOOTS, IRON_BOOTS, GOLD_BOOTS, DIAMOND_BOOTS:
 			return ARMOR_SLOT_FEET
 	return ARMOR_SLOT_NONE
 
@@ -638,4 +844,16 @@ static func max_stack_size(item_id: int) -> int:
 	# Vanilla eu.java:aX=1 — door items don't stack.
 	if item_id == WOODEN_DOOR or item_id == IRON_DOOR:
 		return 1
+	# Vanilla pe.java:aX=1 (ItemSaddle) — Infdev addition, treasure-only,
+	# never stacks. Same for mushroom stew (au.java:aX=1) — eating
+	# returns an empty bowl so the slot can only hold one stew at a time.
+	if item_id == SADDLE or item_id == MUSHROOM_STEW:
+		return 1
+	# Vanilla aE.java:aX=1 (ItemBucketMilk) — milk bucket is per-stack
+	# state like other buckets and doesn't stack. Egg in vanilla stacks
+	# to 16 (aX=16) — throwable item cap.
+	if item_id == MILK_BUCKET:
+		return 1
+	if item_id == EGG:
+		return 16
 	return ItemStack.MAX_SIZE
