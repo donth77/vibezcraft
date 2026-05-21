@@ -469,6 +469,10 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.JACK_O_LANTERN
 		"bookshelf":
 			return Blocks.BOOKSHELF
+		"crops":
+			return Blocks.CROPS
+		"tall_grass":
+			return Blocks.TALL_GRASS
 		"flower_red":
 			return Blocks.FLOWER_RED
 		"flower_yellow":
@@ -718,6 +722,10 @@ static func display_name(item_id: int) -> String:
 			return "Jack o'Lantern"
 		Blocks.BOOKSHELF:
 			return "Bookshelf"
+		Blocks.CROPS:
+			return "Wheat Crops"
+		Blocks.TALL_GRASS:
+			return "Tall Grass"
 		APPLE:
 			return "Apple"
 		BREAD:

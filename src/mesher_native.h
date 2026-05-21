@@ -88,6 +88,15 @@ public:
 	static constexpr int SNOW_BLOCK = 43;
 	static constexpr int CACTUS = 44;
 	static constexpr int SNOW_LAYER = 45;
+	// PUMPKIN + JACK_O_LANTERN (46/47) are regular cubes — no skip
+	// needed, the native mesher handles directional faces via the meta
+	// lookup hook in mesh_chunk_data_lit.
+	static constexpr int BOOKSHELF = 48;
+	// CROPS + TALL_GRASS — both MESH_SHAPE_CROSS in GDScript. Listed
+	// here so the native cube pass can skip them; the GDScript
+	// _append_non_cube_geometry pass emits the cross-quads.
+	static constexpr int CROPS = 49;
+	static constexpr int TALL_GRASS = 50;
 
 	MesherNative();
 	~MesherNative();

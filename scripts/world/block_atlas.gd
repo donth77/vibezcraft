@@ -103,6 +103,21 @@ const _LAYOUT := {
 	# top + bottom reuse "planks". Vanilla terrain.png (3, 2) — slot
 	# was reserved in Alpha terrain.png already.
 	"bookshelf_side": 56,
+	# Crop growth stages — vanilla terrain.png (8..15, 5). Stage 0 is
+	# tiny sprouts, stage 7 is mature wheat. Mesher swaps the active
+	# tile per cell meta in _emit_cross_quads.
+	"crops_stage_0": 57,
+	"crops_stage_1": 58,
+	"crops_stage_2": 59,
+	"crops_stage_3": 60,
+	"crops_stage_4": 61,
+	"crops_stage_5": 62,
+	"crops_stage_6": 63,
+	"crops_stage_7": 64,
+	# Tall grass [BETA 1.6 exception] — procedurally drawn since Alpha
+	# 1.2.6 has wood planks at (7, 2), not tall grass. Cross-quad
+	# billboard rendered the same as saplings/flowers.
+	"tall_grass": 65,
 }
 
 static var active_pack: String = DEFAULT_PACK

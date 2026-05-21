@@ -181,6 +181,23 @@ const JACK_O_LANTERN := 47
 # BlockBookshelf.dropBlockAsItemWithChance). Ships pre-enchanting so
 # the book item has a non-decorative purpose now.
 const BOOKSHELF := 48
+# Crops (wheat) — vanilla nq.az = BlockCrops, id 59. 8 growth stages
+# stored in meta 0..7. Plantable on FARMLAND only; mature (meta=7)
+# drops 1 wheat + 0..3 seeds, immature drops 1 seed. Random-ticked by
+# TickScheduler — vanilla a(World, ...) at ld.java is the tick path;
+# the tick rate matches sapling growth (~30s avg per stage on grass-
+# like surfaces). Bonemeal advances to mature like saplings.
+# We allocate id 49 because vanilla 59 is in our reserved 0..99 range
+# but our existing IDs are densely packed up to 47; 49 keeps the
+# growth/plant family contiguous (50 = TALL_GRASS).
+const CROPS := 49
+# Tall grass [BETA 1.6 exception] — vanilla nq.aB = BlockTallGrass,
+# id 31. Cross-quad render like saplings/flowers. Broken with shears
+# drops 1 tall grass; broken with anything else drops 0-1 wheat seeds
+# at the standard 1/8 vanilla rate. Worldgen scatter on grass blocks.
+# Ships pre-shears: any break (bare hand / pickaxe / sword) rolls
+# the seed chance — same as Beta 1.6 pre-Beta-1.7 behavior.
+const TALL_GRASS := 50
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -263,6 +280,31 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		BlockFluids.update(manager, pos, block_id)
 	elif block_id == FIRE:
 		BlockFire.update(manager, pos)
+	elif block_id == CROPS:
+		_tick_crops(manager, pos)
+
+
+# Crops growth tick. Advances meta by 1 each fire if conditions hold,
+# then reschedules itself for the next stage. Vanilla BlockCrops.b
+# checks light level (>= 9 in older versions; relaxed in Alpha — any
+# sky-exposed cell works) and hydration. We mirror the relaxed Alpha
+# behavior: any sky-lit cell over farmland grows, with a 200-tick
+# interval (~10s) per stage. Mature (meta=7) stops rescheduling.
+static func _tick_crops(manager, pos: Vector3i) -> void:
+	var support_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
+	if support_id != FARMLAND:
+		# Farmland turned back into dirt under the crop — break crop.
+		manager.set_world_block(pos, AIR)
+		return
+	var meta: int = manager.get_world_block_meta(pos)
+	if meta >= 7:
+		return  # mature; no more growth ticks
+	manager.set_world_block(pos, CROPS, meta + 1)
+	# Reschedule. Random ±50% jitter so multiple crops planted at once
+	# don't all mature on the same tick (visual variety + spreads the
+	# remesh cost).
+	var jitter: int = 100 + randi() % 200  # [100, 300] ticks
+	TickScheduler.schedule(pos, CROPS, jitter)
 
 
 static func is_opaque(id: int) -> bool:
@@ -312,6 +354,12 @@ static func is_opaque(id: int) -> bool:
 		and id != MUSHROOM_BROWN
 		and id != MUSHROOM_RED
 		and id != SUGAR_CANE
+		# CROPS + TALL_GRASS render as cross-quads (same reason as the
+		# flower family above). Neighbor cubes must keep emitting their
+		# faces or the cross-shader's discard punches a hole through to
+		# the world background.
+		and id != CROPS
+		and id != TALL_GRASS
 	)
 
 
@@ -385,6 +433,8 @@ static func is_replaceable(id: int) -> bool:
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
 		or id == SUGAR_CANE
+		or id == TALL_GRASS
+		or id == CROPS
 	)
 
 
@@ -459,6 +509,9 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[MUSHROOM_BROWN] = 0
 	_light_opacity_lut[MUSHROOM_RED] = 0
 	_light_opacity_lut[SUGAR_CANE] = 0
+	# Crops + tall grass — both non-solid cross-quads, pass full light.
+	_light_opacity_lut[CROPS] = 0
+	_light_opacity_lut[TALL_GRASS] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -517,6 +570,17 @@ static func can_place_at(id: int, support_id: int) -> bool:
 		# any of the 4 cardinal sides — that side-block check is a
 		# placement-time concern handled in interaction.gd if needed.
 		return support_id == SAND or support_id == CACTUS
+	if id == CROPS:
+		# Vanilla BlockCrops.canPlaceBlockAt: requires FARMLAND below.
+		# Nothing else accepted (not grass / dirt) so the player has to
+		# till first.
+		return support_id == FARMLAND
+	if id == TALL_GRASS:
+		# Vanilla BlockTallGrass uses canPlaceBlockOn(grass / dirt /
+		# farmland). Farmland accepted so worldgen scatter can land on
+		# fields that turned to dirt-then-tilled, though in practice
+		# tall grass spawns on grass blocks during worldgen.
+		return support_id == GRASS or support_id == DIRT or support_id == FARMLAND
 	return true
 
 
@@ -626,7 +690,14 @@ static func mesh_shape(id: int) -> int:
 		or id == MUSHROOM_BROWN
 		or id == MUSHROOM_RED
 		or id == SUGAR_CANE
+		or id == TALL_GRASS
+		or id == CROPS
 	):
+		# Tall grass uses CROSS (same as sapling). Crops technically uses
+		# a flat-faced "wheat" mesh in vanilla (4 vertical quads per cell)
+		# but CROSS is visually close enough at our texture resolution and
+		# reuses the existing mesher path. Per-stage texture swap below
+		# differentiates the 8 growth stages.
 		return MESH_SHAPE_CROSS
 	if id == FIRE:
 		return MESH_SHAPE_FIRE
@@ -729,6 +800,10 @@ static func hardness(id: int) -> float:
 			return 0.1  # vanilla BlockSnowLayer instant break
 		SAPLING, TORCH, FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED, SUGAR_CANE:
 			return 0.0  # vanilla: instant break
+		CROPS, TALL_GRASS:
+			# Vanilla BlockCrops + BlockTallGrass both inherit hardness 0
+			# from BlockBush. Instant break by any tool / bare hand.
+			return 0.0
 		DIRT, SAND:
 			return 0.5
 		GRASS, FARMLAND, GRAVEL:
@@ -1059,6 +1134,10 @@ static func name_of(id: int) -> String:
 			return "jack_o_lantern"
 		BOOKSHELF:
 			return "bookshelf"
+		CROPS:
+			return "crops_stage_7"  # 1-arg fallback (mature); meta-aware path below picks the per-stage tile
+		TALL_GRASS:
+			return "tall_grass"
 	return "unknown"
 
 
@@ -1156,6 +1235,14 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "planks"
 				_:
 					return "bookshelf_side"
+		CROPS:
+			# 1-arg fallback returns the mature stage tile. The mesher's
+			# meta-aware path (directional_face_texture) picks the actual
+			# stage at render time — see has_directional_face.
+			return "crops_stage_7"
+		TALL_GRASS:
+			# All 6 faces share the same cross-quad sprite.
+			return "tall_grass"
 		FARMLAND:
 			match face:
 				"top":

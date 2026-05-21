@@ -28,6 +28,10 @@ const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.p
 # stays enabled so devs who debug-grant a hoe (J in debug mode) can still
 # exercise the full path.
 const HOE_TILL_ENABLED: bool = true
+# Preload the script so we can `is`-test without depending on the
+# class_name cache (which only populates after an editor scan; headless
+# test runs don't trigger that scan).
+const _MOB_BASE_SCRIPT := preload("res://scripts/entities/mob_base.gd")
 
 var _last_place_ms: int = 0
 # Cached player ref for the food-eating handler. find_child walks the
@@ -83,6 +87,58 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event.is_action_pressed("interact_place"):
 		_try_place()
+	# Left-click attack: on the EDGE of interact_break (just-pressed),
+	# check whether the raycast hits a MobBase. If yes, deal a hit and
+	# skip the mining path entirely (a mob in front of you shouldn't
+	# trigger block mining behind it). The hold-to-mine path in
+	# _update_mining still runs continuously for blocks.
+	if event.is_action_pressed("interact_break"):
+		_try_attack_mob()
+
+
+# Returns true if the raycast hit a MobBase and damage was dealt.
+# Knockback direction = camera forward × XZ (no vertical component on
+# attacker side; vanilla applies the +0.4 vertical kick inside the
+# entity's take_damage path).
+func _try_attack_mob() -> bool:
+	var hit: Dictionary = _raycast()
+	if hit.is_empty():
+		return false
+	var collider: Node = hit.get("collider") as Node
+	if collider == null:
+		return false
+	# The raycast collider might be the mob's CollisionShape3D or the
+	# CharacterBody3D itself depending on what the physics server hit.
+	# Walk up the tree until we find a node whose script extends MobBase.
+	var mob: Node = null
+	var node: Node = collider
+	while node != null:
+		var script: Script = node.get_script()
+		if script != null and _script_extends(script, _MOB_BASE_SCRIPT):
+			mob = node
+			break
+		node = node.get_parent()
+	if mob == null:
+		return false
+	# Damage amount = bare-hand 1 (vanilla EntityPlayer.damageEntity for
+	# bare-fist hit is 1 HP). Tools / swords increase this later.
+	var attacker_xz := -_camera.global_transform.basis.z
+	attacker_xz.y = 0.0
+	mob.call("take_damage", 1, attacker_xz)
+	_trigger_player_use_swing()
+	SFX.play_player_hit()
+	return true
+
+
+# Walk a script's base-script chain looking for `target`. Used to test
+# "is a MobBase" without relying on class_name registration.
+static func _script_extends(script: Script, target: Script) -> bool:
+	var s: Script = script
+	while s != null:
+		if s == target:
+			return true
+		s = s.get_base_script()
+	return false
 
 
 func _world_input_active() -> bool:
@@ -305,11 +361,18 @@ func _complete_break(target: Vector3i) -> void:
 	# slot rolls independently — preserves leaves-sapling / gravel-flint
 	# semantics for any future multi-drop block that wants the random
 	# tier mixed in.
-	var n_drops: int = Blocks.drop_quantity(broken_id)
-	for _i in range(n_drops):
-		var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
-		if dropped_id != Blocks.AIR:
-			_spawn_dropped_item(target, dropped_id)
+	# CROPS + TALL_GRASS have variable-item drops (wheat + seeds at
+	# random counts) — route through a special-case helper instead of
+	# the uniform-count loop above.
+	if broken_id == Blocks.CROPS or broken_id == Blocks.TALL_GRASS:
+		for item_id in _farm_drops(broken_id, target):
+			_spawn_dropped_item(target, item_id)
+	else:
+		var n_drops: int = Blocks.drop_quantity(broken_id)
+		for _i in range(n_drops):
+			var dropped_id: int = Blocks.random_drop(broken_id, _held_tool_id())
+			if dropped_id != Blocks.AIR:
+				_spawn_dropped_item(target, dropped_id)
 	# Tool durability — vanilla loses 1 use per block broken (regardless of
 	# whether the break "counted" for a drop). Snap sound on the final hit.
 	var inv: Inventory = _player_inventory()
@@ -654,19 +717,31 @@ func _ignite_tnt(target: Vector3i, inv: Inventory) -> bool:
 # the two stages into one growth step. The dice roll matches vanilla so
 # the player still feels the "needs a few uses" pacing.
 func _try_bonemeal(hit: Dictionary, hit_id: int) -> bool:
-	if hit_id != Blocks.SAPLING:
-		return false
 	var inv: Inventory = _player_inventory()
 	if inv == null:
 		return false
 	var stack: ItemStack = inv.selected()
 	if stack.is_empty() or stack.item_id != Items.BONEMEAL:
 		return false
-	# 45% chance per use, per vanilla. A whiff still consumes one bonemeal.
-	if randf() < 0.45:
-		_chunk_manager.grow_tree_at(hit.block_pos)
-	inv.consume_one_selected()
-	return true
+	# Sapling — 45% chance per use of growing the tree (vanilla). A
+	# whiff still consumes one bonemeal.
+	if hit_id == Blocks.SAPLING:
+		if randf() < 0.45:
+			_chunk_manager.grow_tree_at(hit.block_pos)
+		inv.consume_one_selected()
+		return true
+	# Crops — vanilla BlockCrops.fertilize advances meta straight to
+	# mature (7). Always succeeds (no random roll) and consumes one
+	# bonemeal. No-op if the crop is already mature.
+	if hit_id == Blocks.CROPS:
+		var meta: int = _chunk_manager.get_world_block_meta(hit.block_pos)
+		if meta < 7:
+			_chunk_manager.set_world_block(hit.block_pos, Blocks.CROPS, 7)
+			# Cancel the pending growth tick — the crop is mature now.
+			TickScheduler.cancel(hit.block_pos, Blocks.CROPS)
+		inv.consume_one_selected()
+		return true
+	return false
 
 
 # Bucket use — covers three cases mirroring ds.java::ItemBucket.a() :
@@ -884,6 +959,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# handler that performs the support check + block write.
 	if stack.item_id == Items.SUGAR_CANE:
 		return _try_place_sugar_cane(hit, stack)
+	# Wheat seeds → CROPS at stage 0. Vanilla la.java (ItemSeeds)
+	# checks the targeted cell is FARMLAND + the cell above is AIR,
+	# then places nq.az (BlockCrops) at meta=0 above the farmland.
+	if stack.item_id == Items.WHEAT_SEEDS:
+		return _try_place_wheat_seeds(hit)
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
@@ -1192,6 +1272,64 @@ func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
 		return false
 	_chunk_manager.set_world_block(place, Blocks.SUGAR_CANE)
 	SFX.play_place(Blocks.SUGAR_CANE)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Variable-count drops for the farming family.
+#   CROPS mature (meta=7): 1 wheat + 0..3 seeds. Vanilla BlockCrops
+#     loops 0..3 with a 1/(15-i) chance per seed slot; we use the
+#     simpler 1/4-per-slot approximation that gives the same ~3
+#     average drop value.
+#   CROPS immature: 1 seed back (vanilla: return your seed when the
+#     plant isn't fully grown).
+#   TALL_GRASS: 1/8 chance of 1 seed. Anything else drops nothing.
+#     Matches Beta 1.6 pre-shears behavior — the only practical seed
+#     source in survival until tools land.
+func _farm_drops(broken_id: int, pos: Vector3i) -> Array:
+	var drops: Array = []
+	if broken_id == Blocks.CROPS:
+		var meta: int = _chunk_manager.get_world_block_meta(pos)
+		if meta >= 7:
+			drops.append(Items.WHEAT)
+			for _i in range(3):
+				if randi() % 4 == 0:
+					drops.append(Items.WHEAT_SEEDS)
+		else:
+			drops.append(Items.WHEAT_SEEDS)
+	elif broken_id == Blocks.TALL_GRASS:
+		if randi() % 8 == 0:
+			drops.append(Items.WHEAT_SEEDS)
+	return drops
+
+
+# Wheat seeds placement — vanilla la.java (ItemSeeds.a) requires the
+# CLICKED face to be the top of a FARMLAND cell, and the cell above
+# that to be empty. Places BlockCrops (nq.az) at meta 0 (stage 0),
+# consumes one seed. Players who haven't tilled their dirt first will
+# see no effect — that's Alpha-faithful.
+func _try_place_wheat_seeds(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	# Vanilla requires the top face of farmland. normal_i.y == 1 means
+	# the player clicked the top face — that's the only valid case.
+	if hit.normal_i.y != 1:
+		return false
+	var support_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	if support_id != Blocks.FARMLAND:
+		return false
+	var place: Vector3i = hit.block_pos + Vector3i(0, 1, 0)
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	_chunk_manager.set_world_block(place, Blocks.CROPS, 0)
+	# Schedule growth ticks via TickScheduler. Vanilla picks an interval
+	# uniformly from ~9-30 seconds per stage; we use a mid-range default
+	# of 200 ticks (~10 seconds at 20 TPS) — see _on_crop_tick.
+	TickScheduler.schedule(place, Blocks.CROPS, 200)
+	SFX.play_place(Blocks.FARMLAND)  # soft "till" sound; no dedicated seed-plant sfx in Alpha
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()

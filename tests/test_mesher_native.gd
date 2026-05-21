@@ -254,19 +254,17 @@ func test_water_flow_vector_points_at_lower_neighbor() -> void:
 # the one ArrayMesh.create_trimesh_shape() produces from the render mesh.
 # If they ever diverge, the collision mesh won't match the visual mesh.
 func _collision_faces_via_old_path(chunk: Chunk) -> PackedVector3Array:
+	# Direct read of `collision_faces` from the GDScript Mesher output —
+	# the canonical reference for what's in the physics body. Earlier
+	# versions of this helper rebuilt the trimesh via
+	# ArrayMesh.create_trimesh_shape on the FULL render mesh (cubes +
+	# cross-quads), which leaked sapling / flower / tall-grass triangles
+	# into "expected" and only happened to pass on worldgen chunks that
+	# had zero non-cube blocks. The native flat-soup is cube-only by
+	# design — saplings & friends are passable in vanilla — so the
+	# render-mesh-trimesh comparison was wrong.
 	var gds: Dictionary = Mesher.mesh_chunk(chunk)
-	if gds.vertices.is_empty():
-		return PackedVector3Array()
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = gds.vertices
-	arrays[Mesh.ARRAY_NORMAL] = gds.normals
-	arrays[Mesh.ARRAY_TEX_UV] = gds.uvs
-	arrays[Mesh.ARRAY_INDEX] = gds.indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	var shape: ConcavePolygonShape3D = mesh.create_trimesh_shape()
-	return shape.get_faces() if shape != null else PackedVector3Array()
+	return gds.get("collision_faces", PackedVector3Array())
 
 
 func test_parity_collision_faces_single_block() -> void:

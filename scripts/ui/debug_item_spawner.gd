@@ -1,5 +1,10 @@
 extends Control
 
+# Preloaded so the `TestMob.new()` call below doesn't depend on the
+# class_name registry (headless tests don't trigger the editor scan
+# that populates it).
+const _TEST_MOB_SCRIPT := preload("res://scripts/entities/test_mob.gd")
+
 # Debug item spawner — grid of every implemented block and item, with a
 # quantity selector, that dumps stacks into the player's inventory on
 # click. Replaces the earlier one-key-per-set debug hotkeys
@@ -61,6 +66,10 @@ const _BLOCKS: Array = [
 	Blocks.PUMPKIN,
 	Blocks.JACK_O_LANTERN,
 	Blocks.BOOKSHELF,
+	# Tall grass [BETA 1.6 exception] — spawnable so players can place
+	# patches by hand. Broken with anything has a 1/8 chance of dropping
+	# a wheat seed (vanilla rate).
+	Blocks.TALL_GRASS,
 ]
 
 const _ITEMS: Array = [
@@ -229,11 +238,39 @@ func _build_header(vbox: VBoxContainer) -> void:
 	_qty_spin.value = _DEFAULT_QTY
 	_qty_spin.custom_minimum_size = Vector2(96, 0)
 	header.add_child(_qty_spin)
+	# Spawn-a-test-mob shortcut — M0 validation. Closes the spawner and
+	# drops a magenta cube ~3 m in front of the player. Hit it with LMB
+	# to confirm the take_damage / die / drop loop end-to-end.
+	var spawn_mob_btn := Button.new()
+	spawn_mob_btn.text = "Spawn TestMob"
+	spawn_mob_btn.add_theme_font_size_override("font_size", 14)
+	spawn_mob_btn.pressed.connect(_spawn_test_mob)
+	header.add_child(spawn_mob_btn)
 	var close_btn := Button.new()
 	close_btn.text = "X"
 	close_btn.custom_minimum_size = Vector2(36, 36)
 	close_btn.pressed.connect(_hide_spawner)
 	header.add_child(close_btn)
+
+
+# Drop a TestMob ~3 m in front of the player at their feet height.
+# Used to validate the M0 mob base before real mobs (Pig, Cow, etc.)
+# ship.
+func _spawn_test_mob() -> void:
+	if _player == null:
+		return
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null:
+		return
+	var forward: Vector3 = -_player.global_transform.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.001:
+		forward = Vector3(0, 0, -1)
+	var spawn_pos: Vector3 = _player.global_position + forward.normalized() * 3.0
+	var mob: CharacterBody3D = _TEST_MOB_SCRIPT.new() as CharacterBody3D
+	cm.add_child(mob)
+	mob.global_position = spawn_pos
+	_hide_spawner()
 
 
 # Scrollable grid of clickable item buttons.

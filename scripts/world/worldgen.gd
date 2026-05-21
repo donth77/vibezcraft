@@ -142,6 +142,13 @@ const _SUGAR_CANE_SALT: int = 0xC4ED
 # vanilla density.
 const _CACTUS_ATTEMPTS: int = 3
 const _CACTUS_SALT: int = 0xCAC7
+# Tall grass scatter [BETA 1.6 exception] — vanilla BlockTallGrass
+# generates via WorldGenTallGrass with ~10 attempts per chunk in grass
+# biomes. We use 16 since our biome shape skews larger and the cluster
+# count balances out with vanilla density. Each successful attempt
+# places ONE tall grass on the cell above a grass block.
+const _TALL_GRASS_ATTEMPTS: int = 16
+const _TALL_GRASS_SALT: int = 0xC2A5
 
 # Final Knuth multiplicative mix applied inside _hash3 / _hash4 so low-bit
 # differences in the last argument avalanche into high bits. Without this,
@@ -389,6 +396,10 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	# 8. Cactus — places 1-3 stacked CACTUS blocks on SAND in Desert
 	# biomes only. Vanilla BlockCactus placement.
 	_scatter_cactus(chunk, chunk_x, chunk_z)
+	# 8.5. Tall grass [BETA 1.6 exception] — scatter on grass surfaces.
+	# This is the practical way to obtain wheat seeds in survival;
+	# breaking a tuft has a 1/8 chance to drop one seed (per Beta 1.6).
+	_scatter_tall_grass(chunk, chunk_x, chunk_z)
 	# 9. Cold-biome ICE / snow overlay — must run AFTER trees + cactus
 	# so the topmost-block lookup sees tree leaves / canopy and tops
 	# them with snow too. Vanilla WorldServer's snow step iterates
@@ -1636,3 +1647,36 @@ static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 				break
 			chunk.set_block_unchecked(lx, py, lz, Blocks.CACTUS)
 	PerfProbe.end("worldgen.cactus", probe_token)
+
+
+# Tall grass scatter [BETA 1.6 exception]. Per chunk: 16 attempts at
+# random (x, z). Each attempt picks the topmost grass-block column and
+# places a TALL_GRASS in the cell above. Only fires when the surface is
+# actually grass — won't touch sand/dirt/stone, so plains/forest biomes
+# get tufts but deserts stay clean. Avoids snow-covered cells too so
+# the cold biomes look right (no tall grass poking through snowfall).
+static func _scatter_tall_grass(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
+	if not terrain_3d_enabled:
+		return
+	var probe_token := PerfProbe.begin("worldgen.tall_grass")
+	for attempt in range(_TALL_GRASS_ATTEMPTS):
+		var seed_h: int = _hash4(chunk_x, chunk_z, _TALL_GRASS_SALT, attempt)
+		var lx: int = seed_h & 0xF
+		var lz: int = (seed_h >> 4) & 0xF
+		# Find topmost surface column
+		var sy: int = -1
+		for y in range(Chunk.SIZE_Y - 1, 0, -1):
+			if chunk.get_block_unchecked(lx, y, lz) != Blocks.AIR:
+				sy = y
+				break
+		if sy < 0:
+			continue
+		if chunk.get_block_unchecked(lx, sy, lz) != Blocks.GRASS:
+			continue
+		var py: int = sy + 1
+		if py >= Chunk.SIZE_Y - 1:
+			continue
+		if chunk.get_block_unchecked(lx, py, lz) != Blocks.AIR:
+			continue
+		chunk.set_block_unchecked(lx, py, lz, Blocks.TALL_GRASS)
+	PerfProbe.end("worldgen.tall_grass", probe_token)

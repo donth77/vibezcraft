@@ -575,6 +575,10 @@ func _material_for(block_id: int) -> String:
 			# Vanilla Beta 1.3 BlockBookshelf inherits Material.wood
 			# (same as planks). Wood SFX for dig / step / place.
 			return "wood"
+		Blocks.CROPS, Blocks.TALL_GRASS:
+			# BlockCrops + BlockTallGrass both inherit BlockBush which
+			# uses Material.plant → "grass" SFX (soft rustle, vanilla).
+			return "grass"
 	return ""
 
 

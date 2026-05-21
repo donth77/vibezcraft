@@ -46,6 +46,16 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	# baking finishes.
 	Blocks.PUMPKIN: "pumpkin_face",
 	Blocks.JACK_O_LANTERN: "jack_o_lantern_face",
+	# Tall grass [BETA 1.6 exception] — cross-quad in-world, falls back
+	# to the flat-sprite path for inventory. The procedurally drawn
+	# tall_grass.png in the pack root is sourced by _load_block_sprite.
+	Blocks.TALL_GRASS: "tall_grass",
+	# CROPS uses its mature stage tile as the inventory placeholder
+	# (consistent with how SUGAR_CANE shows the plant sprite). In
+	# practice the inventory shows WHEAT_SEEDS instead — players never
+	# carry a CROPS block directly — but the entry guards against the
+	# debug spawner spawning the block id.
+	Blocks.CROPS: "crops_stage_7",
 }
 
 # Item sprite basenames. Resolved at load time: first try

@@ -84,6 +84,19 @@ TERRAIN_TILES = {
 	# Ships here because books are otherwise useless until enchanting
 	# (Beta 1.9) and decorating with a shelf gives the item a purpose now.
 	"bookshelf_side": (3, 2),
+	# Crop growth stages (BlockCrops, vanilla nq.az). 8 sprites at
+	# terrain.png row 5, cols 8..15 (vanilla terrain.png convention).
+	# Stage 0 is mostly transparent (tiny sprouts); stage 7 is mature
+	# wheat. The mesher swaps the sprite per cell meta — see
+	# scripts/world/mesher.gd::_emit_cross_quads.
+	"crops_stage_0": (8, 5),
+	"crops_stage_1": (9, 5),
+	"crops_stage_2": (10, 5),
+	"crops_stage_3": (11, 5),
+	"crops_stage_4": (12, 5),
+	"crops_stage_5": (13, 5),
+	"crops_stage_6": (14, 5),
+	"crops_stage_7": (15, 5),
 	# `furnace_top` is intentionally NOT here. Vanilla Alpha 1.2.6
 	# BlockFurnace.getBlockTextureFromSide (mj.java:46-52) returns
 	# `nq.t.bg` (= the STONE texture index) for both top (n5=1) and
@@ -253,6 +266,41 @@ PROCEDURAL_ITEMS: dict = {
 	"sugar": "sugar_white_granules",
 }
 
+# Procedural terrain tiles — same idea but emitted into the pack dir
+# (next to the rest of terrain.png extractions), not into items/.
+PROCEDURAL_TERRAIN: dict = {
+	# Tall grass [BETA 1.6 exception]. Vanilla terrain.png (7, 2) added
+	# in Beta — Alpha 1.2.6 has wood-plank pixels in that slot, no
+	# tall-grass tile. Draw a few vertical green strands on a transparent
+	# 16×16; rendered as a cross-quad it reads as a small grass tuft.
+	"tall_grass": "tall_grass_strands",
+}
+
+
+def _draw_tall_grass() -> Image.Image:
+	"""A handful of vertical grass strands of varying heights/shades
+	on a transparent 16×16. Drawn as a cross-quad billboard in-world it
+	reads as a small grass tuft. Approximates vanilla Beta tall_grass
+	colors (the unbiomed grayscale form before tint)."""
+	img = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+	px = img.load()
+	# Each tuple = (x, top_y, color). Strands grow upward from y=15.
+	strands = [
+		(2, 9, (60, 110, 30, 255)),
+		(4, 6, (80, 140, 40, 255)),
+		(5, 8, (50, 100, 25, 255)),
+		(7, 4, (90, 160, 50, 255)),
+		(8, 7, (70, 130, 35, 255)),
+		(10, 5, (85, 150, 45, 255)),
+		(11, 9, (55, 105, 28, 255)),
+		(13, 7, (75, 135, 38, 255)),
+	]
+	for x, top_y, color in strands:
+		for y in range(top_y, 16):
+			if 0 <= x < 16 and 0 <= y < 16:
+				px[x, y] = color
+	return img
+
 
 def _draw_sugar() -> Image.Image:
 	"""6x6 white block centered in a 16x16 transparent canvas, with a
@@ -390,6 +438,12 @@ def main() -> None:
 	for name in PROCEDURAL_ITEMS:
 		if name == "sugar":
 			_draw_sugar().save(ITEMS / f"{name}.png")
+
+	# Procedural terrain tiles — same idea, but written into PACK/ next
+	# to the rest of terrain.png extractions.
+	for name in PROCEDURAL_TERRAIN:
+		if name == "tall_grass":
+			_draw_tall_grass().save(PACK / f"{name}.png")
 
 	# Alpha's Steve skin is 64×32 — the left arm and left leg don't exist in
 	# the texture; the game renders them by mirroring the right side. Our

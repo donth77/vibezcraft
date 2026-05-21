@@ -1210,7 +1210,15 @@ static func _emit_cross_quads(
 	plant_faces: PackedVector3Array
 ) -> void:
 	var origin := Vector3(x, y, z)
-	var rect: Rect2 = BlockAtlas.uv_rect_for(id, BlockAtlas.FACE_SIDE)
+	var rect: Rect2
+	if id == Blocks.CROPS:
+		# Crops swap texture per growth stage (meta 0..7). Vanilla wheat
+		# textures live at terrain.png (8..15, 5); the atlas pre-registers
+		# them as crops_stage_0..7 so we just compose the lookup name.
+		var stage: int = chunk.get_block_meta_unchecked(x, y, z) & 0x07
+		rect = BlockAtlas.uv_rect("crops_stage_%d" % stage)
+	else:
+		rect = BlockAtlas.uv_rect_for(id, BlockAtlas.FACE_SIDE)
 	var top_normal := Vector3(0, 1, 0)
 	# Cross-quad samples its OWN cell light (no "neighbor adjacent to face"
 	# concept — the quad floats inside the cell). Bright air around the
