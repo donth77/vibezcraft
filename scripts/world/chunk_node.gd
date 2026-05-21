@@ -82,6 +82,11 @@ var _priority_apply: bool = false
 # by chunk-local Vector3i; rebuilt every _apply_mesh_data so adds /
 # removes track block edits without per-event signals.
 var _chest_nodes: Dictionary = {}
+# SIGN cells get a SignNode child for the in-world 3D text overlay.
+# Keyed by chunk-local Vector3i; rebuilt every _apply_mesh_data so
+# breaking / placing signs adds + removes nodes in lockstep with the
+# chunk mesh refresh.
+var _sign_nodes: Dictionary = {}
 
 
 func _init() -> void:
@@ -432,6 +437,8 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		_lava_mesh_instance.mesh = null
 	if chunk.has_chest_blocks or not _chest_nodes.is_empty():
 		_sync_chest_entities()
+	if chunk.has_sign_blocks or not _sign_nodes.is_empty():
+		_sync_sign_entities()
 	PerfProbe.end("chunk_node.apply", probe_token)
 
 
@@ -473,3 +480,46 @@ func _sync_chest_entities() -> void:
 # so the right-click-to-open path can drive set_open() on the entity.
 func find_chest_node_at_local(local_pos: Vector3i) -> ChestNode:
 	return _chest_nodes.get(local_pos, null)
+
+
+# Walk the chunk for SIGN_STANDING / SIGN_WALL cells, spawning a
+# SignNode per cell that doesn't already have one. Removes orphan
+# nodes whose underlying block was broken. Same iteration shape as
+# _sync_chest_entities — signs are rare per chunk so the per-cell
+# scan cost is negligible.
+func _sync_sign_entities() -> void:
+	var seen: Dictionary = {}
+	for y in range(Chunk.SIZE_Y):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var idx: int = y * Chunk.SIZE_X * Chunk.SIZE_Z + z * Chunk.SIZE_X + x
+				var bid: int = chunk.blocks[idx]
+				if bid != Blocks.SIGN_STANDING and bid != Blocks.SIGN_WALL:
+					continue
+				var key := Vector3i(x, y, z)
+				seen[key] = true
+				var cell_meta: int = chunk.get_block_meta(x, y, z)
+				if not _sign_nodes.has(key):
+					var node := SignNode.new()
+					node.is_wall_sign = (bid == Blocks.SIGN_WALL)
+					node.meta = cell_meta
+					# Position at chunk-local cell origin (0..16 XZ;
+					# Y in world coords). SignNode internally offsets
+					# to cell-center XZ + cell-base Y via its label
+					# layout. The chunk_node is translated to the
+					# chunk origin in world space, so positioning
+					# here is purely local.
+					node.position = Vector3(float(x), float(y), float(z))
+					add_child(node)
+					_sign_nodes[key] = node
+				else:
+					# Existing node — re-check meta in case the player
+					# broke + re-placed with a new orientation.
+					var existing: SignNode = _sign_nodes[key]
+					existing.is_wall_sign = (bid == Blocks.SIGN_WALL)
+					existing.meta = cell_meta
+	# Despawn entries whose cell is no longer a sign.
+	for key: Vector3i in _sign_nodes.keys():
+		if not seen.has(key):
+			_sign_nodes[key].queue_free()
+			_sign_nodes.erase(key)

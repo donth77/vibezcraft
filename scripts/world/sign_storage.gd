@@ -11,6 +11,12 @@ extends Node
 # hooks at the bottom serialize/restore via the chunk save path so
 # inscribed text survives chunk unload + world reload.
 
+# Emitted whenever a sign's text changes via set_text. SignNode (the
+# in-world Label3D wrapper) listens to refresh its rendered text; the
+# emit fires synchronously so the visible text updates the same frame
+# the GUI's Done button is pressed.
+signal text_changed(pos: Vector3i)
+
 const LINES_PER_SIGN: int = 4
 const MAX_CHARS_PER_LINE: int = 15
 
@@ -41,6 +47,7 @@ func set_text(pos: Vector3i, line_idx: int, text: String) -> void:
 		return
 	var lines: Array = get_or_create(pos)
 	lines[line_idx] = text.substr(0, MAX_CHARS_PER_LINE)
+	text_changed.emit(pos)
 
 
 # Get all 4 lines as a snapshot Array (caller can mutate without

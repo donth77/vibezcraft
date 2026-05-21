@@ -57,6 +57,11 @@ var cane_tops: Array[Vector3i] = []
 # rule as has_non_cube_blocks.
 var has_water_cells: bool = false
 var has_chest_blocks: bool = false
+# Sticky flag set when any SIGN_STANDING / SIGN_WALL cell is written.
+# chunk_node.gd reads this to drive the per-sign Label3D spawn loop —
+# without it we'd walk every cell of every chunk on every materialize
+# even though signs are rare. Sticky-only-grows like has_chest_blocks.
+var has_sign_blocks: bool = false
 # Per-(x,z) heightmap, 256 entries indexed `z * SIZE_X + x`. Each cell
 # stores `(y of topmost cell with light_opacity > 0) + 1`. Cells at
 # `y >= height_map[x,z]` are sky-exposed (vanilla canSeeSky semantics).
@@ -216,6 +221,8 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 		has_water_cells = true
 	if id == Blocks.CHEST:
 		has_chest_blocks = true
+	if id == Blocks.SIGN_STANDING or id == Blocks.SIGN_WALL:
+		has_sign_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 
@@ -237,6 +244,8 @@ func set_block_with_meta(x: int, y: int, z: int, id: int, meta: int) -> void:
 		has_water_cells = true
 	if id == Blocks.CHEST:
 		has_chest_blocks = true
+	if id == Blocks.SIGN_STANDING or id == Blocks.SIGN_WALL:
+		has_sign_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 
@@ -261,6 +270,8 @@ func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
 		has_water_cells = true
 	if id == Blocks.CHEST:
 		has_chest_blocks = true
+	if id == Blocks.SIGN_STANDING or id == Blocks.SIGN_WALL:
+		has_sign_blocks = true
 	_update_height_map_for_set(x, y, z, id)
 	dirty = true
 
