@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://c5dika3pcj4tv"
-path="res://.godot/imported/cobblestone.png-e329286b8fdfdf13cf1d91d0931a6d9d.ctex"
+uid="uid://susfwuyjm8y0"
+path="res://.godot/imported/shears.png-89ef3e7657daa5cf36a1b90a64313b23.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/blocks/packs/pixellab/cobblestone.png"
-dest_files=["res://.godot/imported/cobblestone.png-e329286b8fdfdf13cf1d91d0931a6d9d.ctex"]
+source_file="res://assets/textures/items/shears.png"
+dest_files=["res://.godot/imported/shears.png-89ef3e7657daa5cf36a1b90a64313b23.ctex"]
 
 [params]
 

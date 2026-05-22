@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bcqskrv3k1so0"
-path="res://.godot/imported/planks.png-96ff906dee58f90e0dabd673e3cd1051.ctex"
+uid="uid://cuqe4r72i0iqc"
+path="res://.godot/imported/sheep.png-9336d0357833df22bc40cfa2fff854de.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/blocks/packs/pixellab/planks.png"
-dest_files=["res://.godot/imported/planks.png-96ff906dee58f90e0dabd673e3cd1051.ctex"]
+source_file="res://assets/textures/mob/sheep.png"
+dest_files=["res://.godot/imported/sheep.png-9336d0357833df22bc40cfa2fff854de.ctex"]
 
 [params]
 

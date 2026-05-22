@@ -186,6 +186,14 @@ const _CHICKEN_HURT_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/chicken/hurt2.ogg",
 ]
 const _CHICKEN_PLOP_SOUND: String = "res://assets/audio/sfx/mob/chicken/plop.ogg"
+# Sheep audio — vanilla Alpha 1.2.6 `bx.java::d()`, `f_()`, and `f()` ALL
+# return "mob.sheep", so idle, hurt, AND death share the same say1-3
+# pool. Sheep has only this one clip family in Alpha.
+const _SHEEP_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/sheep/say1.ogg",
+	"res://assets/audio/sfx/mob/sheep/say2.ogg",
+	"res://assets/audio/sfx/mob/sheep/say3.ogg",
+]
 # Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
 # water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
 # by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
@@ -704,6 +712,13 @@ func play_chicken_death(pos: Vector3) -> void:
 # at full volume with the standard ±0.2 vanilla pitch jitter.
 func play_chicken_plop(pos: Vector3) -> void:
 	_play_mob_sound_3d([_CHICKEN_PLOP_SOUND], pos)
+
+
+# Sheep say — vanilla `bx.java` returns "mob.sheep" for idle, hurt, AND
+# death (one clip pool for everything). The single-method wrapper keeps
+# callers cleaner; mob_base routes hurt/death through this too.
+func play_sheep_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SHEEP_SAY_SOUNDS, pos)
 
 
 # 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D

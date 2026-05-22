@@ -395,11 +395,53 @@
       "result": {"id": "sign", "count": 1}
     },
     {
+      "_comment": "Shears — Beta ItemShears recipe: 2 iron ingots diagonal. Top-right + center-left. Yields 1 shears.",
+      "id": "shears",
+      "pattern": [" I", "I "],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "shears", "count": 1}
+    },
+    {
       "_comment": "Boat — vanilla Alpha CraftingManager. 5 planks in a U: empty row on top, plank-air-plank middle, planks across bottom. Yields 1 boat.",
       "id": "boat",
       "pattern": ["P P", "PPP"],
       "key": {"P": "planks"},
       "result": {"id": "boat", "count": 1}
+    },
+    {
+      "_comment": "Iron block — vanilla Alpha CraftingManager. 9 iron_ingot in a 3x3 fill -> 1 iron_block.",
+      "id": "iron_block",
+      "pattern": ["III", "III", "III"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "iron_block", "count": 1}
+    },
+    {
+      "_comment": "Gold block — vanilla Alpha. 9 gold_ingot in 3x3 -> 1 gold_block.",
+      "id": "gold_block",
+      "pattern": ["GGG", "GGG", "GGG"],
+      "key": {"G": "gold_ingot"},
+      "result": {"id": "gold_block", "count": 1}
+    },
+    {
+      "_comment": "Diamond block — vanilla Alpha. 9 diamond in 3x3 -> 1 diamond_block.",
+      "id": "diamond_block",
+      "pattern": ["DDD", "DDD", "DDD"],
+      "key": {"D": "diamond"},
+      "result": {"id": "diamond_block", "count": 1}
+    },
+    {
+      "_comment": "Wool (white) — vanilla Alpha qj.java. 4 string in a 2x2 -> 1 wool. Other wool colors require dyes (Beta 1.2+) which aren't shipped.",
+      "id": "wool_white",
+      "pattern": ["SS", "SS"],
+      "key": {"S": "string"},
+      "result": {"id": "wool_white", "count": 1}
+    },
+    {
+      "_comment": "Clay block — vanilla Beta CraftingManager. 4 clay_ball in 2x2 -> 1 clay block. Reverse-craft of breaking a clay block (which drops 4 clay_ball).",
+      "id": "clay_block",
+      "pattern": ["BB", "BB"],
+      "key": {"B": "clay_ball"},
+      "result": {"id": "clay", "count": 1}
     }
   ],
   "shapeless": [
@@ -419,6 +461,24 @@
       "id": "sugar",
       "ingredients": ["sugar_cane"],
       "result": {"id": "sugar", "count": 1}
+    },
+    {
+      "_comment": "Uncraft iron block back into 9 ingots — vanilla Alpha CraftingManager registers the reverse alongside the forward block recipe.",
+      "id": "iron_ingot_from_block",
+      "ingredients": ["iron_block"],
+      "result": {"id": "iron_ingot", "count": 9}
+    },
+    {
+      "_comment": "Uncraft gold block back into 9 ingots.",
+      "id": "gold_ingot_from_block",
+      "ingredients": ["gold_block"],
+      "result": {"id": "gold_ingot", "count": 9}
+    },
+    {
+      "_comment": "Uncraft diamond block back into 9 diamonds.",
+      "id": "diamond_from_block",
+      "ingredients": ["diamond_block"],
+      "result": {"id": "diamond", "count": 9}
     }
   ],
   "_disabled": [

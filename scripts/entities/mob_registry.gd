@@ -25,6 +25,10 @@ const _ENTRIES: Dictionary = {
 	# 0-2 feather + 0-2 raw_chicken (deviation, modern QoL). Lays
 	# an egg every 5-10 min. Slow-fall (motionY × 0.6 per tick).
 	"chicken": "res://scripts/entities/chicken.gd",
+	# M2 — vanilla bx.java (EntitySheep). Passive, 10 HP. Drops 1-3
+	# wool ONCE on first damage (Alpha first-hit shed mechanic) OR via
+	# right-click with Beta SHEARS item (no damage variant).
+	"sheep": "res://scripts/entities/sheep.gd",
 }
 
 

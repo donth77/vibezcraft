@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cxuj8e88n8acj"
-path="res://.godot/imported/brick.png-efdfc15ae56807315bbc1828ee301d08.ctex"
+uid="uid://cdh0m4jaumgj4"
+path="res://.godot/imported/sheep_fur.png-5fbedb42cc06e9ded07f5d8a1203a067.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/blocks/packs/pixellab/brick.png"
-dest_files=["res://.godot/imported/brick.png-efdfc15ae56807315bbc1828ee301d08.ctex"]
+source_file="res://assets/textures/mob/sheep_fur.png"
+dest_files=["res://.godot/imported/sheep_fur.png-5fbedb42cc06e9ded07f5d8a1203a067.ctex"]
 
 [params]
 

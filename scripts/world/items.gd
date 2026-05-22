@@ -219,6 +219,13 @@ const CLAY_BALL: int = 178
 # below (3 stacked planks ×3 then 1 stick in the bottom center).
 const SIGN: int = 179
 
+# Shears — Beta-era addition (`ItemShears` / Items.SHEARS). Used to
+# shear sheep without damaging them, and to cleanly break leaves / web
+# / vines without dropping the block. Recipe is 2 iron ingots in a
+# diagonal layout (top-right + center-left). 238 durability per Beta
+# `ItemShears.setMaxDurability(238)`.
+const SHEARS: int = 180
+
 # Vanilla nv (id 333) — right-click on water spawns an EntityBoat; the
 # boat itself is a 3D shape built at runtime (RenderBoat.java). Stack
 # size 1 (vanilla aY = 1). No durability; the boat's HP lives on the
@@ -285,6 +292,10 @@ const TOOL_TYPE_FLINT_AND_STEEL: int = 6
 # Fishing rod — bj.java in Alpha 1.2.6 (vanilla 346). Right-click casts,
 # right-click while bobber-out reels. Cast mechanic is a follow-up.
 const TOOL_TYPE_FISHING_ROD: int = 7
+# Shears — Beta ItemShears. Not a dig-tool tier; shear sheep + clean-break
+# leaves/web/vines. Its own type so durability + stack=1 route through
+# _TOOL_DATA but the dig-speed/harvest paths can ignore it.
+const TOOL_TYPE_SHEARS: int = 8
 
 # Vanilla armor defense points (Bukkit/mc-dev `EnumArmorMaterial`).
 # Full-set totals: gold 11, iron 15, diamond 20. Damage reduction
@@ -344,6 +355,9 @@ const _TOOL_DATA: Dictionary = {
 	# Vanilla bj.java aY=64 — fishing rod loses durability on each
 	# successful reel-in (not on cast).
 	FISHING_ROD: [TOOL_TYPE_FISHING_ROD, 1.0, 0, 64],
+	# Beta ItemShears: setMaxDurability(238). One durability tick per
+	# shear, per leaf-block break, per web break. Stack size 1.
+	SHEARS: [TOOL_TYPE_SHEARS, 1.0, 0, 238],
 }
 
 
@@ -639,6 +653,8 @@ static func id_from_name(item_name: String) -> int:
 			return CLAY_BALL
 		"sign":
 			return SIGN
+		"shears":
+			return SHEARS
 		"boat":
 			return BOAT
 	return -1
@@ -934,6 +950,8 @@ static func display_name(item_id: int) -> String:
 			return "Clay"
 		SIGN:
 			return "Sign"
+		SHEARS:
+			return "Shears"
 		BOAT:
 			return "Boat"
 	return ""
