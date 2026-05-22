@@ -75,10 +75,10 @@ func test_sky_factor_floor_at_midnight() -> void:
 
 
 func test_sky_factor_intermediate_at_dawn_and_dusk() -> void:
-	# At sunrise / sunset the sun sits exactly on the horizon (elevation 0).
-	# With the +0.2 horizon offset the factor lands at lerp(min, max, 0.2/1.2)
-	# ≈ min + 0.167 × (max-min) — well above the midnight floor but a long
-	# way below noon. Crucially: same value at sunrise and sunset.
+	# At sunrise / sunset the vanilla curve sin(phase·TAU)*2+0.5 lands at
+	# exactly 0.5 (the horizon shoulder), which lerps to min + 0.5*(max-min)
+	# — well above the midnight floor but below the daytime plateau.
+	# Crucially: same value at sunrise and sunset.
 	WorldTime.set_time_ticks(0)
 	var dawn: float = WorldTime.sky_factor()
 	WorldTime.set_time_ticks(12000)

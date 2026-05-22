@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://godotengine.org"><img src="https://img.shields.io/badge/Godot-4.x-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.x"></a>
   <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/language-GDScript%20%2B%20C%2B%2B-blue" alt="GDScript + C++"></a>
+  <a href="https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c"><img src="https://img.shields.io/badge/music-Suno%20playlist-9333EA" alt="Suno playlist"></a>
 </p>
 
 A single-player clone of MC Alpha, built in **Godot 4, GDScript, and C++**. 
@@ -23,7 +24,7 @@ Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base
 - **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement/pickup
 - **Health & damage** — fall damage, drowning, fire/lava, health regeneration, death screen with respawn
 - **Chest & furnace storage** — per-block inventories with dedicated UI screens
-- **Audio** — footstep cadence, block break/place SFX, ambient sounds, C418-style music player
+- **Audio** — footstep cadence, block break/place SFX, ambient sounds, music player ([Suno playlist](https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c))
 - **Steve player model** — first-person and third-person with arm/leg animation, held-item rendering
 - **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
 - **Native C++ fast paths** — chunk mesher and worldgen via GDExtension, with GDScript fallback

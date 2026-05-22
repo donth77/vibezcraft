@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-Guidance for Claude Code when working in this repo.
-
 ## Project
 
 A from-scratch clone of MC Alpha in **Godot 4, GDScript, and C++**. Alpha-core mechanics with some modern QoL. Targeting v1.2.6's full feature set with exceptions — **multiplayer / SMP** are both out of scope. Purpose-built binary save format (not Anvil-compatible).
@@ -34,7 +32,7 @@ Canonical planning docs:
 - **Health & combat:** fall damage, drowning, fire/lava damage, health regeneration, death screen with respawn, damage overlay, armor damage reduction.
 - **Storage:** per-block chest and furnace inventories with dedicated UI screens (`chest_screen.gd`, `furnace_screen.gd`).
 - **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for first/third-person held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation. Axe-specific TP mesh rotation.
-- **Audio:** footstep cadence tied to horizontal movement (grass/cloth/stone/sand/gravel variants), block break/place SFX by material, ambient sounds (`ambient_fx.gd`), C418-style music player (`music_player.gd`).
+- **Audio:** footstep cadence tied to horizontal movement (grass/cloth/stone/sand/gravel variants), block break/place SFX by material, ambient sounds (`ambient_fx.gd`), music player (`music_player.gd`).
 - **Dev tools:** `tool_tuner.gd` (runtime FP/TP held-item pose sliders + axe rotation knobs), `debug_stats.gd` (FPS / chunk load overlay), `debug_item_spawner.gd`, `MC_CLONE_RESOLUTION` env override.
 
 Earlier phases: Phase 3 (infinite world with threaded chunk loading, shared-material atlas rendering, pluggable texture packs), Phase 4 (base inventory, hotbar, audio scaffolding, hold-to-break, dropped items, Steve player model), Phase 5 (crafting & tools).

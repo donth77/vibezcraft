@@ -137,6 +137,10 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 			stack.damage = int(entry[2])
 			inv.slots[i] = stack
 		inv.selected_slot = int(payload.get("hotbar_selected", 0))
+		# Direct slot mutation bypasses Inventory's normal setters, which
+		# would emit `changed` themselves. Emit once here so subscribers
+		# (hotbar UI, held-item mesh, armor overlay) repaint after load.
+		inv.changed.emit()
 
 
 # --- Cleanup ---

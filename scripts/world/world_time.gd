@@ -103,11 +103,17 @@ func sun_elevation() -> float:
 
 
 # Multiplier applied to sky_light when computing effective brightness.
-# Smoothly transitions from SKY_FACTOR_MIN (midnight) to SKY_FACTOR_MAX
-# (noon). The +0.2 horizon offset keeps a brief dawn glow before the sun
-# clears the horizon — matches vanilla's pre-sunrise twilight.
+# Vanilla Alpha's master sun/sky brightness (vendor/alpha-1.2.6-src/cy.java:846-854):
+#     f4 = clamp(cos(angle·TAU) * 2 + 0.5, 0, 1)
+# The `*2 + 0.5` lifts the cosine curve so the clamp saturates at 1.0 for
+# ~42% of the cycle — the long bright daytime plateau that matches the
+# sky_color() piecewise plateau. Outside the plateau it drops to 0 fast
+# (one cosine arc), with a ~0.5 horizon shoulder at sunrise/sunset.
+# Translated to our phase convention (sunrise=0, noon=0.25), cos becomes
+# sin. We lerp into [SKY_FACTOR_MIN, 1.0] instead of [0, 1] to preserve
+# the gamma-compensated night floor (see SKY_FACTOR_MIN comment above).
 func sky_factor() -> float:
-	var t: float = clampf((sun_elevation() + 0.2) / 1.2, 0.0, 1.0)
+	var t: float = clampf(sin(phase() * TAU) * 2.0 + 0.5, 0.0, 1.0)
 	return lerpf(SKY_FACTOR_MIN, SKY_FACTOR_MAX, t)
 
 
