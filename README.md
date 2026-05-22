@@ -24,8 +24,12 @@ Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base
 - **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement/pickup
 - **Health & damage** — fall damage, drowning, fire/lava, health regeneration, death screen with respawn
 - **Chest & furnace storage** — per-block inventories with dedicated UI screens
+- **World save/load** — purpose-built binary format under `user://World{N}/` (chunks, player position + inventory, entities, world metadata) with crash-safe `.new`/`.old` recovery
+- **Creative mode** — toggleable from Pause → Options or via the hotkey; flight, no fall damage, instant block break
+- **Rebindable controls** — every gameplay action mappable from Main Menu → Settings → Controls or in-game Pause → Options → Controls; persists to `user://settings.cfg`
+- **In-game item spawner** — grid of every block + item with quantity selector; available in Creative or Debug mode
 - **Audio** — footstep cadence, block break/place SFX, ambient sounds, music player ([Suno playlist](https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c))
-- **Steve player model** — first-person and third-person with arm/leg animation, held-item rendering
+- **Player model** — first-person and third-person with arm/leg animation, held-item rendering
 - **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
 - **Native C++ fast paths** — chunk mesher and worldgen via GDExtension, with GDScript fallback
 
@@ -51,31 +55,23 @@ godot --path . main.tscn               # run main scene directly
 
 ## Controls
 
-| Action | Key |
-|---|---|
-| Move | **W A S D** |
-| Look | Mouse |
-| Jump | **Space** |
-| Sneak | **Shift** (hold) |
-| Break block | **Left mouse** (hold) |
-| Place block / interact | **Right mouse** |
-| Select hotbar slot | **1**–**9** |
-| Open inventory | **E** |
-| Drop item | **Q** |
-| Third-person toggle | **V** / **F5** |
-| Release mouse | **Esc** |
+All gameplay actions are configurable in **Main Menu → Settings → Controls** (or in-game **Pause → Options → Controls**). The list below is the default mapping; click any binding in the controls screen and press a key or mouse button to rebind. Overrides persist to `user://settings.cfg`.
 
-### Debug shortcuts
+### Creative & Debug shortcuts
 
-Backtick (`` ` ``) toggles debug mode. These shortcuts only work while debug mode is on:
+Creative is its own user-facing mode — no debug-toggle required. Debug mode adds a stats panel + tool-tuner / lighting / scout shortcuts, and shows debug rows in the controls screen.
 
-| Action | Key |
-|---|---|
-| Toggle debug mode | **`** (backtick) |
-| Toggle Creative mode | **G** |
-| Open item spawner | **J** |
-| Tool tuner (held-item pose) | **T** |
-| Fast day cycle (30s) | **N** |
+| Action | Default | Mode required |
+|---|---|---|
+| Toggle Creative mode | **G** / **F1** | none |
+| Toggle Debug mode | **`** (backtick) | none |
+| Open Item spawner | **F4** | Creative or Debug |
+| Open Mob spawner | **F6** | Creative or Debug |
+| Toggle Stats panel | **F3** | Debug |
+| Tool tuner (held-item pose) | **T** | Debug |
+| Cycle lighting heatmap | **F8** | Debug |
+| Dump biome scan | **B** | Debug |
+| Fast day cycle (30s) | **N** | Debug |
 
 ### Configuration
 

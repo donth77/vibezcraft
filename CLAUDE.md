@@ -33,7 +33,10 @@ Canonical planning docs:
 - **Storage:** per-block chest and furnace inventories with dedicated UI screens (`chest_screen.gd`, `furnace_screen.gd`).
 - **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for first/third-person held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation. Axe-specific TP mesh rotation.
 - **Audio:** footstep cadence tied to horizontal movement (grass/cloth/stone/sand/gravel variants), block break/place SFX by material, ambient sounds (`ambient_fx.gd`), music player (`music_player.gd`).
-- **Dev tools:** `tool_tuner.gd` (runtime FP/TP held-item pose sliders + axe rotation knobs), `debug_stats.gd` (FPS / chunk load overlay), `debug_item_spawner.gd`, `MC_CLONE_RESOLUTION` env override.
+- **World save/load:** purpose-built binary format under `user://World{N}/` — region files (16×16 chunk packing, sector-aligned), `player.bin`, `entities.bin`, `world.json`. Crash-safe via `.new`/`.old` recovery in `save_load.gd`. Autosave every 5 minutes; explicit save on Pause → Save and quit. Out-of-world Y on player.bin (e.g. fell into void) clamps to spawn altitude on load to prevent compounding falls.
+- **Creative mode:** independent of debug — toggled via `toggle_creative` (default G/F1). Enables flight (double-jump), removes fall damage, instant block break, unlocks item / mob spawner UIs. Top-right HUD shows `CREATIVE` / `DEBUG` / `DEBUG | CREATIVE` per mode combo.
+- **Rebindable controls:** every gameplay action is reachable from Main Menu → Settings → Controls or in-game Pause → Options → Controls. Persists to `user://settings.cfg` under `[controls]`. Conflict resolution is vanilla-style — new bind silently clears any other action holding the same key (displaced action shows `NONE`). Debug bindings only surface when `Game.debug_enabled`, but the conflict scanner walks both gameplay + debug lists so binds always stay unique.
+- **Dev tools:** `tool_tuner.gd` (FP/TP pose sliders), `debug_stats.gd` (FPS / chunk load overlay), `debug_item_spawner.gd` + `debug_mob_spawner.gd` (creative-or-debug-gated grids), `MC_CLONE_RESOLUTION` env override.
 
 Earlier phases: Phase 3 (infinite world with threaded chunk loading, shared-material atlas rendering, pluggable texture packs), Phase 4 (base inventory, hotbar, audio scaffolding, hold-to-break, dropped items, Steve player model), Phase 5 (crafting & tools).
 
@@ -78,13 +81,19 @@ scripts/
   entities/                   # chest_node.gd
   audio/
     sfx.gd                    # block/tool/step SFX by material type
-    music_player.gd           # C418-style ambient music with random gaps
+    music_player.gd           # ambient music with random gaps
+  persistence/
+    save_load.gd              # region-file I/O, crash-safe .new/.old recovery, world-dir layout
+    player_save.gd            # player.bin: pos + head rotation + health + 45-slot inventory
+    entity_save.gd            # entities.bin: dropped items + chest tile-entities + signs
+    world_meta.gd             # world.json: seed, spawn, last_played, play_time_seconds
   ui/                         # hotbar_ui, inventory_screen, crafting_table_screen, furnace_screen,
                               #  chest_screen, pause_menu, death_screen, main_menu, settings_menu,
-                              #  debug_stats, tool_tuner, debug_item_spawner, item_icons,
-                              #  block_icon_renderer, character_preview, hp_bar, air_bar,
-                              #  damage_overlay, water_overlay, fire_overlay, durability_bar,
-                              #  loading_screen, in_game_options, vanilla_button, minecraft_font
+                              #  in_game_options, controls_menu, select_world_screen,
+                              #  debug_stats, tool_tuner, debug_item_spawner, debug_mob_spawner,
+                              #  item_icons, block_icon_renderer, character_preview, hp_bar,
+                              #  air_bar, damage_overlay, water_overlay, fire_overlay,
+                              #  durability_bar, loading_screen, vanilla_button, minecraft_font
   dev/                        # pre-commit.sh, install-hooks.sh
 scenes/                       # chunk, chunk_manager, player, ui, entities
 shaders/
@@ -178,6 +187,7 @@ Read `.claude/optimizations.md` first — the high-leverage wins are already doc
 - **`MC_CLONE_RESOLUTION=WxH`** overrides the window size at boot (e.g. `MC_CLONE_RESOLUTION=2560x1440`). Useful on high-DPI displays where the default 1920×1080 looks tiny.
 - **Recipe JSON is authoritative** for the crafting surface — edit `data/recipes.json`, not `recipes.gd`. Pattern strings preserve whitespace; `" S "` means "empty, stick, empty" in a 3-wide row. Names resolve through `Items.id_from_name()` (blocks + items unified).
 - **Item IDs are stable too.** Like block IDs, items in `scripts/world/items.gd` are uint8 (100+); append, never renumber. They're referenced by recipe JSON and persisted in `ItemStack`.
+- **InputMap action IDs are persisted.** Once a user has saved a rebind, the action string (`"move_forward"`, `"open_item_spawner"`, etc.) lives in their `settings.cfg [controls]` section. Renaming an action ID orphans the saved override and the user falls back to the default binding silently. Add new actions freely; renaming requires a migration in `InputActions.apply_saved_overrides`.
 
 ## Don'ts
 
