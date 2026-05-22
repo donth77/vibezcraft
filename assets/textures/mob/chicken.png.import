@@ -2,16 +2,16 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dry3jhg26bcwm"
-path="res://.godot/imported/leather.png-62f17aefe91787f07651d341829fe393.ctex"
+uid="uid://r5v1um4sv4ja"
+path="res://.godot/imported/chicken.png-bee01390022320d58421ca73e2971344.ctex"
 metadata={
 "vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/textures/blocks/packs/alpha_vanilla/items/leather.png"
-dest_files=["res://.godot/imported/leather.png-62f17aefe91787f07651d341829fe393.ctex"]
+source_file="res://assets/textures/mob/chicken.png"
+dest_files=["res://.godot/imported/chicken.png-bee01390022320d58421ca73e2971344.ctex"]
 
 [params]
 

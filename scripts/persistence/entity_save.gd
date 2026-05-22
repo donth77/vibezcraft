@@ -29,8 +29,14 @@ const _HEADER_SIZE: int = 8
 
 # Stable type IDs — persisted in the file, never renumber.
 const TYPE_DROPPED_ITEM: int = 1
+# TYPE_MOB — single ID for ANY MobBase descendant. The mob's species
+# (pig/cow/sheep/zombie/etc.) is stored in `payload.mob_name` and looked
+# up via MobRegistry on restore. This indirection means adding new mob
+# species doesn't require renumbering — the on-disk schema stays stable
+# even as MobRegistry grows.
+const TYPE_MOB: int = 6
 # Future: TYPE_FALLING_BLOCK = 2, TYPE_PRIMED_TNT = 3, TYPE_BOAT = 4,
-# TYPE_PAINTING = 5, mobs from 6 upward.
+# TYPE_PAINTING = 5.
 
 # "MCAE" magic — same const-expression workaround as SaveLoad._magic.
 static var _magic: PackedByteArray = PackedByteArray(_MAGIC_BYTES)
@@ -71,6 +77,22 @@ static func _serialize_one(node: Node) -> Dictionary:
 	if node is DroppedItem:
 		var d: DroppedItem = node
 		return {"type": TYPE_DROPPED_ITEM, "payload": d.to_save_dict()}
+	# MobBase descendants (Pig, future Cow/Sheep/Zombie...) — single
+	# TYPE_MOB record tagged with mob_name so we can dispatch via
+	# MobRegistry on restore. Skip mobs whose script isn't registered
+	# (defensive — registry should always cover live mobs, but a
+	# rogue extends-MobBase node would otherwise crash the save).
+	if node is MobBase:
+		var mb: MobBase = node
+		var script_res: Script = mb.get_script() as Script
+		if script_res == null:
+			return {}
+		var mob_name: String = MobRegistry.name_for_script_path(script_res.resource_path)
+		if mob_name == "":
+			return {}
+		var payload: Dictionary = mb.to_save_dict()
+		payload["mob_name"] = mob_name
+		return {"type": TYPE_MOB, "payload": payload}
 	return {}
 
 
@@ -127,6 +149,23 @@ static func _spawn_one(entry: Dictionary, parent: Node) -> bool:
 			parent.add_child(item)
 			item.global_position = payload.get("pos", Vector3.ZERO) as Vector3
 			item.restore_from_dict(payload)
+			return true
+		TYPE_MOB:
+			var mob_name: String = payload.get("mob_name", "") as String
+			var script: Script = MobRegistry.script_for(mob_name)
+			if script == null:
+				push_warning("[EntitySave] unknown mob '%s', skipping" % mob_name)
+				return false
+			var mob: MobBase = script.new() as MobBase
+			if mob == null:
+				push_warning("[EntitySave] script for '%s' isn't a MobBase" % mob_name)
+				return false
+			parent.add_child(mob)
+			# Position must be set BEFORE restore_from_dict — _ready ran
+			# during add_child and may have already touched physics state
+			# at the default (0,0,0) position. restore overwrites pos
+			# from the dict so the final position is correct.
+			mob.restore_from_dict(payload)
 			return true
 		_:
 			push_warning("[EntitySave] unknown entity type_id=%d, skipping" % type_id)
