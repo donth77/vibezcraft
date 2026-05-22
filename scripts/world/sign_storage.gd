@@ -68,57 +68,75 @@ func forget(pos: Vector3i) -> void:
 	_signs.erase(pos)
 
 
-# Persistence: serialize every sign within (cx, cz) into a flat Array
-# the chunk save format can store. Inverse of `restore_from_snapshot`.
-# Layout per entry: [x, y, z, line0, line1, line2, line3]. We use a
-# flat dict-list instead of a structured serializer so the chunk save
-# code can write/read it via var_to_bytes without a schema dep.
-func snapshot_for_chunk(cx: int, cz: int) -> Array:
-	var out: Array = []
-	for pos: Vector3i in _signs:
-		var entry_cx: int = int(floor(float(pos.x) / float(Chunk.SIZE_X)))
-		var entry_cz: int = int(floor(float(pos.z) / float(Chunk.SIZE_Z)))
-		if entry_cx != cx or entry_cz != cz:
+# Build a chunk-local serialization of every sign whose world coord
+# falls inside the chunk at `chunk_coord`. Returns {Vector3i_local:
+# lines_array} where lines_array is 4 strings. Same shape as
+# ChestStorage / FurnaceManager so chunk_manager._build_chunk_save_entry
+# can bundle all three under one `tile_entities` dict.
+func serialize_chunk(chunk_coord: Vector2i) -> Dictionary:
+	var result: Dictionary = {}
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	for world_pos: Vector3i in _signs.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
 			continue
-		var lines: Array = _signs[pos]
-		(
-			out
-			. append(
-				{
-					"pos": pos,
-					"l0": String(lines[0]),
-					"l1": String(lines[1]),
-					"l2": String(lines[2]),
-					"l3": String(lines[3]),
-				}
-			)
-		)
-	return out
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		var local_pos := Vector3i(world_pos.x - min_x, world_pos.y, world_pos.z - min_z)
+		var lines: Array = (_signs[world_pos] as Array).duplicate()
+		result[local_pos] = lines
+	return result
 
 
-# Drop every sign in (cx, cz). Used by chunk-unload to free memory for
-# distant chunks; combined with `snapshot_for_chunk` for the save path.
-func forget_chunk(cx: int, cz: int) -> void:
-	var to_drop: Array = []
-	for pos: Vector3i in _signs:
-		var entry_cx: int = int(floor(float(pos.x) / float(Chunk.SIZE_X)))
-		var entry_cz: int = int(floor(float(pos.z) / float(Chunk.SIZE_Z)))
-		if entry_cx == cx and entry_cz == cz:
-			to_drop.append(pos)
+# Inverse of serialize_chunk. `dict` is {Vector3i_local: lines_array}.
+# Called from ChunkManager._materialize_chunk after a saved chunk loads.
+func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:
+	var origin_x: int = chunk_coord.x * Chunk.SIZE_X
+	var origin_z: int = chunk_coord.y * Chunk.SIZE_Z
+	for local_pos: Vector3i in dict.keys():
+		var world_pos := Vector3i(origin_x + local_pos.x, local_pos.y, origin_z + local_pos.z)
+		var raw: Array = dict[local_pos]
+		var lines: Array = []
+		lines.resize(LINES_PER_SIGN)
+		for i in range(LINES_PER_SIGN):
+			lines[i] = String(raw[i]) if i < raw.size() else ""
+		_signs[world_pos] = lines
+		# Fire so any SignNode that has already spawned for this world_pos
+		# (e.g. a previously-loaded chunk that gets re-decorated) refreshes
+		# its labels with the restored text instead of staying blank.
+		text_changed.emit(world_pos)
+
+
+# Drop every sign in chunk_coord. Used by chunk-unload to free memory
+# for distant chunks; combined with `serialize_chunk` for the save path.
+func forget_chunk(chunk_coord: Vector2i) -> void:
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	var to_drop: Array[Vector3i] = []
+	for world_pos: Vector3i in _signs.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		to_drop.append(world_pos)
 	for p: Vector3i in to_drop:
 		_signs.erase(p)
 
 
-# Restore from a snapshot — drops any existing signs in (cx, cz)
-# first so reloads don't get duplicates. Layout matches what
-# `snapshot_for_chunk` produces.
-func restore_from_snapshot(cx: int, cz: int, snapshot: Array) -> void:
-	forget_chunk(cx, cz)
-	for entry in snapshot:
-		var lines: Array = []
-		lines.resize(LINES_PER_SIGN)
-		lines[0] = String(entry.get("l0", ""))
-		lines[1] = String(entry.get("l1", ""))
-		lines[2] = String(entry.get("l2", ""))
-		lines[3] = String(entry.get("l3", ""))
-		_signs[entry.pos] = lines
+# Distinct chunk coords containing any live sign. ChunkManager.
+# flush_dirty_loaded calls this so chunks whose only edit was a sign
+# text change (no block re-place after the initial put → never re-flagged
+# in _dirty_loaded after the first save) still get persisted on autosave.
+func get_active_chunks() -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var seen: Dictionary = {}
+	for world_pos: Vector3i in _signs.keys():
+		var coord := Vector2i(world_pos.x >> 4, world_pos.z >> 4)
+		if not seen.has(coord):
+			seen[coord] = true
+			result.append(coord)
+	return result

@@ -1674,33 +1674,55 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	var support_id: int = _chunk_manager.get_world_block(hit.block_pos)
 	var place: Vector3i
 	var dest_id: int
-	# Fence sign handling. A fence post is narrow (0.25 m) so a wall sign
-	# placed against its side hangs in mid-air relative to the visible
-	# post — vanilla behavior, but ugly. Route ANY click on a fence (top
-	# or side, on the visible post or in the 0.5 m phantom collision zone
-	# above it) to a standing-sign-on-top placement: sign cell sits one
-	# above the fence cell so the sign post stacks directly on the fence
-	# post.
+	# Fence sign handling. Fence is a narrow post (0.25 m) but our sign
+	# panel is 0.875 m wide — vanilla places a wall sign that visibly
+	# hangs past the post, no MC version cleans this up. Instead we
+	# split fence clicks into two clean placements:
+	#   * TOP click  → standing sign on TOP of fence (post stacks on post)
+	#   * SIDE click → standing sign IN THE CELL ADJACENT to the fence
+	#                  along the click normal (sign stands next to fence)
+	# Both are STANDING signs, no wall sign on fence, no floating.
 	#
-	# Three cases all reduce to "fence cell is somewhere obvious":
-	#   1. Top click, hit landed in the air cell above the fence:
-	#      support=AIR, below=FENCE, normal=+Y
-	#   2. Side click in the phantom collision zone (y above visible post):
-	#      support=AIR, below=FENCE, normal=±X/±Z
-	#   3. Side click on the visible post itself:
-	#      support=FENCE, normal=±X/±Z
+	# The fence's collision box extends 0.5 m above its cell (1.5 total),
+	# so a top click + a side click in the "phantom" zone above the
+	# visible post both land in the AIR cell above the fence. Treat all
+	# fence-cell + fence-phantom hits uniformly.
 	var below_id: int = _chunk_manager.get_world_block(hit.block_pos + Vector3i(0, -1, 0))
-	var fence_top_or_phantom: bool = support_id == Blocks.AIR and below_id == Blocks.FENCE
-	var fence_visible_side: bool = support_id == Blocks.FENCE and hit.normal_i.y == 0
-	var fence_routed: bool = fence_top_or_phantom or fence_visible_side
+	var hit_is_fence: bool = support_id == Blocks.FENCE
+	var hit_is_fence_phantom: bool = support_id == Blocks.AIR and below_id == Blocks.FENCE
+	var fence_routed: bool = hit_is_fence or hit_is_fence_phantom
+	var block_id: int
+	var meta: int
 	if fence_routed:
-		# Find the fence cell, then place on top of it. For phantom + top
-		# clicks the fence cell is one BELOW hit.block_pos; for visible-
-		# side clicks the fence cell IS hit.block_pos.
+		# Locate the fence cell. For phantom-zone hits the fence is one
+		# BELOW hit.block_pos; for visible-post hits it IS hit.block_pos.
 		var fence_cell: Vector3i = (
-			hit.block_pos if fence_visible_side else hit.block_pos + Vector3i(0, -1, 0)
+			hit.block_pos if hit_is_fence else hit.block_pos + Vector3i(0, -1, 0)
 		)
-		place = fence_cell + Vector3i(0, 1, 0)
+		if hit.normal_i.y == -1:
+			return false
+		# "Aim at the fence" intent — players almost always look forward
+		# and slightly down, hitting the SIDE of the 0.5 m phantom
+		# collider above the visible post. We treat any hit in that
+		# phantom zone (top face OR side face) as "on top of fence"
+		# intent. Hits on the visible post itself (lower y, support is
+		# FENCE) are the "in front of fence" intent → wall sign.
+		var on_top_intent: bool = hit.normal_i.y == 1 or hit_is_fence_phantom
+		if on_top_intent:
+			place = fence_cell + Vector3i(0, 1, 0)
+			block_id = Blocks.SIGN_STANDING
+			var yaw_deg: float = rad_to_deg(_player_yaw())
+			meta = int(round(-yaw_deg * 16.0 / 360.0)) & 0x0F
+		else:
+			# Visible-post side hit → WALL sign in the adjacent cell.
+			# The mesher (and SignNode label layout) detect the fence
+			# support and offset the panel INTO the fence cell so it
+			# attaches to the fence post instead of hanging in mid-air.
+			place = Vector3i(
+				fence_cell.x + hit.normal_i.x, fence_cell.y, fence_cell.z + hit.normal_i.z
+			)
+			block_id = Blocks.SIGN_WALL
+			meta = _wall_sign_meta_from_normal(hit.normal_i)
 		dest_id = _chunk_manager.get_world_block(place)
 		if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
 			return false
@@ -1711,38 +1733,28 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 		dest_id = _chunk_manager.get_world_block(place)
 		if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
 			return false
-	# Player-occupancy guard.
-	var player: Node3D = get_parent() as Node3D
-	if player != null:
-		var pp: Vector3 = player.global_position
-		var pb := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
-		if place == pb or place == pb + Vector3i(0, 1, 0):
+		if hit.normal_i.y == 1:
+			block_id = Blocks.SIGN_STANDING
+			var yaw_deg: float = rad_to_deg(_player_yaw())
+			meta = int(round(-yaw_deg * 16.0 / 360.0)) & 0x0F
+		elif hit.normal_i.y == -1:
+			# Bottom-face click — vanilla nv.java rejects this.
 			return false
-	var block_id: int
-	var meta: int
-	if hit.normal_i.y == 1 or fence_routed:
-		# Standing sign — either a true top-face click on a regular
-		# support, OR any click on a fence (top + side both place on top).
-		block_id = Blocks.SIGN_STANDING
-		# Player facing direction in Godot: (-sin(yaw), 0, -cos(yaw)).
-		# Player wants the sign's INSCRIBED face to point BACK toward
-		# them — desired sign_front = (sin(yaw), 0, cos(yaw)).
-		# Mesher's n_front per meta = (-sin(meta * 22.5°), 0, cos(meta * 22.5°)).
-		# Setting `meta * 22.5° = -yaw` makes n_front = (sin(yaw), 0, cos(yaw))
-		# which matches sign_front. For yaws with sin = 0 (cardinal ±Z)
-		# the sign of yaw didn't matter; for ±X yaws the old positive
-		# formula put the panel BACK toward the player instead of the
-		# inscribed face.
-		var yaw_deg: float = rad_to_deg(_player_yaw())
-		meta = int(round(-yaw_deg * 16.0 / 360.0)) & 0x0F
-	elif hit.normal_i.y == -1:
-		# Bottom-face click — vanilla nv.java rejects this (can't attach
-		# a sign to the underside of a block). Bail so the player gets
-		# the "nothing happened" feedback rather than a misplaced sign.
-		return false
-	else:
-		block_id = Blocks.SIGN_WALL
-		meta = _wall_sign_meta_from_normal(hit.normal_i)
+		else:
+			block_id = Blocks.SIGN_WALL
+			meta = _wall_sign_meta_from_normal(hit.normal_i)
+	# Player-occupancy guard. Wall signs are thin panels (0.125 m
+	# thick) and don't fill the cell — vanilla allows you to place
+	# one in the cell you're standing in (e.g. against a fence you're
+	# right next to). Standing signs DO have a post that conflicts
+	# with the player, so keep the guard for them.
+	if block_id != Blocks.SIGN_WALL:
+		var player: Node3D = get_parent() as Node3D
+		if player != null:
+			var pp: Vector3 = player.global_position
+			var pb := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
+			if place == pb or place == pb + Vector3i(0, 1, 0):
+				return false
 	_chunk_manager.set_world_block_with_meta(place, block_id, meta)
 	SignStorage.get_or_create(place)
 	SFX.play_place(Blocks.SIGN_STANDING)

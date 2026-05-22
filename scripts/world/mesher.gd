@@ -1107,18 +1107,52 @@ static func _emit_sign_geometry(
 	var blk: int = chunk.get_block_light(x, y, z)
 	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
 	if id == Blocks.SIGN_STANDING:
+		# Detect fence support — if the cell directly below is a fence,
+		# the standing sign should render with a shorter post so it
+		# stacks cleanly on the fence post (visible fence top is at
+		# fence_cell.y + 1.0, which is sign_cell.y, so a normal 0.5 m
+		# post would extend further up than needed).
+		var on_fence: bool = chunk.get_block(x, y - 1, z) == Blocks.FENCE
 		_emit_standing_sign(
-			fx, fy, fz, meta, rect, face_color, verts, norms, uvs, colors, indices, plant_faces
+			fx,
+			fy,
+			fz,
+			meta,
+			rect,
+			face_color,
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			plant_faces,
+			on_fence
 		)
 	else:
 		_emit_wall_sign(
-			fx, fy, fz, meta, rect, face_color, verts, norms, uvs, colors, indices, plant_faces
+			chunk,
+			x,
+			y,
+			z,
+			fx,
+			fy,
+			fz,
+			meta,
+			rect,
+			face_color,
+			verts,
+			norms,
+			uvs,
+			colors,
+			indices,
+			plant_faces
 		)
 
 
 # Post + rotated panel. Vanilla ni.java yaw meta is 16 increments
 # (0..15 → 0°..337.5°). Standing on a fence post; panel mounted on
 # top at the rotated angle.
+# gdlint: disable=function-arguments-number
 static func _emit_standing_sign(
 	fx: float,
 	fy: float,
@@ -1132,28 +1166,28 @@ static func _emit_standing_sign(
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
 	plant_faces: PackedVector3Array,
+	on_fence: bool = false
 ) -> void:
-	# Post AABB — centered (0.5±0.0625, 0..0.5, 0.5±0.0625).
+	# Fence-mounted standing sign has a SHORTER post (0.25 m instead of
+	# 0.5 m) so the panel sits lower on the fence — reads as "sign on
+	# top of fence" rather than "sign on a tall stand far above fence".
+	# Panel y range also shifts down by 0.25 m to stay connected to the
+	# post top.
+	var post_height: float = 0.25 if on_fence else 0.5
+	# Post AABB — centered XZ on the cell (0.5±0.0625).
 	var post_mn := Vector3(fx + 0.4375, fy, fz + 0.4375)
-	var post_mx := Vector3(fx + 0.5625, fy + 0.5, fz + 0.5625)
+	var post_mx := Vector3(fx + 0.5625, fy + post_height, fz + 0.5625)
 	_emit_box(verts, norms, uvs, colors, indices, post_mn, post_mx, rect, face_color)
-	# Panel — 0.875 wide × 0.5 tall × 0.125 thick, mounted on top of
-	# the post (centered at y=0.75). Vanilla's yaw=0 faces -Z (a sign
-	# placed by a south-facing player). Each 1-step of meta rotates
-	# 22.5° clockwise (viewed from above).
-	#
-	# Compute the 8 panel corners by rotating the local-frame corners
-	# around the cell-center Y axis by yaw_rad, then translating to
-	# world space.
+	# Panel — 0.875 wide × 0.5 tall × 0.125 thick. Normal sign: y=[0.5,
+	# 1.0] (centered at 0.75). Fence-mounted: y=[0.25, 0.75] (centered
+	# at 0.5), so it sits on the shorter post.
 	var yaw_rad: float = float(meta) * (TAU / 16.0)
 	var cs: float = cos(yaw_rad)
 	var sn: float = sin(yaw_rad)
-	# Local-frame corners (panel center at origin, post at +y down):
-	# X = width (along sign face), Z = thickness (perpendicular).
 	var half_w: float = 0.4375
 	var half_t: float = 0.0625
-	var y0: float = 0.5  # panel bottom in cell-local space
-	var y1: float = 1.0  # panel top
+	var y0: float = post_height  # panel bottom — sits on post top
+	var y1: float = post_height + 0.5  # panel top
 	# 8 corners — index bits xtb: x=±half_w, t=±half_t, b=top/bottom.
 	# Rotate (lx, lz) around Y by yaw_rad → (rx, rz). Translate to
 	# (fx + 0.5 + rx, fy + ly, fz + 0.5 + rz).
@@ -1226,7 +1260,12 @@ static func _emit_standing_sign(
 # 1 = panel on +Z face
 # 2 = panel on -X face
 # 3 = panel on +X face
+# gdlint: disable=function-arguments-number
 static func _emit_wall_sign(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
 	fx: float,
 	fy: float,
 	fz: float,
@@ -1249,21 +1288,49 @@ static func _emit_wall_sign(
 	var y1: float = 0.75
 	var mn: Vector3
 	var mx: Vector3
+	# Fence-attached wall sign: vanilla mounts the panel at the cell face
+	# (at distance 0 from the cell edge) but the fence post is 0.375 m
+	# INSIDE the support cell, so the panel hangs in mid-air relative to
+	# the visible post. We detect "support is a fence" here and offset
+	# the panel by 0.375 m INTO the support cell so its back face touches
+	# the fence post directly. Cross-chunk-edge fence support isn't
+	# detected (chunk.get_block returns AIR for OOB), so a sign placed at
+	# the very edge of a chunk against a fence in the neighbour chunk
+	# will still float — rare enough to defer.
+	var off: float = 0.375
+	var fence_offset: Vector3 = Vector3.ZERO
 	match meta:
 		0:  # -Z face — panel hangs on the +Z side of the support, facing -Z
 			mn = Vector3(fx + 0.5 - half_w, fy + y0, fz + 1.0 - thick)
 			mx = Vector3(fx + 0.5 + half_w, fy + y1, fz + 1.0)
+			if chunk.get_block(x, y, z + 1) == Blocks.FENCE:
+				fence_offset = Vector3(0, 0, off)
 		1:  # +Z face
 			mn = Vector3(fx + 0.5 - half_w, fy + y0, fz)
 			mx = Vector3(fx + 0.5 + half_w, fy + y1, fz + thick)
+			if chunk.get_block(x, y, z - 1) == Blocks.FENCE:
+				fence_offset = Vector3(0, 0, -off)
 		2:  # -X face
 			mn = Vector3(fx + 1.0 - thick, fy + y0, fz + 0.5 - half_w)
 			mx = Vector3(fx + 1.0, fy + y1, fz + 0.5 + half_w)
+			if chunk.get_block(x + 1, y, z) == Blocks.FENCE:
+				fence_offset = Vector3(off, 0, 0)
 		_:  # +X face (meta 3)
 			mn = Vector3(fx, fy + y0, fz + 0.5 - half_w)
 			mx = Vector3(fx + thick, fy + y1, fz + 0.5 + half_w)
+			if chunk.get_block(x - 1, y, z) == Blocks.FENCE:
+				fence_offset = Vector3(-off, 0, 0)
+	# Visual mesh at the offset position (touching the fence post).
+	# Collision / selection AABB stays at the ORIGINAL cell-face
+	# position so the player's raycast hits the sign before the fence
+	# collider behind it — otherwise the cursor always selects the
+	# fence and the sign can never be right-clicked to edit.
+	var sel_mn: Vector3 = mn
+	var sel_mx: Vector3 = mx
+	mn += fence_offset
+	mx += fence_offset
 	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
-	_emit_collision_box(plant_faces, mn, mx)
+	_emit_collision_box(plant_faces, sel_mn, sel_mx)
 
 
 # Helper to emit 6 quads with a per-quad normal (used by rotated

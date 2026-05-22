@@ -64,26 +64,52 @@ func test_forget_removes_entry() -> void:
 	assert_false(SignStorage.has_sign(pos))
 
 
-# Chunk snapshot / restore — used by the save-load pipeline so sign
-# text survives chunk unload + world reload.
-func test_snapshot_and_restore_round_trip() -> void:
-	# Two signs in chunk (0, 0), one in chunk (1, 0). Snapshot of
-	# (0, 0) should only include the first two.
+# Chunk serialize / restore — used by the save-load pipeline so sign
+# text survives chunk unload + world reload. Mirrors the Chest/Furnace
+# serializer contract: local-pos keyed dict round-trips through the
+# tile_entities blob bundled into the saved chunk entry.
+func test_serialize_and_restore_round_trip() -> void:
+	# Two signs in chunk (0, 0), one in chunk (1, 0). serialize_chunk
+	# of (0, 0) should only include the first two.
 	var p1 := Vector3i(3, 64, 3)
 	var p2 := Vector3i(8, 64, 9)
 	var p3 := Vector3i(20, 64, 5)  # chunk (1, 0)
 	SignStorage.set_text(p1, 0, "first")
 	SignStorage.set_text(p2, 1, "second")
 	SignStorage.set_text(p3, 2, "other chunk")
-	var snap: Array = SignStorage.snapshot_for_chunk(0, 0)
+	var snap: Dictionary = SignStorage.serialize_chunk(Vector2i(0, 0))
 	assert_eq(snap.size(), 2)
-	# Drop the chunk we just snapshotted, then restore.
-	SignStorage.forget_chunk(0, 0)
+	# Local pos keys (world - chunk_origin) — verifies the chunk-relative
+	# encoding so cross-chunk relocations don't double-map.
+	assert_true(snap.has(Vector3i(3, 64, 3)))
+	assert_true(snap.has(Vector3i(8, 64, 9)))
+	# Drop the chunk we just serialized, then restore.
+	SignStorage.forget_chunk(Vector2i(0, 0))
 	assert_false(SignStorage.has_sign(p1))
 	assert_false(SignStorage.has_sign(p2))
 	assert_true(SignStorage.has_sign(p3))  # chunk (1, 0) untouched
-	SignStorage.restore_from_snapshot(0, 0, snap)
+	SignStorage.restore_chunk(Vector2i(0, 0), snap)
 	assert_true(SignStorage.has_sign(p1))
 	assert_eq(SignStorage.get_lines(p1)[0], "first")
 	assert_true(SignStorage.has_sign(p2))
 	assert_eq(SignStorage.get_lines(p2)[1], "second")
+
+
+func test_get_active_chunks_returns_one_coord_per_chunk() -> void:
+	SignStorage.set_text(Vector3i(1, 64, 1), 0, "a")
+	SignStorage.set_text(Vector3i(2, 64, 2), 0, "b")  # same chunk
+	SignStorage.set_text(Vector3i(20, 64, 5), 0, "c")  # chunk (1, 0)
+	var active: Array[Vector2i] = SignStorage.get_active_chunks()
+	assert_eq(active.size(), 2)
+	assert_has(active, Vector2i(0, 0))
+	assert_has(active, Vector2i(1, 0))
+
+
+# Negative-coord chunks: arithmetic right-shift maps world (-1, _, -1)
+# into chunk (-1, -1), not (0, 0). Regression for the chest-pattern
+# shift convention.
+func test_get_active_chunks_negative_coords() -> void:
+	SignStorage.set_text(Vector3i(-1, 64, -1), 0, "neg")
+	var active: Array[Vector2i] = SignStorage.get_active_chunks()
+	assert_eq(active.size(), 1)
+	assert_eq(active[0], Vector2i(-1, -1))

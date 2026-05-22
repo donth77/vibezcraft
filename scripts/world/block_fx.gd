@@ -110,7 +110,10 @@ static func get_material(block_id: int) -> StandardMaterial3D:
 # Spawn break particles at `world_pos` (the block's integer coord) for
 # `block_id`. Parent should outlive the particle lifetime — typically the
 # ChunkManager since it's persistent. No-op for AIR / unknown blocks.
-static func spawn_break(parent: Node, world_pos: Vector3i, block_id: int) -> void:
+# `meta` is consumed by non-cube blocks (signs) whose particle volume
+# depends on orientation; default 0 covers full-cube blocks where meta
+# doesn't matter.
+static func spawn_break(parent: Node, world_pos: Vector3i, block_id: int, meta: int = 0) -> void:
 	if block_id == Blocks.AIR:
 		return
 	var mat: StandardMaterial3D = get_material(block_id)
@@ -122,11 +125,46 @@ static func spawn_break(parent: Node, world_pos: Vector3i, block_id: int) -> voi
 	var draw: QuadMesh = particles.mesh as QuadMesh
 	if draw != null:
 		draw.material = mat
-	# Center on the block: world_pos is the integer cell, +0.5 puts the
-	# emission box at the cube center so EMISSION_SHAPE_BOX with extents
-	# 0.5 spawns evenly across the cube's interior — matches vanilla's
-	# 4×4×4 grid in expectation.
-	particles.position = Vector3(world_pos) + Vector3(0.5, 0.5, 0.5)
+	# Pick an emission center + extents that hug the block's actual visible
+	# volume. Default = full cube; non-cube blocks (signs) override so
+	# particles don't spawn in the empty air around a small panel.
+	var center: Vector3 = Vector3(0.5, 0.5, 0.5)
+	var extents: Vector3 = Vector3(0.5, 0.5, 0.5)
+	if block_id == Blocks.FENCE:
+		# Fence post AABB — 0.25 wide × 1.5 tall (vanilla gd.java::a
+		# bounds (0.375, 0, 0.375)→(0.625, 1.5, 0.625)). Centered XZ in
+		# the cell, sticks 0.5 m above the cell top. Match the same box
+		# here so particles spawn within the visible post + arms.
+		center = Vector3(0.5, 0.75, 0.5)
+		extents = Vector3(0.125, 0.75, 0.125)
+	elif block_id == Blocks.SIGN_STANDING:
+		# Post + rotating panel — the union of all panel rotations forms a
+		# disc, but a 0.5×1×0.5 axis-aligned box covers the post and any
+		# yaw of the panel without much overshoot. Matches vanilla
+		# ni.java::a() which sets bounds (0.25, 0, 0.25)→(0.75, 1, 0.75).
+		extents = Vector3(0.25, 0.5, 0.25)
+	elif block_id == Blocks.SIGN_WALL:
+		# Panel hangs on the support's far side; mesher coords:
+		#   meta=0 (-Z): z ∈ [0.875, 1.0]
+		#   meta=1 (+Z): z ∈ [0.0, 0.125]
+		#   meta=2 (-X): x ∈ [0.875, 1.0]
+		#   meta=3 (+X): x ∈ [0.0, 0.125]
+		# Panel itself is 0.875 wide × 0.5 tall × 0.125 thick.
+		match meta:
+			0:
+				center = Vector3(0.5, 0.5, 0.9375)
+				extents = Vector3(0.4375, 0.25, 0.0625)
+			1:
+				center = Vector3(0.5, 0.5, 0.0625)
+				extents = Vector3(0.4375, 0.25, 0.0625)
+			2:
+				center = Vector3(0.9375, 0.5, 0.5)
+				extents = Vector3(0.0625, 0.25, 0.4375)
+			_:
+				center = Vector3(0.0625, 0.5, 0.5)
+				extents = Vector3(0.0625, 0.25, 0.4375)
+	particles.position = Vector3(world_pos) + center
+	particles.emission_box_extents = extents
 	particles.visible = true
 	particles.restart()
 	_schedule_return(parent, particles)

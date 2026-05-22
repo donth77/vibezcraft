@@ -489,6 +489,9 @@ func find_chest_node_at_local(local_pos: Vector3i) -> ChestNode:
 # scan cost is negligible.
 func _sync_sign_entities() -> void:
 	var seen: Dictionary = {}
+	var coord: Vector2i = _compute_chunk_coord()
+	var ox: int = coord.x * Chunk.SIZE_X
+	var oz: int = coord.y * Chunk.SIZE_Z
 	for y in range(Chunk.SIZE_Y):
 		for z in range(Chunk.SIZE_Z):
 			for x in range(Chunk.SIZE_X):
@@ -499,10 +502,44 @@ func _sync_sign_entities() -> void:
 				var key := Vector3i(x, y, z)
 				seen[key] = true
 				var cell_meta: int = chunk.get_block_meta(x, y, z)
+				# For wall signs only: detect fence support so the
+				# SignNode label layout offsets to match the mesher's
+				# panel offset into the fence cell. Same neighbour-query
+				# pattern + same 0.375 m offset as mesher._emit_wall_sign.
+				var fence_offset: Vector3 = Vector3.ZERO
+				if bid == Blocks.SIGN_WALL:
+					var off: float = 0.375
+					match cell_meta & 3:
+						0:
+							if chunk.get_block(x, y, z + 1) == Blocks.FENCE:
+								fence_offset = Vector3(0, 0, off)
+						1:
+							if chunk.get_block(x, y, z - 1) == Blocks.FENCE:
+								fence_offset = Vector3(0, 0, -off)
+						2:
+							if chunk.get_block(x + 1, y, z) == Blocks.FENCE:
+								fence_offset = Vector3(off, 0, 0)
+						_:
+							if chunk.get_block(x - 1, y, z) == Blocks.FENCE:
+								fence_offset = Vector3(-off, 0, 0)
+				# For STANDING signs: detect if the cell below is a
+				# fence — mesher renders a shorter post and the label
+				# layout follows the lower panel position.
+				var standing_on_fence: bool = false
+				if bid == Blocks.SIGN_STANDING:
+					standing_on_fence = chunk.get_block(x, y - 1, z) == Blocks.FENCE
 				if not _sign_nodes.has(key):
 					var node := SignNode.new()
 					node.is_wall_sign = (bid == Blocks.SIGN_WALL)
 					node.meta = cell_meta
+					node.fence_offset = fence_offset
+					node.on_fence = standing_on_fence
+					# Explicit world-cell coords so the SignNode's
+					# text_changed signal listener matches the key used
+					# by interaction.gd + SignStorage. Deriving this
+					# from global_position used to break at coord 0 and
+					# negative coords (Godot rounds half away from zero).
+					node.world_pos = Vector3i(ox + x, y, oz + z)
 					# Position at chunk-local cell origin (0..16 XZ;
 					# Y in world coords). SignNode internally offsets
 					# to cell-center XZ + cell-base Y via its label
@@ -514,10 +551,12 @@ func _sync_sign_entities() -> void:
 					_sign_nodes[key] = node
 				else:
 					# Existing node — re-check meta in case the player
-					# broke + re-placed with a new orientation.
+					# broke + re-placed with a new orientation. Use the
+					# setter so labels relayout.
 					var existing: SignNode = _sign_nodes[key]
-					existing.is_wall_sign = (bid == Blocks.SIGN_WALL)
-					existing.meta = cell_meta
+					existing.fence_offset = fence_offset
+					existing.on_fence = standing_on_fence
+					existing.update_orientation(bid == Blocks.SIGN_WALL, cell_meta)
 	# Despawn entries whose cell is no longer a sign.
 	for key: Vector3i in _sign_nodes.keys():
 		if not seen.has(key):
