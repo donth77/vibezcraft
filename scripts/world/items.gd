@@ -219,6 +219,12 @@ const CLAY_BALL: int = 178
 # below (3 stacked planks ×3 then 1 stick in the bottom center).
 const SIGN: int = 179
 
+# Vanilla nv (id 333) — right-click on water spawns an EntityBoat; the
+# boat itself is a 3D shape built at runtime (RenderBoat.java). Stack
+# size 1 (vanilla aY = 1). No durability; the boat's HP lives on the
+# entity, not the item. Spawning logic lives in interaction.gd.
+const BOAT: int = 181
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -633,6 +639,8 @@ static func id_from_name(item_name: String) -> int:
 			return CLAY_BALL
 		"sign":
 			return SIGN
+		"boat":
+			return BOAT
 	return -1
 
 
@@ -926,6 +934,8 @@ static func display_name(item_id: int) -> String:
 			return "Clay"
 		SIGN:
 			return "Sign"
+		BOAT:
+			return "Boat"
 	return ""
 
 
@@ -1063,6 +1073,10 @@ static func max_stack_size(item_id: int) -> int:
 	# state like other buckets and doesn't stack. Egg in vanilla stacks
 	# to 16 (aX=16) — throwable item cap.
 	if item_id == MILK_BUCKET:
+		return 1
+	# Vanilla nv.java::aX=1 (ItemBoat) — boat item never stacks because
+	# placement consumes one and spawns a unique entity.
+	if item_id == BOAT:
 		return 1
 	if item_id == EGG:
 		return 16

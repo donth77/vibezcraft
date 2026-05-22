@@ -197,6 +197,9 @@ const _ITEMS: Array = [
 	# face) or SIGN_WALL (side face). Stage 1: empty text. Stage 2:
 	# opens the edit GUI on placement.
 	Items.SIGN,
+	# Boat — right-click water to spawn an EntityBoat, right-click an
+	# empty boat to mount. Vanilla nv.java (id 333).
+	Items.BOAT,
 ]
 
 var _player: Node

@@ -393,6 +393,13 @@
       "pattern": ["PPP", "PPP", " S "],
       "key": {"P": "planks", "S": "stick"},
       "result": {"id": "sign", "count": 1}
+    },
+    {
+      "_comment": "Boat — vanilla Alpha CraftingManager. 5 planks in a U: empty row on top, plank-air-plank middle, planks across bottom. Yields 1 boat.",
+      "id": "boat",
+      "pattern": ["P P", "PPP"],
+      "key": {"P": "planks"},
+      "result": {"id": "boat", "count": 1}
     }
   ],
   "shapeless": [

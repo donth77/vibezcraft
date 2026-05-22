@@ -600,12 +600,13 @@ func _build_held_tool(id: int) -> void:
 	# For signs we use Sprite3D (purpose-built for 2D-sprite-in-3D-space
 	# with alpha-cut + texture filter handled natively, and no cull_back
 	# clipping like the MeshInstance3D + shader path).
-	# Sign is the only held item that uses Sprite3D for its FP path; all
-	# other tools / loose items go through the voxel-extrusion mesh.
-	# Either way we need to fall through to the TP setup below so the
-	# third-person mirror gets built too.
-	var is_sign: bool = id == Items.SIGN
-	if is_sign:
+	# Sign + Boat use Sprite3D for their FP path — both have sprites
+	# whose voxel-extrusion would look misshapen (sign is too thin,
+	# boat is mostly opaque rounded hull pixels). Tools / loose items
+	# go through the voxel-extrusion mesh. Either way we fall through
+	# to the TP setup below so the third-person mirror gets built too.
+	var is_flat_sprite_item: bool = id == Items.SIGN or id == Items.BOAT
+	if is_flat_sprite_item:
 		var sprite := Sprite3D.new()
 		sprite.texture = tex
 		sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -679,7 +680,7 @@ func _build_held_tool(id: int) -> void:
 		# regardless of perspective). Build sprite + early-return so we
 		# skip the scale / position logic that's tailored to the
 		# voxel-extruded mesh path.
-		if id == Items.SIGN:
+		if id == Items.SIGN or id == Items.BOAT:
 			var tp_sprite := Sprite3D.new()
 			tp_sprite.texture = tex
 			tp_sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST

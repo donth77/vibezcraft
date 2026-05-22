@@ -21,6 +21,10 @@ const MINING_PARTICLE_INTERVAL_MS: int = 50
 # this script before block_fx.gd is registered, so the direct identifier
 # would fail at parse time.
 const _BLOCK_FX: GDScript = preload("res://scripts/world/block_fx.gd")
+# Resource path for the Boat entity script. Compared against
+# `node.get_script().resource_path` since the Boat class_name isn't
+# always picked up by Godot's editor class index on first reload.
+const _BOAT_SCRIPT_PATH: String = "res://scripts/entities/boat.gd"
 const NO_TARGET: Vector3i = Vector3i(-2147483648, -2147483648, -2147483648)
 const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.png"
 # Hoe + farmland are Beta 1.6 additions, not in Alpha 1.2.6. The recipe
@@ -261,6 +265,92 @@ func _try_right_click_mob(hit: Dictionary) -> bool:
 	# consume case) leave the stack alone.
 	if held_id == Items.SADDLE and stack != null and not stack.is_empty():
 		inv.consume_one_selected()
+	return true
+
+
+# Walk the collider's ancestor chain looking for a Boat. Boats don't
+# extend MobBase so the mob-targeted right-click helper doesn't pick
+# them up — this is a parallel dispatch for the boat entity type.
+# Uses script-path comparison instead of the `Boat` class_name because
+# Godot's editor class index lags one reload behind for new class_name
+# files (same workaround MobBase descendants use elsewhere).
+func _find_boat_from_hit(hit: Dictionary) -> Node:
+	var collider: Node = hit.get("collider") as Node
+	if collider == null:
+		return null
+	var node: Node = collider
+	while node != null:
+		var script: Script = node.get_script()
+		if script != null and script.resource_path == _BOAT_SCRIPT_PATH:
+			return node
+		node = node.get_parent()
+	return null
+
+
+# Right-click on a boat — mount the player. Returns true if the click
+# was consumed. Held-item is ignored for stage 1 (vanilla doesn't have
+# a saddle-equivalent for boats).
+func _try_right_click_boat(hit: Dictionary) -> bool:
+	var boat: Node = _find_boat_from_hit(hit)
+	if boat == null:
+		return false
+	if not boat.has_method("right_click_with"):
+		return false
+	return boat.call("right_click_with", 0, get_parent())
+
+
+# Place a boat on the water the player is pointing at. Casts a ray
+# from the camera and steps along it looking for a water cell; spawns
+# the Boat entity at that cell's surface (y = cell_y + 0.875, matching
+# vanilla water level). Consumes one boat item on success. Returns
+# true if a boat was spawned.
+func _try_place_boat() -> bool:
+	var player: Node3D = get_parent() as Node3D
+	if player == null:
+		return false
+	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
+	if camera == null:
+		return false
+	var origin: Vector3 = camera.global_position
+	var look_dir: Vector3 = -camera.global_transform.basis.z
+	# Step along the look direction looking for a water cell. Vanilla
+	# nv.java does the same — a fixed-distance scan with ~5 m reach.
+	var max_reach: float = 5.0
+	var step: float = 0.1
+	var water_cell: Vector3i = Vector3i.ZERO
+	var found: bool = false
+	var t: float = 0.0
+	while t <= max_reach:
+		var p: Vector3 = origin + look_dir * t
+		var cell := Vector3i(int(floor(p.x)), int(floor(p.y)), int(floor(p.z)))
+		var id: int = _chunk_manager.get_world_block(cell)
+		if Blocks.is_water(id):
+			water_cell = cell
+			found = true
+			break
+		# Hit a solid block before water → can't place
+		if id != Blocks.AIR and not Blocks.is_water(id):
+			return false
+		t += step
+	if not found:
+		return false
+	# Spawn coordinates: cell-center XZ, surface Y. Vanilla water source
+	# is 1.0 m tall but the visible top renders at 0.875 m (see
+	# mesher's water surface comment). Float the boat at the visible
+	# surface so it sits ON the water, not inside.
+	var spawn_pos := Vector3(
+		float(water_cell.x) + 0.5, float(water_cell.y) + 0.875, float(water_cell.z) + 0.5
+	)
+	var yaw: float = _player_yaw()
+	var boat_script: GDScript = load(_BOAT_SCRIPT_PATH)
+	var boat: Node3D = boat_script.new() as Node3D
+	_chunk_manager.add_child(boat)
+	boat.call("setup", spawn_pos, yaw, player)
+	# Consume one boat from the held stack.
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	_trigger_player_use_swing()
 	return true
 
 
@@ -634,6 +724,13 @@ func _try_place() -> void:
 	if _try_right_click_mob(hit):
 		_last_place_ms = now
 		return
+	# Boat right-click — mount the player if the boat is empty.
+	# Runs before the held-item branches so right-clicking a boat
+	# while holding another boat doesn't try to spawn a new boat
+	# inside the existing one.
+	if _try_right_click_boat(hit):
+		_last_place_ms = now
+		return
 	# Buckets run even when `hit` is empty — the bucket's fluid-aware scan
 	# handles pointing at open water (no collider → raycast passes through)
 	# and pointing at open sky for lava-source placement.
@@ -664,6 +761,14 @@ func _try_place() -> void:
 				or held_id == Items.BUCKET_LAVA
 			):
 				if _try_bucket(hit, -1):
+					_last_place_ms = now
+				return
+			# Boat — vanilla nv.java places an EntityBoat at the water
+			# cell the player is pointing at. Hit-irrelevant (raycast
+			# passes through transparent water; boat-placement code
+			# does its own ray-vs-water scan).
+			if held_id == Items.BOAT:
+				if _try_place_boat():
 					_last_place_ms = now
 				return
 	if hit.is_empty():
