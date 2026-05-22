@@ -55,8 +55,11 @@ func _build_panel() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.anchor_left = 0.0
 	title.anchor_right = 1.0
-	title.anchor_top = 0.18
-	title.anchor_bottom = 0.18
+	# Anchor + offset numbers re-balanced after adding the "Controls..." button:
+	# title→vbox→button_col is now ~960 px tall at 80 px/button, so the whole
+	# stack lives between y≈108..968 at 1080p (≈100 px margin top + bottom).
+	title.anchor_top = 0.10
+	title.anchor_bottom = 0.10
 	title.offset_bottom = 96
 	title.add_theme_font_size_override("font_size", 64)
 	title.add_theme_color_override("font_color", Color.WHITE)
@@ -68,8 +71,8 @@ func _build_panel() -> void:
 	var vbox := VBoxContainer.new()
 	vbox.anchor_left = 0.5
 	vbox.anchor_right = 0.5
-	vbox.anchor_top = 0.34
-	vbox.anchor_bottom = 0.34
+	vbox.anchor_top = 0.24
+	vbox.anchor_bottom = 0.24
 	vbox.offset_left = -360
 	vbox.offset_right = 360
 	vbox.offset_top = 0
@@ -84,20 +87,26 @@ func _build_panel() -> void:
 	_vsync_checkbox = _add_checkbox_row(vbox, "VSync")
 	_fog_checkbox = _add_checkbox_row(vbox, "Fog")
 
-	# Save + Cancel stacked vertically below the options. Two
-	# VanillaButtons (800×80 each) + 16 px separation = 176 px tall.
+	# Controls / Save / Cancel stacked vertically below the options. Three
+	# VanillaButtons (800×80 each) + 2 × 16 px separation = 272 px tall.
 	var button_col := VBoxContainer.new()
 	button_col.anchor_left = 0.5
 	button_col.anchor_right = 0.5
-	button_col.anchor_top = 0.72
-	button_col.anchor_bottom = 0.72
+	# 0.65 keeps the column above the bottom edge at 1080p (ends y≈974)
+	# while leaving ~25 px of breathing room below vbox (which ends y≈643).
+	button_col.anchor_top = 0.65
+	button_col.anchor_bottom = 0.65
 	button_col.offset_left = -400
 	button_col.offset_right = 400
 	button_col.offset_top = 0
-	button_col.offset_bottom = 176
+	button_col.offset_bottom = 272
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
+	var controls_btn := VanillaButton.new()
+	controls_btn.text = "Controls..."
+	controls_btn.pressed.connect(_on_controls_pressed)
+	button_col.add_child(controls_btn)
 	var save_btn := VanillaButton.new()
 	save_btn.text = "Save"
 	save_btn.pressed.connect(_on_save_pressed)
@@ -321,3 +330,20 @@ func _apply_fog_live() -> void:
 
 func _on_cancel_pressed() -> void:
 	queue_free()
+
+
+# Open the controls rebinding screen. Hide this screen while controls is
+# open so the two layered modals don't fight visually. The overlay has
+# to live on the scene root, NOT as our child — when we set visible=false,
+# Godot recursively hides all descendants, and a child overlay would
+# vanish along with us (this softlocked an early version: controls UI
+# invisible but its modal grab was active, so the game was unreachable).
+func _on_controls_pressed() -> void:
+	var packed: PackedScene = load("res://scenes/ui/controls_menu.tscn") as PackedScene
+	if packed == null:
+		return
+	var overlay: Control = packed.instantiate() as Control
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	visible = false
+	overlay.tree_exited.connect(func() -> void: visible = true)
+	get_tree().get_root().add_child(overlay)

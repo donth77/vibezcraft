@@ -125,14 +125,16 @@ func _build_panel() -> void:
 	vbox.anchor_bottom = 0.03
 	vbox.offset_left = -360
 	vbox.offset_right = 360
-	# 88 px below the title's anchor — title is 48 px tall, plus a 40 px
-	# breathing gap so the heading reads as a separate block from the rows.
-	vbox.offset_top = 88
+	# 60 px below the title's anchor. Was 88 before the "Controls..." button
+	# added a third row to button_col (+96 px); shifted vbox up to recover
+	# the bottom-edge margin at 1080p (without this, button_col bottom
+	# landed at y=1098 — off-screen).
+	vbox.offset_top = 60
 	# 10 rows × 60 px + 9 × 10 separation = 690 px. Row height is 60 (not 52)
 	# because CheckBox + HSlider have intrinsic minimum heights from Godot's
 	# default theme that exceed the controls' explicit custom_minimum_size,
 	# so under-sizing here used to push the bottom rows past the Save button.
-	vbox.offset_bottom = 88 + 690
+	vbox.offset_bottom = 60 + 690
 	vbox.add_theme_constant_override("separation", 10)
 	add_child(vbox)
 
@@ -168,11 +170,18 @@ func _build_panel() -> void:
 	button_col.anchor_bottom = 0.03
 	button_col.offset_left = -400
 	button_col.offset_right = 400
-	button_col.offset_top = 794
-	button_col.offset_bottom = 794 + 176
+	# 766 = vbox bottom (750) + 16 px breathing gap. 3 × 80 px buttons +
+	# 2 × 16 px separation = 272 px, so bottom lands at y=1038 — fits the
+	# 1080p viewport with ~40 px margin to spare.
+	button_col.offset_top = 766
+	button_col.offset_bottom = 766 + 272
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
+	var controls_btn := VanillaButton.new()
+	controls_btn.text = "Controls..."
+	controls_btn.pressed.connect(_on_controls_pressed)
+	button_col.add_child(controls_btn)
 	var save_btn := VanillaButton.new()
 	save_btn.text = "Save"
 	save_btn.pressed.connect(_on_save_pressed)
@@ -543,6 +552,21 @@ func _on_save_pressed() -> void:
 
 func _on_cancel_pressed() -> void:
 	_close()
+
+
+# Open the controls rebinding screen. Hide this screen while controls is
+# open. Overlay lives on the scene root, NOT as our child — hiding self
+# would otherwise hide the overlay too (Godot propagates visible=false
+# to descendants) and the user would be stuck in an invisible modal.
+func _on_controls_pressed() -> void:
+	var packed: PackedScene = load("res://scenes/ui/controls_menu.tscn") as PackedScene
+	if packed == null:
+		return
+	var overlay: Control = packed.instantiate() as Control
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	visible = false
+	overlay.tree_exited.connect(func() -> void: visible = true)
+	get_tree().get_root().add_child(overlay)
 
 
 func _close() -> void:

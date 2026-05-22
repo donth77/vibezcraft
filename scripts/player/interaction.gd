@@ -2046,13 +2046,6 @@ func _build_crack() -> MeshInstance3D:
 		push_error("[Crack] failed to load atlas: " + CRACK_ATLAS_PATH)
 	else:
 		_crack_stages = max(1, int(round(float(tex.get_height()) / float(tex.get_width()))))
-		if Game.debug_mesh:
-			print(
-				(
-					"[Crack] atlas loaded: %dx%d, %d stages"
-					% [tex.get_width(), tex.get_height(), _crack_stages]
-				)
-			)
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/crack.gdshader") as Shader
 	mat.set_shader_parameter("crack_atlas", tex)

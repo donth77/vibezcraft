@@ -2605,13 +2605,6 @@ static func _emit_torch_box(
 			v = _torch_rotate_y(v, ymeta)
 		# Final translate to world cell.
 		ao[i] = Vector3(v.x + cx_off, v.y + cy_off, v.z + cz_off)
-	# Debug logger — set MC_CLONE_DEBUG_MESH=1 in .env to print the 8
-	# transformed verts for every torch the mesher emits. Confirms the
-	# GDScript path is running (vs the native mesher silently treating
-	# torches as cubes) and shows the actual geometry coords so we can
-	# tell if the rotation pipeline is producing the right shape.
-	if Game.debug_mesh:
-		print("[torch] (%d,%d,%d) meta=%d wall=%s" % [x, y, z, meta, str(is_wall)])
 	var u0: float = rect.position.x
 	var u1: float = rect.position.x + rect.size.x
 	var v0: float = rect.position.y

@@ -1113,14 +1113,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("debug_toggle"):
 		Game.debug_enabled = not Game.debug_enabled
-		if not Game.debug_enabled:
-			creative_mode = false  # leaving debug also clears creative
-			_is_flying = false  # and creative-only flight along with it
 		_update_debug_label()
 	elif event.is_action_pressed("toggle_perspective"):
 		perspective = (perspective + 1) % PERSPECTIVE_COUNT
 		_apply_perspective()
-	elif Game.debug_enabled and event.is_action_pressed("debug_creative"):
+	elif event.is_action_pressed("toggle_creative"):
+		# Creative is its own user-facing mode now — independent of debug.
+		# Stays on across debug-toggle cycles; only this binding flips it.
 		creative_mode = not creative_mode
 		if not creative_mode:
 			_is_flying = false
@@ -1227,13 +1226,16 @@ func _update_debug_label() -> void:
 	var label: Label = get_node_or_null("Crosshair/DebugLabel") as Label
 	if label == null:
 		return
-	if not Game.debug_enabled:
-		label.text = ""
-		return
-	if creative_mode:
+	# Creative + debug are independent now (creative no longer requires
+	# debug to enable). Show whichever combination is on:
+	if Game.debug_enabled and creative_mode:
 		label.text = "DEBUG | CREATIVE"
-	else:
+	elif Game.debug_enabled:
 		label.text = "DEBUG"
+	elif creative_mode:
+		label.text = "CREATIVE"
+	else:
+		label.text = ""
 
 
 func _process(_delta: float) -> void:

@@ -89,7 +89,7 @@ func _build_header(vbox: VBoxContainer) -> void:
 	header.add_theme_constant_override("separation", 12)
 	vbox.add_child(header)
 	var title := Label.new()
-	title.text = "Debug Mob Spawner  (F6 / Esc to close)"
+	title.text = "Mob Spawner  (F6 / Esc to close)"
 	title.add_theme_font_size_override("font_size", 22)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
@@ -218,7 +218,7 @@ func _place_spawner_cage(cm: Node, mob_name: String, pos: Vector3i) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("debug_mob_spawner") and Game.debug_enabled:
+	if event.is_action_pressed("open_mob_spawner") and _spawner_available():
 		if visible:
 			_hide()
 		else:
@@ -227,6 +227,15 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif visible and event.is_action_pressed("pause"):
 		_hide()
 		get_viewport().set_input_as_handled()
+
+
+# Same creative-or-debug gate as the item spawner.
+func _spawner_available() -> bool:
+	if Game.debug_enabled:
+		return true
+	if _player != null and "creative_mode" in _player and _player.creative_mode:
+		return true
+	return false
 
 
 func _show() -> void:

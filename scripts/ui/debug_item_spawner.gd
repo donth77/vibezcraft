@@ -259,7 +259,7 @@ func _build_header(vbox: VBoxContainer) -> void:
 	header.add_theme_constant_override("separation", 12)
 	vbox.add_child(header)
 	var title := Label.new()
-	title.text = "Debug Item Spawner  (F4 / Esc to close)"
+	title.text = "Item Spawner  (F4 / Esc to close)"
 	title.add_theme_font_size_override("font_size", 22)
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(title)
@@ -358,7 +358,7 @@ func _display_name(item_id: int) -> String:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("debug_item_spawner") and Game.debug_enabled:
+	if event.is_action_pressed("open_item_spawner") and _spawner_available():
 		if visible:
 			_hide_spawner()
 		else:
@@ -367,6 +367,17 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif visible and event.is_action_pressed("pause"):
 		_hide_spawner()
 		get_viewport().set_input_as_handled()
+
+
+# Spawner is user-facing now: open in either creative or debug. Either
+# mode is a valid context for "I'm building / experimenting and want
+# unrestricted item access." Survival-mode players still get the gate.
+func _spawner_available() -> bool:
+	if Game.debug_enabled:
+		return true
+	if _player != null and "creative_mode" in _player and _player.creative_mode:
+		return true
+	return false
 
 
 func _show_spawner() -> void:

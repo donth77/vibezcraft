@@ -19,6 +19,10 @@ extends Node
 # so writing every frame wastes main-thread cycles.
 const _SKY_COLOR_EPS: float = 1.0 / 255.0
 
+# Debug fast-day toggle target. WorldTime.set_day_length flips between
+# vanilla 1200 s and this 30 s sprint on debug_fast_day.
+const _FAST_DAY_SECONDS: float = 30.0
+
 @export var environment_path: NodePath = ^"../WorldEnvironment"
 @export var sun_path: NodePath = ^"../DirectionalLight3D"
 
@@ -39,6 +43,24 @@ var _last_sky_top: Color = Color(-1, -1, -1, -1)
 func _ready() -> void:
 	if _sun != null:
 		_noon_sun_energy = _sun.light_energy
+
+
+# N flips WorldTime.day_length_seconds between vanilla (1200 s) and
+# _FAST_DAY_SECONDS so lighting changes are easy to eyeball. Bound via
+# debug_fast_day in input_actions.gd. Game.debug_enabled-gated so a
+# regular player can't accidentally drop into hyper-speed days.
+func _unhandled_input(event: InputEvent) -> void:
+	if not Game.debug_enabled:
+		return
+	if event.is_action_pressed("debug_fast_day"):
+		var current: float = WorldTime.day_length_seconds
+		var target: float = (
+			WorldTime.VANILLA_DAY_SECONDS
+			if current < WorldTime.VANILLA_DAY_SECONDS
+			else _FAST_DAY_SECONDS
+		)
+		WorldTime.set_day_length(target)
+		get_viewport().set_input_as_handled()
 
 
 func _process(_delta: float) -> void:

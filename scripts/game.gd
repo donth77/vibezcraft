@@ -46,12 +46,11 @@ var debug_enabled: bool = false
 
 # Per-category logging flags. Independent of `debug_enabled` so a dev can
 # tail one subsystem (e.g. mining timing) without flipping every debug
-# hotkey on. Set via env / .env: MC_CLONE_DEBUG_MINING, _LIGHTING, _MESH,
-# _WORLDGEN. Pattern at call sites is `if Game.debug_mining: print(...)`
-# so the gating cost is one bool load when the flag is off.
+# hotkey on. Set via env / .env: MC_CLONE_DEBUG_MINING, _LIGHTING,
+# _WORLDGEN, _CLOUDS. Pattern at call sites is `if Game.debug_mining:
+# print(...)` so the gating cost is one bool load when the flag is off.
 var debug_mining: bool = false
 var debug_lighting: bool = false
-var debug_mesh: bool = false
 var debug_worldgen: bool = false
 var debug_clouds: bool = false
 
@@ -157,6 +156,10 @@ func _ready() -> void:
 	# survives relaunches; env / .env still win so devs can override without
 	# editing the saved profile.
 	var cfg := SettingsMenu.load_config()
+	# Apply any user keybinding overrides from [controls]. Has to come
+	# after register_defaults so cleared bindings (saved as "") actually
+	# clear, and before any scene that reads InputMap (HUDs, player).
+	InputActions.apply_saved_overrides(cfg)
 	# Resolution: apply the cfg-saved value first, then env override wins.
 	# Order matters — _apply_resolution_override is a no-op when the env var
 	# isn't set, so cfg always lands; when it IS set, the env call overrides.
@@ -184,7 +187,6 @@ func _ready() -> void:
 	debug_enabled = _resolve_bool("MC_CLONE_DEBUG_MODE", false)
 	debug_mining = _resolve_bool("MC_CLONE_DEBUG_MINING", false)
 	debug_lighting = _resolve_bool("MC_CLONE_DEBUG_LIGHTING", false)
-	debug_mesh = _resolve_bool("MC_CLONE_DEBUG_MESH", false)
 	debug_worldgen = _resolve_bool("MC_CLONE_DEBUG_WORLDGEN", false)
 	debug_clouds = _resolve_bool("MC_CLONE_DEBUG_CLOUDS", false)
 	# World seed: read from settings.cfg [world] seed, OR randomize on
@@ -226,11 +228,11 @@ func _ready() -> void:
 	)
 	# Only mention category flags when at least one is on — otherwise the
 	# extra line is noise on every launch.
-	if debug_mining or debug_lighting or debug_mesh or debug_worldgen:
+	if debug_mining or debug_lighting or debug_worldgen:
 		print(
 			(
-				"[Game] debug categories: mining=%s lighting=%s mesh=%s worldgen=%s"
-				% [str(debug_mining), str(debug_lighting), str(debug_mesh), str(debug_worldgen)]
+				"[Game] debug categories: mining=%s lighting=%s worldgen=%s"
+				% [str(debug_mining), str(debug_lighting), str(debug_worldgen)]
 			)
 		)
 	# Warm the worldgen noise on the main thread before any worker can hit it,

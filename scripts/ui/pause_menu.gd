@@ -235,22 +235,31 @@ func _on_open_options() -> void:
 	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
 	get_tree().get_root().add_child(overlay)
 	# Hide the world HUD (crosshair, hotbar, hp, etc.) so it doesn't bleed
-	# through the options overlay. The Crosshair CanvasLayer is the root
-	# of all gameplay HUD per scenes/ui/crosshair.tscn. Restored in
-	# _on_options_closed.
+	# through the options overlay. Selectively iterate Crosshair's children
+	# instead of hiding the whole CanvasLayer — keeps DebugLabel visible so
+	# the player can still tell they're in debug mode while configuring
+	# options. Restored in _on_options_closed.
 	var hud: CanvasLayer = get_tree().get_root().find_child("Crosshair", true, false) as CanvasLayer
+	var hidden_hud_children: Array[CanvasItem] = []
 	if hud != null:
-		hud.visible = false
+		for child in hud.get_children():
+			if child.name == "DebugLabel" or child.name == "DebugStatsPanel":
+				continue
+			if child is CanvasItem and (child as CanvasItem).visible:
+				hidden_hud_children.append(child as CanvasItem)
+				(child as CanvasItem).visible = false
 	visible = false
-	overlay.tree_exited.connect(_on_options_closed.bind(hud))
+	overlay.tree_exited.connect(_on_options_closed.bind(hidden_hud_children))
 
 
-func _on_options_closed(hud: CanvasLayer) -> void:
+func _on_options_closed(hidden_hud_children: Array[CanvasItem]) -> void:
 	# Fired when the options overlay queue_frees itself. Re-show pause
-	# menu + game HUD; tree stays paused.
+	# menu + the gameplay HUD children we hid (DebugLabel stayed visible
+	# throughout). Tree stays paused.
 	visible = true
-	if hud != null:
-		hud.visible = true
+	for child in hidden_hud_children:
+		if is_instance_valid(child):
+			child.visible = true
 
 
 func _on_quit_to_title() -> void:
