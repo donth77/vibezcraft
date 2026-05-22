@@ -33,11 +33,6 @@ const CAST_SPEED: float = 12.0  # m/s — vanilla applies vel * 1.5 from 0.4 bas
 const BITE_CHANCE_PER_TICK: int = 500  # 1/500 vanilla rate per in-water tick
 const BITE_DURATION_MIN: int = 10
 const BITE_DURATION_RANGE: int = 30
-# Wait-for-bite — random initial countdown so the player feels the
-# "tense moments before a bite". Vanilla picks per-tick but this is
-# simpler to reason about + same gameplay feel.
-const INITIAL_WAIT_TICKS_MIN: int = 200  # 10s
-const INITIAL_WAIT_TICKS_RANGE: int = 600  # +0..30s
 
 const _BOBBER_SPRITE_PATH: String = "res://assets/textures/entities/packs/alpha_vanilla/bobber.png"
 # Vanilla jw.java scales the bobber quad by 0.5 — bobber appears as
@@ -47,9 +42,12 @@ const _BOBBER_WORLD_SIZE: float = 0.5
 var velocity: Vector3 = Vector3.ZERO
 var _owner_player: Node3D = null
 var _chunk_manager: Node = null
-var _bite_countdown: int = 0  # ticks until bite (when in water)
 var _bite_active: int = 0  # ticks of active-bite remaining
 var _in_water: bool = false
+# Set true the first tick the bobber transitions out-of-water →
+# in-water so we play "random.splash" once at impact (vanilla
+# Entity.N() handleWaterMovement behavior).
+var _splash_played: bool = false
 var _sprite: Sprite3D
 var _tick_accum: float = 0.0
 
@@ -65,10 +63,6 @@ func setup(player: Node3D, chunk_manager: Node, camera_pos: Vector3, look_dir: V
 	# inside the player's own head. Then apply cast velocity along look.
 	global_position += look_dir * 0.4
 	velocity = look_dir.normalized() * CAST_SPEED
-	# Initial bite countdown picked at cast time — actual countdown only
-	# advances while bobber is settled in water (vanilla hj.java drives
-	# the random-tick check from the in-water branch).
-	_bite_countdown = INITIAL_WAIT_TICKS_MIN + (randi() % INITIAL_WAIT_TICKS_RANGE)
 	# Vanilla jw.java (RenderFish) pulls an 8×8 tile from particles.png
 	# at (8, 16)→(16, 24), scales 0.5 (half-block billboard) and rotates
 	# to face the camera each frame. Sprite3D's BILLBOARD_ENABLED gives
@@ -142,17 +136,27 @@ func _tick_in_water_check() -> void:
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
 	)
 	var id: int = _chunk_manager.get_world_block(cell)
+	var was_in_water: bool = _in_water
 	_in_water = (id == Blocks.WATER_STILL or id == Blocks.WATER_FLOWING)
 	if not _in_water:
 		return
+	# First-tick transition out-of-water → in-water: play the impact
+	# splash that vanilla's Entity.N() (handleWaterMovement) fires for
+	# any Entity entering a water cell. Velocity-scaled so a steep cast
+	# splashes louder than a gentle one. _splash_played gates so we
+	# only fire once even if the bobber wobbles across the surface for
+	# several ticks before settling.
+	if not was_in_water and not _splash_played:
+		_splash_played = true
+		SFX.play_splash(velocity)
 	# Bite active — count down remaining bite ticks.
 	if _bite_active > 0:
 		_bite_active -= 1
 		return
-	# Pre-bite — count down toward bite OR roll the per-tick chance.
-	if _bite_countdown > 0:
-		_bite_countdown -= 1
-	if _bite_countdown <= 0 and randi() % BITE_CHANCE_PER_TICK == 0:
+	# Vanilla hj.java::e_() rolls a 1/500 chance per in-water tick
+	# starting immediately on water entry. No initial wait — the
+	# expected time to bite is ~25s with high variance (exponential).
+	if randi() % BITE_CHANCE_PER_TICK == 0:
 		_trigger_bite()
 
 
