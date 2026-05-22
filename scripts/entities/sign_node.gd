@@ -30,19 +30,17 @@ const FONT_PATH: String = "res://assets/fonts/Minecraft.otf"
 # symmetrically inside that height, centered on the panel mid-Y so
 # the top line doesn't spill above the panel and the bottom line
 # doesn't spill below.
-# Line stack offsets are a compromise between plank-row alignment and
-# panel-edge clearance. Vanilla text size (~0.089 m) is bigger than the
-# 3-texel plank light area (0.094 m) - 1 texel margin, so we can't
-# both center text on plank rows AND keep a top gap on wall signs.
-# Half-texel shift below splits the difference: line 0 sits midway
-# between plank-row center (texel 1) and seam (texel 3), so the text
-# has a small top gap AND text bottom stays above the seam.
-const PANEL_MID_Y_STANDING: float = 0.71875  # 0.75 - 1 texel (plank-centered)
-const PANEL_MID_Y_WALL: float = 0.515625  # 0.5 + 0.5 texel (half-texel gap from panel top)
-# Fence-mounted standing sign uses a SHORTER post (0.25 m) so the panel
-# y range is [0.25, 0.75] (centered at 0.5) instead of [0.5, 1.0]
-# (centered at 0.75). Apply the same -0.03125 plank-alignment shift.
-const PANEL_MID_Y_STANDING_ON_FENCE: float = 0.46875  # 0.5 - 1 texel
+# Standing + wall + fence-mounted standing all use non-V-flipped UVs
+# now (texture row 0 at panel top). Lines sit half a texel BELOW each
+# plank-row center — line center inside the light band, text top a few
+# screen px below panel edge (vanilla-size text is too big to perfectly
+# center inside a 3-texel light band without overflow).
+#   Wall:              panel y range [0.25, 0.75], PANEL_MID 0.515625
+#   Standing:          panel y range [0.5, 1.0],   PANEL_MID 0.765625
+#   Standing on fence: panel y range [0.25, 0.75], PANEL_MID 0.515625
+const PANEL_MID_Y_STANDING: float = 0.765625  # half-texel below plank center 0.96875
+const PANEL_MID_Y_WALL: float = 0.515625
+const PANEL_MID_Y_STANDING_ON_FENCE: float = 0.515625
 # 4 lines centered in the 0.5 m panel, ONE LINE PER PLANK ROW.
 # Vanilla MC's planks.png has 4 horizontal plank rows (4 texels tall
 # each) with dark seams between, and vanilla sign rendering aligns

@@ -166,6 +166,12 @@ func _ready() -> void:
 	render_distance = int(cfg.get_value("graphics", "render_distance", render_distance))
 	ChunkView.apply_alpha_fog(get_tree(), render_distance)
 	_setup_autosave()
+	# Push live foliage-tint updates to every loaded chunk + the overlay /
+	# entity materials when the player toggles "Alpha 1.1.2 foliage" in
+	# Settings. ChunkNode applies its per-instance pair at mesh-build, but
+	# already-loaded chunks need the explicit re-push or the change won't
+	# show up without a relog. See BlockAtlas.grass_tint / leaves_tint.
+	Game.alpha_vintage_foliage_changed.connect(_on_alpha_vintage_foliage_changed)
 	# Peek at the saved player position to pick where the initial chunk
 	# ring lands. Without this, ChunkManager always spawns chunks around
 	# (0,0) even when PlayerSave will teleport the player thousands of
@@ -1770,6 +1776,17 @@ func _notify_fluid_neighbors(pos: Vector3i) -> void:
 		FluidFx.flush_deferred(self, _deferred_sky_seeds, _deferred_fizz)
 		_deferred_sky_seeds.clear()
 		_deferred_fizz.clear()
+
+
+# Settings → Alpha 1.1.2 foliage toggled. Push the new tints to every
+# loaded chunk's MeshInstance3D (instance uniform — can't be set on the
+# shared material) plus the overlay + entity materials. No re-mesh; the
+# shader's UV gates already isolate the affected fragments.
+func _on_alpha_vintage_foliage_changed(_enabled: bool) -> void:
+	BlockAtlas.apply_foliage_tints()
+	for chunk_node: Node in _chunks.values():
+		if chunk_node != null and chunk_node.has_method("apply_foliage_tints"):
+			chunk_node.apply_foliage_tints()
 
 
 # Called when a fluid is freshly placed at `pos`. Ensures a first tick

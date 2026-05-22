@@ -86,8 +86,8 @@ func _ready() -> void:
 	_build_wordmark()
 	_build_splash()
 	_build_buttons()
-	_build_version_label()
-	_build_footer_label()
+	#_build_version_label()
+	#_build_footer_label()
 
 
 func _force_cursor_visible() -> void:
@@ -215,7 +215,7 @@ func _add_button(parent: VBoxContainer, text: String, handler: Callable) -> Vani
 # string.
 func _build_version_label() -> void:
 	var label := Label.new()
-	label.text = "VibezCraft Alpha v0.1 (targeting MC Alpha v1.2.6)"
+	label.text = "VibezCraft v0.1"
 	label.anchor_left = 0.0
 	label.anchor_top = 0.0
 	label.offset_left = 10
@@ -234,7 +234,7 @@ func _build_version_label() -> void:
 # hygiene (see legal.md).
 func _build_footer_label() -> void:
 	var label := Label.new()
-	label.text = "Unofficial Alpha-era clone. Not affiliated with Mojang AB."
+	label.text = "Unofficial MC Alpha-era clone."
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.anchor_left = 1.0

@@ -1217,21 +1217,17 @@ static func _emit_standing_sign(
 	# Normals after rotation: front=(-sin, 0, +cos), right=(+cos, 0, +sin)
 	var n_front := Vector3(-sn, 0, cs)
 	var n_right := Vector3(cs, 0, sn)
-	# Back face (-Z LOCAL) UV override. The shared _emit_rotated_quads
-	# pattern emits UVs in winding order [bot-L, top-L, top-R, bot-R]
-	# of the texture rect, which lines up correctly with the FRONT quad's
-	# CCW-from-outside vertex order [top-L, bot-L, bot-R, top-R]. But the
-	# back quad's vertex order [top-L, top-R, bot-R, bot-L from −Z viewer]
-	# differs — same UV pattern rotates the texture 90° on the back face.
-	# Override with UVs matched to the back-face vertex order so the
-	# texture reads upright + non-mirrored from behind, matching the
-	# front (vanilla parity: jx.java draws the same sign mesh both sides).
+	# Back face (-Z LOCAL) UV override. Default UV order is non-V-flipped
+	# (texture top-left at FRONT quad's top-left). Back quad's vertex
+	# order [top-L, top-R, bot-R, bot-L from −Z viewer] needs UVs
+	# matched to THOSE corners so the texture reads upright + non-
+	# mirrored from behind.
 	var back_uvs := PackedVector2Array(
 		[
-			Vector2(rect.position.x, rect.position.y + rect.size.y),
-			Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y),
-			Vector2(rect.position.x + rect.size.x, rect.position.y),
 			Vector2(rect.position.x, rect.position.y),
+			Vector2(rect.position.x + rect.size.x, rect.position.y),
+			Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y),
+			Vector2(rect.position.x, rect.position.y + rect.size.y),
 		]
 	)
 	# Quads: each is [v0, v1, v2, v3, normal] in winding-consistent order.
@@ -1359,10 +1355,14 @@ static func _emit_rotated_quads(
 			for vi in range(4):
 				uvs.append(custom_uvs[vi])
 		else:
-			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			# Non-V-flipped UV order — texture row 0 (light pixel) lands
+			# at the panel top vertex so standing signs show their wood
+			# in the same orientation as wall signs + the edit-screen
+			# preview (matching ask: "preview wood matches in-game").
 			uvs.append(Vector2(rect.position.x, rect.position.y))
-			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
 			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
 		colors.append(face_light)
 		colors.append(face_light)
 		colors.append(face_light)

@@ -343,6 +343,13 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		array_mesh.surface_set_material(0, BlockAtlas.material())
 		_mesh_instance.mesh = array_mesh
+		# Per-instance foliage tints. The chunk shader declares
+		# grass_tint / leaves_tint as `instance uniform`, so the shader-
+		# code defaults only apply if no per-instance value is set; we
+		# always push explicitly to keep behavior identical regardless of
+		# whether the user toggles the alpha-vintage setting. ChunkManager
+		# re-runs apply_foliage_tints_to_all() on toggle changes.
+		_apply_foliage_tints()
 		# Per-instance Savanna tint — sample the climate biome at chunk
 		# center; the chunk shader gates the yellow shift behind UV ∈
 		# grass_top so non-grass faces stay normal. Per-chunk granularity
@@ -443,6 +450,21 @@ func _apply_mesh_data(data: Dictionary) -> void:
 
 
 # Walk the chunk for CHEST cells and ensure a ChestNode exists at each.
+# Push the active grass / leaves tints to this chunk's mesh instance.
+# Called at mesh-build time and by ChunkManager when the user toggles the
+# vintage-foliage setting at runtime. Safe to call even if the chunk has
+# no grass/leaves faces — the shader's UV gates skip non-foliage frags.
+func apply_foliage_tints() -> void:
+	if _mesh_instance == null:
+		return
+	_apply_foliage_tints()
+
+
+func _apply_foliage_tints() -> void:
+	_mesh_instance.set_instance_shader_parameter("grass_tint", BlockAtlas.grass_tint())
+	_mesh_instance.set_instance_shader_parameter("leaves_tint", BlockAtlas.leaves_tint())
+
+
 # Removes orphan entities for cells whose block is no longer a chest.
 # Cheap because chest count per chunk is low (0..few) — we do a single
 # linear scan over `chunk.blocks` keyed on the CHEST byte.

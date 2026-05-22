@@ -8,6 +8,16 @@ render_mode cull_back, depth_test_disabled, unshaded;
 
 uniform sampler2D atlas_texture : filter_nearest, source_color;
 
+// Atlas UV slots + biome tints. Mirror chunk.gdshader's pairs so the
+// first-person held grass / leaves block renders the same vivid Alpha
+// green as world chunks. See comments on the corresponding uniforms in
+// chunk.gdshader for the reverse-engineering math behind the values.
+// LINEAR-space (G > 1.0 is intentional HDR multiplier).
+uniform vec4 grass_top_uv = vec4(0.0);
+uniform vec3 grass_tint = vec3(0.52, 1.38, 0.19);
+uniform vec4 leaves_uv = vec4(0.0);
+uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
+
 varying vec3 v_normal;
 
 
@@ -31,5 +41,14 @@ void fragment() {
 	} else {
 		b = 0.65;
 	}
-	ALBEDO = c.rgb * b;
+	vec3 albedo_rgb = c.rgb;
+	if (UV.x >= grass_top_uv.x && UV.x < grass_top_uv.x + grass_top_uv.z
+			&& UV.y >= grass_top_uv.y && UV.y < grass_top_uv.y + grass_top_uv.w) {
+		albedo_rgb *= grass_tint;
+	}
+	if (UV.x >= leaves_uv.x && UV.x < leaves_uv.x + leaves_uv.z
+			&& UV.y >= leaves_uv.y && UV.y < leaves_uv.y + leaves_uv.w) {
+		albedo_rgb *= leaves_tint;
+	}
+	ALBEDO = albedo_rgb * b;
 }

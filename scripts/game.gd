@@ -1,5 +1,7 @@
 extends Node
 
+signal alpha_vintage_foliage_changed(enabled: bool)
+
 # Cloud rendering quality — mirrors vanilla's `Options.fancyGraphics`
 # split (vendor/alpha-1.2.6-src/src/f.java:b vs c). 0=off (no clouds),
 # 1=fast (single flat textured plane, low cost), 2=fancy (3D box clouds
@@ -14,12 +16,20 @@ const CLOUD_QUALITY_FANCY: int = 2
 # pack, Steve in `assets/textures/entities/packs/{pack}/`). Available:
 #   • "alpha_vanilla"   — extracted from Mojang Alpha 1.2.6 (default)
 #   • "pixel_perfection" — HD community vanilla style
-#   • "pixellab"         — AI-generated 32x32
 #   • "programmer_art"   — CC-BY 4.0 from github.com/deathcap/ProgrammerArt
 @export var texture_pack: String = "alpha_vanilla"
 @export_enum("Off", "Fast", "Fancy") var cloud_quality: int = CLOUD_QUALITY_FANCY
 @export var fog_enabled: bool = true
 @export var sfx_enabled: bool = true
+
+# Opt-in "Alpha 1.1.2 foliage" tint. Settings UI surfaces this only when
+# the active pack is `alpha_vanilla` (the only pack the calibrated values
+# target). OFF (default) leaves the current vivid screenshot-derived
+# tints in place; ON swaps grass + leaves to values sampled directly from
+# the alpha 1.1.2 grass tile in the user's foliage-color reference image.
+# BlockAtlas + ChunkNode read this flag at material build / chunk creation
+# and listen on `alpha_vintage_foliage_changed` to re-push tints live.
+var alpha_vintage_foliage: bool = false
 
 # Active world slot for this session. Set by the Select World screen
 # (step 7.6) when the player clicks a slot; persistence modules
@@ -72,6 +82,13 @@ func _resolve_bool(key: String, default_val: bool) -> bool:
 		return default_val
 	var lower := raw.to_lower()
 	return lower in ["1", "true", "yes", "on"]
+
+
+func set_alpha_vintage_foliage(enabled: bool) -> void:
+	if alpha_vintage_foliage == enabled:
+		return
+	alpha_vintage_foliage = enabled
+	alpha_vintage_foliage_changed.emit(enabled)
 
 
 # MC_CLONE_RESOLUTION overrides the default window size at startup.
@@ -170,6 +187,9 @@ func _ready() -> void:
 	var settings_pack: String = cfg.get_value("graphics", "texture_pack", texture_pack)
 	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", settings_pack)
 	BlockAtlas.active_pack = resolved_pack
+	# Has to land BEFORE BlockAtlas.build() so the overlay + entity
+	# materials' initial grass/leaves tints reflect the saved choice.
+	alpha_vintage_foliage = bool(cfg.get_value("graphics", "alpha_vintage_foliage", false))
 	BlockAtlas.build()
 	# Cloud quality from settings.cfg (set via Main-Menu → Options).
 	# Defaults to the @export value (FANCY) on first launch.

@@ -24,7 +24,7 @@ const _BG_TINT: Color = Color(0x40 / 255.0, 0x40 / 255.0, 0x40 / 255.0, 1.0)
 # = TINY/SHORT/NORMAL/FAR.
 const _RENDER_DISTANCES: Array[int] = [2, 4, 8, 16]
 const _RENDER_DISTANCE_LABELS: Array[String] = ["Tiny", "Short", "Normal", "Far"]
-const _PACKS: Array[String] = ["alpha_vanilla", "pixel_perfection", "pixellab", "programmer_art"]
+const _PACKS: Array[String] = ["alpha_vanilla", "pixel_perfection", "programmer_art"]
 const _CLOUD_QUALITY_LABELS: Array[String] = ["Off", "Fast", "Fancy"]
 const _FPS_CAPS: Array[int] = [0, 60, 90, 120, 144]
 const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
@@ -59,6 +59,10 @@ var _fps_option: OptionButton
 var _vsync_checkbox: CheckBox
 var _fog_checkbox: CheckBox
 var _sfx_checkbox: CheckBox
+# Pack-conditional row — visible only when the texture pack dropdown
+# is set to alpha_vanilla. The label + checkbox both hide/show as a pair.
+var _vintage_foliage_row: HBoxContainer
+var _vintage_foliage_checkbox: CheckBox
 var _seed_label: Label
 var _pending_seed: int = 0
 # Overlay mode: Done-equivalents (Save/Cancel) queue_free instead of
@@ -130,11 +134,12 @@ func _build_panel() -> void:
 	# the bottom-edge margin at 1080p (without this, button_col bottom
 	# landed at y=1098 — off-screen).
 	vbox.offset_top = 60
-	# 10 rows × 60 px + 9 × 10 separation = 690 px. Row height is 60 (not 52)
-	# because CheckBox + HSlider have intrinsic minimum heights from Godot's
-	# default theme that exceed the controls' explicit custom_minimum_size,
-	# so under-sizing here used to push the bottom rows past the Save button.
-	vbox.offset_bottom = 60 + 690
+	# 11 rows × 60 px + 10 × 10 separation = 760 px. Bumped from 690 to
+	# reserve space for the conditional Alpha-1.1.2-foliage row (visible
+	# only when the pack dropdown is on alpha_vanilla). When hidden, the
+	# bottom 70 px just reads as extra breathing room — acceptable
+	# tradeoff for not having to reflow button_col on every pack change.
+	vbox.offset_bottom = 60 + 760
 	vbox.add_theme_constant_override("separation", 10)
 	add_child(vbox)
 
@@ -157,6 +162,13 @@ func _build_panel() -> void:
 		dist_labels.append("%s (%d)" % [_RENDER_DISTANCE_LABELS[i], _RENDER_DISTANCES[i]])
 	_distance_option = _add_option_row(vbox, "Render distance", dist_labels)
 	_pack_option = _add_option_row(vbox, "Texture pack", _PACKS)
+	# Pack-conditional toggle. The label is intentionally specific to the
+	# era — when more pack-scoped era flags ship later, each gets its own
+	# row rather than a generic "vintage" umbrella so persisted cfg keys
+	# stay stable. Visibility is wired through _on_pack_selected below.
+	_vintage_foliage_checkbox = _add_checkbox_row(vbox, "Alpha 1.1.2 foliage")
+	_vintage_foliage_row = _vintage_foliage_checkbox.get_parent() as HBoxContainer
+	_pack_option.item_selected.connect(_on_pack_selected)
 	_cloud_option = _add_option_row(vbox, "Clouds", _CLOUD_QUALITY_LABELS)
 	_fps_option = _add_option_row(vbox, "Frame rate cap", _FPS_CAP_LABELS)
 	_vsync_checkbox = _add_checkbox_row(vbox, "VSync")
@@ -434,6 +446,9 @@ static func apply_config(cfg: ConfigFile) -> void:
 	if resolution != "":
 		apply_resolution_value(resolution)
 	Game.fog_enabled = bool(cfg.get_value("graphics", "fog_enabled", true))
+	# Route through the setter so the signal fires + chunks/materials live-
+	# update without a relog (only matters when value actually changed).
+	Game.set_alpha_vintage_foliage(bool(cfg.get_value("graphics", "alpha_vintage_foliage", false)))
 	Game.sfx_enabled = bool(cfg.get_value("audio", "sfx_enabled", true))
 	var music_vol: float = float(cfg.get_value("audio", "music_volume", 0.25))
 	if Music != null:
@@ -524,6 +539,23 @@ func _load_settings() -> void:
 	_pending_seed = int(cfg.get_value("world", "seed", 0))
 	if _seed_label != null:
 		_seed_label.text = str(_pending_seed) if _pending_seed != 0 else "(random)"
+	var vintage_on: bool = bool(cfg.get_value("graphics", "alpha_vintage_foliage", false))
+	_vintage_foliage_checkbox.button_pressed = vintage_on
+	_vintage_foliage_checkbox.text = "On" if vintage_on else "Off"
+	_refresh_vintage_foliage_visibility(pack)
+
+
+# Show/hide the vintage-foliage row whenever the pack dropdown changes.
+# Calibrated values are alpha_vanilla-specific (grayscale grass_top), so
+# pre-tinted packs (pixel_perfection, programmer_art) would land wrong.
+func _on_pack_selected(idx: int) -> void:
+	_refresh_vintage_foliage_visibility(_PACKS[idx])
+
+
+func _refresh_vintage_foliage_visibility(pack: String) -> void:
+	if _vintage_foliage_row == null:
+		return
+	_vintage_foliage_row.visible = pack == "alpha_vanilla"
 
 
 func _on_save_pressed() -> void:
@@ -541,6 +573,7 @@ func _on_save_pressed() -> void:
 	)
 	cfg.set_value("graphics", "vsync", vsync_value)
 	cfg.set_value("graphics", "fog_enabled", _fog_checkbox.button_pressed)
+	cfg.set_value("graphics", "alpha_vintage_foliage", _vintage_foliage_checkbox.button_pressed)
 	cfg.set_value("audio", "sfx_enabled", _sfx_checkbox.button_pressed)
 	cfg.set_value("audio", "music_volume", _music_slider.value)
 	if _pending_seed != 0:
@@ -564,6 +597,11 @@ func _on_controls_pressed() -> void:
 		return
 	var overlay: Control = packed.instantiate() as Control
 	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	# Main-menu Settings flow paints the dirt-tile bg. In overlay mode
+	# (in-game pause) the paused world behind reads as enough context;
+	# the default semi-transparent dim is correct there.
+	if not _overlay_mode and overlay.has_method("set_dirt_background_mode"):
+		overlay.call("set_dirt_background_mode", true)
 	visible = false
 	overlay.tree_exited.connect(func() -> void: visible = true)
 	get_tree().get_root().add_child(overlay)

@@ -40,10 +40,56 @@ uniform int debug_view = 0;
 // this, dirt / stone tops would also catch the savanna yellow.
 uniform vec4 grass_top_uv = vec4(0.0);
 
+// Same gate for leaves — `leaves.png` ships GRAYSCALE with alpha-tested
+// transparency gaps, and the shader applies the canonical Alpha foliage
+// green via `leaves_tint` below. BlockAtlas pushes the slot rect at
+// build() so dirt / planks fragments aren't caught by the tint.
+uniform vec4 leaves_uv = vec4(0.0);
+
+// Per-instance base grass tint. grass_top.png ships GRAYSCALE in the
+// pack (matches Mojang's terrain.png), so the renderer is responsible
+// for the green.
+//
+// Default is reverse-engineered from a reference Alpha-style screenshot
+// (vivid sunlit plains green, foreground grass avg sRGB ≈ (111, 175, 72),
+// brightest sunlit pixels ≈ (120, 184, 78)). Canonical ColorizerGrass
+// (#91BD59) renders noticeably darker through grayscale × tint math
+// because Mojang painted the foliage texture brighter than that math
+// alone produces; the screenshot color is what players actually
+// associate with "iconic Alpha green."
+//
+// Target math (Godot 4 linear-space lighting):
+//   grass_top avg pixel = gray 146 sRGB → linear 0.288
+//   screenshot target avg = (111, 175, 72) sRGB → linear (0.150, 0.398, 0.054)
+//   solve tint × 0.288 = target → linear tint ≈ (0.52, 1.38, 0.19)
+//
+// G > 1.0 is intentional. HDR-space tint multiplier; the brightest
+// grass_top pixels (linear 0.566) × 1.38 = 0.781 linear → sRGB ~228,
+// which is the vivid sunlit grass in the screenshot's bright spots.
+// 8-bit framebuffer clamps gracefully at sRGB encode time.
+// ChunkNode can still override per-chunk via
+//   set_instance_shader_parameter("grass_tint", Color8(...).srgb_to_linear())
+// once biome variation lands.
+instance uniform vec3 grass_tint = vec3(0.52, 1.38, 0.19);
+
+// Per-instance leaves tint. leaves.png ships GRAYSCALE w/ alpha gaps —
+// same shader-tinting pattern as grass_top, calibrated against the same
+// reference screenshot. Foreground tree canopy avg ≈ sRGB (38, 123, 30)
+// = linear (0.020, 0.196, 0.013); our leaves grayscale source avgs 99
+// sRGB → linear 0.125. Required tint per channel: target / source.
+// Same HDR G > 1.0 trick as grass — vivid sunlit leaves come from
+// bright source pixels × big tint, framebuffer encode clamps gracefully.
+//   tint_R = 0.020 / 0.125 = 0.16
+//   tint_G = 0.196 / 0.125 = 1.57
+//   tint_B = 0.013 / 0.125 = 0.10
+instance uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
+
 // Per-instance Savanna tint factor (0.0 = no tint, 1.0 = full yellow).
-// ChunkNode sets this based on the chunk-center biome. Beta-style mostly-
-// per-chunk biome tinting; per-cell precision would need a chunk biome_map
-// + mesher changes (deferred).
+// ChunkNode sets this based on the chunk-center biome. Stacks ON TOP of
+// grass_tint above — the base plains green still applies, then savanna
+// pulls toward warm yellow. Beta-style mostly-per-chunk biome tinting;
+// per-cell precision would need a chunk biome_map + mesher changes
+// (deferred).
 instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
 
 varying vec3 v_normal;
@@ -112,13 +158,32 @@ void fragment() {
 		b = 0.6;
 	}
 	vec3 albedo_rgb = c.rgb;
-	// Savanna biome tint. Gate on UV being inside the grass_top slot so
-	// only grass-top faces in savanna chunks get the yellow shift; dirt /
-	// stone tops in the same chunk render normally. Vanilla Beta savanna
-	// grass color (BiomeBase.l() default ~ #BFB755 → ~vec3(0.75, 0.72, 0.33)).
-	if (savanna_tint > 0.0
-			&& UV.x >= grass_top_uv.x && UV.x < grass_top_uv.x + grass_top_uv.z
-			&& UV.y >= grass_top_uv.y && UV.y < grass_top_uv.y + grass_top_uv.w) {
+	// Grass-top biome tint. Applied to every fragment inside the grass_top
+	// atlas slot so the grayscale grass tile renders as the canonical Alpha
+	// plains green (#91BD59) — same math vanilla used at render time
+	// (GL_MODULATE: texture × biome_color), just baked into a single
+	// uniform multiply. The savanna shift below (warm yellow) stacks on top
+	// of this base tint, so savanna chunks first become plains-green then
+	// pull toward yellow.
+	bool in_grass_top = (
+			UV.x >= grass_top_uv.x && UV.x < grass_top_uv.x + grass_top_uv.z
+			&& UV.y >= grass_top_uv.y && UV.y < grass_top_uv.y + grass_top_uv.w);
+	if (in_grass_top) {
+		albedo_rgb *= grass_tint;
+	}
+	// Same UV-gate treatment for leaves so dirt / planks / etc. that
+	// happen to share neighbor atlas rows aren't accidentally tinted.
+	bool in_leaves = (
+			UV.x >= leaves_uv.x && UV.x < leaves_uv.x + leaves_uv.z
+			&& UV.y >= leaves_uv.y && UV.y < leaves_uv.y + leaves_uv.w);
+	if (in_leaves) {
+		albedo_rgb *= leaves_tint;
+	}
+	// Savanna biome tint. Same UV gate so only grass-top faces in savanna
+	// chunks get the yellow shift; dirt / stone tops render normally.
+	// Vanilla Beta savanna grass color (BiomeBase.l() default ~ #BFB755 →
+	// ~vec3(0.75, 0.72, 0.33)).
+	if (savanna_tint > 0.0 && in_grass_top) {
 		vec3 tint = vec3(1.0, 0.95, 0.55);
 		albedo_rgb = mix(albedo_rgb, albedo_rgb * tint, savanna_tint);
 	}

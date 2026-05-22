@@ -25,6 +25,14 @@ var _listening_button: Button = null
 # True until Save/Cancel decides what to do. Cancel reverts InputMap to
 # whatever was loaded; Save persists the _pending_events map to disk.
 var _baseline: Dictionary = {}  # action_id -> InputEvent | null (snapshot on open)
+# When opened from the main-menu Settings screen (which has a dirt-tile
+# bg), the parent screen hides itself so the controls overlay needs to
+# render its OWN dirt bg — without it the screen is just a black void.
+# In the in-game pause flow the dimmed world behind the parent reads as
+# enough context, so we stick with the semi-transparent overlay.
+# settings_menu sets this via `set_dirt_background_mode(true)` before
+# adding the overlay to the tree.
+var _use_dirt_background: bool = false
 
 
 func _ready() -> void:
@@ -39,14 +47,37 @@ func _ready() -> void:
 
 
 func _build_background() -> void:
-	# Same dim treatment as in_game_options so opening Controls from either
-	# the main-menu Settings or the in-game pause Options reads as the same
-	# layered modal style.
+	if _use_dirt_background:
+		# Match the main-menu Settings screen — dirt-tile bg tinted to the
+		# same 0x404040 vanilla shade so the two screens read as one flow.
+		var bg := TextureRect.new()
+		bg.anchor_right = 1.0
+		bg.anchor_bottom = 1.0
+		bg.stretch_mode = TextureRect.STRETCH_TILE
+		bg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		bg.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+		bg.modulate = Color(0x40 / 255.0, 0x40 / 255.0, 0x40 / 255.0, 1.0)
+		var dirt: Texture2D = VanillaButton.make_scaled_dirt_texture(4)
+		if dirt != null:
+			bg.texture = dirt
+		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(bg)
+		return
+	# Default: semi-transparent dim — used when opened over the paused
+	# game world (in-game Options → Controls). Keeps the world visible
+	# behind so the player has spatial context.
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.65)
 	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
+
+
+# Caller hook — settings_menu sets this to true before instantiating
+# so the controls overlay paints dirt instead of dim. Must be set
+# BEFORE the overlay enters the tree (i.e. before `add_child(overlay)`).
+func set_dirt_background_mode(enabled: bool) -> void:
+	_use_dirt_background = enabled
 
 
 func _build_panel() -> void:
@@ -112,27 +143,32 @@ func _build_panel() -> void:
 			var display: String = entry[1]
 			_add_action_row(vbox, action, display)
 
-	# Bottom button bar: Reset / Save / Cancel side-by-side.
+	# Bottom button bar: Reset / Save / Cancel side-by-side. Row is sized
+	# wider than the sum of buttons + separation so HBoxContainer's
+	# ALIGNMENT_CENTER has room to leave equal slack on each side. Total
+	# button width: 500 + 220 + 220 + 2×20 = 980 → row width 1100 leaves
+	# ~60 px slack each side at 1080p.
 	var button_row := HBoxContainer.new()
 	button_row.anchor_left = 0.5
 	button_row.anchor_right = 0.5
 	button_row.anchor_top = 0.88
 	button_row.anchor_bottom = 0.88
-	button_row.offset_left = -480
-	button_row.offset_right = 480
+	button_row.offset_left = -550
+	button_row.offset_right = 550
 	button_row.offset_top = 0
 	button_row.offset_bottom = 80
-	button_row.add_theme_constant_override("separation", 16)
+	button_row.add_theme_constant_override("separation", 20)
 	button_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_row)
 
 	var reset_btn := VanillaButton.new()
 	reset_btn.text = "Reset to Defaults"
-	# Wider footprint (460) + smaller font (36 vs default 40) so the longer
-	# label has visible padding around it. VanillaButton's stylebox has no
-	# content_margin, so without these tweaks the text touches the border.
-	reset_btn.custom_minimum_size = Vector2(460, 80)
-	reset_btn.add_theme_font_size_override("font_size", 36)
+	# 500 wide × font 32 leaves ~180 px of visible padding around the
+	# label, in line with how Save / Cancel breathe at their 220×80
+	# footprint with shorter text. font_size 32 (vs the default 40)
+	# also keeps the longer string from crowding the pixel-art border.
+	reset_btn.custom_minimum_size = Vector2(500, 80)
+	reset_btn.set_font_size(32)
 	reset_btn.pressed.connect(_on_reset_pressed)
 	button_row.add_child(reset_btn)
 

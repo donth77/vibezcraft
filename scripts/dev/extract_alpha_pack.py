@@ -11,11 +11,18 @@
 #   vendor/mojang/alpha-1.2.6/gui/items.png     — 256×256, 16×16 tiles
 #   vendor/mojang/alpha-1.2.6/mob/char.png      — 64×32 Steve skin
 #
-# Alpha's terrain.png stores grass_top and opaque leaves as grayscale
-# (Mojang tinted them per-biome at render time). Modern Minecraft still does
-# this, but our pack layout expects pre-tinted PNGs so every block can ship
-# a single face texture without a tint shader. We hand-apply the vanilla
-# default-biome tint here: grass_top → #79C05A, leaves → #48B518.
+# Alpha's terrain.png stores grass_top and leaves as grayscale; Mojang
+# tinted them per-biome at render time. Both ship GRAYSCALE in this
+# pack — the chunk shader applies the tint via `grass_tint` / `leaves_tint`
+# instance uniforms (defaults reverse-engineered from a reference
+# Alpha-style screenshot, see shaders/chunk.gdshader for the math).
+# Per-chunk biome variation (taiga, swamp, jungle) lands later by
+# overriding these uniforms without re-running the extractor.
+#
+# Leaves are taken from terrain.png (4, 3) — the TRANSPARENT variant
+# with alpha-tested gaps between leaf clusters (the iconic Alpha foliage
+# look). Beta added the "fast" mode that uses the opaque (5, 3) tile;
+# Alpha 1.2.6 had no such toggle.
 
 from PIL import Image
 from pathlib import Path
@@ -26,14 +33,12 @@ PACK = ROOT / "assets" / "textures" / "blocks" / "packs" / "alpha_vanilla"
 ITEMS = PACK / "items"
 ENTITIES = ROOT / "assets" / "textures" / "entities" / "packs" / "alpha_vanilla"
 
-# Vanilla default-biome tints (ColorizerGrass / ColorizerFoliage lookup at
-# temperature=0.5, humidity=0.5 — the Alpha spawn biome).
-GRASS_TINT = (0x79, 0xC0, 0x5A)
-FOLIAGE_TINT = (0x48, 0xB5, 0x18)
+# Tint constants live in the chunk shader now — see top-of-file comment +
+# shaders/chunk.gdshader's `grass_tint` / `leaves_tint` instance uniforms.
 
 # terrain.png — (col, row) in 16×16 tiles. Only blocks we actually use.
 TERRAIN_TILES = {
-	"grass_top": (0, 0),  # grayscale — tinted below
+	"grass_top": (0, 0),  # grayscale — tinted in chunk shader
 	"stone": (1, 0),
 	"dirt": (2, 0),
 	"grass_side": (3, 0),  # pre-baked green strip on top
@@ -55,7 +60,7 @@ TERRAIN_TILES = {
 	"furnace_side": (13, 2),
 	"glass": (1, 3),
 	"diamond_ore": (2, 3),
-	"leaves": (5, 3),  # grayscale (opaque variant) — tinted below
+	"leaves": (4, 3),  # grayscale, transparent gaps — tinted in chunk shader
 	"crafting_table_side": (11, 3),
 	"crafting_table_front": (12, 3),
 	"furnace_front_lit": (13, 3),
@@ -271,6 +276,10 @@ ITEM_TILES = {
 	# Sign item — vanilla dx.as(67).a(42) → items.png index 42 = (10, 2).
 	# Wooden sign sprite; placed by right-clicking a face.
 	"sign": (10, 2),
+	# Boat item — vanilla ItemBoat (id 333). Sprite at items.png tile
+	# (8, 6) — a side-view wooden hull. Verified against
+	# vendor/mojang/alpha-1.2.6/gui/items.png.
+	"boat": (8, 6),
 	# Gunpowder — vanilla Alpha dx.K(33).a(40) → sprite 40 = (8, 2).
 	# The existing assets/textures/items/gunpowder.png was extracted
 	# from (7, 8) which is actually MINECART, so the inventory icon
@@ -428,24 +437,6 @@ def _mirror_limb_block(arm: Image.Image) -> Image.Image:
 	return m
 
 
-def multiply_tint(img: Image.Image, tint: tuple[int, int, int]) -> Image.Image:
-	# Multiply grayscale × tint color — the same math Mojang runs in the
-	# tint shader. Alpha channel is preserved from the source.
-	out = img.copy()
-	px = out.load()
-	w, h = out.size
-	for y in range(h):
-		for x in range(w):
-			r, g, b, a = px[x, y]
-			px[x, y] = (
-				(r * tint[0]) // 255,
-				(g * tint[1]) // 255,
-				(b * tint[2]) // 255,
-				a,
-			)
-	return out
-
-
 # grass_side is left raw — Alpha bakes the green strip into the texture
 # (unlike grass_top and leaves, which ship grayscale for biome tinting).
 # Applying a multiply tint to the whole tile darkens the dirt half.
@@ -479,8 +470,8 @@ def main() -> None:
 
 	for name, (c, r) in TERRAIN_TILES.items():
 		img = tile(terrain, c, r)
-		if name in ("grass_top", "leaves"):
-			img = multiply_tint(img, GRASS_TINT if name == "grass_top" else FOLIAGE_TINT)
+		# grass_top + leaves both ship grayscale — tinted at render time in
+		# chunk.gdshader via `grass_tint` / `leaves_tint` instance uniforms.
 		img.save(PACK / f"{name}.png")
 
 	for alias, source in TERRAIN_ALIASES.items():

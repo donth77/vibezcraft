@@ -168,7 +168,29 @@ const _LAYOUT := {
 	"stone_slab_side": 89,
 }
 
+# Foliage tint variants. Default = current vivid screenshot-derived tints
+# baked into chunk.gdshader / chunk_overlay.gdshader. Vintage = sampled
+# from the user's alpha 1.1.2 grass reference (mean sRGB ≈ (105, 165, 61)
+# = #69A53D). Linear-space — same channels as the shader uniforms.
+#
+# Solved per-channel: required tint = target_linear / source_avg_linear.
+# Our grass_top.png ships GRAYSCALE with mean gray = 146 sRGB → linear
+# 0.288. (105,165,61) → linear (0.141, 0.366, 0.046). Tint =
+# (0.490, 1.304, 0.162) — kept rounded to two decimals in code.
+#
+# Leaves: no isolated alpha-1.1.2 leaf reference in the source image, so
+# we follow the same shape as the grass shift — drop ~6% off green vs
+# the shipping value (1.57 → 1.48), nudge red down (0.16 → 0.14), keep
+# blue identical (0.10). Produces a leaves tone that visually pairs with
+# the grass without sampling a non-existent reference.
+const _GRASS_TINT_DEFAULT: Vector3 = Vector3(0.52, 1.38, 0.19)
+const _GRASS_TINT_VINTAGE: Vector3 = Vector3(0.49, 1.30, 0.16)
+const _LEAVES_TINT_DEFAULT: Vector3 = Vector3(0.16, 1.57, 0.10)
+const _LEAVES_TINT_VINTAGE: Vector3 = Vector3(0.14, 1.48, 0.10)
+const _VINTAGE_FOLIAGE_PACK: String = "alpha_vanilla"
+
 static var active_pack: String = DEFAULT_PACK
+
 static var _texture: ImageTexture
 static var _uv_rects: Dictionary = {}
 # Precomputed face-UV lookup indexed by (block_id * 3 + face_kind).
@@ -192,6 +214,22 @@ static var _entity_material: ShaderMaterial
 static var _water_material: ShaderMaterial
 static var _lava_material: ShaderMaterial
 static var _slot_size: int = 32  # auto-detected on build()
+
+
+# Returns the active grass tint based on Game.alpha_vintage_foliage AND
+# active pack. Vintage only fires on the alpha_vanilla pack — the
+# values are calibrated against that pack's grayscale grass_top.png and
+# would land wrong on a pre-tinted pack like programmer_art.
+static func grass_tint() -> Vector3:
+	if active_pack == _VINTAGE_FOLIAGE_PACK and Game.alpha_vintage_foliage:
+		return _GRASS_TINT_VINTAGE
+	return _GRASS_TINT_DEFAULT
+
+
+static func leaves_tint() -> Vector3:
+	if active_pack == _VINTAGE_FOLIAGE_PACK and Game.alpha_vintage_foliage:
+		return _LEAVES_TINT_VINTAGE
+	return _LEAVES_TINT_DEFAULT
 
 
 static func build() -> void:
@@ -353,6 +391,18 @@ static func material() -> ShaderMaterial:
 				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
 			)
 		)
+		# Same UV gate for leaves — shader tints fragments inside this rect
+		# with the canonical Alpha foliage green.
+		var leaves_rect: Rect2 = uv_rect("leaves")
+		_material.set_shader_parameter(
+			"leaves_uv",
+			Vector4(
+				leaves_rect.position.x,
+				leaves_rect.position.y,
+				leaves_rect.size.x,
+				leaves_rect.size.y
+			)
+		)
 		# Animated fire — pass the atlas region the static fire tile occupies
 		# (the shader uses it as a UV gate) plus the multi-frame strip the
 		# shader samples from on a hit. fire_layer_0.png is 16×512 (32 frames).
@@ -374,7 +424,33 @@ static func overlay_material() -> ShaderMaterial:
 		_overlay_material = ShaderMaterial.new()
 		_overlay_material.shader = load("res://shaders/chunk_overlay.gdshader") as Shader
 		_overlay_material.set_shader_parameter("atlas_texture", texture())
+		# Same grass-top + leaves gates as the main chunk material so the
+		# first-person held grass / leaves blocks pick up the canonical Alpha
+		# tint (the overlay shader's grass_tint / leaves_tint defaults)
+		# instead of rendering the raw grayscale source tiles.
+		var grass_rect: Rect2 = uv_rect("grass_top")
+		_overlay_material.set_shader_parameter(
+			"grass_top_uv",
+			Vector4(
+				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
+			)
+		)
+		var leaves_rect: Rect2 = uv_rect("leaves")
+		_overlay_material.set_shader_parameter(
+			"leaves_uv",
+			Vector4(
+				leaves_rect.position.x,
+				leaves_rect.position.y,
+				leaves_rect.size.x,
+				leaves_rect.size.y
+			)
+		)
 		_overlay_material.render_priority = 100
+		# Initial pack-aware tint. apply_foliage_tints() also pushes these
+		# on a live toggle change so the held block reflects the setting
+		# immediately.
+		_overlay_material.set_shader_parameter("grass_tint", grass_tint())
+		_overlay_material.set_shader_parameter("leaves_tint", leaves_tint())
 	return _overlay_material
 
 
@@ -391,7 +467,48 @@ static func entity_material() -> ShaderMaterial:
 		# gdlint: disable=duplicated-load
 		_entity_material.shader = load("res://shaders/chunk.gdshader") as Shader
 		_entity_material.set_shader_parameter("atlas_texture", texture())
+		# UV gates + foliage tints. Entity material is plain `uniform` here
+		# (we set it on the material, not per-instance) — same shader as the
+		# chunk material but a separate ShaderMaterial instance, so the
+		# instance-uniform default in the shader still applies UNLESS we
+		# override it on the material like this.
+		var grass_rect: Rect2 = uv_rect("grass_top")
+		_entity_material.set_shader_parameter(
+			"grass_top_uv",
+			Vector4(
+				grass_rect.position.x, grass_rect.position.y, grass_rect.size.x, grass_rect.size.y
+			)
+		)
+		var leaves_rect: Rect2 = uv_rect("leaves")
+		_entity_material.set_shader_parameter(
+			"leaves_uv",
+			Vector4(
+				leaves_rect.position.x,
+				leaves_rect.position.y,
+				leaves_rect.size.x,
+				leaves_rect.size.y
+			)
+		)
+		_entity_material.set_shader_parameter("grass_tint", grass_tint())
+		_entity_material.set_shader_parameter("leaves_tint", leaves_tint())
 	return _entity_material
+
+
+# Push the current `grass_tint()` / `leaves_tint()` to the overlay +
+# entity materials. Called by ChunkManager when Game emits
+# `alpha_vintage_foliage_changed` so toggling the setting takes effect
+# without requiring a relog. ChunkNode handles the per-instance update
+# for the live chunk material separately (instance uniforms can't be set
+# on the material — they live on the MeshInstance3D).
+static func apply_foliage_tints() -> void:
+	var g: Vector3 = grass_tint()
+	var l: Vector3 = leaves_tint()
+	if _overlay_material != null:
+		_overlay_material.set_shader_parameter("grass_tint", g)
+		_overlay_material.set_shader_parameter("leaves_tint", l)
+	if _entity_material != null:
+		_entity_material.set_shader_parameter("grass_tint", g)
+		_entity_material.set_shader_parameter("leaves_tint", l)
 
 
 # Shared translucent water ShaderMaterial, used by every chunk's water
