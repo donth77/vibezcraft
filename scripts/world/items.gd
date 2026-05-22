@@ -503,6 +503,8 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.CHEST
 		"fence":
 			return Blocks.FENCE
+		"fence_gate":
+			return Blocks.FENCE_GATE
 		"wood_stairs":
 			return Blocks.WOOD_STAIRS
 		"cobblestone_stairs":
@@ -1037,6 +1039,12 @@ static func is_food(item_id: int) -> bool:
 
 static func max_stack_size(item_id: int) -> int:
 	if is_tool_item(item_id):
+		return 1
+	# Vanilla ItemArmor.aX=1 — armor pieces never stack. Without this,
+	# a debug-spawned or pickup-merged stack of helmets would let the
+	# player equip 64 helmets into one slot (slot-level limit is also
+	# enforced in inventory_screen for legacy saves with stacked armor).
+	if is_armor(item_id):
 		return 1
 	# Vanilla ItemBucket overrides maxStackSize to 1 — filled buckets
 	# need per-stack state (which fluid), and even empty buckets follow

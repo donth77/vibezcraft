@@ -62,16 +62,21 @@ func _ready() -> void:
 # toward that direction). We rotate the whole node so the body/lid front
 # faces the correct world direction.
 func set_facing(meta: int) -> void:
+	# Godot rotation.y is CCW from above (right-hand rule on +Y axis): the
+	# node's local -Z (forward) maps to world (-sin yaw, 0, -cos yaw). So
+	# yaw +π/2 sends the front to -X, yaw -π/2 sends it to +X. The previous
+	# version had meta 1 and meta 3 swapped, which made E/W chest placements
+	# read as "front faces away from the player."
 	var yaw: float = 0.0
 	match meta & 3:
 		0:
 			yaw = 0.0  # front faces -Z
 		1:
-			yaw = -PI / 2.0  # front faces -X
+			yaw = PI / 2.0  # front faces -X
 		2:
 			yaw = PI  # front faces +Z
 		3:
-			yaw = PI / 2.0  # front faces +X
+			yaw = -PI / 2.0  # front faces +X
 	rotation.y = yaw
 
 

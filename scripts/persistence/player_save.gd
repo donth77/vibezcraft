@@ -44,6 +44,30 @@ static func player_path(world_name: String = "") -> String:
 	return "%s/player.bin" % SaveLoad.world_dir(world_name)
 
 
+# Lightweight read of just the saved XZ — used by ChunkManager._ready so
+# initial chunks spawn around where the player will teleport to (instead
+# of (0,0)). Without this, a saved player far from origin lands in
+# unloaded space the moment _apply_payload runs and falls through. Y is
+# ignored because chunk selection is XZ-only; out-of-bounds Y is fixed up
+# separately in _apply_payload. Returns null on missing or malformed.
+static func peek_position(world_name: String = "") -> Variant:
+	var path: String = player_path(world_name)
+	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
+	if bytes.size() < _HEADER_SIZE:
+		return null
+	if bytes.slice(0, 4) != _magic:
+		return null
+	if bytes.decode_u32(4) != _FORMAT_VERSION:
+		return null
+	var parsed: Variant = bytes_to_var(bytes.slice(_HEADER_SIZE, bytes.size()))
+	if not parsed is Dictionary:
+		return null
+	var d: Dictionary = parsed as Dictionary
+	if not d.has("pos"):
+		return null
+	return d["pos"] as Vector3
+
+
 # --- Save ---
 
 
@@ -121,7 +145,27 @@ static func load_player(player: Node3D, world_name: String = "") -> bool:
 
 
 static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
-	player.global_position = payload.get("pos", Vector3.ZERO) as Vector3
+	# Sanitize saved Y. The autosave loop persists position unconditionally,
+	# so if the player ever falls into open space (e.g. a chunk-load race
+	# at world entry, or a creative-mode void plunge) the disk Y can land
+	# arbitrarily far below the world (y=-2727 seen in the wild). Clamp
+	# any Y outside the world's vertical range back to the world spawn
+	# altitude (or 100 if no spawn metadata yet) so the player respawns
+	# above terrain instead of falling forever again on reload.
+	var saved_pos: Vector3 = payload.get("pos", Vector3.ZERO) as Vector3
+	if saved_pos.y < 1.0 or saved_pos.y > 127.0:
+		var meta: Dictionary = WorldMeta.load_meta()
+		var spawn_y: float = 100.0
+		if not meta.is_empty():
+			var spawn_dict: Dictionary = meta.get("spawn", {}) as Dictionary
+			spawn_y = float(spawn_dict.get("y", 100.0))
+		var msg: String = (
+			"[PlayerSave] saved Y=%.1f out of world bounds; restoring to spawn altitude %.1f"
+			% [saved_pos.y, spawn_y]
+		)
+		push_warning(msg)
+		saved_pos.y = maxf(spawn_y, 64.0)
+	player.global_position = saved_pos
 	player.rotation.y = float(payload.get("yaw", 0.0))
 	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	if camera != null:

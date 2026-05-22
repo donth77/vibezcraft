@@ -504,6 +504,18 @@ func _handle_left_click(slot_index: int) -> void:
 	var slot: ItemStack = inventory.slots[slot_index]
 	if _cursor.is_empty() and slot.is_empty():
 		return
+	# Vanilla SlotArmor.getSlotStackLimit()=1 — armor slots only ever hold
+	# one piece, regardless of how many are on the cursor. Move exactly 1
+	# from the cursor into an empty armor slot; leave the rest on cursor.
+	if _is_armor_slot(slot_index) and not _cursor.is_empty() and slot.is_empty():
+		slot.item_id = _cursor.item_id
+		slot.count = 1
+		slot.damage = _cursor.damage
+		_cursor.count -= 1
+		if _cursor.count <= 0:
+			_cursor.clear()
+		_after_slot_change(slot_index)
+		return
 	if _cursor.is_empty():
 		_cursor.copy_from(slot)
 		slot.clear()
@@ -551,12 +563,17 @@ func _handle_shift_click(slot_index: int) -> void:
 		return
 	var armor_kind: int = Items.armor_slot_for(src.item_id)
 	# Source is armor in main/hotbar → equip into matching armor slot if free.
+	# Move exactly 1 piece (SlotArmor stack-limit=1); leave the rest in src.
 	if armor_kind != Items.ARMOR_SLOT_NONE and not _is_armor_slot(slot_index):
 		var dest: int = Inventory.ARMOR_START + armor_kind - Items.ARMOR_SLOT_HEAD
 		var dest_slot: ItemStack = inventory.slots[dest]
 		if dest_slot.is_empty():
-			dest_slot.copy_from(src)
-			src.clear()
+			dest_slot.item_id = src.item_id
+			dest_slot.count = 1
+			dest_slot.damage = src.damage
+			src.count -= 1
+			if src.count <= 0:
+				src.clear()
 			_after_slot_change(slot_index)
 			return
 		# Slot taken — fall through to the generic main/hotbar hop below.

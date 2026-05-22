@@ -132,6 +132,10 @@ var _spiral_offsets_r: int = -1
 var _spawn_queue_set: Dictionary = {}
 var _last_chunk_set_coord: Vector2i = Vector2i(2147483647, 2147483647)
 var _cached_player_chunk: Vector2i = Vector2i.ZERO
+# Center of the initial chunk-ring at world entry. Defaults to (0,0) for
+# fresh worlds; ChunkManager._ready overwrites it from PlayerSave.peek
+# so saved worlds load chunks around the player's destination.
+var _initial_load_center: Vector2i = Vector2i.ZERO
 
 # Autosave (step 7.4 — BETA exception per .claude/pre-mob-roadmap.md).
 # Alpha 1.2.6 had no autosave — saved only on pause menu open + save-
@@ -162,6 +166,18 @@ func _ready() -> void:
 	render_distance = int(cfg.get_value("graphics", "render_distance", render_distance))
 	ChunkView.apply_alpha_fog(get_tree(), render_distance)
 	_setup_autosave()
+	# Peek at the saved player position to pick where the initial chunk
+	# ring lands. Without this, ChunkManager always spawns chunks around
+	# (0,0) even when PlayerSave will teleport the player thousands of
+	# blocks away — the teleport then lands in unloaded space and the
+	# player falls through the world before the per-frame chunk loader
+	# catches up. ZERO fallback covers fresh worlds + corrupt saves.
+	var saved_pos: Variant = PlayerSave.peek_position()
+	if saved_pos is Vector3:
+		var p: Vector3 = saved_pos as Vector3
+		_initial_load_center = Vector2i(
+			int(floor(p.x / float(Chunk.SIZE_X))), int(floor(p.z / float(Chunk.SIZE_Z)))
+		)
 	# Spawn the player's current chunk synchronously so they have ground
 	# under them the moment the scene comes up. The rest of the render-
 	# distance ring spawns one chunk per frame so the LoadingScreen can
@@ -175,14 +191,16 @@ func _spawn_initial_chunks() -> void:
 	var span: int = render_distance * 2 + 1
 	var total: int = span * span
 	var loaded: int = 0
-	_spawn_chunk_sync(Vector2i.ZERO)
+	_spawn_chunk_sync(_initial_load_center)
 	loaded += 1
 	initial_chunks_ready.emit(loaded, total)
 	# Spiral-out by squared distance so the player-ring lands first.
+	# Offsets are relative; add _initial_load_center so the ring centers
+	# on the saved player chunk (or (0,0) for fresh worlds).
 	var order: Array = ChunkView.spiral_offsets(render_distance)
 	for c: Vector2i in order:
 		await get_tree().process_frame
-		_spawn_chunk_sync(c)
+		_spawn_chunk_sync(c + _initial_load_center)
 		loaded += 1
 		initial_chunks_ready.emit(loaded, total)
 	Music.start_music()
@@ -471,6 +489,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 		if not tile_entities.is_empty():
 			var chests: Dictionary = {}
 			var furnaces: Dictionary = {}
+			var signs: Dictionary = {}
 			for local_pos: Vector3i in tile_entities:
 				var te: Dictionary = tile_entities[local_pos]
 				match te.get("type", ""):
@@ -478,10 +497,14 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 						chests[local_pos] = te.get("items", [])
 					"furnace":
 						furnaces[local_pos] = te.get("data", {})
+					"sign":
+						signs[local_pos] = te.get("lines", [])
 			if not chests.is_empty():
 				ChestStorage.restore_chunk(coord, chests)
 			if not furnaces.is_empty():
 				FurnaceManager.restore_chunk(coord, furnaces)
+			if not signs.is_empty():
+				SignStorage.restore_chunk(coord, signs)
 	# Drain cane tops collected during worldgen / decode (worker thread).
 	# Was a 32k-cell column walk on every materialize before — now a small
 	# list iteration (typical chunks: 0-4 entries).
@@ -776,6 +799,8 @@ func flush_dirty_loaded() -> int:
 		coords_to_flush[coord] = true
 	for coord: Vector2i in FurnaceManager.get_active_chunks():
 		coords_to_flush[coord] = true
+	for coord: Vector2i in SignStorage.get_active_chunks():
+		coords_to_flush[coord] = true
 	var written: int = 0
 	for coord: Vector2i in coords_to_flush.keys():
 		if not _chunks.has(coord):
@@ -805,9 +830,13 @@ func _build_chunk_save_entry(coord: Vector2i, chunk: Chunk, destructive: bool) -
 	var furnace_data: Dictionary = FurnaceManager.serialize_chunk(coord)
 	for local_pos: Vector3i in furnace_data:
 		tile_entities[local_pos] = {"type": "furnace", "data": furnace_data[local_pos]}
+	var sign_data: Dictionary = SignStorage.serialize_chunk(coord)
+	for local_pos: Vector3i in sign_data:
+		tile_entities[local_pos] = {"type": "sign", "lines": sign_data[local_pos]}
 	if destructive:
 		ChestStorage.forget_chunk(coord)
 		FurnaceManager.forget_chunk(coord)
+		SignStorage.forget_chunk(coord)
 	var pending_ticks: Array
 	if destructive:
 		pending_ticks = TickScheduler.take_for_chunk(coord.x, coord.y)
