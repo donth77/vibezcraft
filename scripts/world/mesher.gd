@@ -198,6 +198,20 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_door_geometry(
 						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_FENCE_GATE:
+					_emit_fence_gate_geometry(
+						chunk,
+						x,
+						y,
+						z,
+						verts,
+						norms,
+						uvs,
+						colors,
+						indices,
+						collision_faces,
+						plant_faces
+					)
 				elif ms == Blocks.MESH_SHAPE_LADDER:
 					_emit_ladder_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
@@ -408,6 +422,14 @@ static func _emit_block_faces(
 		var neighbor_hides_face: bool = (
 			(Blocks.is_opaque(neighbor_id) and neighbor_id != Blocks.LEAVES) or neighbor_id == id
 		)
+		# Mob spawner: always emit all 6 cage faces regardless of neighbor
+		# opacity. Vanilla `eb.java::shouldSideBeRendered` returns true for
+		# any non-same-material neighbor (the cage looks like a complete
+		# cube on every side). Without this exception the bottom face
+		# vanished against grass/dirt and the spawner looked like a
+		# floating five-faced block.
+		if id == Blocks.MOB_SPAWNER:
+			neighbor_hides_face = neighbor_id == id
 		if neighbor_hides_face:
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
@@ -516,6 +538,15 @@ static func _emit_external_collision(
 # hop a single fence. Collision soup spans the full hitbox; visible mesh
 # stays at the 16/16 post height (vanilla's 1.5 hitbox is purely physical).
 # gdlint: disable=function-arguments-number
+# True if the cell at (nx, ny, nz) should have a fence rail extended
+# toward it. Vanilla Bukkit `BlockFence.e()` returns true for same-id
+# fence AND for any fence gate (no facing check) — we mirror exactly
+# that. Other opaque-cube neighbours stay deliberately excluded.
+static func _fence_attaches_to(chunk: Chunk, nx: int, ny: int, nz: int) -> bool:
+	var nid: int = chunk.get_block(nx, ny, nz)
+	return nid == Blocks.FENCE or nid == Blocks.FENCE_GATE
+
+
 static func _emit_fence_geometry(
 	chunk: Chunk,
 	x: int,
@@ -529,12 +560,17 @@ static func _emit_fence_geometry(
 	collision_faces: PackedVector3Array
 ) -> void:
 	# Connection probes — same convention as bk.java:1205-1208 but with our
-	# Vector3i offsets. Alpha gates on same-id neighbors only; we mirror that
-	# strictly. Solid-block connection is a Beta+ change we deliberately omit.
-	var conn_west: bool = chunk.get_block(x - 1, y, z) == Blocks.FENCE
-	var conn_east: bool = chunk.get_block(x + 1, y, z) == Blocks.FENCE
-	var conn_north: bool = chunk.get_block(x, y, z - 1) == Blocks.FENCE
-	var conn_south: bool = chunk.get_block(x, y, z + 1) == Blocks.FENCE
+	# Vector3i offsets. Alpha gates on same-id neighbours only. Bukkit's
+	# `BlockFence.e()` (the modern-MC connect check) explicitly returns
+	# true for `Blocks.FENCE_GATE` neighbours regardless of gate facing,
+	# so a fence rail extrudes into any gate-adjacent side — same rule we
+	# adopt here. Other Beta+ "connect to any opaque renderAsNormalBlock"
+	# neighbours stay deliberately omitted (would attach to dirt / planks
+	# / etc., which doesn't fit the Alpha-leaning aesthetic).
+	var conn_west: bool = _fence_attaches_to(chunk, x - 1, y, z)
+	var conn_east: bool = _fence_attaches_to(chunk, x + 1, y, z)
+	var conn_north: bool = _fence_attaches_to(chunk, x, y, z - 1)
+	var conn_south: bool = _fence_attaches_to(chunk, x, y, z + 1)
 	# Sample sky/block light at the fence's own cell — fence faces don't
 	# have an obvious "open neighbor" the way cube faces do, and the cell
 	# above is generally air. Self-light is what RenderBlocks.k() does
@@ -782,6 +818,140 @@ static func _emit_ladder_geometry(
 # (same as Blocks._door_facing). Each cell renders ONE half of the door
 # (upper or lower); the block above/below holds the other half.
 # gdlint: disable=function-arguments-number
+# Beta 1.8 BlockFenceGate, mesh modelled after the canonical 1.9 model
+# JSON (`models/block/fence_gate_closed.json` + `_open.json`) but with
+# the outer posts extended down to y=0 instead of y=5/16. Vanilla 1.9
+# leaves a 5/16 gap below the gate because adjacent fences are expected
+# to attach there; for standalone gates that gap reads as "floating".
+# 8 boxes per state: 2 grounded outer posts, 2 short inner posts
+# (y=6..15/16), and 4 rails (lower y=6..9/16, upper y=12..15/16). Open
+# state swings the inner posts + rails back to +Z. Facing 0/2 keeps the
+# canonical X-axis layout; facing 1/3 rotates 90° around Y.
+#
+# Collision: closed gate emits a full-width 1.5-tall fence-style hitbox
+# (Bukkit `a(World,...)` AABB); open gate emits zero collision_faces so
+# the player can walk through. Selection collision (plant_faces) is
+# emitted in BOTH states, scaled to the per-facing selection AABB, so
+# the cursor can still raycast-hit an OPEN gate to right-click it
+# closed. Without this the raycast passed through the gate to whatever
+# was behind it — the user-reported "unable to close gate fence" bug.
+# gdlint: disable=function-arguments-number
+static func _emit_fence_gate_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var facing: int = Blocks.fence_gate_facing(meta)
+	var is_open: bool = Blocks.is_fence_gate_open(meta)
+	var fx: float = float(x)
+	var fy: float = float(y)
+	var fz: float = float(z)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var rect: Rect2 = BlockAtlas.uv_rect("planks")
+	for box: Array in _fence_gate_boxes(facing, is_open):
+		var mn: Vector3 = (box[0] as Vector3) + Vector3(fx, fy, fz)
+		var mx: Vector3 = (box[1] as Vector3) + Vector3(fx, fy, fz)
+		_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_light)
+	# Physical collision: closed only. 1.5-tall (matches FENCE so the
+	# player can't hop over) along the gate's spanned axis.
+	if not is_open:
+		if facing == 0 or facing == 2:
+			_emit_collision_box(
+				collision_faces,
+				Vector3(fx, fy, fz + 0.375),
+				Vector3(fx + 1.0, fy + 1.5, fz + 0.625)
+			)
+		else:
+			_emit_collision_box(
+				collision_faces,
+				Vector3(fx + 0.375, fy, fz),
+				Vector3(fx + 0.625, fy + 1.5, fz + 1.0)
+			)
+	# Selection collision (cursor target only). Emit on BOTH open and
+	# closed so right-click still hits the open gate. Footprint matches
+	# `Blocks._fence_gate_selection_aabb` so the highlight wireframe
+	# and the cursor pick agree.
+	var sel_aabb: AABB = Blocks._fence_gate_selection_aabb(meta)
+	_emit_collision_box(
+		plant_faces,
+		Vector3(fx + sel_aabb.position.x, fy + sel_aabb.position.y, fz + sel_aabb.position.z),
+		Vector3(
+			fx + sel_aabb.position.x + sel_aabb.size.x,
+			fy + sel_aabb.position.y + sel_aabb.size.y,
+			fz + sel_aabb.position.z + sel_aabb.size.z
+		)
+	)
+
+
+# Canonical 1.9 fence-gate box list in cell-local [0..1] coords. 8
+# axis-aligned boxes per open/closed state — direct port of the
+# `models/block/fence_gate_{closed,open}.json` element coords (1/16
+# units divided by 16). Facing 1/3 rotates the X-axis boxes 90° CW
+# around the cell center via (x, y, z) → (z, y, 1-x) so the gate
+# spans Z instead of X. Used by the mesher (in-world geometry) and
+# could also feed a held-mesh builder, but the held variant freezes
+# facing 0 + closed so we just inline that case in block_mesh.gd.
+static func _fence_gate_boxes(facing: int, is_open: bool) -> Array:
+	var canonical: Array
+	# Outer posts are grounded (y=0..1.0) — diverges from vanilla 1.9's
+	# y=5..16 because standalone gates would otherwise float. Inner
+	# posts + rails keep canonical heights.
+	if is_open:
+		canonical = [
+			[Vector3(0.0, 0.0, 0.4375), Vector3(0.125, 1.0, 0.5625)],
+			[Vector3(0.875, 0.0, 0.4375), Vector3(1.0, 1.0, 0.5625)],
+			# Inner posts swung to +Z edge (open hinge position).
+			[Vector3(0.0, 0.375, 0.8125), Vector3(0.125, 0.9375, 0.9375)],
+			[Vector3(0.875, 0.375, 0.8125), Vector3(1.0, 0.9375, 0.9375)],
+			# Rails connecting outer (z=0.5625) → inner (z=0.8125), both
+			# sides + both y-levels. Gate "swung 90° toward +Z".
+			[Vector3(0.0, 0.375, 0.5625), Vector3(0.125, 0.5625, 0.8125)],
+			[Vector3(0.0, 0.75, 0.5625), Vector3(0.125, 0.9375, 0.8125)],
+			[Vector3(0.875, 0.375, 0.5625), Vector3(1.0, 0.5625, 0.8125)],
+			[Vector3(0.875, 0.75, 0.5625), Vector3(1.0, 0.9375, 0.8125)],
+		]
+	else:
+		canonical = [
+			# Outer posts — full height, 2/16 wide × 2/16 deep, cell edges.
+			[Vector3(0.0, 0.0, 0.4375), Vector3(0.125, 1.0, 0.5625)],
+			[Vector3(0.875, 0.0, 0.4375), Vector3(1.0, 1.0, 0.5625)],
+			# Inner posts — y=6..15/16, centered pair.
+			[Vector3(0.375, 0.375, 0.4375), Vector3(0.5, 0.9375, 0.5625)],
+			[Vector3(0.5, 0.375, 0.4375), Vector3(0.625, 0.9375, 0.5625)],
+			# Lower + upper rails, two halves of the gate body.
+			[Vector3(0.125, 0.375, 0.4375), Vector3(0.375, 0.5625, 0.5625)],
+			[Vector3(0.125, 0.75, 0.4375), Vector3(0.375, 0.9375, 0.5625)],
+			[Vector3(0.625, 0.375, 0.4375), Vector3(0.875, 0.5625, 0.5625)],
+			[Vector3(0.625, 0.75, 0.4375), Vector3(0.875, 0.9375, 0.5625)],
+		]
+	if facing == 0 or facing == 2:
+		return canonical
+	var rotated: Array = []
+	for box: Array in canonical:
+		var a: Vector3 = box[0]
+		var b: Vector3 = box[1]
+		var ra := Vector3(a.z, a.y, 1.0 - a.x)
+		var rb := Vector3(b.z, b.y, 1.0 - b.x)
+		rotated.append(
+			[
+				Vector3(minf(ra.x, rb.x), minf(ra.y, rb.y), minf(ra.z, rb.z)),
+				Vector3(maxf(ra.x, rb.x), maxf(ra.y, rb.y), maxf(ra.z, rb.z))
+			]
+		)
+	return rotated
+
+
 static func _emit_door_geometry(
 	chunk: Chunk,
 	x: int,
@@ -1013,11 +1183,31 @@ static func _emit_standing_sign(
 	# Normals after rotation: front=(-sin, 0, +cos), right=(+cos, 0, +sin)
 	var n_front := Vector3(-sn, 0, cs)
 	var n_right := Vector3(cs, 0, sn)
+	# Back face (-Z LOCAL) UV override. The shared _emit_rotated_quads
+	# pattern emits UVs in winding order [bot-L, top-L, top-R, bot-R]
+	# of the texture rect, which lines up correctly with the FRONT quad's
+	# CCW-from-outside vertex order [top-L, bot-L, bot-R, top-R]. But the
+	# back quad's vertex order [top-L, top-R, bot-R, bot-L from −Z viewer]
+	# differs — same UV pattern rotates the texture 90° on the back face.
+	# Override with UVs matched to the back-face vertex order so the
+	# texture reads upright + non-mirrored from behind, matching the
+	# front (vanilla parity: jx.java draws the same sign mesh both sides).
+	var back_uvs := PackedVector2Array(
+		[
+			Vector2(rect.position.x, rect.position.y + rect.size.y),
+			Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y),
+			Vector2(rect.position.x + rect.size.x, rect.position.y),
+			Vector2(rect.position.x, rect.position.y),
+		]
+	)
 	# Quads: each is [v0, v1, v2, v3, normal] in winding-consistent order.
+	# Optional 6th element (PackedVector2Array) overrides the default
+	# UV pattern for faces where the standard order produces a rotated
+	# or mirrored texture.
 	var quads: Array = [
 		[c001, c011, c111, c101, Vector3.UP],
 		[c000, c100, c110, c010, Vector3.DOWN],
-		[c001, c101, c100, c000, -n_front],  # -Z local face
+		[c001, c101, c100, c000, -n_front, back_uvs],  # -Z local face
 		[c011, c010, c110, c111, n_front],  # +Z local face
 		[c101, c111, c110, c100, n_right],  # +X local face
 		[c001, c000, c010, c011, -n_right],  # -X local face
@@ -1094,10 +1284,18 @@ static func _emit_rotated_quads(
 		for vi in range(4):
 			verts.append(q[vi])
 			norms.append(nv)
-		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		# Optional per-quad UV override — used for faces (like the
+		# standing-sign back) where the default winding-order UV pattern
+		# rotates / mirrors the texture relative to the front face.
+		if q.size() > 5 and q[5] is PackedVector2Array:
+			var custom_uvs: PackedVector2Array = q[5]
+			for vi in range(4):
+				uvs.append(custom_uvs[vi])
+		else:
+			uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
+			uvs.append(Vector2(rect.position.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
+			uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
 		colors.append(face_light)
 		colors.append(face_light)
 		colors.append(face_light)

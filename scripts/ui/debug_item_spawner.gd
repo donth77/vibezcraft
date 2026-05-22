@@ -50,6 +50,7 @@ const _BLOCKS: Array = [
 	Blocks.TORCH,
 	Blocks.CHEST,
 	Blocks.FENCE,
+	Blocks.FENCE_GATE,
 	Blocks.WOOD_STAIRS,
 	Blocks.COBBLESTONE_STAIRS,
 	Blocks.LADDER,

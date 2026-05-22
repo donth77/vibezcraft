@@ -42,6 +42,27 @@ var _highlight: MeshInstance3D
 var _crack: MeshInstance3D
 var _crack_material: ShaderMaterial
 var _crack_stages: int = 6  # auto-detected from texture; default falls back to 6
+# Default cube crack mesh — re-applied whenever the target is a regular
+# cube block, after the fence-shaped variant was swapped in for a fence
+# target. Without this we'd churn an ArrayMesh.new() per non-cube target
+# change, and worse, the cube mesh's uniform UVs are lost.
+var _box_crack_mesh: ArrayMesh
+# Cache the most recently built fence crack mesh keyed by the 4-bit
+# connection mask (W, E, N, S). Only 16 combinations so the cache grows
+# bounded; lets quick target-changes between adjacent fences reuse a
+# prior build instead of rebuilding the same 1-5 boxes each tick.
+var _fence_crack_meshes: Dictionary = {}
+# Same caching pattern, keyed by (facing<<1 | is_open) — 8 entries max
+# (4 facings × 2 states), so memory is bounded.
+var _fence_gate_crack_meshes: Dictionary = {}
+# Stair crack meshes — keyed by meta & 3 (4 orientations). Bottom
+# half-slab + upper step matches Mesher._emit_stair_geometry.
+var _stair_crack_meshes: Dictionary = {}
+# Chest crack mesh — single 14/16 cube matching ChestNode's visible
+# bounds (the chunk mesher emits a full-cube collision soup for the
+# external-render block, but the visible chest entity is the smaller
+# vanilla mesh). Lazy-built on first chest break.
+var _chest_crack_mesh: ArrayMesh
 
 # Hold-to-break state
 var _mining_target: Vector3i = NO_TARGET
@@ -154,6 +175,21 @@ static func _script_extends(script: Script, target: Script) -> bool:
 	return false
 
 
+# Visual AABB for the selection-highlight + crack overlay. Static
+# Blocks.selection_aabb suffices for everything except connection-aware
+# shapes; FENCE grows out toward each neighbouring fence the same way
+# the mesher's `_emit_fence_geometry` extrudes rails, so the wireframe
+# sits on the visible geometry instead of a floating cube.
+func _block_visual_aabb(world_pos: Vector3i, id: int, meta: int) -> AABB:
+	if id == Blocks.FENCE:
+		var w: bool = _chunk_manager.get_world_block(world_pos + Vector3i(-1, 0, 0)) == Blocks.FENCE
+		var e: bool = _chunk_manager.get_world_block(world_pos + Vector3i(1, 0, 0)) == Blocks.FENCE
+		var n: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, -1)) == Blocks.FENCE
+		var s: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, 1)) == Blocks.FENCE
+		return Blocks.fence_selection_aabb(w, e, n, s)
+	return Blocks.selection_aabb(id, meta)
+
+
 # True if the raycast hit's collider is (or is a child of) a MobBase.
 # Used by _update_highlight to suppress the block-selection cube on
 # mobs and by _try_attack_mob to route LMB to take_damage.
@@ -231,7 +267,7 @@ func _update_highlight(hit: Dictionary) -> void:
 	# floating in the air cell next to it.
 	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
 	var hit_meta: int = _chunk_manager.get_world_block_meta(hit.block_pos)
-	var aabb: AABB = Blocks.selection_aabb(hit_id, hit_meta)
+	var aabb: AABB = _block_visual_aabb(hit.block_pos, hit_id, hit_meta)
 	_highlight.scale = aabb.size
 	_highlight.global_position = Vector3(hit.block_pos) + aabb.position + aabb.size * 0.5
 	_highlight.rotation = Vector3.ZERO
@@ -300,10 +336,24 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 	var stage: int = clamp(int(damage * float(_crack_stages)), 0, _crack_stages - 1)
 	var hit_id_now: int = _chunk_manager.get_world_block(target)
 	var hit_meta_now: int = _chunk_manager.get_world_block_meta(target)
-	var crack_aabb: AABB = Blocks.selection_aabb(hit_id_now, hit_meta_now)
 	_crack.visible = true
-	_crack.global_position = Vector3(target) + crack_aabb.position + crack_aabb.size * 0.5
-	_crack.scale = crack_aabb.size
+	# Shape-aware crack mesh — fence / fence-gate / chest / stairs use
+	# the same per-shape geometry as the chunk mesher emits, scaled 1:1
+	# in world coords, so the destroy_stages overlay reads on the
+	# visible triangles instead of plastering across the air gaps of a
+	# fat AABB box. Default cube-shaped blocks still use the unit-box
+	# mesh scaled to the selection AABB.
+	var shaped_mesh: ArrayMesh = _shape_aware_crack_mesh(target, hit_id_now, hit_meta_now)
+	if shaped_mesh != null:
+		_crack.mesh = shaped_mesh
+		_crack.scale = Vector3.ONE
+		_crack.global_position = Vector3(target)
+	else:
+		if _crack.mesh != _box_crack_mesh:
+			_crack.mesh = _box_crack_mesh
+		var crack_aabb: AABB = _block_visual_aabb(target, hit_id_now, hit_meta_now)
+		_crack.global_position = Vector3(target) + crack_aabb.position + crack_aabb.size * 0.5
+		_crack.scale = crack_aabb.size
 	_crack_material.set_shader_parameter("stage", stage)
 	# Complete the break?
 	if _mining_progress >= _mining_total_time:
@@ -411,6 +461,14 @@ func _complete_break(target: Vector3i) -> void:
 	if broken_id == Blocks.WOODEN_DOOR or broken_id == Blocks.IRON_DOOR:
 		_break_door(target, broken_id)
 		return
+	# Capture sign meta + drop its stored text BEFORE the block disappears,
+	# so the particle emission box can hug the panel (meta drives
+	# orientation) and SignStorage doesn't leak a phantom entry after the
+	# coord is reused.
+	var broken_meta: int = 0
+	if broken_id == Blocks.SIGN_STANDING or broken_id == Blocks.SIGN_WALL:
+		broken_meta = _chunk_manager.get_world_block_meta(target)
+		SignStorage.forget(target)
 	# Async re-mesh — chunk_manager.set_world_block flips chunk.dirty + a
 	# `_priority_apply` flag on the chunk_node so the result skips the
 	# 1-per-frame apply budget queue (avoids the ghost-block bug where the
@@ -425,7 +483,7 @@ func _complete_break(target: Vector3i) -> void:
 	# preload() instead of the class_name — Godot's editor class index
 	# lags one reload behind for new class_name files (TickScheduler had
 	# the same issue). The preload path doesn't depend on the index.
-	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
+	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id, broken_meta)
 	# Drop is gated by tool tier — bare hand on stone yields nothing,
 	# wrong-tier pick on iron ore yields nothing, etc.
 	# Multi-drop blocks (bookshelf → 3 books) loop random_drop so each
@@ -610,6 +668,10 @@ func _try_place() -> void:
 		return
 	if hit_id == Blocks.WOODEN_DOOR:
 		_toggle_door(hit.block_pos, hit_id)
+		_last_place_ms = now
+		return
+	if hit_id == Blocks.FENCE_GATE:
+		_toggle_fence_gate(hit.block_pos)
 		_last_place_ms = now
 		return
 	# Hoe + dirt/grass + top face hit + air above → till to farmland.
@@ -1045,6 +1107,57 @@ func _toggle_door(pos: Vector3i, block_id: int) -> void:
 	SFX.play_door_toggle()
 
 
+# Beta 1.8 BlockFenceGate.interact (Bukkit v.java:52-70). If closed,
+# the gate opens — and if the player is facing the gate from the
+# OPPOSITE side it was placed from, the gate's facing flips so the
+# swing goes the right way visually. If open, just clear the open bit.
+# Re-uses the door toggle SFX (`world.a(player, 1003, ...)` = door
+# sound id, vanilla reuses for both block families).
+func _toggle_fence_gate(pos: Vector3i) -> void:
+	var meta: int = _chunk_manager.get_world_block_meta(pos)
+	var new_meta: int
+	if Blocks.is_fence_gate_open(meta):
+		new_meta = meta & ~4
+	else:
+		var player_facing: int = _player_yaw_facing()
+		var gate_facing: int = Blocks.fence_gate_facing(meta)
+		# Mirror vanilla: if the player is on the opposite side of the
+		# fence's placed-facing, re-orient the gate to the player's facing
+		# so the rails swing away from the player rather than into them.
+		if gate_facing == (player_facing + 2) % 4:
+			new_meta = (meta & ~3) | player_facing | 4
+		else:
+			new_meta = meta | 4
+	_chunk_manager.set_world_block_with_meta(pos, Blocks.FENCE_GATE, new_meta)
+	SFX.play_door_toggle()
+
+
+# Quantize the player's current yaw into the 4-way facing convention
+# used by BlockDirectional (0=south/+Z, 1=west/-X, 2=north/-Z, 3=east/+X).
+# Same formula as Bukkit BlockFenceGate.postPlace.
+func _player_yaw_facing() -> int:
+	var player: Node3D = get_parent() as Node3D
+	if player == null:
+		return 0
+	# Same quantize as _chest_meta_from_yaw / _stair_meta_from_yaw:
+	# `dir` is the Godot-convention quadrant (0=-Z, 1=-X, 2=+Z, 3=+X).
+	# Remap to Bukkit BlockDirectional facing where 0=+Z/south, 1=-X/west,
+	# 2=-Z/north, 3=+X/east so the fence-gate interact handler reads the
+	# same convention as the source.
+	var yaw: float = player.global_transform.basis.get_euler().y
+	var dir: int = int(round(yaw / (PI / 2.0))) & 3
+	match dir:
+		0:
+			return 2  # facing -Z → north
+		1:
+			return 1  # facing -X → west
+		2:
+			return 0  # facing +Z → south
+		3:
+			return 3  # facing +X → east
+	return 0
+
+
 # Returns true if a block was actually placed (i.e., consumed an item).
 # gdlint: disable=max-returns
 func _place_block_from_held(hit: Dictionary) -> bool:
@@ -1183,6 +1296,12 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# yaw). Same convention as chest, so the same yaw quadrant helper
 	# applies. meta 0..3 maps -Z / -X / +Z / +X to which side carries
 	# the face — see Blocks.directional_face_texture.
+	if stack.item_id == Blocks.FENCE_GATE:
+		var gate_meta: int = _player_yaw_facing()
+		_chunk_manager.set_world_block_with_meta(place, Blocks.FENCE_GATE, gate_meta)
+		SFX.play_place(Blocks.FENCE_GATE)
+		inv.consume_one_selected()
+		return true
 	if stack.item_id == Blocks.PUMPKIN or stack.item_id == Blocks.JACK_O_LANTERN:
 		var pumpkin_meta: int = _chest_meta_from_yaw()
 		_chunk_manager.set_world_block_with_meta(place, stack.item_id, pumpkin_meta)
@@ -1420,13 +1539,28 @@ func _try_fishing_rod() -> bool:
 		var bobber_pos: Vector3 = existing.get_bobber_position()
 		player_node.set("fishing_bobber", null)
 		if caught:
-			# Spawn raw_fish entity at bobber, vanilla velocity toward
-			# player + slight upward bias.
+			# Spawn raw_fish entity at bobber, velocity toward player +
+			# small upward bias. Vanilla hj.java::k() uses to_player ×
+			# 0.1 + sqrt(dist) × 0.08, but vanilla's tick-rate physics
+			# is gentler than ours (effective drag ~0.4/s vs our 2.5/s,
+			# gravity ~16 m/s² vs our 22). Earlier 4.0× tuning carried
+			# the fish but overshot — it flew above the player's head
+			# (sqrt(10) × 4 = 12.6 m/s up = peak 3.6 m, well over the
+			# 1.6 m player head) and past them horizontally, leaving
+			# the magnet to drag it back. Current tune:
+			#   horizontal × 3.0 — fish reaches magnet range (1.8
+			#     blocks) at the player without overshooting; lower
+			#     multiplier means less drag-induced velocity loss
+			#     residual the magnet has to reverse.
+			#   vertical += sqrt(dist) × 1.5 — peak ≈ player hip
+			#     height, fish arcs UP TO the player not OVER them.
+			# Pickup delay 0.2s (default 2.0s) — magnet grabs the fish
+			# the moment it lands near the player.
 			var to_player: Vector3 = player_node.global_position + Vector3(0, 1.6, 0) - bobber_pos
 			var dist: float = to_player.length()
-			var vel: Vector3 = to_player * 0.5
-			vel.y += sqrt(maxf(dist, 0.0)) * 0.5
-			_spawn_dropped_item_with_velocity(bobber_pos, Items.RAW_FISH, vel)
+			var vel: Vector3 = to_player * 3.0
+			vel.y += sqrt(maxf(dist, 0.0)) * 1.5
+			_spawn_dropped_item_with_velocity(bobber_pos, Items.RAW_FISH, vel, 0.2)
 		# Always damage rod on reel (vanilla returns n2 from k(); we
 		# simplify to 1).
 		var inv: Inventory = _player_inventory()
@@ -1447,24 +1581,30 @@ func _try_fishing_rod() -> bool:
 	_chunk_manager.add_child(bobber)
 	bobber.setup(player_node, _chunk_manager, cam_pos, look_dir)
 	player_node.set("fishing_bobber", bobber)
-	# Vanilla bj.java plays "random.bow" — we don't have a bow sound
-	# yet so reuse splash with a low-amplitude velocity for the cast
-	# whoosh; not perfect but better than silence.
-	SFX.play_splash(Vector3(0, 0.4, 0))
+	# Vanilla bj.java::a plays "random.bow" at cast — volume 0.5, pitch
+	# 0.4 / (rand * 0.4 + 0.8). The water-entry splash fires later
+	# from FishingBobber on the first out-of-water → in-water
+	# transition (mirroring vanilla Entity.N() handleWaterMovement).
+	SFX.play_bow_cast()
 	_trigger_player_use_swing()
 	return true
 
 
 # Spawn a dropped item at `pos` with an initial velocity (used by
 # fishing-rod reel to fling a fish toward the player). Mirrors the
-# regular _spawn_dropped_item but takes a custom velocity + the
-# longer player-drop pickup delay so the player can't insta-grab
-# their own catch mid-flight.
-func _spawn_dropped_item_with_velocity(pos: Vector3, item_id: int, vel: Vector3) -> void:
+# regular _spawn_dropped_item but takes a custom velocity + an
+# optional pickup-delay override. Default delay = PLAYER_DROP_DELAY_SEC
+# (2.0s) which prevents the player insta-grabbing their own throws;
+# fishing passes a much shorter delay (~0.2s) since the whole point
+# of the reel is for the fish to land in inventory.
+func _spawn_dropped_item_with_velocity(
+	pos: Vector3, item_id: int, vel: Vector3, pickup_delay: float = -1.0
+) -> void:
 	var item := DroppedItem.new()
 	_chunk_manager.add_child(item)
 	item.global_position = pos
-	item.setup(item_id, vel, DroppedItem.PLAYER_DROP_DELAY_SEC)
+	var delay: float = pickup_delay if pickup_delay >= 0.0 else DroppedItem.PLAYER_DROP_DELAY_SEC
+	item.setup(item_id, vel, delay)
 
 
 # Variable-count drops for CROPS.
@@ -1532,12 +1672,45 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	# wrongly rejected placement on leaves / glass / fences (vanilla
 	# allows those).
 	var support_id: int = _chunk_manager.get_world_block(hit.block_pos)
-	if support_id == Blocks.AIR or Blocks.is_water(support_id) or Blocks.is_lava(support_id):
-		return false
-	var place: Vector3i = hit.block_pos + hit.normal_i
-	var dest_id: int = _chunk_manager.get_world_block(place)
-	if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
-		return false
+	var place: Vector3i
+	var dest_id: int
+	# Fence sign handling. A fence post is narrow (0.25 m) so a wall sign
+	# placed against its side hangs in mid-air relative to the visible
+	# post — vanilla behavior, but ugly. Route ANY click on a fence (top
+	# or side, on the visible post or in the 0.5 m phantom collision zone
+	# above it) to a standing-sign-on-top placement: sign cell sits one
+	# above the fence cell so the sign post stacks directly on the fence
+	# post.
+	#
+	# Three cases all reduce to "fence cell is somewhere obvious":
+	#   1. Top click, hit landed in the air cell above the fence:
+	#      support=AIR, below=FENCE, normal=+Y
+	#   2. Side click in the phantom collision zone (y above visible post):
+	#      support=AIR, below=FENCE, normal=±X/±Z
+	#   3. Side click on the visible post itself:
+	#      support=FENCE, normal=±X/±Z
+	var below_id: int = _chunk_manager.get_world_block(hit.block_pos + Vector3i(0, -1, 0))
+	var fence_top_or_phantom: bool = support_id == Blocks.AIR and below_id == Blocks.FENCE
+	var fence_visible_side: bool = support_id == Blocks.FENCE and hit.normal_i.y == 0
+	var fence_routed: bool = fence_top_or_phantom or fence_visible_side
+	if fence_routed:
+		# Find the fence cell, then place on top of it. For phantom + top
+		# clicks the fence cell is one BELOW hit.block_pos; for visible-
+		# side clicks the fence cell IS hit.block_pos.
+		var fence_cell: Vector3i = (
+			hit.block_pos if fence_visible_side else hit.block_pos + Vector3i(0, -1, 0)
+		)
+		place = fence_cell + Vector3i(0, 1, 0)
+		dest_id = _chunk_manager.get_world_block(place)
+		if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
+			return false
+	else:
+		if support_id == Blocks.AIR or Blocks.is_water(support_id) or Blocks.is_lava(support_id):
+			return false
+		place = hit.block_pos + hit.normal_i
+		dest_id = _chunk_manager.get_world_block(place)
+		if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
+			return false
 	# Player-occupancy guard.
 	var player: Node3D = get_parent() as Node3D
 	if player != null:
@@ -1547,17 +1720,21 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 			return false
 	var block_id: int
 	var meta: int
-	if hit.normal_i.y == 1:
+	if hit.normal_i.y == 1 or fence_routed:
+		# Standing sign — either a true top-face click on a regular
+		# support, OR any click on a fence (top + side both place on top).
 		block_id = Blocks.SIGN_STANDING
-		# Vanilla ni.java: meta = floor((yaw + 180) * 16 / 360 + 0.5) & 15
-		# That `+ 180` converts the player's FACING direction into the
-		# sign's INSCRIBED-face direction (opposite). Godot's player
-		# rotation.y already differs from vanilla MC's yaw by exactly π
-		# (Godot.y=0 → looking -Z = MC yaw=180), so the two 180° offsets
-		# cancel and we use the raw Godot yaw directly. Without this we
-		# were always landing 8 meta-steps off (180° error).
+		# Player facing direction in Godot: (-sin(yaw), 0, -cos(yaw)).
+		# Player wants the sign's INSCRIBED face to point BACK toward
+		# them — desired sign_front = (sin(yaw), 0, cos(yaw)).
+		# Mesher's n_front per meta = (-sin(meta * 22.5°), 0, cos(meta * 22.5°)).
+		# Setting `meta * 22.5° = -yaw` makes n_front = (sin(yaw), 0, cos(yaw))
+		# which matches sign_front. For yaws with sin = 0 (cardinal ±Z)
+		# the sign of yaw didn't matter; for ±X yaws the old positive
+		# formula put the panel BACK toward the player instead of the
+		# inscribed face.
 		var yaw_deg: float = rad_to_deg(_player_yaw())
-		meta = int(round(yaw_deg * 16.0 / 360.0)) & 0x0F
+		meta = int(round(-yaw_deg * 16.0 / 360.0)) & 0x0F
 	elif hit.normal_i.y == -1:
 		# Bottom-face click — vanilla nv.java rejects this (can't attach
 		# a sign to the underside of a block). Bail so the player gets
@@ -1862,7 +2039,8 @@ func _build_crack() -> MeshInstance3D:
 	# BoxMesh's default UVs split a single texture across all 6 faces with a
 	# cube-unwrap layout — not what we want. Build a custom cube where each
 	# face has full (0,0)-(1,1) UVs so the crack atlas samples cleanly.
-	mi.mesh = _build_uv_cube_mesh(1.01)
+	_box_crack_mesh = _build_uv_cube_mesh(1.01)
+	mi.mesh = _box_crack_mesh
 	var tex: Texture2D = load(CRACK_ATLAS_PATH) as Texture2D
 	if tex == null:
 		push_error("[Crack] failed to load atlas: " + CRACK_ATLAS_PATH)
@@ -1883,6 +2061,262 @@ func _build_crack() -> MeshInstance3D:
 	mi.material_override = mat
 	mi.visible = false
 	return mi
+
+
+# Returns a per-block crack mesh whose triangles match the visible
+# block shape, or null for blocks that should fall back to the default
+# unit-box-scaled-to-AABB path. Result is in cell-local [0..1] coords;
+# caller positions at `Vector3(target)` with scale 1.
+func _shape_aware_crack_mesh(target: Vector3i, id: int, meta: int) -> ArrayMesh:
+	if id == Blocks.FENCE:
+		var fw: bool = _chunk_manager.get_world_block(target + Vector3i(-1, 0, 0)) == Blocks.FENCE
+		var fe: bool = _chunk_manager.get_world_block(target + Vector3i(1, 0, 0)) == Blocks.FENCE
+		var fn: bool = _chunk_manager.get_world_block(target + Vector3i(0, 0, -1)) == Blocks.FENCE
+		var fs: bool = _chunk_manager.get_world_block(target + Vector3i(0, 0, 1)) == Blocks.FENCE
+		return _get_fence_crack_mesh(fw, fe, fn, fs)
+	if id == Blocks.FENCE_GATE:
+		return _get_fence_gate_crack_mesh(meta)
+	if id == Blocks.WOOD_STAIRS or id == Blocks.COBBLESTONE_STAIRS:
+		return _get_stair_crack_mesh(meta)
+	if id == Blocks.CHEST:
+		return _get_chest_crack_mesh()
+	return null
+
+
+# Cached lookup for fence crack meshes by connection mask. Builds on
+# demand the first time each (W, E, N, S) combination is targeted; later
+# hits return the cached mesh. 16 combinations max, so memory is bounded.
+func _get_fence_crack_mesh(w: bool, e: bool, n: bool, s: bool) -> ArrayMesh:
+	var key: int = (int(w) << 3) | (int(e) << 2) | (int(n) << 1) | int(s)
+	if not _fence_crack_meshes.has(key):
+		_fence_crack_meshes[key] = _build_fence_crack_mesh(w, e, n, s)
+	return _fence_crack_meshes[key] as ArrayMesh
+
+
+# Fence gate crack mesh — reuses `Mesher._fence_gate_boxes(facing,
+# is_open)` so the crack triangles match the mesher's emitted boxes
+# exactly. Cached per (facing, is_open) pair.
+func _get_fence_gate_crack_mesh(meta: int) -> ArrayMesh:
+	var facing: int = Blocks.fence_gate_facing(meta)
+	var is_open: bool = Blocks.is_fence_gate_open(meta)
+	var key: int = (facing << 1) | int(is_open)
+	if not _fence_gate_crack_meshes.has(key):
+		_fence_gate_crack_meshes[key] = _build_fence_gate_crack_mesh(facing, is_open)
+	return _fence_gate_crack_meshes[key] as ArrayMesh
+
+
+func _build_fence_gate_crack_mesh(facing: int, is_open: bool) -> ArrayMesh:
+	const INSET: float = 0.005
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	for box: Array in Mesher._fence_gate_boxes(facing, is_open):
+		var mn: Vector3 = box[0]
+		var mx: Vector3 = box[1]
+		_emit_unit_uv_box(
+			verts,
+			uvs,
+			indices,
+			Vector3(mn.x - INSET, mn.y - INSET, mn.z - INSET),
+			Vector3(mx.x + INSET, mx.y + INSET, mx.z + INSET)
+		)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+# Stair crack mesh — 2 boxes (bottom half-slab + upper step) per the
+# 4-orientation meta. Direct match to Mesher._emit_stair_geometry's
+# `box_a_min/max + box_b_min/max` layout.
+func _get_stair_crack_mesh(meta: int) -> ArrayMesh:
+	var key: int = meta & 3
+	if not _stair_crack_meshes.has(key):
+		_stair_crack_meshes[key] = _build_stair_crack_mesh(key)
+	return _stair_crack_meshes[key] as ArrayMesh
+
+
+func _build_stair_crack_mesh(meta: int) -> ArrayMesh:
+	const INSET: float = 0.005
+	var box_a_min: Vector3
+	var box_a_max: Vector3
+	var box_b_min: Vector3
+	var box_b_max: Vector3
+	match meta & 3:
+		0:
+			box_a_min = Vector3(0.0, 0.0, 0.0)
+			box_a_max = Vector3(0.5, 0.5, 1.0)
+			box_b_min = Vector3(0.5, 0.0, 0.0)
+			box_b_max = Vector3(1.0, 1.0, 1.0)
+		1:
+			box_a_min = Vector3(0.0, 0.0, 0.0)
+			box_a_max = Vector3(0.5, 1.0, 1.0)
+			box_b_min = Vector3(0.5, 0.0, 0.0)
+			box_b_max = Vector3(1.0, 0.5, 1.0)
+		2:
+			box_a_min = Vector3(0.0, 0.0, 0.0)
+			box_a_max = Vector3(1.0, 0.5, 0.5)
+			box_b_min = Vector3(0.0, 0.0, 0.5)
+			box_b_max = Vector3(1.0, 1.0, 1.0)
+		_:
+			box_a_min = Vector3(0.0, 0.0, 0.0)
+			box_a_max = Vector3(1.0, 1.0, 0.5)
+			box_b_min = Vector3(0.0, 0.0, 0.5)
+			box_b_max = Vector3(1.0, 0.5, 1.0)
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	_emit_unit_uv_box(
+		verts,
+		uvs,
+		indices,
+		box_a_min - Vector3(INSET, INSET, INSET),
+		box_a_max + Vector3(INSET, INSET, INSET)
+	)
+	_emit_unit_uv_box(
+		verts,
+		uvs,
+		indices,
+		box_b_min - Vector3(INSET, INSET, INSET),
+		box_b_max + Vector3(INSET, INSET, INSET)
+	)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+# Chest crack mesh — 14/16 cube centered at the cell origin, matching
+# the vanilla ChestNode visible bounds (chunks emit a full-cube
+# collision soup so the player can't walk through, but the renderer
+# uses the smaller mesh — same convention as the in-world chest).
+func _get_chest_crack_mesh() -> ArrayMesh:
+	if _chest_crack_mesh == null:
+		const INSET: float = 0.005
+		var verts := PackedVector3Array()
+		var uvs := PackedVector2Array()
+		var indices := PackedInt32Array()
+		_emit_unit_uv_box(
+			verts,
+			uvs,
+			indices,
+			Vector3(0.0625 - INSET, 0.0 - INSET, 0.0625 - INSET),
+			Vector3(0.9375 + INSET, 0.875 + INSET, 0.9375 + INSET)
+		)
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_TEX_UV] = uvs
+		arrays[Mesh.ARRAY_INDEX] = indices
+		_chest_crack_mesh = ArrayMesh.new()
+		_chest_crack_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return _chest_crack_mesh
+
+
+# Build a crack-overlay mesh shaped like the in-world fence's actual
+# triangles: a central post plus the top/bottom rail pair for each
+# direction that has a fence neighbour. Inflated by INSET on every face
+# to push past the chunk mesh's surface and avoid z-fighting (same job
+# the unit-cube `_build_uv_cube_mesh(1.01)` does for cube blocks).
+# Geometry constants mirror `Mesher._emit_fence_geometry` (mesher.gd
+# :539-591) so the crack overlay sits on the exact visible faces.
+func _build_fence_crack_mesh(w: bool, e: bool, n: bool, s: bool) -> ArrayMesh:
+	const INSET: float = 0.005  # 1/200 outward push per face
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	# Post — always emitted; matches mesher.gd:540's 6/16 × 16/16 × 6/16 box.
+	_emit_unit_uv_box(
+		verts,
+		uvs,
+		indices,
+		Vector3(0.375 - INSET, 0.0 - INSET, 0.375 - INSET),
+		Vector3(0.625 + INSET, 1.0 + INSET, 0.625 + INSET)
+	)
+	# Rails. mesher.gd:559 lays the top rail at y=12..15/16 and the bottom
+	# rail at y=6..9/16. The horizontal extent on each axis stretches to the
+	# cell edge when a neighbour fence connects on that side, otherwise
+	# collapses into the post (degenerate — skipped here to keep the crack
+	# tight on the actual visible geometry).
+	for rail_y in [Vector2(0.75, 0.9375), Vector2(0.375, 0.5625)]:
+		var y0: float = rail_y.x - INSET
+		var y1: float = rail_y.y + INSET
+		if w or e:
+			var rx0: float = 0.0 if w else 0.4375
+			var rx1: float = 1.0 if e else 0.5625
+			_emit_unit_uv_box(
+				verts,
+				uvs,
+				indices,
+				Vector3(rx0 - INSET, y0, 0.4375 - INSET),
+				Vector3(rx1 + INSET, y1, 0.5625 + INSET)
+			)
+		if n or s:
+			var rz0: float = 0.0 if n else 0.4375
+			var rz1: float = 1.0 if s else 0.5625
+			_emit_unit_uv_box(
+				verts,
+				uvs,
+				indices,
+				Vector3(0.4375 - INSET, y0, rz0 - INSET),
+				Vector3(0.5625 + INSET, y1, rz1 + INSET)
+			)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+# Emit one 6-face box with full (0,0)..(1,1) UVs per face — same scheme
+# as `_build_uv_cube_mesh` but for arbitrary AABBs. Used by the fence
+# crack mesh so the crack shader samples a full destroy_stages tile
+# on every face regardless of the box's dimensions.
+func _emit_unit_uv_box(
+	verts: PackedVector3Array,
+	uvs: PackedVector2Array,
+	indices: PackedInt32Array,
+	mn: Vector3,
+	mx: Vector3
+) -> void:
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	var faces: Array = [
+		[c010, c011, c111, c110],  # +Y
+		[c001, c000, c100, c101],  # -Y
+		[c100, c110, c111, c101],  # +X
+		[c001, c011, c010, c000],  # -X
+		[c101, c111, c011, c001],  # +Z
+		[c000, c010, c110, c100],  # -Z
+	]
+	for face: Array in faces:
+		var base: int = verts.size()
+		for i: int in range(4):
+			verts.append(face[i])
+		uvs.append(Vector2(0, 1))
+		uvs.append(Vector2(0, 0))
+		uvs.append(Vector2(1, 0))
+		uvs.append(Vector2(1, 1))
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
 
 
 # Six-face cube where every face has UV (0,0)..(1,1) — needed so the crack

@@ -109,6 +109,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	# sprite showed a full-square cobblestone-looking face — wrong).
 	Blocks.DOUBLE_SLAB,
 	Blocks.HALF_SLAB,
+	# Fence gate — non-cube (2 posts + 2 rails); the bake uses the
+	# dedicated closed-state mesh in BlockMesh._build_fence_gate so the
+	# inventory icon shows the recognizable gate silhouette rather than
+	# a flat planks square.
+	Blocks.FENCE_GATE,
 ]
 
 static var _viewport: SubViewport

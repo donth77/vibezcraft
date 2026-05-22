@@ -111,6 +111,17 @@ public:
 	// _emit_sign_geometry handles the placeholder plank visual.
 	static constexpr int SIGN_STANDING = 75;
 	static constexpr int SIGN_WALL = 76;
+	// FENCE_GATE — Beta 1.8 BlockFenceGate (v.java). Non-cube (2 posts
+	// + cross-rails); native skips the cube pass and GDScript
+	// _emit_fence_gate_geometry handles the mesh + meta-aware collision.
+	static constexpr int FENCE_GATE = 77;
+	// MOB_SPAWNER — vanilla eb.java cage block. Non-opaque (light
+	// passes through cage) AND emits all 6 faces regardless of
+	// neighbor (vanilla shouldSideBeRendered returns true for any
+	// non-same-material neighbor). Treated as non-opaque in the
+	// neighbor-opacity check below + special-cased to always emit
+	// faces when meshing the spawner itself.
+	static constexpr int MOB_SPAWNER = 51;
 
 	MesherNative();
 	~MesherNative();

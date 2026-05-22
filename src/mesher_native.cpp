@@ -544,7 +544,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE) {
 					continue;
 				}
 
@@ -576,10 +576,18 @@ Dictionary MesherNative::mesh_chunk_data(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE
 									&& !neighbor_is_water && !neighbor_is_lava);
-					const bool neighbor_hides_face =
+					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
+					// Mob spawner: always emit all 6 cage faces. Vanilla
+					// `eb.java::shouldSideBeRendered` returns true for any
+					// non-same-material neighbor; the cage looks like a
+					// complete cube. Without this the bottom vanished
+					// against grass/dirt.
+					if (id == MOB_SPAWNER) {
+						neighbor_hides_face = (neighbor_id == id);
+					}
 					if (neighbor_hides_face) {
 						continue;
 					}
@@ -794,7 +802,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE) {
 					continue;
 				}
 				for (int face = 0; face < 6; face++) {
@@ -832,10 +840,18 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE
 									&& !neighbor_is_water && !neighbor_is_lava);
-					const bool neighbor_hides_face =
+					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
+					// Mob spawner: always emit all 6 cage faces. Vanilla
+					// `eb.java::shouldSideBeRendered` returns true for any
+					// non-same-material neighbor; the cage looks like a
+					// complete cube. Without this the bottom vanished
+					// against grass/dirt.
+					if (id == MOB_SPAWNER) {
+						neighbor_hides_face = (neighbor_id == id);
+					}
 					if (neighbor_hides_face) {
 						continue;
 					}

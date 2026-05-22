@@ -185,6 +185,16 @@ const _FP_SWING_X_TILT_DEG: float = -25.0  # tilt-down at peak — main rotation
 const _HELD_BLOCK_POSITION: Vector3 = Vector3(0.5, -0.45, -0.65)
 const _HELD_BLOCK_ROTATION: Vector3 = Vector3(-0.1745, -0.7854, 0.0)  # (-10°, -45°, 0°)
 const _HELD_BLOCK_SIZE: float = 0.42
+# Fence-specific FP pose. The 4-box mesh (2 posts on Z + 2 rails along Z)
+# is asymmetric, so the cube default's mild -10° pitch leaves the rails
+# end-on to the camera and the player sees a vertical sliver. Mirror the
+# TP-fence pitch (-45°) so the top is tipped forward enough that both
+# rails read as horizontal slats; bump up slightly and pull back from
+# the cube position so the longer Z extent doesn't clip into the view.
+# `var` (not `const`) so ToolTuner can live-tune these — see the FP
+# fence override in apply_tuner_value/get_tuner_value.
+var _held_fence_position: Vector3 = Vector3(0.630, -0.510, -0.750)
+var _held_fence_rotation: Vector3 = Vector3(deg_to_rad(6.0), deg_to_rad(40.0), deg_to_rad(2.0))
 
 # Held-tool rest pose. Vanilla MC uses +45° Y but at our render scale that
 # turns the pickaxe sideways too much — flat face barely visible. Trim to
@@ -528,8 +538,12 @@ func _build_held_block(id: int) -> void:
 	# Force the FP held block to draw on top of world geometry — same
 	# fix as the FP hand. Without this it z-fights nearby blocks.
 	_held_block.material_override = BlockAtlas.overlay_material()
-	_held_block.position = _HELD_BLOCK_POSITION
-	_held_block.rotation = _HELD_BLOCK_ROTATION
+	if id == Blocks.FENCE:
+		_held_block.position = _held_fence_position
+		_held_block.rotation = _held_fence_rotation
+	else:
+		_held_block.position = _HELD_BLOCK_POSITION
+		_held_block.rotation = _HELD_BLOCK_ROTATION
 	_camera.add_child(_held_block)
 	# TP block lives under the right arm so it inherits walking + mining swings.
 	var arm_r: Node3D = null
@@ -586,7 +600,12 @@ func _build_held_tool(id: int) -> void:
 	# For signs we use Sprite3D (purpose-built for 2D-sprite-in-3D-space
 	# with alpha-cut + texture filter handled natively, and no cull_back
 	# clipping like the MeshInstance3D + shader path).
-	if id == Items.SIGN:
+	# Sign is the only held item that uses Sprite3D for its FP path; all
+	# other tools / loose items go through the voxel-extrusion mesh.
+	# Either way we need to fall through to the TP setup below so the
+	# third-person mirror gets built too.
+	var is_sign: bool = id == Items.SIGN
+	if is_sign:
 		var sprite := Sprite3D.new()
 		sprite.texture = tex
 		sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -607,27 +626,27 @@ func _build_held_tool(id: int) -> void:
 		sprite.position = Vector3(0, 8.0 * ps, 0)
 		_held_tool_orient.add_child(sprite)
 		_held_tool = sprite
-		return
-	_held_tool = MeshInstance3D.new()
-	var mesh: ArrayMesh = SpriteExtruder.build(tex)
-	_held_tool.mesh = mesh
-	_held_tool.scale = Vector3(ps, ps, ps)
-	# Find the actual handle tip (bottom-most opaque pixel — for the
-	# pickaxe that's the lower-left corner) and offset the mesh so THAT
-	# point lands at the pivot origin. Without this, rotating around
-	# bounding-box center made the handle visibly slide out of the fist
-	# as the head arced forward.
-	var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-	_held_tool.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
-	# Custom shader: textured + per-face Notch shading + depth_test_disabled
-	# so the tool always draws on top of world geometry.
-	var shader: Shader = load("res://shaders/held_item.gdshader") as Shader
-	var mat := ShaderMaterial.new()
-	mat.shader = shader
-	mat.set_shader_parameter("item_texture", tex)
-	mat.render_priority = 100
-	_held_tool.material_override = mat
-	_held_tool_orient.add_child(_held_tool)
+	else:
+		_held_tool = MeshInstance3D.new()
+		var mesh: ArrayMesh = SpriteExtruder.build(tex)
+		_held_tool.mesh = mesh
+		_held_tool.scale = Vector3(ps, ps, ps)
+		# Find the actual handle tip (bottom-most opaque pixel — for the
+		# pickaxe that's the lower-left corner) and offset the mesh so THAT
+		# point lands at the pivot origin. Without this, rotating around
+		# bounding-box center made the handle visibly slide out of the fist
+		# as the head arced forward.
+		var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+		_held_tool.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
+		# Custom shader: textured + per-face Notch shading + depth_test_disabled
+		# so the tool always draws on top of world geometry.
+		var shader: Shader = load("res://shaders/held_item.gdshader") as Shader
+		var mat := ShaderMaterial.new()
+		mat.shader = shader
+		mat.set_shader_parameter("item_texture", tex)
+		mat.render_priority = 100
+		_held_tool.material_override = mat
+		_held_tool_orient.add_child(_held_tool)
 
 	# Third-person variant — SAME voxel-extruded mesh, just smaller and
 	# parented to the right arm so it inherits walking + mining swings.
@@ -746,9 +765,24 @@ func _refresh_tool_pose() -> void:
 # TP rest-pose (and returns FP swing values unchanged since swing knobs
 # don't drive the TP mesh — the arm animation does).
 func get_tuner_value(key: String) -> float:
-	var pos: Vector3 = _tp_held_tool_position if _tuner_mode == "tp" else _held_tool_position
-	var rot: Vector3 = _tp_held_tool_rotation if _tuner_mode == "tp" else _held_tool_rotation
-	var ps: float = _tp_held_tool_pixel_size if _tuner_mode == "tp" else _held_tool_pixel_size
+	# FP fence override — see apply_tuner_value for the matching write
+	# path. Sliders need to OPEN to the current fence pose, otherwise
+	# they'd snap the held block to the tool's pose on first drag.
+	var pos: Vector3
+	var rot: Vector3
+	var ps: float
+	if _is_holding_fence_fp():
+		pos = _held_fence_position
+		rot = _held_fence_rotation
+		ps = 0.0
+	elif _tuner_mode == "tp":
+		pos = _tp_held_tool_position
+		rot = _tp_held_tool_rotation
+		ps = _tp_held_tool_pixel_size
+	else:
+		pos = _held_tool_position
+		rot = _held_tool_rotation
+		ps = _held_tool_pixel_size
 	var values: Dictionary = {
 		"pos_x": pos.x,
 		"pos_y": pos.y,
@@ -775,6 +809,30 @@ func apply_tuner_value(key: String, v: float) -> void:
 		_apply_tp_tuner_value(key, v)
 		_refresh_tp_pose()
 		return
+	# FP held-fence routing — the fence uses the block path (not the
+	# sprite-extruded tool path), so the standard `_held_tool_*` writes
+	# below never reach it. When the player is holding a fence, redirect
+	# pos/rot sliders to the fence vars and refresh the block instance.
+	# pixel_size + swing knobs stay no-op (fence isn't sprite-extruded
+	# and doesn't have the tool's _apply_tool_swing pipeline).
+	if _is_holding_fence_fp():
+		match key:
+			"pos_x":
+				_held_fence_position.x = v
+			"pos_y":
+				_held_fence_position.y = v
+			"pos_z":
+				_held_fence_position.z = v
+			"rot_x_deg":
+				_held_fence_rotation.x = deg_to_rad(v)
+			"rot_y_deg":
+				_held_fence_rotation.y = deg_to_rad(v)
+			"rot_z_deg":
+				_held_fence_rotation.z = deg_to_rad(v)
+		if _held_block != null:
+			_held_block.position = _held_fence_position
+			_held_block.rotation = _held_fence_rotation
+		return
 	match key:
 		"pos_x":
 			_held_tool_position.x = v
@@ -799,6 +857,18 @@ func apply_tuner_value(key: String, v: float) -> void:
 		"swing_thrust_fwd":
 			_tool_swing_thrust_fwd = v
 	_refresh_tool_pose()
+
+
+# True when the player is in FP mode and currently holding a FENCE block.
+# Used by the tuner accessors so the FP pos/rot sliders target the held
+# fence's transform instead of the (irrelevant) tool pivot.
+func _is_holding_fence_fp() -> bool:
+	if _tuner_mode != "fp" or inventory == null:
+		return false
+	var stack: ItemStack = inventory.selected()
+	if stack == null or stack.is_empty():
+		return false
+	return stack.item_id == Blocks.FENCE
 
 
 # TP rest-pose write side. Swing/thrust keys are no-ops in TP mode (the
@@ -1252,6 +1322,12 @@ func _physics_process(delta: float) -> void:
 	# (radius 32, column scans), so running it per-tick caused <30 fps
 	# stutter. Schedule: immediate check on tick 1, then retries every
 	# 20 ticks while still in water. Successful relocate ends the budget.
+	#
+	# Fast-path: if the FIRST exhaustive 32-cell spiral fails, we already
+	# know it's open ocean (the spawn-chunk preload covers more than the
+	# search radius), so jump straight to the platform instead of making
+	# the player flail in water for 4.5 seconds waiting for retries that
+	# can't find anything new.
 	if _spawn_check_ticks_remaining > 0 and not Game.is_loading:
 		_spawn_check_ticks_remaining -= 1
 		var first_tick: bool = _spawn_check_ticks_remaining == 89
@@ -1259,9 +1335,12 @@ func _physics_process(delta: float) -> void:
 		if (first_tick or retry_tick) and _is_in_water():
 			if _relocate_if_unsafe_spawn():
 				_spawn_check_ticks_remaining = 0
-		# Final fallback: budget just expired and we're still in water
-		# (no land within the spiral's 32-cell radius — open ocean).
-		# Drop a small sand platform so the player has solid ground.
+			elif first_tick:
+				_create_emergency_spawn_platform()
+				_spawn_check_ticks_remaining = 0
+		# Final fallback (legacy): budget expired, still in water. Kept as
+		# belt-and-suspenders in case the relocate path skips the first-tick
+		# branch (e.g. _is_in_water flickers during chunk load).
 		if _spawn_check_ticks_remaining == 0 and _is_in_water():
 			_create_emergency_spawn_platform()
 	# Damage cooldown tick — ALWAYS runs before any branch dispatch.
@@ -1437,7 +1516,18 @@ func _physics_process(delta: float) -> void:
 		if _fp_hand != null and _fp_hand.visible:
 			_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
 		if _held_block != null and _held_block.visible:
-			_apply_fp_swing(_held_block, _HELD_BLOCK_POSITION, _HELD_BLOCK_ROTATION, progress)
+			# Fence held in FP uses its own rest-pose vars (live-tuneable via
+			# ToolTuner). Passing the cube constants here would overwrite the
+			# tuner's edits every physics tick — the visible "flash back" the
+			# user reported. Route based on the currently-selected item.
+			var hb_base_pos: Vector3 = _HELD_BLOCK_POSITION
+			var hb_base_rot: Vector3 = _HELD_BLOCK_ROTATION
+			if inventory != null:
+				var sel: ItemStack = inventory.selected()
+				if sel != null and not sel.is_empty() and sel.item_id == Blocks.FENCE:
+					hb_base_pos = _held_fence_position
+					hb_base_rot = _held_fence_rotation
+			_apply_fp_swing(_held_block, hb_base_pos, hb_base_rot, progress)
 		# Apply swing to the PIVOT (which sits at the fist), not the mesh —
 		# this makes the head arc forward while the handle stays in place.
 		if _held_tool_pivot != null and _held_tool_pivot.visible:

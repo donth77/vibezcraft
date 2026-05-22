@@ -7,6 +7,26 @@ extends RefCounted
 
 const FACE_NAMES: Array = ["top", "bottom", "side", "side", "side", "side"]
 
+# Held/dropped/icon fence gate boxes — canonical 1.9 closed-state model.
+# 8 planks-textured boxes: 2 outer posts (y=5..16/16), 2 inner posts
+# (y=6..15/16, centered), 4 rails (lower y=6..9/16, upper y=12..15/16).
+# Inventory always shows the closed silhouette regardless of placed meta.
+const _HELD_FENCE_GATE_BOXES: Array = [
+	# Outer posts at the X edges — full height so the held / icon gate
+	# doesn't appear to float (vanilla 1.9 trims to y=5..16 because real
+	# placements connect to fences below, which we can't assume here).
+	[Vector3(0.0, 0.0, 0.4375), Vector3(0.125, 1.0, 0.5625)],
+	[Vector3(0.875, 0.0, 0.4375), Vector3(1.0, 1.0, 0.5625)],
+	# Inner posts at the gate center.
+	[Vector3(0.375, 0.375, 0.4375), Vector3(0.5, 0.9375, 0.5625)],
+	[Vector3(0.5, 0.375, 0.4375), Vector3(0.625, 0.9375, 0.5625)],
+	# Lower + upper rails, left + right halves.
+	[Vector3(0.125, 0.375, 0.4375), Vector3(0.375, 0.5625, 0.5625)],
+	[Vector3(0.125, 0.75, 0.4375), Vector3(0.375, 0.9375, 0.5625)],
+	[Vector3(0.625, 0.375, 0.4375), Vector3(0.875, 0.5625, 0.5625)],
+	[Vector3(0.625, 0.75, 0.4375), Vector3(0.875, 0.9375, 0.5625)],
+]
+
 static var _cache: Dictionary = {}  # block_id → ArrayMesh
 
 
@@ -27,6 +47,8 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 			_cache[key] = _build_ladder(size)
 		elif block_id == Blocks.HALF_SLAB:
 			_cache[key] = _build_slab(block_id, size)
+		elif block_id == Blocks.FENCE_GATE:
+			_cache[key] = _build_fence_gate(size)
 		else:
 			_cache[key] = _build(block_id, size)
 	return _cache[key] as ArrayMesh
@@ -234,63 +256,112 @@ static func _build_slab(block_id: int, size: float) -> ArrayMesh:
 	return mesh
 
 
-# Fence post — 6/16 × 16/16 × 6/16 pillar with planks texture. Vanilla
-# renders held/inventory fence as the isolated post (bk.java:1195 draws
-# the center column; rails only appear in-world with neighbors).
-static func _build_fence_post(size: float) -> ArrayMesh:
+# Held/dropped/icon fence gate — canonical 1.9 closed-state model. See
+# `_HELD_FENCE_GATE_BOXES` near the top of the file for the box list.
+# Reuses `_emit_planks_box` so each face samples the planks sub-rect
+# matching its projected extent (same convention as the held fence).
+static func _build_fence_gate(size: float) -> ArrayMesh:
 	var rect: Rect2 = BlockAtlas.uv_rect("planks")
-	var hw: float = (3.0 / 16.0) * size  # half-width (6/16 / 2)
-	var hh: float = 0.5 * size  # half-height (16/16 / 2)
-	var hd: float = (3.0 / 16.0) * size  # half-depth
+	var pu0: float = rect.position.x
+	var pu1: float = rect.position.x + rect.size.x
+	var pv0: float = rect.position.y
+	var pv1: float = rect.position.y + rect.size.y
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
-	var ao: Array[Vector3] = [
-		Vector3(-hw, -hh, -hd),
-		Vector3(hw, -hh, -hd),
-		Vector3(hw, -hh, hd),
-		Vector3(-hw, -hh, hd),
-		Vector3(-hw, hh, -hd),
-		Vector3(hw, hh, -hd),
-		Vector3(hw, hh, hd),
-		Vector3(-hw, hh, hd),
-	]
-	var u0: float = rect.position.x
-	var u1: float = rect.position.x + rect.size.x
-	var v0: float = rect.position.y
-	var v1: float = rect.position.y + rect.size.y
-	# Sub-rect for top/bottom faces — 6/16 × 6/16 center of the planks tile
-	var tu0: float = u0 + (u1 - u0) * (5.0 / 16.0)
-	var tu1: float = u0 + (u1 - u0) * (11.0 / 16.0)
-	var tv0: float = v0 + (v1 - v0) * (5.0 / 16.0)
-	var tv1: float = v0 + (v1 - v0) * (11.0 / 16.0)
-	# Sub-rect for side faces — 6/16 wide × full height
-	var su0: float = u0 + (u1 - u0) * (5.0 / 16.0)
-	var su1: float = u0 + (u1 - u0) * (11.0 / 16.0)
-	# Top (+Y)
-	_fence_face(
-		verts, norms, uvs, indices, ao[4], ao[7], ao[6], ao[5], Vector3.UP, tu0, tv0, tu1, tv1
+	for box: Array in _HELD_FENCE_GATE_BOXES:
+		_emit_planks_box(verts, norms, uvs, indices, box[0], box[1], size, pu0, pu1, pv0, pv1)
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(0, BlockAtlas.entity_material())
+	return mesh
+
+
+# Held/dropped/icon fence — vanilla bk.java:1715-1759 (renderType 11
+# inventory branch) draws FOUR boxes: two full-height posts hugging the
+# front/back Z edges + two slim rails (top + bottom) connecting them
+# along Z, extending slightly past the cell on both ends. This is what
+# the user sees in their hand and on the ground; the in-world geometry
+# (post + neighbour-connected rails) is built separately by the chunk
+# mesher's `_emit_fence_geometry`.
+static func _build_fence_post(size: float) -> ArrayMesh:
+	var rect: Rect2 = BlockAtlas.uv_rect("planks")
+	var pu0: float = rect.position.x
+	var pu1: float = rect.position.x + rect.size.x
+	var pv0: float = rect.position.y
+	var pv1: float = rect.position.y + rect.size.y
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	# Post half-width and rail half-thickness from vanilla constants:
+	#   posts use f3 = 0.125 (so post is 0.25 wide × 1.0 tall × 0.25 deep)
+	#   rails use f3 = 0.0625 (0.125 wide × 0.125 tall × 1.25 long,
+	#                          extending -0.125..1.125 along Z)
+	var pf: float = 0.125
+	var rf: float = 0.0625
+	# Post 1 — front (low Z)
+	_emit_planks_box(
+		verts,
+		norms,
+		uvs,
+		indices,
+		Vector3(0.5 - pf, 0.0, 0.0),
+		Vector3(0.5 + pf, 1.0, pf * 2.0),
+		size,
+		pu0,
+		pu1,
+		pv0,
+		pv1
 	)
-	# Bottom (-Y)
-	_fence_face(
-		verts, norms, uvs, indices, ao[3], ao[0], ao[1], ao[2], Vector3.DOWN, tu0, tv0, tu1, tv1
+	# Post 2 — back (high Z)
+	_emit_planks_box(
+		verts,
+		norms,
+		uvs,
+		indices,
+		Vector3(0.5 - pf, 0.0, 1.0 - pf * 2.0),
+		Vector3(0.5 + pf, 1.0, 1.0),
+		size,
+		pu0,
+		pu1,
+		pv0,
+		pv1
 	)
-	# -Z side
-	_fence_face(
-		verts, norms, uvs, indices, ao[4], ao[5], ao[1], ao[0], Vector3(0, 0, -1), su0, v0, su1, v1
+	# Top rail — y 12/16..15/16, extends past the cell on both Z ends
+	_emit_planks_box(
+		verts,
+		norms,
+		uvs,
+		indices,
+		Vector3(0.5 - rf, 1.0 - rf * 3.0, -rf * 2.0),
+		Vector3(0.5 + rf, 1.0 - rf, 1.0 + rf * 2.0),
+		size,
+		pu0,
+		pu1,
+		pv0,
+		pv1
 	)
-	# +X side
-	_fence_face(
-		verts, norms, uvs, indices, ao[5], ao[6], ao[2], ao[1], Vector3(1, 0, 0), su0, v0, su1, v1
-	)
-	# +Z side
-	_fence_face(
-		verts, norms, uvs, indices, ao[6], ao[7], ao[3], ao[2], Vector3(0, 0, 1), su0, v0, su1, v1
-	)
-	# -X side
-	_fence_face(
-		verts, norms, uvs, indices, ao[7], ao[4], ao[0], ao[3], Vector3(-1, 0, 0), su0, v0, su1, v1
+	# Bottom rail — y 6/16..9/16
+	_emit_planks_box(
+		verts,
+		norms,
+		uvs,
+		indices,
+		Vector3(0.5 - rf, 0.5 - rf * 3.0, -rf * 2.0),
+		Vector3(0.5 + rf, 0.5 - rf, 1.0 + rf * 2.0),
+		size,
+		pu0,
+		pu1,
+		pv0,
+		pv1
 	)
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -302,6 +373,128 @@ static func _build_fence_post(size: float) -> ArrayMesh:
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(0, BlockAtlas.entity_material())
 	return mesh
+
+
+# Vanilla-style box emit for held-fence rendering. `mn`/`mx` are in
+# [0..1] unit-cube space (matches vanilla's nq.a() setBlockBounds
+# convention); translated to origin-centered local coords scaled by
+# `size`. Each face samples a sub-rect of the planks tile matching the
+# box's projected dimensions on that face, same way RenderBlocks'
+# default face renderers do (`bk.java::a/b/c/d/e/f` compute U/V from
+# block bounds bk..bp). Coords outside [0, 1] (rails extending past
+# the cell) are clamped to the planks tile bounds — vanilla samples
+# beyond into neighbour atlas tiles, but the atlas-edge gutters and
+# the rail's slim profile mean the difference is invisible at icon /
+# entity scale.
+# gdlint: disable=function-arguments-number
+static func _emit_planks_box(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	indices: PackedInt32Array,
+	mn: Vector3,
+	mx: Vector3,
+	size: float,
+	pu0: float,
+	pu1: float,
+	pv0: float,
+	pv1: float,
+) -> void:
+	var lx0: float = (mn.x - 0.5) * size
+	var lx1: float = (mx.x - 0.5) * size
+	var ly0: float = (mn.y - 0.5) * size
+	var ly1: float = (mx.y - 0.5) * size
+	var lz0: float = (mn.z - 0.5) * size
+	var lz1: float = (mx.z - 0.5) * size
+	var c000 := Vector3(lx0, ly0, lz0)
+	var c100 := Vector3(lx1, ly0, lz0)
+	var c010 := Vector3(lx0, ly1, lz0)
+	var c110 := Vector3(lx1, ly1, lz0)
+	var c001 := Vector3(lx0, ly0, lz1)
+	var c101 := Vector3(lx1, ly0, lz1)
+	var c011 := Vector3(lx0, ly1, lz1)
+	var c111 := Vector3(lx1, ly1, lz1)
+	# Map a 0..1 unit coord to the planks atlas U or V range (clamped).
+	var pu_x0: float = pu0 + (pu1 - pu0) * clampf(mn.x, 0.0, 1.0)
+	var pu_x1: float = pu0 + (pu1 - pu0) * clampf(mx.x, 0.0, 1.0)
+	var pu_z0: float = pu0 + (pu1 - pu0) * clampf(mn.z, 0.0, 1.0)
+	var pu_z1: float = pu0 + (pu1 - pu0) * clampf(mx.z, 0.0, 1.0)
+	var pv_y0: float = pv0 + (pv1 - pv0) * (1.0 - clampf(mx.y, 0.0, 1.0))
+	var pv_y1: float = pv0 + (pv1 - pv0) * (1.0 - clampf(mn.y, 0.0, 1.0))
+	var pv_z0: float = pv0 + (pv1 - pv0) * clampf(mn.z, 0.0, 1.0)
+	var pv_z1: float = pv0 + (pv1 - pv0) * clampf(mx.z, 0.0, 1.0)
+	# +Y top — UV samples the x-z projection
+	_fence_face(
+		verts, norms, uvs, indices, c010, c011, c111, c110, Vector3.UP, pu_x0, pv_z0, pu_x1, pv_z1
+	)
+	# -Y bottom
+	_fence_face(
+		verts, norms, uvs, indices, c001, c000, c100, c101, Vector3.DOWN, pu_x0, pv_z0, pu_x1, pv_z1
+	)
+	# -Z (north) — UV is x × y (V-flipped)
+	_fence_face(
+		verts,
+		norms,
+		uvs,
+		indices,
+		c010,
+		c110,
+		c100,
+		c000,
+		Vector3(0, 0, -1),
+		pu_x0,
+		pv_y0,
+		pu_x1,
+		pv_y1
+	)
+	# +Z (south)
+	_fence_face(
+		verts,
+		norms,
+		uvs,
+		indices,
+		c111,
+		c011,
+		c001,
+		c101,
+		Vector3(0, 0, 1),
+		pu_x0,
+		pv_y0,
+		pu_x1,
+		pv_y1
+	)
+	# -X (west) — UV is z × y
+	_fence_face(
+		verts,
+		norms,
+		uvs,
+		indices,
+		c011,
+		c010,
+		c000,
+		c001,
+		Vector3(-1, 0, 0),
+		pu_z0,
+		pv_y0,
+		pu_z1,
+		pv_y1
+	)
+	# +X (east)
+	_fence_face(
+		verts,
+		norms,
+		uvs,
+		indices,
+		c110,
+		c111,
+		c101,
+		c100,
+		Vector3(1, 0, 0),
+		pu_z0,
+		pv_y0,
+		pu_z1,
+		pv_y1
+	)
 
 
 # Stair step — two-box mesh (bottom half-slab + upper step) in meta-0

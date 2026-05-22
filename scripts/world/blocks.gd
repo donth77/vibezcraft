@@ -292,6 +292,17 @@ const SIGN_STANDING := 75
 # is only 0..3 (the 4 cardinal directions; see SIGN_WALL).
 const SIGN_WALL := 76
 
+# Beta 1.8 BlockFenceGate (vanilla v.java in Beta source; not present in
+# Alpha 1.2.6 — adopted as a Beta-era exception alongside the worldgen /
+# physics ports we already take from Beta). Two stacked vertical posts
+# + two cross-rails between them, openable like a door. Meta bits:
+#   0-1 = facing (0=+Z south, 1=-X west, 2=-Z north, 3=+X east)
+#   2   = open flag (0=closed, 1=open)
+#   3   = unused
+# Closed: 1.5-tall hitbox so the player can't hop over (matches FENCE).
+# Open: passable. Texture is planks on every face (vanilla v.java).
+const FENCE_GATE := 77
+
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
 # shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
@@ -343,6 +354,11 @@ const MESH_SHAPE_SLAB: int = 10
 # (placeholder). Stage 2 replaces with the full post + flat-panel mesh
 # and routes the panel face through the tile-entity text texture.
 const MESH_SHAPE_SIGN: int = 11
+# Beta 1.8 fence gate — 2 posts + 2 cross-rails when closed; rails hide
+# (rotate parallel to the posts) when open. Meta-aware orientation +
+# open/closed state. Same family as the door but with collision toggling
+# rather than two stacked halves.
+const MESH_SHAPE_FENCE_GATE: int = 12
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -453,6 +469,9 @@ static func is_opaque(id: int) -> bool:
 		and id != WOODEN_DOOR
 		and id != IRON_DOOR
 		and id != LADDER
+		# Fence gate is non-cube (2 posts + cross-rails); neighbour faces
+		# must keep rendering through it.
+		and id != FENCE_GATE
 		# Flowers + mushrooms render as cross-quads like saplings — opaque
 		# treatment would cull the dirt/grass face below them, leaving a
 		# punch-through hole when the cross shader discards the corners.
@@ -474,6 +493,13 @@ static func is_opaque(id: int) -> bool:
 		# Signs are non-cube — neighbor cubes must keep their faces.
 		and id != SIGN_STANDING
 		and id != SIGN_WALL
+		# Mob spawner is a sparse cage — vanilla eb.java::isOpaqueCube
+		# returns false. Treating it as opaque hides the floor face
+		# beneath it (and the cage's own bottom face), so the spawner
+		# looks like a 5-faced block floating with no floor. Marking it
+		# non-opaque lets the grass/dirt below emit its TOP face right
+		# at the spawner's base.
+		and id != MOB_SPAWNER
 	)
 
 
@@ -637,6 +663,12 @@ static func _build_light_opacity_lut() -> void:
 	# Signs — thin plank, light passes through the surrounding air.
 	_light_opacity_lut[SIGN_STANDING] = 0
 	_light_opacity_lut[SIGN_WALL] = 0
+	# Fence gate — non-cube (post + rails or just posts when open), light
+	# passes through the empty cell volume. Vanilla v.java a()=false.
+	_light_opacity_lut[FENCE_GATE] = 0
+	# Mob spawner cage — light passes through bars (vanilla eb.java
+	# inherits getOpacity=0 from BlockContainer when isOpaqueCube=false).
+	_light_opacity_lut[MOB_SPAWNER] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -752,10 +784,17 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 				# extends to 0.75 so the wireframe encloses the flame tip.
 				return AABB(Vector3(0.4, 0.0, 0.4), Vector3(0.2, 0.75, 0.2))
 	if id == FENCE:
-		# Vanilla gd.java:13 `co.b(x, y, z, x+1, y+1.5, z+1)` — full cell
-		# width, 1.5 high so the highlight wraps the half-block extension
-		# above the cell that prevents the player from hopping over.
-		return AABB(Vector3.ZERO, Vector3(1.0, 1.5, 1.0))
+		# Pure-meta fallback (no neighbour info): the post-only 6/16 × 16/16
+		# × 6/16 column, matching the visible fence with no connected rails.
+		# Connection-aware version is `fence_selection_aabb_at(world_pos,
+		# chunk_manager)` — interaction.gd calls that for live highlight /
+		# crack so the wireframe grows out toward each connected neighbour.
+		# Alpha 1.2.6 gd.java inherits nq's 0..1 unit-cube selection bounds
+		# (no setBlockBoundsBasedOnState override); the connection-aware
+		# extension is a Beta-era improvement we adopt for visual clarity.
+		return AABB(Vector3(0.375, 0.0, 0.375), Vector3(0.25, 1.0, 0.25))
+	if id == FENCE_GATE:
+		return _fence_gate_selection_aabb(meta)
 	if id == WOODEN_DOOR or id == IRON_DOOR:
 		return _door_selection_aabb(meta)
 	if id == LADDER:
@@ -771,7 +810,70 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 			5:
 				return AABB(Vector3(0, 0, 0), Vector3(f, 1, 1))
 		return AABB(Vector3(0, 0, 1.0 - f), Vector3(1, 1, f))
+	if id == SIGN_STANDING:
+		# Vanilla ni.java::ni() ctor — setBlockBounds(0.5-f, 0, 0.5-f,
+		# 0.5+f, 1, 0.5+f) with f=0.25 → 0.5×1×0.5 column centered XZ.
+		# Covers the union of post + rotated panel for any meta yaw.
+		return AABB(Vector3(0.25, 0.0, 0.25), Vector3(0.5, 1.0, 0.5))
+	if id == SIGN_WALL:
+		# Vanilla ni.java::a(pk2, ...) — meta-driven thin panel at the
+		# support face. Vanilla bounds: y ∈ [0.28125, 0.78125], width
+		# spans full cell, 0.125 thick against the support side.
+		# Our meta 0..3 → vanilla 2..5 (−Z / +Z / −X / +X faces).
+		var y0: float = 0.28125
+		var dy: float = 0.5
+		var t: float = 0.125
+		match meta:
+			0:  # -Z face panel on +Z side of cell
+				return AABB(Vector3(0, y0, 1.0 - t), Vector3(1.0, dy, t))
+			1:  # +Z face panel on -Z side of cell
+				return AABB(Vector3(0, y0, 0), Vector3(1.0, dy, t))
+			2:  # -X face panel on +X side of cell
+				return AABB(Vector3(1.0 - t, y0, 0), Vector3(t, dy, 1.0))
+			_:  # +X face panel on -X side of cell (meta 3)
+				return AABB(Vector3(0, y0, 0), Vector3(t, dy, 1.0))
 	return AABB(Vector3.ZERO, Vector3.ONE)
+
+
+# Beta 1.8 BlockFenceGate.updateShape (Bukkit/mc-dev): the visible AABB
+# spans the full cell on one axis and 6/16 on the other, depending on
+# facing. Open gates are passable but the WIREFRAME / selection still
+# shows the closed footprint so the cursor has something to target.
+# Facing 0/2 → rails along X (full X, narrow Z). Facing 1/3 → rails
+# along Z (narrow X, full Z). Y is full 0..1 (the 1.5-tall collision
+# only applies to player physics, not the selection wireframe).
+static func _fence_gate_selection_aabb(meta: int) -> AABB:
+	var facing: int = fence_gate_facing(meta)
+	if facing == 0 or facing == 2:
+		return AABB(Vector3(0.0, 0.0, 0.375), Vector3(1.0, 1.0, 0.25))
+	return AABB(Vector3(0.375, 0.0, 0.0), Vector3(0.25, 1.0, 1.0))
+
+
+# Vanilla BlockFenceGate.b(int) — meta bit 2 is the open flag.
+static func is_fence_gate_open(meta: int) -> bool:
+	return (meta & 4) != 0
+
+
+# Vanilla BlockFenceGate.l(int) (inherited from BlockDirectional) — meta
+# bits 0-1 store the 4-way facing. 0=south, 1=west, 2=north, 3=east —
+# matches the player-yaw quadrant set in postPlace.
+static func fence_gate_facing(meta: int) -> int:
+	return meta & 3
+
+
+# Vanilla BlockFence.setBlockBoundsBasedOnState (Beta+ mc-dev): the
+# visible/selectable AABB grows out from the 6/16-wide center post to
+# the cell edge along each direction with a connected fence neighbour.
+# Mirrors `_emit_fence_geometry` exactly so the wireframe sits on the
+# rendered geometry (post + connected rail boxes), not the 1.5-tall
+# collision hitbox. Alpha 1.2.6 connects same-id only — solid-block
+# connection is a Beta+ change we deliberately omit.
+static func fence_selection_aabb(west: bool, east: bool, north: bool, south: bool) -> AABB:
+	var x_min: float = 0.0 if west else 0.375
+	var x_max: float = 1.0 if east else 0.625
+	var z_min: float = 0.0 if north else 0.375
+	var z_max: float = 1.0 if south else 0.625
+	return AABB(Vector3(x_min, 0.0, z_min), Vector3(x_max - x_min, 1.0, z_max - z_min))
 
 
 static func _door_selection_aabb(meta: int) -> AABB:
@@ -824,6 +926,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_EXTERNAL
 	if id == FENCE:
 		return MESH_SHAPE_FENCE
+	if id == FENCE_GATE:
+		return MESH_SHAPE_FENCE_GATE
 	if id == WOOD_STAIRS or id == COBBLESTONE_STAIRS:
 		return MESH_SHAPE_STAIRS
 	if id == WOODEN_DOOR or id == IRON_DOOR:
@@ -901,7 +1005,7 @@ static func explosion_resistance(id: int) -> float:
 			return 6.0
 		WOODEN_DOOR:
 			return 15.0
-		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER, BOOKSHELF:
+		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER, BOOKSHELF, FENCE_GATE:
 			return 2.5
 		IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK:
 			# Vanilla nq.e class constructor uses b(10.0f) — high blast
@@ -966,8 +1070,10 @@ static func hardness(id: int) -> float:
 			return 0.4  # ca.java `c(0.4f)` — soft wood, quick break
 		TNT:
 			return 0.0  # v.java `c(0.0f)` — instant break (still drops the block)
-		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, COBBLESTONE_STAIRS:
+		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, COBBLESTONE_STAIRS, FENCE_GATE:
 			# mb.java:14 `this.c(nq2.bi)` — inherits parent hardness (2.0).
+			# BlockFenceGate (Bukkit) calls `super(Material.WOOD)` and never
+			# overrides hardness, so it inherits the 2.0 wood-material default.
 			return 2.0
 		WOODEN_DOOR:
 			return 3.0  # gv.java: nq.aE `c(3.0f)` — wood door
@@ -1053,7 +1159,7 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_PICKAXE
 		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
-		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR, LADDER, BOOKSHELF:
+		LOG, PLANKS, CHEST, FENCE, WOOD_STAIRS, WOODEN_DOOR, LADDER, BOOKSHELF, FENCE_GATE:
 			return Items.TOOL_TYPE_AXE
 		IRON_DOOR:
 			return Items.TOOL_TYPE_PICKAXE
@@ -1419,6 +1525,8 @@ static func name_of(id: int) -> String:
 			return "sign_standing"
 		SIGN_WALL:
 			return "sign_wall"
+		FENCE_GATE:
+			return "fence_gate"
 	return "unknown"
 
 
@@ -1486,6 +1594,11 @@ static func get_face_texture(id: int, face: String) -> String:
 		# Stage 1 placeholder: full-cube planks render. Stage 2 swaps to
 		# the non-cube sign-post / wall-panel mesh with the wood texture
 		# on the post and a procedural plank face for the inscribed area.
+		return "planks"
+	if id == FENCE_GATE:
+		# Vanilla v.java (Beta BlockFenceGate) inherits the planks texture
+		# from Material.WOOD with no override — every face of every box
+		# (posts + rails) samples the planks tile.
 		return "planks"
 	match id:
 		BEDROCK:

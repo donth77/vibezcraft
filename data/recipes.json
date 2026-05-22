@@ -229,6 +229,12 @@
       "result": {"id": "fence", "count": 2}
     },
     {
+      "id": "fence_gate",
+      "pattern": ["SPS", "SPS"],
+      "key": {"S": "stick", "P": "planks"},
+      "result": {"id": "fence_gate", "count": 1}
+    },
+    {
       "id": "wood_stairs",
       "pattern": ["#  ", "## ", "###"],
       "key": {"#": "planks"},
