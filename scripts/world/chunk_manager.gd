@@ -901,10 +901,13 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 	var cane_top_y: Dictionary = {}  # Vector2i(lx, lz) -> highest ly seen
 	var found_non_cube: bool = false
 	var found_chest: bool = false
+	var found_sign: bool = false
 	for i in range(c.blocks.size()):
 		var b: int = c.blocks[i]
 		if b == Blocks.CHEST:
 			found_chest = true
+		if b == Blocks.SIGN_STANDING or b == Blocks.SIGN_WALL:
+			found_sign = true
 		if Blocks.needs_gdscript_mesher(b):
 			found_non_cube = true
 			var lx: int = i % Chunk.SIZE_X
@@ -920,6 +923,12 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 					cane_top_y[key] = ly
 	c.has_non_cube_blocks = found_non_cube
 	c.has_chest_blocks = found_chest
+	# Without this rescan, chunks loaded from disk had has_sign_blocks=false
+	# even when the blocks array contained sign cells, so chunk_node's
+	# `if chunk.has_sign_blocks` gate skipped _sync_sign_entities entirely
+	# → no SignNode children spawned → labels never rendered, even though
+	# SignStorage had the text (which is why the editor still showed it).
+	c.has_sign_blocks = found_sign
 	# Materialize the per-column cane tops into world coords.
 	for key: Vector2i in cane_top_y:
 		c.cane_tops.append(

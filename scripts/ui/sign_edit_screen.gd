@@ -283,12 +283,15 @@ func _build_preview_panel(font: Font) -> Control:
 		label.double_sided = true
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		# Preview panel is centered at root y=0 (not at SignNode's 0.75
-		# cell-mid). The standing sign's plank-alignment shift is
-		# -0.03125 from panel geometric center — apply it here too so
-		# preview lines land on the same plank centers as the in-world
-		# sign.
-		var y: float = (1.5 - float(i)) * SignNode.LINE_HEIGHT - 0.03125
+		# Preview panel is centered at root y=0. With the texture NOT
+		# V-flipped (so its image row 0 — a light pixel — sits at the
+		# panel top), the plank-row centers are at panel y = 0.21875,
+		# 0.09375, -0.03125, -0.15625 (image y = 1, 5, 9, 13). Apply
+		# the wall sign's half-texel shift (+0.015625) so line 0 sits
+		# half a texel below plank center 1 — same vertical position
+		# as the in-world wall sign, with a small top gap from the
+		# panel edge.
+		var y: float = (1.5 - float(i)) * SignNode.LINE_HEIGHT + 0.015625
 		label.position = Vector3(0, y, face_offset)
 		root.add_child(label)
 		_preview_text_labels.append(label)
@@ -370,22 +373,15 @@ func _wood_material() -> StandardMaterial3D:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	mat.albedo_color = Color(0.6, 0.6, 0.6)
 	if planks_tex != null:
-		# Pre-flip the texture VERTICALLY so its plank rows map to the
-		# panel in the same order as the in-world standing sign (whose
-		# mesher V-flips UVs: image bottom row at panel top). Godot's
-		# BoxMesh default puts image top at panel top, opposite. The
-		# previous attempt used uv1_scale.y=-1 + uv1_offset.y=+1, but
-		# that interacted with BoxMesh's per-face UV layout in a way
-		# that left some faces unflipped. Flipping the texture itself
-		# guarantees ALL faces show the same plank-row ordering as the
-		# standing sign in-world.
-		var src: Image = planks_tex.get_image()
-		if src != null:
-			var flipped: Image = src.duplicate() as Image
-			flipped.flip_y()
-			mat.albedo_texture = ImageTexture.create_from_image(flipped)
-		else:
-			mat.albedo_texture = planks_tex
+		# Default BoxMesh UV puts image top at panel top, which is the
+		# light pixel row 1 (no seam). Earlier attempts to V-flip so this
+		# matched the standing-sign in-world mesher (which DOES V-flip,
+		# putting the dark seam at image y=15 on top) made the preview's
+		# panel top a dark line. We choose "preview reads cleanly" over
+		# "preview exactly mirrors standing in-world wood orientation" —
+		# plank rows look symmetric enough that the orientation mismatch
+		# isn't noticeable except for the seam-at-top, which IS.
+		mat.albedo_texture = planks_tex
 		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	else:
 		mat.albedo_color = Color(0.55, 0.36, 0.20) * 0.6
@@ -552,11 +548,9 @@ func _position_chevrons() -> void:
 	# glyph (≈ 12 px at font_size 24) at the text edge can't touch the
 	# chevron glyph drawn to its outside.
 	var gap: float = 14.0 * SignNode.TEXT_PIXEL_SIZE
-	# Match the same plank-alignment shift the text labels use so the
-	# chevrons sit vertically centred on the text instead of one texel
-	# above it (the previous bug — chevrons were 0.03125 m higher than
-	# the text and looked misaligned).
-	var line_y: float = (1.5 - float(_active_line)) * SignNode.LINE_HEIGHT - 0.03125
+	# Match the same shift the text labels use (see _build_preview_panel)
+	# so chevrons sit vertically centred on the text.
+	var line_y: float = (1.5 - float(_active_line)) * SignNode.LINE_HEIGHT + 0.015625
 	var face_z: float = 0.0625 + 0.01
 	_chevron_left.position = Vector3(-text_width / 2.0 - gap, line_y, face_z)
 	_chevron_right.position = Vector3(text_width / 2.0 + gap, line_y, face_z)

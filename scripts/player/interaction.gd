@@ -187,6 +187,30 @@ func _block_visual_aabb(world_pos: Vector3i, id: int, meta: int) -> AABB:
 		var n: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, -1)) == Blocks.FENCE
 		var s: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, 1)) == Blocks.FENCE
 		return Blocks.fence_selection_aabb(w, e, n, s)
+	# Wall sign mounted against a fence: the mesher renders the panel
+	# offset 0.375 m INTO the fence cell so it touches the post, but
+	# selection_aabb returns the default cell-face position. Detect
+	# the fence-support case and offset the highlight wireframe to
+	# match the visible panel.
+	if id == Blocks.SIGN_WALL:
+		var aabb: AABB = Blocks.selection_aabb(id, meta)
+		var off: float = 0.375
+		var fence_offset: Vector3 = Vector3.ZERO
+		match meta & 3:
+			0:
+				if _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, 1)) == Blocks.FENCE:
+					fence_offset = Vector3(0, 0, off)
+			1:
+				if _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, -1)) == Blocks.FENCE:
+					fence_offset = Vector3(0, 0, -off)
+			2:
+				if _chunk_manager.get_world_block(world_pos + Vector3i(1, 0, 0)) == Blocks.FENCE:
+					fence_offset = Vector3(off, 0, 0)
+			_:
+				if _chunk_manager.get_world_block(world_pos + Vector3i(-1, 0, 0)) == Blocks.FENCE:
+					fence_offset = Vector3(-off, 0, 0)
+		aabb.position += fence_offset
+		return aabb
 	return Blocks.selection_aabb(id, meta)
 
 
@@ -1729,11 +1753,22 @@ func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	else:
 		if support_id == Blocks.AIR or Blocks.is_water(support_id) or Blocks.is_lava(support_id):
 			return false
-		place = hit.block_pos + hit.normal_i
+		# Snow layer + other replaceable supports (tall grass, etc.) —
+		# vanilla places the new block AT the support cell, stomping
+		# the snow flat instead of stacking above it. Without this the
+		# sign floats one cell above the snow layer.
+		if Blocks.is_replaceable(support_id):
+			place = hit.block_pos
+		else:
+			place = hit.block_pos + hit.normal_i
 		dest_id = _chunk_manager.get_world_block(place)
 		if dest_id != Blocks.AIR and not Blocks.is_replaceable(dest_id):
 			return false
-		if hit.normal_i.y == 1:
+		# Replaceable support → always standing sign (top-face-equivalent
+		# placement). For non-replaceable supports the normal direction
+		# decides: +Y = standing, sideways = wall, -Y = reject.
+		var effectively_top: bool = hit.normal_i.y == 1 or Blocks.is_replaceable(support_id)
+		if effectively_top:
 			block_id = Blocks.SIGN_STANDING
 			var yaw_deg: float = rad_to_deg(_player_yaw())
 			meta = int(round(-yaw_deg * 16.0 / 360.0)) & 0x0F
