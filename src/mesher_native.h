@@ -119,6 +119,14 @@ public:
 	// top of supporting block. Native skips the cube pass; GDScript
 	// _emit_rail_geometry handles the meta-driven plank quad + UV.
 	static constexpr int RAIL = 78;
+	// BED_FOOT (83) + BED_HEAD (84) — Beta 1.3 BlockBed pair. Non-cube
+	// (9/16 tall with per-face head/foot textures). Native skips the
+	// cube pass; GDScript _emit_bed_geometry owns the mesh + collision.
+	// Without skipping here, the native mesher emits a full 1×1×1 cube
+	// with the default get_face_texture fallback (= "unknown" → empty
+	// UV → flat-grey faces, user-reported "big gray block").
+	static constexpr int BED_FOOT = 83;
+	static constexpr int BED_HEAD = 84;
 	// MOB_SPAWNER — vanilla eb.java cage block. Non-opaque (light
 	// passes through cage) AND emits all 6 faces regardless of
 	// neighbor (vanilla shouldSideBeRendered returns true for any

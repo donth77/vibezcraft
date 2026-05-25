@@ -1,6 +1,8 @@
 class_name Minecart
 extends CharacterBody3D
 
+# gdlint: disable=max-file-lines
+
 # Vanilla MC Alpha 1.2.6 EntityMinecart (vendor/alpha-1.2.6-src/src/qd.java).
 # Rolls on RAIL blocks, follows rail orientation, free-falls otherwise.
 # Right-click an empty cart to mount; sneak / right-click to dismount.
@@ -94,6 +96,22 @@ const MAX_HEALTH: int = 6
 # above that.
 const _SEAT_OFFSET: Vector3 = Vector3(0, FLOOR_THICKNESS + 0.15, 0)
 
+# Vanilla qd.java `d` field — 0=normal, 1=chest, 2=furnace. Determines
+# visual (chest mesh on top for variant 1) and right-click behaviour
+# (variant 1 opens chest UI instead of mounting). Must be set BEFORE
+# _ready so _build_visual_mesh sees the correct value — use
+# `setup(..., variant)` or set the property right after `Minecart.new()`.
+const VARIANT_NORMAL: int = 0
+const VARIANT_CHEST: int = 1
+const VARIANT_FURNACE: int = 2
+
+# Chest variant inventory size — vanilla 27 slots (same as block chest).
+const CHEST_INVENTORY_SIZE: int = 27
+
+var variant: int = VARIANT_NORMAL
+# 27-slot ItemStack array for chest cart. Lazily filled to size when
+# variant == CHEST. Direct refs; chest_screen mutates these stacks.
+var chest_items: Array = []
 var health: int = MAX_HEALTH
 var _owner_player: Node3D = null
 var _rider: Node3D = null
@@ -105,12 +123,31 @@ var _player_ref: Node3D = null
 var _floor_mat: StandardMaterial3D = null
 var _wall_mat: StandardMaterial3D = null
 var _last_light_brightness: float = -1.0
+# Chest cart only — the animated chest sitting in the cart's bed.
+# Reuses ChestNode (same geometry + lid animation as world chests).
+var _chest_node: Node3D = null
+# Furnace cart only — the cube mesh sitting in the cart's bed. Swapped
+# between FURNACE / LIT_FURNACE block ids when fuel state flips.
+var _furnace_mi: MeshInstance3D = null
+# Furnace cart fuel state — when _fuel_ticks > 0 the cart is "burning"
+# and applies push velocity along (_push_x, _push_z). Vanilla qd.java
+# fields: e (fuel ticks), f/g (push direction).
+var _fuel_ticks: int = 0
+var _push_x: float = 0.0
+var _push_z: float = 0.0
+var _is_burning: bool = false
+# Accumulates delta until ≥ 1/20 s, then fires cart-cart collision once
+# and resets. Vanilla's collision math is a per-TICK impulse (qd.java
+# runs at 20 TPS); running it every frame at 60+ FPS triples the push,
+# which made adjacent placement shove much harder than vanilla.
+var _collision_tick_accum: float = 0.0
 
 
-func setup(spawn_pos: Vector3, yaw: float, owner: Node3D) -> void:
+func setup(spawn_pos: Vector3, yaw: float, owner: Node3D, cart_variant: int = 0) -> void:
 	global_position = spawn_pos
 	rotation.y = yaw
 	_owner_player = owner
+	variant = cart_variant
 
 
 func _ready() -> void:
@@ -122,8 +159,22 @@ func _ready() -> void:
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 	_player_ref = get_tree().get_root().find_child("Player", true, false) as Node3D
 	add_to_group("minecarts")
+	_ensure_chest_inventory()
 	_build_collider()
 	_build_visual_mesh()
+
+
+# Initialise the chest_items array to 27 empty ItemStacks when the
+# variant is CHEST. No-op for other variants.
+func _ensure_chest_inventory() -> void:
+	if variant != VARIANT_CHEST:
+		return
+	if chest_items.size() == CHEST_INVENTORY_SIZE:
+		return
+	chest_items.resize(CHEST_INVENTORY_SIZE)
+	for i: int in range(CHEST_INVENTORY_SIZE):
+		if chest_items[i] == null:
+			chest_items[i] = ItemStack.new()
 
 
 func _build_collider() -> void:
@@ -201,6 +252,63 @@ func _build_visual_mesh() -> void:
 		wall.position = Vector3(0, wall_y, sz)
 		wall.material_override = _wall_mat
 		_visual_root.add_child(wall)
+	# Variant-specific add-ons: chest cart drops a small chest mesh
+	# inside the bed; furnace cart (not yet implemented) would drop a
+	# furnace mesh in the same slot.
+	if variant == VARIANT_CHEST:
+		_build_chest_mesh()
+	elif variant == VARIANT_FURNACE:
+		_build_furnace_mesh()
+
+
+# Build a chest sitting in the cart's bed. Reuses ChestNode so the
+# chest's geometry, textures, and lid animation match a world chest
+# exactly — no hand-rolled BoxMesh that drifts visually. Scaled down
+# slightly so it tucks inside the cart walls instead of poking through.
+func _build_chest_mesh() -> void:
+	var chest_script: GDScript = load("res://scripts/entities/chest_node.gd")
+	_chest_node = chest_script.new() as Node3D
+	# Vanilla world chest is 1×1×1; cart bed is 0.85 wide × 1.2 long ×
+	# WALL_HEIGHT tall. Scale 0.7 fits inside the gunwales with clearance.
+	var s: float = 0.7
+	_chest_node.scale = Vector3(s, s, s)
+	# Bottom of chest on cart floor, centered XZ. Chest's "front" face
+	# is -Z by default — same as our cart's front (where the rider would
+	# look toward forward motion), so no extra rotation needed.
+	_chest_node.position = Vector3(0, FLOOR_THICKNESS, 0)
+	_visual_root.add_child(_chest_node)
+
+
+# Build a furnace sitting in the cart's bed. Reuses BlockMesh.get_cube_mesh
+# so the furnace's face textures (top, side, front) match the world
+# furnace block exactly. Scaled down to fit the cart bed; rotated 180°
+# around Y so the firebox (-Z face per Blocks.get_face_texture) faces
+# +Z = the cart's forward direction. Track lit/unlit by rebuilding the
+# mesh when fuel state flips.
+func _build_furnace_mesh() -> void:
+	_furnace_mi = MeshInstance3D.new()
+	_furnace_mi.mesh = BlockMesh.get_cube_mesh(_active_furnace_block_id(), 1.0)
+	_furnace_mi.material_override = BlockAtlas.material()
+	# BlockMesh.get_cube_mesh emits a cube centred on its own origin and
+	# spanning ±size/2 per axis. After scaling by `s`, the cube spans
+	# ±(s/2). Position the mesh so the cube's BOTTOM rests on the cart
+	# floor: y = FLOOR_THICKNESS + (s/2). XZ stays at 0 — the cube is
+	# already centred under the cart origin.
+	var s: float = 0.7
+	_furnace_mi.scale = Vector3(s, s, s)
+	_furnace_mi.position = Vector3(0.0, FLOOR_THICKNESS + s * 0.5, 0.0)
+	# Spin so the firebox face (-Z = vanilla front) points to the cart's
+	# forward (+Z). Same convention as the chest cart's chest_node.
+	_furnace_mi.rotation.y = PI
+	_visual_root.add_child(_furnace_mi)
+
+
+# Helper — the furnace block id for the current burning state. Vanilla
+# stores two distinct block ids (FURNACE / LIT_FURNACE) with different
+# front-face textures (firebox shows flames when lit). For now the cart
+# starts unlit; flips to lit when fueled by the physics step (stage 2).
+func _active_furnace_block_id() -> int:
+	return Blocks.LIT_FURNACE if _is_burning else Blocks.FURNACE
 
 
 # Pack-aware cart skin loader. Falls back to the shared entity dir
@@ -223,9 +331,25 @@ func _make_cart_material(tex: Texture2D) -> StandardMaterial3D:
 	return mat
 
 
-# Vanilla c(eb) — right-click while same-player rider dismounts;
-# otherwise mounts an empty cart.
-func right_click_with(_held_id: int, player: Node3D) -> bool:
+# Vanilla qd.java::a(eb) (lines 582-604).
+#   d==0 (NORMAL): rider dismounts on RMB; empty cart mounts the player.
+#   d==1 (CHEST): opens the chest UI; never mounts.
+#   d==2 (FURNACE): held coal adds 1200 fuel ticks; ALWAYS sets push
+#       direction to cart - player (cart accelerates away). Never mounts.
+func right_click_with(held_id: int, player: Node3D) -> bool:
+	if variant == VARIANT_CHEST:
+		_open_chest_screen(player)
+		return true
+	if variant == VARIANT_FURNACE:
+		if held_id == Items.COAL or held_id == Items.CHARCOAL:
+			_add_fuel(player)
+		# Vanilla qd.java:600-601 sets push direction every RMB,
+		# regardless of held item. Push points AWAY from the player so
+		# the cart drives off in the direction the player is facing.
+		if player != null:
+			_push_x = global_position.x - player.global_position.x
+			_push_z = global_position.z - player.global_position.z
+		return true
 	if _rider == player:
 		dismount()
 		return true
@@ -233,6 +357,114 @@ func right_click_with(_held_id: int, player: Node3D) -> bool:
 		return false
 	mount(player)
 	return true
+
+
+# Vanilla qd.java::g (type==2 with held coal) — `this.e += 1200` and
+# consumes one coal. 1200 ticks = 60 s of burning. If the cart has no
+# current push direction (just placed, idle), seed it from the player's
+# facing so the cart starts thrusting in a sensible direction.
+func _add_fuel(player: Node3D) -> void:
+	_fuel_ticks += 1200
+	if absf(_push_x) < 0.01 and absf(_push_z) < 0.01:
+		if absf(velocity.x) > 0.01 or absf(velocity.z) > 0.01:
+			_push_x = velocity.x
+			_push_z = velocity.z
+		elif player != null:
+			# Use player's yaw to face the cart's push the way they're looking.
+			var yaw: float = player.rotation.y
+			_push_x = -sin(yaw)
+			_push_z = -cos(yaw)
+	_update_burning_visual()
+	# Consume one from the player's selected stack.
+	if player != null:
+		var inv: Inventory = player.get("inventory") as Inventory
+		if inv != null and inv.has_method("consume_one_selected"):
+			inv.consume_one_selected()
+
+
+# Open the chest UI bound to THIS cart's chest_items array. The screen
+# script (chest_screen.gd) reads/writes the array in place — when the
+# screen closes, the cart's inventory is already up-to-date with no
+# extra syncing.
+func _open_chest_screen(player: Node3D) -> void:
+	_ensure_chest_inventory()
+	var screen: Node = player.get_node_or_null("Crosshair/ChestScreen") if player != null else null
+	if screen == null or not screen.has_method("open_entity"):
+		return
+	if _chest_node != null and _chest_node.has_method("set_open"):
+		_chest_node.set_open(true)
+	SFX.play_chest_open()
+	screen.open_entity(
+		chest_items, "Minecart with Chest", Callable(self, "_on_chest_screen_closed")
+	)
+
+
+func _on_chest_screen_closed() -> void:
+	if _chest_node != null and _chest_node.has_method("set_open"):
+		_chest_node.set_open(false)
+	SFX.play_chest_close()
+
+
+# Flip the furnace mesh between FURNACE (cold) and LIT_FURNACE (burning)
+# based on _fuel_ticks. Called when fuel is added or runs out.
+func _update_burning_visual() -> void:
+	if _furnace_mi == null:
+		return
+	var want_burning: bool = _fuel_ticks > 0
+	if want_burning == _is_burning:
+		return
+	_is_burning = want_burning
+	_furnace_mi.mesh = BlockMesh.get_cube_mesh(_active_furnace_block_id(), 1.0)
+
+
+# Furnace cart per-frame thrust. Vanilla qd.java type==2:
+#   - if |push| > 0.01: az *= 0.8, aB *= 0.8, az += push_x * 0.04,
+#     aB += push_z * 0.04 — each tick.
+#   - fuel ticks down at random (~1/4 chance per tick).
+#   - if fuel hits 0: push direction zeroed → cart coasts to stop.
+# Converted to per-frame at our 60+ FPS:
+#   - per-second thrust = 0.04 b/tick * 20 = 0.8 m/s² along push axis.
+#   - per-second decay = 0.8 per tick = 0.8^20 = 0.012/s — too aggressive
+#     for our drag stack (already handled by DRAG_ON_RAIL). Skip the
+#     extra ×0.8 and rely on the global drag; the +0.04 thrust still
+#     accelerates the cart visibly.
+func _apply_furnace_thrust(delta: float) -> void:
+	if _fuel_ticks <= 0:
+		# Idle furnace cart — push has no effect; let drag handle decel.
+		if _is_burning:
+			_is_burning = false
+			_update_burning_visual()
+		return
+	# Decrement fuel. Vanilla: random subtract once per 4 ticks; we use
+	# a steady -1 per tick equivalent at 20 TPS for predictability.
+	_fuel_ticks -= int(delta * 20.0)
+	if _fuel_ticks <= 0:
+		_fuel_ticks = 0
+		_push_x = 0.0
+		_push_z = 0.0
+		_update_burning_visual()
+		return
+	# Apply thrust along normalized push direction. 0.8 m/s² == vanilla
+	# 0.04 b/tick × 20.
+	var mag: float = sqrt(_push_x * _push_x + _push_z * _push_z)
+	if mag > 0.01:
+		var nx: float = _push_x / mag
+		var nz: float = _push_z / mag
+		var accel: float = 0.8
+		velocity.x += nx * accel * delta
+		velocity.z += nz * accel * delta
+	# Sync push direction with velocity (vanilla qd.java:287-297). If
+	# the cart reverses against its push, zero the push (player can
+	# brake by shoving the cart backwards); otherwise the push tracks
+	# the cart's current motion.
+	var vel_sq: float = velocity.x * velocity.x + velocity.z * velocity.z
+	if mag > 0.01 and vel_sq > 0.001:
+		if _push_x * velocity.x + _push_z * velocity.z < 0.0:
+			_push_x = 0.0
+			_push_z = 0.0
+		else:
+			_push_x = velocity.x
+			_push_z = velocity.z
 
 
 func mount(player: Node3D) -> void:
@@ -280,17 +512,41 @@ func _destroy() -> void:
 
 
 func _spawn_break_drops() -> void:
-	# Vanilla qd.java::d() drops 1 minecart item + the cart's iron-based
-	# build cost. Alpha drops just the minecart item (consistent with
-	# vanilla CraftingManager: 5 iron → 1 cart, so breaking returns 1).
+	# Vanilla qd.java::d() drops the cart variant item + the chest +
+	# all chest contents for chest carts. Furnace cart would drop a
+	# furnace too. Alpha drops just one of each (vanilla recipe is
+	# `1 cart + 1 chest -> 1 chest cart`, so breaking returns both).
 	var parent: Node = get_parent()
 	if parent == null:
 		return
+	_drop_one(parent, Items.MINECART)
+	if variant == VARIANT_CHEST:
+		_drop_one(parent, Blocks.CHEST)
+		for stack in chest_items:
+			if stack == null or stack.is_empty():
+				continue
+			_drop_stack(parent, stack)
+	elif variant == VARIANT_FURNACE:
+		_drop_one(parent, Blocks.FURNACE)
+
+
+func _drop_one(parent: Node, item_id: int) -> void:
 	var item := DroppedItem.new()
 	parent.add_child(item)
 	var jitter := Vector3(randf_range(-0.2, 0.2), 0.3, randf_range(-0.2, 0.2))
 	item.global_position = global_position + Vector3(0, 0.4, 0) + jitter
-	item.setup(Items.MINECART)
+	item.setup(item_id)
+
+
+func _drop_stack(parent: Node, stack) -> void:
+	# DroppedItem holds one item; spawn `count` instances. Practical
+	# cart inventories rarely hold full 64-stacks so this is fine.
+	for _i: int in range(stack.count):
+		var item := DroppedItem.new()
+		parent.add_child(item)
+		var jitter := Vector3(randf_range(-0.3, 0.3), 0.3, randf_range(-0.3, 0.3))
+		item.global_position = global_position + Vector3(0, 0.4, 0) + jitter
+		item.setup(stack.item_id)
 
 
 # Per-tick physics. Two branches:
@@ -332,6 +588,12 @@ func _physics_process(delta: float) -> void:
 			_rail_axis_for(rail_info.meta) if on_rail else Vector3.ZERO
 		)
 		_apply_soft_push(delta, rail_axis_for_push)
+	# Furnace cart self-propulsion. Vanilla qd.java::e_() type==2:
+	# while pushed (|f,g| > 0.01), velocity *= 0.8 then += dir * 0.04
+	# per tick (= 0.8 m/s² per second of acceleration along the push
+	# direction). Fuel decays randomly (~1/4 ticks → ~5/s).
+	if variant == VARIANT_FURNACE:
+		_apply_furnace_thrust(delta)
 	velocity.x = clampf(velocity.x, -MAX_HORIZ_PER_AXIS, MAX_HORIZ_PER_AXIS)
 	velocity.z = clampf(velocity.z, -MAX_HORIZ_PER_AXIS, MAX_HORIZ_PER_AXIS)
 	# Friction. On-rail drag (0.997) makes carts coast ~10 blocks per
@@ -345,10 +607,15 @@ func _physics_process(delta: float) -> void:
 	if not on_rail:
 		velocity.y *= pow(DRAG_VERT_PER_TICK, tick_scale)
 	# Cart-cart collision — share momentum + push apart. Vanilla
-	# qd.java::g(lw) at lines 481-538. Done after drag so the averaged
-	# velocity is the just-decayed value, not stale velocity from last
-	# frame.
-	_apply_cart_cart_collision()
+	# qd.java::g(lw) at lines 481-538. Vanilla fires this once per
+	# tick (20 TPS); running it every frame at 60+ FPS would over-apply
+	# the per-tick impulse and triple the push when carts spawn next
+	# to each other. Gate on a delta accumulator so it fires at vanilla
+	# cadence regardless of frame rate.
+	_collision_tick_accum += delta
+	if _collision_tick_accum >= 1.0 / 20.0:
+		_collision_tick_accum = 0.0
+		_apply_cart_cart_collision()
 	# Yaw — track the rail direction when on rails (so the cart sprite
 	# orients along the track), else track rider facing. Rail axis is
 	# undirected (cart can face either way), so pick the orientation
@@ -766,13 +1033,27 @@ func _update_damage_rock(delta: float) -> void:
 
 
 func to_save_dict() -> Dictionary:
-	return {
+	var d: Dictionary = {
 		"pos": global_position,
 		"yaw": rotation.y,
 		"velocity": velocity,
 		"health": health,
+		"variant": variant,
 		"has_rider": _rider != null,
 	}
+	if variant == VARIANT_CHEST:
+		var items: Array = []
+		for s in chest_items:
+			if s == null:
+				items.append({"id": 0, "count": 0})
+			else:
+				items.append({"id": s.item_id, "count": s.count})
+		d["chest"] = items
+	if variant == VARIANT_FURNACE:
+		d["fuel"] = _fuel_ticks
+		d["push_x"] = _push_x
+		d["push_z"] = _push_z
+	return d
 
 
 func restore_from_dict(d: Dictionary) -> void:
@@ -780,6 +1061,19 @@ func restore_from_dict(d: Dictionary) -> void:
 	rotation.y = float(d.get("yaw", 0.0))
 	velocity = d.get("velocity", Vector3.ZERO) as Vector3
 	health = int(d.get("health", MAX_HEALTH))
+	variant = int(d.get("variant", VARIANT_NORMAL))
+	if variant == VARIANT_CHEST and d.has("chest"):
+		_ensure_chest_inventory()
+		var saved: Array = d.get("chest", []) as Array
+		for i: int in range(mini(saved.size(), chest_items.size())):
+			var entry: Dictionary = saved[i]
+			chest_items[i].item_id = int(entry.get("id", 0))
+			chest_items[i].count = int(entry.get("count", 0))
+	if variant == VARIANT_FURNACE:
+		_fuel_ticks = int(d.get("fuel", 0))
+		_push_x = float(d.get("push_x", 0.0))
+		_push_z = float(d.get("push_z", 0.0))
+		call_deferred("_update_burning_visual")
 	if bool(d.get("has_rider", false)):
 		call_deferred("_remount_saved_rider")
 

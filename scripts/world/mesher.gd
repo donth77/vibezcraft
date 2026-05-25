@@ -3264,44 +3264,45 @@ static func _bed_face_uvs(rect: Rect2, face_idx: int, facing: int, _is_head: boo
 		#   uv[2] = (u1, v0)  top-right
 		#   uv[3] = (u1, v1)  bottom-right
 		return [bl, tl, tr, br]
-	# Top face — rotate UVs based on facing direction. The bed_head_top
-	# / bed_foot_top textures are authored with "head end" at the +V
-	# (south, +Z) edge in the source asset. For facing != 0 we rotate
-	# the UV mapping 90° per quarter turn so the visible head→foot axis
-	# aligns with the placed bed's facing.
+	# Top face — rotate UVs based on facing direction. Vanilla
+	# bed_head_top / bed_foot_top textures place the END art (pillow on
+	# head, far-strip on foot) at the LOW-V (top-of-image) edge. The
+	# rotation table below maps the +facing direction of the head cell
+	# (= where the pillow should appear in world space) to that LOW-V
+	# edge so the pillow stays at the head end as the bed yaws.
 	# Top-face vertex order (from face_geom[0]): c010, c011, c111, c110
 	#   = (-X, -Z), (-X, +Z), (+X, +Z), (+X, -Z)
-	# For facing 0 (head at +Z), the +V edge of the texture is the +Z
-	# edge of the face → (-X, +Z) and (+X, +Z) get high V.
+	# For facing 0 (head at +Z), the head-end corners are c011/c111 (+Z)
+	# → they get LOW V (the pillow art).
 	var top_uvs: Array
 	match facing:
-		0:  # head at +Z (south)
+		0:  # head at +Z (south) — pillow on +Z edge → +Z corners = low V
 			top_uvs = [
-				Vector2(u0, v0),  # (-X, -Z) → top-left
-				Vector2(u0, v1),  # (-X, +Z) → bottom-left
-				Vector2(u1, v1),  # (+X, +Z) → bottom-right
-				Vector2(u1, v0),  # (+X, -Z) → top-right
+				Vector2(u0, v1),  # (-X, -Z) foot-end corner
+				Vector2(u0, v0),  # (-X, +Z) head/pillow corner
+				Vector2(u1, v0),  # (+X, +Z) head/pillow corner
+				Vector2(u1, v1),  # (+X, -Z) foot-end corner
 			]
-		1:  # head at -X (west) → rotate 90° CCW
+		1:  # head at -X (west) — pillow on -X edge → -X corners = low V
 			top_uvs = [
-				Vector2(u0, v1),
-				Vector2(u1, v1),
-				Vector2(u1, v0),
-				Vector2(u0, v0),
+				Vector2(u0, v0),  # (-X, -Z) head/pillow
+				Vector2(u1, v0),  # (-X, +Z) head/pillow
+				Vector2(u1, v1),  # (+X, +Z) foot-end
+				Vector2(u0, v1),  # (+X, -Z) foot-end
 			]
-		2:  # head at -Z (north) → rotate 180°
+		2:  # head at -Z (north) — pillow on -Z edge → -Z corners = low V
 			top_uvs = [
-				Vector2(u1, v1),
-				Vector2(u1, v0),
-				Vector2(u0, v0),
-				Vector2(u0, v1),
+				Vector2(u1, v0),  # (-X, -Z) head/pillow
+				Vector2(u1, v1),  # (-X, +Z) foot-end
+				Vector2(u0, v1),  # (+X, +Z) foot-end
+				Vector2(u0, v0),  # (+X, -Z) head/pillow
 			]
-		_:  # facing 3 — head at +X (east) → rotate 90° CW
+		_:  # facing 3 — head at +X (east) → +X corners = low V
 			top_uvs = [
-				Vector2(u1, v0),
-				Vector2(u0, v0),
-				Vector2(u0, v1),
-				Vector2(u1, v1),
+				Vector2(u1, v1),  # (-X, -Z) foot-end
+				Vector2(u0, v1),  # (-X, +Z) foot-end
+				Vector2(u0, v0),  # (+X, +Z) head/pillow
+				Vector2(u1, v0),  # (+X, -Z) head/pillow
 			]
 	# `_is_head` reserved for future per-half top-UV tweaks (e.g. if the
 	# head and foot top textures need different V flips). Currently both

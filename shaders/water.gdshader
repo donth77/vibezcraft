@@ -119,10 +119,15 @@ void fragment() {
     // raw block_light so torches dominate at night. Matches the formula
     // chunk.gdshader uses for opaque blocks.
     float light = max(v_sky * sky_factor, v_block);
-    // Floor at 0.10 so water never goes pitch-black even in unlit caves,
-    // matching vanilla's BlockFluids minimum visibility (player should
-    // still see *something* even underwater in pitch dark).
-    light = max(light, 0.10);
+    // Water keeps its blue identity at every time-of-day. Opaque blocks
+    // can fade to near-black at midnight (chunk.gdshader LUT ≈ 0.076
+    // floor); water can't — ALPHA stays at 0.7, so a near-black ALBEDO
+    // composites to background-with-a-faint-dark-tint, which reads as
+    // "the water turned transparent / black" rather than dim blue.
+    // Remap [0..1] → [0.35..1.0] so the deep_color stays clearly visible
+    // even at the SKY_FACTOR_MIN=0.10 midnight floor. Daytime still
+    // peaks at full brightness; dusk and caves dim BUT stay blue.
+    light = mix(0.35, 1.0, light);
     ALBEDO = col * b * light;
     ALPHA = alpha_strength;
 }

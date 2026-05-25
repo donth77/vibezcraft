@@ -45,7 +45,11 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 			_cache[key] = _build_door(block_id, size)
 		elif block_id == Blocks.LADDER:
 			_cache[key] = _build_ladder(size)
-		elif block_id == Blocks.HALF_SLAB:
+		elif (
+			block_id == Blocks.HALF_SLAB
+			or block_id == Blocks.WOOD_HALF_SLAB
+			or block_id == Blocks.COBBLESTONE_HALF_SLAB
+		):
 			_cache[key] = _build_slab(block_id, size)
 		elif block_id == Blocks.FENCE_GATE:
 			_cache[key] = _build_fence_gate(size)

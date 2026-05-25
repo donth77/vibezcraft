@@ -9,7 +9,15 @@ class_name EntityLighting
 #   oz.java:22-28  — World.brightness LUT (per light level 0..15)
 #   cy.java        — World.j(time) sun-brightness scaler (we use WorldTime)
 
-const _FLOOR: float = 0.05
+# Brightness floor for entity rendering. Vanilla used 0.05 (matches the
+# chunk LUT's f2 floor), but in our linear-space pipeline that produced
+# entities at ~5-8% of texture albedo at midnight — boats, minecarts,
+# mobs, paintings, etc. all read as pitch-black silhouettes against
+# the already-dim terrain. Bumped to 0.25 (deliberate vanilla deviation)
+# so entities stay clearly readable as objects at all times of day.
+# Chunks keep the vanilla 0.05 floor in chunk.gdshader so the world
+# itself still looks properly dark.
+const _FLOOR: float = 0.25
 
 
 # Vanilla LUT formula. Returns 0.05..1.0 — matches the LUT baked into

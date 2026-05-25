@@ -266,13 +266,16 @@ var _fall_immune_next_landing: bool = true
 # chunks haven't loaded yet still gets corrected once they're in.
 # 30 ticks ≈ 0.5 s — well within the chunk-streaming window.
 var _spawn_check_ticks_remaining: int = 90
-# Defensive "unstick" pass — runs on the first physics tick of a world
-# load after PlayerSave.load_player has set the saved position. If the
-# capsule is embedded inside one or more solid blocks (e.g. saved
-# mid-fall onto an emergency platform with feet inside the grass), walks
-# Y up by 1 m at a time until the capsule's foot/center/eye cells are
-# all clear. Consumed once at first tick.
-var _settle_pending: bool = true
+# Defensive "unstick" pass — runs every physics tick after world load
+# until we've CONFIRMED the player position is clear of solid blocks.
+# Single-shot consume failed when chunks around the spawn hadn't
+# streamed in yet: OOB block reads return AIR ("clear"), settle bails,
+# the real chunk arrives later, and the player is suddenly inside
+# terrain with the flag already consumed. Retries for up to 60 frames
+# (~1 s at 60 fps) — once any sampled cell returns a real loaded block
+# we either confirm clear and stop, or walk Y up to escape.
+var _settle_remaining_frames: int = 60
+var _settled: bool = false
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -1426,15 +1429,15 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	# First-tick safety: if the saved position has the capsule embedded
-	# inside one or more solid blocks (e.g. mid-fall onto an emergency
-	# platform), push it up until clear. Runs once. Skipped when chunks
-	# around the player aren't loaded yet so we don't false-positive on
-	# OOB reads — _is_in_water + the spawn-relocate logic handle that
-	# case separately.
-	if _settle_pending and not Game.is_loading:
-		_settle_pending = false
-		_settle_out_of_solid_block()
+	# Defensive unstick pass — repeats every frame until chunks around
+	# the spawn have streamed in AND we've confirmed the capsule isn't
+	# embedded in any solid blocks. Stops after _settle_remaining_frames
+	# expires to bound the work; in normal cases it finishes within 1-2
+	# ticks of the chunk landing on disk.
+	if not _settled and not Game.is_loading and _settle_remaining_frames > 0:
+		_settle_remaining_frames -= 1
+		if _settle_out_of_solid_block():
+			_settled = true
 	# Mount short-circuit — when riding a mob, the mob's _process drives
 	# our global_position to the saddle and the mob reads WASD input
 	# directly. Skip everything else (gravity, water, jump, move_and_slide,
@@ -2179,20 +2182,30 @@ func _is_in_water() -> bool:
 	return false
 
 
-# Capsule extends ±0.9 m around the Node3D origin (per scenes/player/
-# player.tscn). Walk Y up by 1 m at a time until none of the cells
-# the capsule overlaps (feet, center, eye) contain a solid block. Caps
-# the walk at 8 m to avoid teleporting the player to the moon if the
-# block lookup is broken. No-op when chunks aren't loaded (OOB returns
-# AIR which is "clear", so the loop exits immediately).
-func _settle_out_of_solid_block() -> void:
+# Walk Y up by 1 m at a time until the capsule (±0.9 m around origin)
+# overlaps no solid blocks at feet / center / eye sample points. Returns
+# true ONLY when we've confirmed the position is clear AND the chunk is
+# loaded (so we know AIR reads aren't OOB-default). Returns false if
+# chunks haven't streamed in yet — the caller retries next frame.
+func _settle_out_of_solid_block() -> bool:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):
-		return
+		return false
+	# Probe whether the chunk containing the player has finished loading.
+	# OOB / unloaded reads return AIR — we can't distinguish "actually
+	# clear AIR" from "chunk not loaded yet" by block content alone, so
+	# ask chunk_manager directly. Without this gate we false-positive
+	# settle on the first tick and the player ends up inside terrain
+	# once the chunk lands.
+	var chunk_x: int = int(floor(global_position.x / float(Chunk.SIZE_X)))
+	var chunk_z: int = int(floor(global_position.z / float(Chunk.SIZE_Z)))
+	if cm.has_method("is_chunk_loaded"):
+		if not cm.is_chunk_loaded(Vector2i(chunk_x, chunk_z)):
+			return false  # try again next frame once the chunk arrives
 	var x: int = int(floor(global_position.x))
 	var z: int = int(floor(global_position.z))
 	var sample_dys: Array = [-0.85, 0.0, 0.7]
-	for _step in range(8):
+	for _step in range(16):
 		var stuck := false
 		for dy: float in sample_dys:
 			var y: int = int(floor(global_position.y + dy))
@@ -2203,11 +2216,12 @@ func _settle_out_of_solid_block() -> void:
 				stuck = true
 				break
 		if not stuck:
-			return
+			return true
 		global_position.y += 1.0
 	push_warning(
-		"[Player] _settle_out_of_solid_block: gave up after 8 m at y=%.1f" % global_position.y
+		"[Player] _settle_out_of_solid_block: gave up after 16 m at y=%.1f" % global_position.y
 	)
+	return true  # gave up — mark settled so we don't keep trying forever
 
 
 # True when the player's eye cell is not water — their head has cleared

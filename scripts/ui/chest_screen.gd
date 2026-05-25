@@ -29,8 +29,10 @@ const CHEST_GRID_SIZE: int = 27
 
 var inventory: Inventory  # bound to player's inventory for the bottom rows
 var _local_slots: Array  # 27 ItemStack refs into ChestStorage's array
-var _chest_pos: Vector3i  # world cell of the open chest
+var _chest_pos: Vector3i  # world cell of the open chest (entity mode: ignored)
 var _open_callback: Callable  # invoked when screen closes (drives lid anim)
+var _title_label: Label = null  # rebound per-open to swap "Chest" vs cart title
+var _title_text: String = "Chest"
 var _cursor: ItemStack
 var _slot_nodes: Array = []  # Array[Panel]; -1..-1 = local, then global to inventory
 var _local_node_for: Dictionary = {}  # local_index -> Panel
@@ -75,6 +77,24 @@ func open_for(pos: Vector3i, close_cb: Callable) -> void:
 	_chest_pos = pos
 	_open_callback = close_cb
 	_local_slots = ChestStorage.get_or_create(pos)
+	_title_text = "Chest"
+	if _title_label != null:
+		_title_label.text = _title_text
+	_open()
+
+
+# Entity-attached variant — chest minecart (and any future entity that
+# carries an inventory). Caller passes the cart's 27-slot ItemStack
+# array by reference; mutations are visible to the cart immediately
+# because chest_screen reads/writes _local_slots in place. Optional
+# close_cb drives the entity's lid animation (cart's chest_node).
+func open_entity(items: Array, title: String = "Chest", close_cb: Callable = Callable()) -> void:
+	_chest_pos = Vector3i.ZERO
+	_open_callback = close_cb
+	_local_slots = items
+	_title_text = title
+	if _title_label != null:
+		_title_label.text = _title_text
 	_open()
 
 
@@ -117,13 +137,14 @@ func _build_panel() -> void:
 	root.add_child(bg)
 
 	var title := Label.new()
-	title.text = "Chest"
+	title.text = _title_text
 	title.add_theme_color_override("font_color", _COLOR_TITLE)
 	title.add_theme_font_override("font", _font)
 	title.add_theme_font_size_override("font_size", 8 * SCALE)
 	title.position = Vector2(_TITLE_POS.x * SCALE, _TITLE_POS.y * SCALE)
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(title)
+	_title_label = title
 
 	# 9x3 chest grid (LOCAL slots 0..26).
 	for r in range(3):

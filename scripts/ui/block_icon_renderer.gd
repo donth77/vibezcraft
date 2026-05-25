@@ -109,6 +109,13 @@ const _ICONIFIED_BLOCKS: Array = [
 	# sprite showed a full-square cobblestone-looking face — wrong).
 	Blocks.DOUBLE_SLAB,
 	Blocks.HALF_SLAB,
+	# Wood + cobblestone slab variants (Beta 1.3) — same half-height
+	# mesh as the stone slab, planks / cobblestone textures from
+	# blocks.gd::get_face_texture.
+	Blocks.WOOD_HALF_SLAB,
+	Blocks.WOOD_DOUBLE_SLAB,
+	Blocks.COBBLESTONE_HALF_SLAB,
+	Blocks.COBBLESTONE_DOUBLE_SLAB,
 	# Fence gate — non-cube (2 posts + 2 rails); the bake uses the
 	# dedicated closed-state mesh in BlockMesh._build_fence_gate so the
 	# inventory icon shows the recognizable gate silhouette rather than
@@ -187,6 +194,14 @@ static func _render_one(host: Node, block_id: int) -> void:
 		child.queue_free()
 	var mi := MeshInstance3D.new()
 	mi.mesh = BlockMesh.get_cube_mesh(block_id, 1.0)
+	# CHEST + FURNACE store their "front" texture on the -Z face (vanilla
+	# convention — front faces the player on placement). The icon camera
+	# sits in the +X+Y+Z octant and sees the +Z face, so without a flip
+	# the inventory icon shows the BACK of the chest / furnace instead
+	# of the latch / firebox. Rotate 180° around Y so the front face
+	# swings around to the camera-facing side.
+	if block_id == Blocks.CHEST or block_id == Blocks.FURNACE:
+		mi.rotation.y = PI
 	_holder.add_child(mi)
 	# Wait two frames: one for the new mesh to register, one for the viewport
 	# to render it. RenderingServer.frame_post_draw fires after the GPU has

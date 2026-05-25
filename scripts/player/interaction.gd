@@ -459,7 +459,16 @@ func _try_right_click_minecart(hit: Dictionary) -> bool:
 		return false
 	if not cart.has_method("right_click_with"):
 		return false
-	return cart.call("right_click_with", 0, get_parent())
+	# Pass the actual held item id — furnace carts need to see COAL /
+	# CHARCOAL to accept fuel. Earlier hardcoded 0 (AIR) made all
+	# variants behave as if the player's hand were empty.
+	var inv: Inventory = _player_inventory()
+	var held_id: int = 0
+	if inv != null:
+		var sel: ItemStack = inv.selected()
+		if sel != null and not sel.is_empty():
+			held_id = sel.item_id
+	return cart.call("right_click_with", held_id, get_parent())
 
 
 func _try_attack_minecart() -> bool:
@@ -2119,6 +2128,15 @@ func _compute_rail_meta(pos: Vector3i) -> int:
 	var s_up: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 1, 1)) == Blocks.RAIL
 	var e_up: bool = _chunk_manager.get_world_block(pos + Vector3i(1, 1, 0)) == Blocks.RAIL
 	var w_up: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, 1, 0)) == Blocks.RAIL
+	# Lower-Y horizontal neighbours — required for chained ramps. Vanilla
+	# qe.java::e() checks both above AND below. Without these, a rail
+	# placed on top of a step couldn't auto-orient as ramping down to the
+	# rail at the lower step, so chained staircases broke unless every
+	# other rail was flat.
+	var n_down: bool = _chunk_manager.get_world_block(pos + Vector3i(0, -1, -1)) == Blocks.RAIL
+	var s_down: bool = _chunk_manager.get_world_block(pos + Vector3i(0, -1, 1)) == Blocks.RAIL
+	var e_down: bool = _chunk_manager.get_world_block(pos + Vector3i(1, -1, 0)) == Blocks.RAIL
+	var w_down: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, -1, 0)) == Blocks.RAIL
 	# (1) Two-opposite straight beats everything — even if there's also
 	# a perpendicular neighbor (vanilla picks the straight in that case
 	# and the perpendicular rail will adjust on its own re-evaluation).
@@ -2155,6 +2173,19 @@ func _compute_rail_meta(pos: Vector3i) -> int:
 		return 4
 	if s_up:
 		return 5
+	# (4b) Lower-Y-only neighbors → ascending AWAY from them (i.e. the
+	# OPPOSITE side of this rail is the high end, the side facing the
+	# lower neighbour is the low end). e_down (rail one step east-and-
+	# down) means this rail should descend east = ascend west (meta 3).
+	# Mirror for the other three axes.
+	if e_down:
+		return 3  # this rail descends east toward the lower rail
+	if w_down:
+		return 2  # this rail descends west
+	if n_down:
+		return 5  # this rail descends north
+	if s_down:
+		return 4  # this rail descends south
 	# (5) Isolated rail → use player facing direction.
 	var yaw: float = _player_yaw()
 	var fx: float = absf(sin(yaw))

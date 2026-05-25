@@ -190,6 +190,9 @@ static func _spawn_one(entry: Dictionary, parent: Node) -> bool:
 			return true
 		TYPE_MINECART:
 			var cart: Node3D = _MINECART_SCRIPT.new() as Node3D
+			# variant must be set BEFORE add_child so _ready() builds
+			# the correct visual mesh (chest add-on for variant 1).
+			cart.set("variant", int(payload.get("variant", 0)))
 			parent.add_child(cart)
 			cart.call("restore_from_dict", payload)
 			return true

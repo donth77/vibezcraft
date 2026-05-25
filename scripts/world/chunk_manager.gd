@@ -1619,6 +1619,17 @@ func set_world_block_with_meta(world_pos: Vector3i, id: int, meta: int) -> void:
 	chunk_node.chunk.set_block_meta(local_x, world_pos.y, local_z, meta)
 
 
+# Reports whether the chunk at the given chunk-space coord has fully
+# loaded (live ChunkNode in the scene). Used by Player's spawn-settle
+# pass so it can distinguish "AIR because the cell is genuinely empty"
+# from "AIR because the chunk hasn't streamed in yet" — OOB / unloaded
+# reads both return the AIR / sky=15 defaults, which without this gate
+# false-positives the settle and lets a spawn-in-terrain save stay
+# embedded once chunks actually arrive.
+func is_chunk_loaded(chunk_coord: Vector2i) -> bool:
+	return _chunks.has(chunk_coord)
+
+
 # World-coord sky-light read. Returns 15 (`Chunk.get_sky_light`'s OOB
 # convention; vanilla EnumSkyBlock.SKY default) when the chunk is
 # unloaded or y is out of range. Used by Lighting's bounded BFS so it
