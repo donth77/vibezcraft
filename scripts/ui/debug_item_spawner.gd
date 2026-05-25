@@ -94,11 +94,15 @@ const _BLOCKS: Array = [
 	# Clay block — also worldgen-placed in lakes; spawnable here for
 	# convenience.
 	Blocks.CLAY,
-	# Stone slabs — half-slab is the placeable form; double-slab is
-	# normally only formed by stacking two halves but exposed here so
-	# testers can place it directly.
+	# Stone / wood / cobblestone slabs — half-slab is the placeable form;
+	# double-slab is normally only formed by stacking two halves but
+	# exposed here so testers can place it directly.
 	Blocks.HALF_SLAB,
 	Blocks.DOUBLE_SLAB,
+	Blocks.WOOD_HALF_SLAB,
+	Blocks.WOOD_DOUBLE_SLAB,
+	Blocks.COBBLESTONE_HALF_SLAB,
+	Blocks.COBBLESTONE_DOUBLE_SLAB,
 ]
 # Sign item — separate from block list since the item-place handler
 # decides standing vs wall sign at right-click time.
@@ -209,6 +213,12 @@ const _ITEMS: Array = [
 	# Minecart — right-click on a placed rail to spawn an EntityMinecart.
 	# Recipe is 5 iron in a U pattern.
 	Items.MINECART,
+	# Chest minecart — variant of the cart that carries a 27-slot
+	# inventory in place of a rider seat. Recipe: 1 minecart + 1 chest.
+	Items.MINECART_CHEST,
+	# Furnace minecart — variant that takes coal/charcoal as fuel and
+	# self-propels. Recipe: 1 minecart + 1 furnace.
+	Items.MINECART_FURNACE,
 	# Bow + arrow — first projectile + ranged damage system. Bow has 384
 	# durability (vanilla ItemBow); arrow stacks to 64 and is consumed
 	# per shot (or re-picked from stuck arrows).
@@ -217,6 +227,10 @@ const _ITEMS: Array = [
 	# Painting — wall-mounted decoration. Right-click a wall face to
 	# spawn a randomly-chosen variant whose size fits the open space.
 	Items.PAINTING,
+	# Bed — multi-cell block. Right-click on the top face of a block to
+	# place foot + head. Right-click placed bed at night to skip to dawn
+	# + set spawn point.
+	Items.BED,
 ]
 
 var _player: Node

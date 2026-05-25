@@ -170,6 +170,16 @@ const _LAYOUT := {
 	# and turn (6-9). The rail mesher reads block meta to pick which.
 	"rail": 90,
 	"rail_turn": 91,
+	# Bed (vanilla bd.java) — 6 distinct face textures per half. Head =
+	# pillow end (the player's head), foot = legs end. Mesher samples by
+	# block id (BED_HEAD vs BED_FOOT) + face direction (top / side / end)
+	# to pick the right slot.
+	"bed_head_top": 92,
+	"bed_head_side": 93,
+	"bed_head_end": 94,
+	"bed_foot_top": 95,
+	"bed_foot_side": 96,
+	"bed_foot_end": 97,
 }
 
 # Foliage tint variants.

@@ -232,6 +232,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_rail_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_BED:
+					_emit_bed_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -1035,8 +1039,23 @@ static func _emit_slab_geometry(
 	var fz: float = float(z)
 	var mn := Vector3(fx, fy, fz)
 	var mx := Vector3(fx + 1.0, fy + 0.5, fz + 1.0)
-	var top_rect: Rect2 = BlockAtlas.uv_rect("stone_slab_top")
-	var side_rect: Rect2 = BlockAtlas.uv_rect("stone_slab_side")
+	# Slab texture varies by variant. The stone slab has a beveled side
+	# tile (stone_slab_side) baked specifically for the half-height
+	# stretch; wood + cobblestone variants don't ship dedicated tiles in
+	# Alpha terrain.png so they reuse a single full-cube tile on every
+	# face — the half-height silhouette alone reads as a slab.
+	var slab_id: int = chunk.get_block(x, y, z)
+	var top_rect: Rect2
+	var side_rect: Rect2
+	if slab_id == Blocks.WOOD_HALF_SLAB:
+		top_rect = BlockAtlas.uv_rect("planks")
+		side_rect = top_rect
+	elif slab_id == Blocks.COBBLESTONE_HALF_SLAB:
+		top_rect = BlockAtlas.uv_rect("cobblestone")
+		side_rect = top_rect
+	else:
+		top_rect = BlockAtlas.uv_rect("stone_slab_top")
+		side_rect = BlockAtlas.uv_rect("stone_slab_side")
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
 	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
@@ -3064,3 +3083,227 @@ static func _emit_rail_geometry(
 	)
 	var sel_max: Vector3 = sel_min + sel_aabb.size
 	_emit_collision_box(plant_faces, sel_min, sel_max)
+
+
+# Bed — Beta 1.3 BlockBed (bd.java). A 1×9/16×1 box per half (FOOT or
+# HEAD), with per-face textures picked from the bed atlas slots. The
+# half that the player is looking at determines which textures load
+# (foot vs head); meta encodes facing 0..3 so the END texture lands on
+# the correct outer face and the INTERNAL face (the one that meets the
+# other half) is skipped to avoid coplanar z-fighting between the two
+# half-meshes.
+#
+# Vanilla refs:
+#   bd.java::a(IBlockAccess,int,int,int,int) — per-face tile index
+#   bd.java::a(World,...,EntityHuman) — sleep trigger (handled in
+#     interaction.gd, not here)
+#
+# Facing convention (matches BlockDirectional / chest):
+#   0 = +Z (south) — head is at FOOT.z + 1
+#   1 = -X (west)  — head is at FOOT.x - 1
+#   2 = -Z (north) — head is at FOOT.z - 1
+#   3 = +X (east)  — head is at FOOT.x + 1
+static func _emit_bed_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array
+) -> void:
+	var id: int = chunk.get_block(x, y, z)
+	var meta: int = chunk.get_block_meta_unchecked(x, y, z)
+	var facing: int = meta & 3
+	var is_head: bool = id == Blocks.BED_HEAD
+	# Bed silhouette: full XZ footprint, 9/16 tall. Matches the vanilla
+	# Block.setBlockBounds(0, 0, 0, 1, 0.5625, 1) at bd.java:42.
+	var bed_height: float = 9.0 / 16.0
+	var mn := Vector3(float(x), float(y), float(z))
+	var mx := Vector3(float(x) + 1.0, float(y) + bed_height, float(z) + 1.0)
+	# Internal face — the half-side that meets the OTHER half. Coplanar
+	# with the other half's mesh, so skipping it kills the z-fight that
+	# would otherwise flicker the seam between FOOT and HEAD.
+	#   FOOT's internal face points along +facing (toward the head).
+	#   HEAD's internal face points along -facing (toward the foot).
+	# Direction-to-face mapping for the standard mesher face indices:
+	#   0=+Y, 1=-Y, 2=+X, 3=-X, 4=+Z, 5=-Z
+	var internal_face_idx: int = -1
+	if is_head:
+		match facing:
+			0:
+				internal_face_idx = 5  # head's foot side = -Z
+			1:
+				internal_face_idx = 2  # +X
+			2:
+				internal_face_idx = 4  # +Z
+			_:
+				internal_face_idx = 3  # -X
+	else:
+		match facing:
+			0:
+				internal_face_idx = 4  # foot's head side = +Z
+			1:
+				internal_face_idx = 3  # -X
+			2:
+				internal_face_idx = 5  # -Z
+			_:
+				internal_face_idx = 2  # +X
+	# Outer END face — opposite the internal face. Carries the
+	# pillow-end texture (HEAD) or the legs-end texture (FOOT).
+	var end_face_idx: int = _bed_opposite_face(internal_face_idx)
+	# Per-half textures.
+	var top_tex: String = "bed_head_top" if is_head else "bed_foot_top"
+	var side_tex: String = "bed_head_side" if is_head else "bed_foot_side"
+	var end_tex: String = "bed_head_end" if is_head else "bed_foot_end"
+	var bottom_tex: String = "planks"
+	# 8 box corners.
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	var sky: int = chunk.get_sky_light(x, y, z)
+	var blk: int = chunk.get_block_light(x, y, z)
+	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	# Face table — index matches the dir convention above (0=+Y..5=-Z).
+	# Each entry: [v0, v1, v2, v3, normal] in CCW order so the existing
+	# reversed-index emit pattern (base, base+2, base+1, base, base+3,
+	# base+2) keeps the outward side visible under CULL_BACK.
+	var face_geom: Array = [
+		[c010, c011, c111, c110, Vector3.UP],  # 0 +Y top
+		[c001, c000, c100, c101, Vector3.DOWN],  # 1 -Y bottom
+		[c100, c110, c111, c101, Vector3.RIGHT],  # 2 +X
+		[c001, c011, c010, c000, Vector3.LEFT],  # 3 -X
+		[c101, c111, c011, c001, Vector3.BACK],  # 4 +Z
+		[c000, c010, c110, c100, Vector3.FORWARD],  # 5 -Z
+	]
+	for face_idx in range(6):
+		if face_idx == internal_face_idx:
+			# Skip — handled by the other bed half's mesh.
+			continue
+		var face: Array = face_geom[face_idx]
+		# Pick texture per face role.
+		var tex_name: String
+		if face_idx == 0:
+			tex_name = top_tex
+		elif face_idx == 1:
+			tex_name = bottom_tex
+		elif face_idx == end_face_idx:
+			tex_name = end_tex
+		else:
+			tex_name = side_tex
+		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+		var face_uvs: Array = _bed_face_uvs(rect, face_idx, facing, is_head)
+		var base: int = verts.size()
+		var fv: Vector3 = face[4]
+		for i in range(4):
+			verts.append(face[i])
+			norms.append(fv)
+			uvs.append(face_uvs[i])
+			colors.append(face_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+	# Collision soup: full 1×9/16×1 box matches the player's walkable +
+	# selection box. Vanilla collision is the same shape; mounting the
+	# bed (right-click) is handled by the cursor raycast independently.
+	_emit_collision_box(collision_faces, mn, mx)
+
+
+# Face-index opposite mapping for the bed's internal-cull pairing.
+# 0↔1 (Y), 2↔3 (X), 4↔5 (Z).
+static func _bed_opposite_face(face_idx: int) -> int:
+	match face_idx:
+		0:
+			return 1
+		1:
+			return 0
+		2:
+			return 3
+		3:
+			return 2
+		4:
+			return 5
+		_:
+			return 4
+
+
+# Bed UV picker — rotates the top / bottom UV mapping per facing so the
+# pillow-top (HEAD) and sheet-stripe (FOOT) line up with the visible
+# head→foot direction. Side faces use the unrotated tile (their texture
+# is already oriented along the bed's length). End faces use a flipped
+# horizontal U for the LEFT vs RIGHT sides of the bed so the symmetric
+# end texture doesn't mirror-double on one side.
+#
+# Returns the 4 UVs matching the CCW vertex order in `face_geom`.
+static func _bed_face_uvs(rect: Rect2, face_idx: int, facing: int, _is_head: bool) -> Array:
+	# Standard UV corner offsets: [top-left, bot-left, bot-right, top-right]
+	# in (u, v) — V grows downward in atlas space.
+	var u0: float = rect.position.x
+	var v0: float = rect.position.y
+	var u1: float = rect.position.x + rect.size.x
+	var v1: float = rect.position.y + rect.size.y
+	# Default corners — used for side faces and for the bottom.
+	var tl := Vector2(u0, v0)
+	var bl := Vector2(u0, v1)
+	var br := Vector2(u1, v1)
+	var tr := Vector2(u1, v0)
+	if face_idx != 0:
+		# Side / end / bottom — no rotation needed. The mesher's default
+		# UV ordering matches the corners.
+		# Standard "side" UV ordering used by _emit_slab_geometry:
+		#   uv[0] = (u0, v1)  bottom-left
+		#   uv[1] = (u0, v0)  top-left
+		#   uv[2] = (u1, v0)  top-right
+		#   uv[3] = (u1, v1)  bottom-right
+		return [bl, tl, tr, br]
+	# Top face — rotate UVs based on facing direction. The bed_head_top
+	# / bed_foot_top textures are authored with "head end" at the +V
+	# (south, +Z) edge in the source asset. For facing != 0 we rotate
+	# the UV mapping 90° per quarter turn so the visible head→foot axis
+	# aligns with the placed bed's facing.
+	# Top-face vertex order (from face_geom[0]): c010, c011, c111, c110
+	#   = (-X, -Z), (-X, +Z), (+X, +Z), (+X, -Z)
+	# For facing 0 (head at +Z), the +V edge of the texture is the +Z
+	# edge of the face → (-X, +Z) and (+X, +Z) get high V.
+	var top_uvs: Array
+	match facing:
+		0:  # head at +Z (south)
+			top_uvs = [
+				Vector2(u0, v0),  # (-X, -Z) → top-left
+				Vector2(u0, v1),  # (-X, +Z) → bottom-left
+				Vector2(u1, v1),  # (+X, +Z) → bottom-right
+				Vector2(u1, v0),  # (+X, -Z) → top-right
+			]
+		1:  # head at -X (west) → rotate 90° CCW
+			top_uvs = [
+				Vector2(u0, v1),
+				Vector2(u1, v1),
+				Vector2(u1, v0),
+				Vector2(u0, v0),
+			]
+		2:  # head at -Z (north) → rotate 180°
+			top_uvs = [
+				Vector2(u1, v1),
+				Vector2(u1, v0),
+				Vector2(u0, v0),
+				Vector2(u0, v1),
+			]
+		_:  # facing 3 — head at +X (east) → rotate 90° CW
+			top_uvs = [
+				Vector2(u1, v0),
+				Vector2(u0, v0),
+				Vector2(u0, v1),
+				Vector2(u1, v1),
+			]
+	# `_is_head` reserved for future per-half top-UV tweaks (e.g. if the
+	# head and foot top textures need different V flips). Currently both
+	# halves use the same facing-driven rotation above.
+	return top_uvs

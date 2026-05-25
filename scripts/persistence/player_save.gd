@@ -99,6 +99,16 @@ static func _build_payload(player: Node3D) -> Dictionary:
 	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	var yaw: float = player.rotation.y
 	var pitch: float = camera.rotation.x if camera != null else 0.0
+	# Bed-respawn point — vanilla `EntityPlayer.spawnX/Y/Z + spawnSet`.
+	# Optional fields; default to no-bed-spawn on first save and on
+	# loads from older format-version-1 files (Dictionary.get with a
+	# missing key returns the default we pass).
+	var bed_spawn_pos: Vector3 = (
+		player.get("bed_spawn_pos") as Vector3 if "bed_spawn_pos" in player else Vector3.ZERO
+	)
+	var has_bed_spawn: bool = (
+		bool(player.get("has_bed_spawn")) if "has_bed_spawn" in player else false
+	)
 	return {
 		"pos": player.global_position,
 		"yaw": yaw,
@@ -106,6 +116,8 @@ static func _build_payload(player: Node3D) -> Dictionary:
 		"health": int(player.get("health")) if "health" in player else 20,
 		"hotbar_selected": inv.selected_slot if inv != null else 0,
 		"inventory": slots_out,
+		"bed_spawn_pos": bed_spawn_pos,
+		"has_bed_spawn": has_bed_spawn,
 	}
 
 
@@ -172,6 +184,13 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 		camera.rotation.x = float(payload.get("pitch", 0.0))
 	if "health" in player:
 		player.set("health", int(payload.get("health", 20)))
+	# Bed-respawn restore — defaults preserve the no-bed-spawn state for
+	# saves written before bed support landed (format_version 1 saves
+	# don't have these keys; Dictionary.get falls back to the defaults).
+	if "bed_spawn_pos" in player:
+		player.set("bed_spawn_pos", payload.get("bed_spawn_pos", Vector3.ZERO))
+	if "has_bed_spawn" in player:
+		player.set("has_bed_spawn", bool(payload.get("has_bed_spawn", false)))
 	var inv: Inventory = player.get("inventory") as Inventory
 	if inv != null:
 		var slots_in: Array = payload.get("inventory", []) as Array

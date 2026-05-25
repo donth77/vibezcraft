@@ -321,6 +321,46 @@ const FENCE_GATE := 77
 # happens at placement time — same family as FENCE's meta-aware
 # connection logic.
 const RAIL := 78
+# Wooden slab + double-slab [BETA 1.3 exception] — vanilla nq.aT =
+# qj(126, false) for the half-slab; the wood variant came in Beta with
+# the planks-textured slab line. Same placement / combine semantics as
+# the stone slab (HALF_SLAB / DOUBLE_SLAB): right-click on a face puts
+# a half-slab in the neighbor cell; right-click on the TOP face of an
+# existing wooden half-slab upgrades that cell to a wood double-slab.
+# Material wood (axe-preferred, hand-breakable). Hardness 2.0 (planks).
+# All 6 faces use the `planks` atlas slot — no dedicated wood-slab
+# texture in Alpha terrain.png since the slab silhouette is conveyed
+# by the half-height mesh, not a beveled side strip.
+const WOOD_HALF_SLAB := 79
+const WOOD_DOUBLE_SLAB := 80
+# Cobblestone slab + double-slab [BETA 1.3 exception] — same family
+# as the wood slab. Vanilla had stone, sandstone, cobblestone, wood,
+# brick, and smooth-stone variants under qj.java with different
+# textures + materials. Cobblestone variant: Material.stone,
+# pickaxe-required to drop, hardness 2.0. All 6 faces use the
+# `cobblestone` atlas slot.
+const COBBLESTONE_HALF_SLAB := 81
+const COBBLESTONE_DOUBLE_SLAB := 82
+# Bed [BETA 1.3 exception] — vanilla bd.java BlockBed (item id 26 in
+# Beta, drops Items.BED). Beds span TWO cells: a FOOT block at the
+# player-clicked cell and a HEAD block one cell along the placer's
+# facing. We split into TWO block IDs (BED_FOOT, BED_HEAD) so the
+# mesher can pick per-half face textures without re-reading neighbors;
+# vanilla uses ONE id with a meta bit 3 head flag, but our two-ID
+# split keeps the mesher table-driven and matches our SIGN_STANDING /
+# SIGN_WALL pair pattern.
+#
+# Meta layout for both halves:
+#   bits 0-1 = facing the player faced when placing (0=+Z south,
+#              1=-X west, 2=-Z north, 3=+X east) — same BlockDirectional
+#              convention as fence-gate / chest / door.
+#   bit 2..  = unused (vanilla's occupied flag is bit 2; we don't yet
+#              render the "sleeping player" overlay, so it's reserved).
+#
+# Material wool/cloth: hardness 0.2 (vanilla `c(0.2f)`), no required
+# tool, breakable by hand. Drops 1 Items.BED. Light passes through.
+const BED_FOOT := 83
+const BED_HEAD := 84
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -382,6 +422,13 @@ const MESH_SHAPE_FENCE_GATE: int = 12
 # Texture rotates/swaps based on meta orientation. No collision (player
 # walks straight over rails); only the minecart entity reads the meta.
 const MESH_SHAPE_RAIL: int = 13
+# Beta 1.3 bed — 9/16 block tall, two-cell pair (foot + head). Each
+# half builds its own mesh with FOOT or HEAD face textures depending
+# on the block id (BED_FOOT vs BED_HEAD). Meta 0-1 selects facing for
+# both halves (matched by placement code) so the bed mesher can yaw
+# the local quads to align with the placer's direction without
+# reading neighbors.
+const MESH_SHAPE_BED: int = 14
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -511,8 +558,11 @@ static func is_opaque(id: int) -> bool:
 		# HALF_SLAB exposes the upper half-cell — neighbor cubes need
 		# to keep emitting their faces against the open half, else
 		# the visible side-of-slab area shows the void. Same reason
-		# as snow_layer.
+		# as snow_layer. Wood + cobblestone half-slabs use the same
+		# half-height mesh and need the same treatment.
 		and id != HALF_SLAB
+		and id != WOOD_HALF_SLAB
+		and id != COBBLESTONE_HALF_SLAB
 		# Signs are non-cube — neighbor cubes must keep their faces.
 		and id != SIGN_STANDING
 		and id != SIGN_WALL
@@ -527,6 +577,11 @@ static func is_opaque(id: int) -> bool:
 		# Neighbor cubes (especially the support below) must keep
 		# emitting their faces, since the rail doesn't fill its cell.
 		and id != RAIL
+		# Bed halves are 9/16 tall and leave the top 7/16 of their cells
+		# open — adjacent cubes must keep emitting faces facing into the
+		# bed cell so the air above the bed stays visible / lightable.
+		and id != BED_FOOT
+		and id != BED_HEAD
 	)
 
 
@@ -675,6 +730,10 @@ static func _build_light_opacity_lut() -> void:
 	# Rail: 1-pixel-tall flat plane, light passes through. Vanilla
 	# qe.java doesn't override isOpaqueCube → defaults to false → 0.
 	_light_opacity_lut[RAIL] = 0
+	# Bed: 9/16 tall, light passes through the open top. Vanilla
+	# bd.java doesn't override isOpaqueCube either.
+	_light_opacity_lut[BED_FOOT] = 0
+	_light_opacity_lut[BED_HEAD] = 0
 	# Flowers + mushrooms — cross-quad blocks pass light through, same as
 	# SAPLING. Vanilla mr.java extends ok which extends nq with no opacity
 	# override → defaults to 0 (transparent).
@@ -690,6 +749,11 @@ static func _build_light_opacity_lut() -> void:
 	# half. Set opacity 0 so sky light reaches the cell below.
 	# DOUBLE_SLAB (full cube) keeps the default 15.
 	_light_opacity_lut[HALF_SLAB] = 0
+	# Wooden + cobblestone half-slabs — same half-cube silhouette as
+	# the stone variant. Their DOUBLE_SLAB variants are full cubes →
+	# stay at default 15.
+	_light_opacity_lut[WOOD_HALF_SLAB] = 0
+	_light_opacity_lut[COBBLESTONE_HALF_SLAB] = 0
 	# Signs — thin plank, light passes through the surrounding air.
 	_light_opacity_lut[SIGN_STANDING] = 0
 	_light_opacity_lut[SIGN_WALL] = 0
@@ -868,6 +932,12 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# rail plane so the player has a reliable target for break /
 		# right-click instead of a thin 0-height surface.
 		return AABB(Vector3(0, 0, 0), Vector3(1.0, 1.0 / 16.0, 1.0))
+	if id == BED_FOOT or id == BED_HEAD:
+		# Vanilla bd.java::a(World, int, int, int) — bed bounds are
+		# (0, 0, 0)..(1, 0.5625, 1). The 9/16 height matches the visible
+		# mattress + frame; selection wireframe sits flush with the top
+		# of the bed instead of floating to the cell ceiling.
+		return AABB(Vector3(0, 0, 0), Vector3(1.0, 9.0 / 16.0, 1.0))
 	return AABB(Vector3.ZERO, Vector3.ONE)
 
 
@@ -972,12 +1042,14 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_LADDER
 	if id == SNOW_LAYER:
 		return MESH_SHAPE_SNOW_LAYER
-	if id == HALF_SLAB:
+	if id == HALF_SLAB or id == WOOD_HALF_SLAB or id == COBBLESTONE_HALF_SLAB:
 		return MESH_SHAPE_SLAB
 	if id == SIGN_STANDING or id == SIGN_WALL:
 		return MESH_SHAPE_SIGN
 	if id == RAIL:
 		return MESH_SHAPE_RAIL
+	if id == BED_FOOT or id == BED_HEAD:
+		return MESH_SHAPE_BED
 	return MESH_SHAPE_CUBE
 
 
@@ -1055,6 +1127,10 @@ static func explosion_resistance(id: int) -> float:
 			return 3.0  # vanilla nq.aW — soft gravel-like
 		HALF_SLAB, DOUBLE_SLAB:
 			return 6.0  # vanilla qj — same as stone (Material.stone)
+		WOOD_HALF_SLAB, WOOD_DOUBLE_SLAB:
+			return 2.5  # vanilla Beta nq.aT — same as PLANKS (Material.wood)
+		COBBLESTONE_HALF_SLAB, COBBLESTONE_DOUBLE_SLAB:
+			return 30.0  # cobblestone-family — same blast resistance
 		SIGN_STANDING, SIGN_WALL:
 			return 5.0  # vanilla ni.java — same as wood family
 	# Soft / replaceable blocks — air, plants, sand, dirt, leaves, glass,
@@ -1116,6 +1192,10 @@ static func hardness(id: int) -> float:
 		RAIL:
 			# qe.java::c(0.7f) — soft, breaks fast with bare hand.
 			return 0.7
+		BED_FOOT, BED_HEAD:
+			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
+			# doesn't gate on tool; bare-hand breaks in under a second.
+			return 0.2
 		WOODEN_DOOR:
 			return 3.0  # gv.java: nq.aE `c(3.0f)` — wood door
 		IRON_DOOR:
@@ -1161,6 +1241,14 @@ static func hardness(id: int) -> float:
 			# Vanilla qj.java inherits from BlockSandStone-style stone
 			# (via `nq(id, 6, hb.d)`). Block.c is default 2.0 for stone
 			# but qj overrides nothing — hits the default 2.0.
+			return 2.0
+		WOOD_HALF_SLAB, WOOD_DOUBLE_SLAB:
+			# Beta nq.aT — Material.wood, axe-preferred. Hardness 2.0
+			# matches PLANKS.
+			return 2.0
+		COBBLESTONE_HALF_SLAB, COBBLESTONE_DOUBLE_SLAB:
+			# Cobblestone-textured variant — Material.stone, pickaxe-
+			# required. Same hardness as the stone slab.
 			return 2.0
 		SIGN_STANDING, SIGN_WALL:
 			# Vanilla ni.java `c(1.0f)` — fast break with axe, slow bare-
@@ -1219,10 +1307,20 @@ static func preferred_tool_type(id: int) -> int:
 		HALF_SLAB, DOUBLE_SLAB:
 			# Stone material → pickaxe-preferred. Required-level 0.
 			return Items.TOOL_TYPE_PICKAXE
+		WOOD_HALF_SLAB, WOOD_DOUBLE_SLAB:
+			# Wood material → axe-preferred.
+			return Items.TOOL_TYPE_AXE
+		COBBLESTONE_HALF_SLAB, COBBLESTONE_DOUBLE_SLAB:
+			# Cobblestone variant — Material.stone, pickaxe-preferred.
+			return Items.TOOL_TYPE_PICKAXE
 		RAIL:
 			# Iron material — pickaxe-preferred. Hardness is low so even a
 			# bare hand breaks it quickly; the pickaxe just speeds it up.
 			return Items.TOOL_TYPE_PICKAXE
+		BED_FOOT, BED_HEAD:
+			# Wool material — vanilla bd.java doesn't set a tool affinity.
+			# Same as wool blocks: fall through to the default 0 below.
+			return 0
 		SIGN_STANDING, SIGN_WALL:
 			# Vanilla ni.java sets material wood → axe-preferred.
 			return Items.TOOL_TYPE_AXE
@@ -1395,6 +1493,14 @@ static func drops(id: int) -> int:
 		HALF_SLAB:
 			# Vanilla half-slab drops itself unchanged.
 			return HALF_SLAB
+		WOOD_DOUBLE_SLAB:
+			return WOOD_HALF_SLAB
+		WOOD_HALF_SLAB:
+			return WOOD_HALF_SLAB
+		COBBLESTONE_DOUBLE_SLAB:
+			return COBBLESTONE_HALF_SLAB
+		COBBLESTONE_HALF_SLAB:
+			return COBBLESTONE_HALF_SLAB
 		SIGN_STANDING, SIGN_WALL:
 			# Vanilla ni.java::a returns dx.as (sign item, our Items.SIGN).
 			# The text on the sign is discarded — vanilla doesn't preserve
@@ -1403,6 +1509,11 @@ static func drops(id: int) -> int:
 		RAIL:
 			# Vanilla qe.java drops Items.MINECART_TRACK (item id 66).
 			return Items.RAIL
+		BED_FOOT, BED_HEAD:
+			# Vanilla bd.java::e_() drops a single BED item regardless of
+			# which half the player broke (and even when broken via the
+			# paired-half cascade — see interaction.gd's break-cascade).
+			return Items.BED
 	return id
 
 
@@ -1420,7 +1531,7 @@ static func drop_quantity(id: int) -> int:
 		# so interaction.gd's loop spawns 4 separate dropped items
 		# (matches vanilla's per-item-spread on break-drop).
 		return 4
-	if id == DOUBLE_SLAB:
+	if id == DOUBLE_SLAB or id == WOOD_DOUBLE_SLAB or id == COBBLESTONE_DOUBLE_SLAB:
 		# Vanilla qj.java — double-slab is two stacked halves; breaking
 		# drops both back as separate half-slab items.
 		return 2
@@ -1569,6 +1680,14 @@ static func name_of(id: int) -> String:
 			return "half_slab"
 		DOUBLE_SLAB:
 			return "double_slab"
+		WOOD_HALF_SLAB:
+			return "wood_half_slab"
+		WOOD_DOUBLE_SLAB:
+			return "wood_double_slab"
+		COBBLESTONE_HALF_SLAB:
+			return "cobblestone_half_slab"
+		COBBLESTONE_DOUBLE_SLAB:
+			return "cobblestone_double_slab"
 		SIGN_STANDING:
 			return "sign_standing"
 		SIGN_WALL:
@@ -1577,6 +1696,10 @@ static func name_of(id: int) -> String:
 			return "fence_gate"
 		RAIL:
 			return "rail"
+		BED_FOOT:
+			return "bed_foot"
+		BED_HEAD:
+			return "bed_head"
 	return "unknown"
 
 
@@ -1640,6 +1763,14 @@ static func get_face_texture(id: int, face: String) -> String:
 		if face == "top" or face == "bottom":
 			return "stone_slab_top"
 		return "stone_slab_side"
+	if id == WOOD_HALF_SLAB or id == WOOD_DOUBLE_SLAB:
+		# Beta wood-slab variant — planks on all 6 faces. No dedicated
+		# wood-slab top/side tile in Alpha terrain.png; the half-height
+		# silhouette is what reads as a slab.
+		return "planks"
+	if id == COBBLESTONE_HALF_SLAB or id == COBBLESTONE_DOUBLE_SLAB:
+		# Cobblestone-textured variant — cobblestone on all 6 faces.
+		return "cobblestone"
 	if id == SIGN_STANDING or id == SIGN_WALL:
 		# Stage 1 placeholder: full-cube planks render. Stage 2 swaps to
 		# the non-cube sign-post / wall-panel mesh with the wood texture

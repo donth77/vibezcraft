@@ -239,6 +239,15 @@ func trigger_use_swing() -> void:
 
 var health: int = MAX_HEALTH
 
+# Bed-set respawn point. Vanilla MC tracks `spawnX/Y/Z` on the player
+# and a boolean flag for whether it's set; right-clicking a bed at
+# night writes to those fields. We mirror that pair so death respawns
+# can pick the bed location if the player set one, otherwise fall back
+# to the hardcoded world spawn at (8, 100, 8). Both fields are persisted
+# in PlayerSave._build_payload.
+var bed_spawn_pos: Vector3 = Vector3.ZERO
+var has_bed_spawn: bool = false
+
 # Fall tracking — _fall_peak_y is the HIGHEST Y reached during the
 # current air period. On landing we compute (peak - land_y) to get the
 # actual fall distance regardless of jumps bumping the start upward.
@@ -627,7 +636,12 @@ func _build_held_tool(id: int) -> void:
 	# go through the voxel-extrusion mesh. Either way we fall through
 	# to the TP setup below so the third-person mirror gets built too.
 	var is_flat_sprite_item: bool = (
-		id == Items.SIGN or id == Items.BOAT or id == Items.MINECART or id == Items.RAIL
+		id == Items.SIGN
+		or id == Items.BOAT
+		or id == Items.MINECART
+		or id == Items.MINECART_CHEST
+		or id == Items.MINECART_FURNACE
+		or id == Items.RAIL
 	)
 	if is_flat_sprite_item:
 		var sprite := Sprite3D.new()
@@ -703,7 +717,14 @@ func _build_held_tool(id: int) -> void:
 		# regardless of perspective). Build sprite + early-return so we
 		# skip the scale / position logic that's tailored to the
 		# voxel-extruded mesh path.
-		if id == Items.SIGN or id == Items.BOAT or id == Items.MINECART or id == Items.RAIL:
+		if (
+			id == Items.SIGN
+			or id == Items.BOAT
+			or id == Items.MINECART
+			or id == Items.MINECART_CHEST
+			or id == Items.MINECART_FURNACE
+			or id == Items.RAIL
+		):
 			var tp_sprite := Sprite3D.new()
 			tp_sprite.texture = tex
 			tp_sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -1196,6 +1217,23 @@ func _play_footstep() -> void:
 
 
 func _toggle_inventory_screen() -> void:
+	# Vanilla MC: pressing the inventory key while a container screen is
+	# open CLOSES the container instead of stacking the player inventory
+	# on top. Same convention as Esc. Without this guard you can wedge
+	# the player inventory above an open chest / furnace / craft table
+	# and lose mouse routing.
+	var table_screen: Control = get_node_or_null("Crosshair/CraftingTableScreen")
+	var furnace_screen: Control = get_node_or_null("Crosshair/FurnaceScreen")
+	var chest_screen: Control = get_node_or_null("Crosshair/ChestScreen")
+	if table_screen != null and table_screen.is_open():
+		table_screen.toggle()
+		return
+	if furnace_screen != null and furnace_screen.is_open():
+		furnace_screen.close()
+		return
+	if chest_screen != null and chest_screen.is_open():
+		chest_screen.close()
+		return
 	var inv_screen: Control = get_node_or_null("Crosshair/InventoryScreen")
 	if inv_screen != null and inv_screen.has_method("toggle"):
 		inv_screen.toggle()
@@ -1410,6 +1448,18 @@ func _physics_process(delta: float) -> void:
 		if Input.is_action_just_pressed("dismount"):
 			if _mounted_to.has_method("dismount"):
 				_mounted_to.dismount()
+		# Vanilla plays the arm-swing animation when the rider mines or
+		# attacks from inside a boat / minecart. The mount only locks
+		# movement (driveable from saddle position); interaction reach +
+		# mining cadence + swing animation all work normally. Skipping
+		# update_mining_swing here was the cause of "no break animation
+		# while in a vehicle" — the rest of interaction.gd was running,
+		# the block was breaking, but the character_model never got the
+		# swing tick so the arm stayed at rest.
+		if _character_model != null and _character_model.has_method("update_mining_swing"):
+			var progress: float = _character_model.update_mining_swing(is_mining, delta)
+			if _fp_hand != null and _fp_hand.visible:
+				_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
 		return
 	# While the sign-edit screen is open the player is typing text and
 	# Input.is_action_pressed("jump") / get_vector still see WASD + Space
@@ -1814,7 +1864,15 @@ func _respawn() -> void:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm != null and cm.has_method("_spawn_chunk_sync"):
 		cm.call("_spawn_chunk_sync", Vector2i(0, 0))
-	global_position = Vector3(8, 100.0, 8)
+	# Bed-spawn override — if the player slept in a bed since the last
+	# death, respawn at that bed cell instead of the world spawn. Same
+	# spawn-chunk safety net (above) covers the bed location too; the
+	# _spawn_check_ticks_remaining budget below relocates the player if
+	# the bed cell happens to be inside a not-yet-streamed chunk.
+	if has_bed_spawn:
+		global_position = bed_spawn_pos
+	else:
+		global_position = Vector3(8, 100.0, 8)
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y
 	_fall_immune_next_landing = true

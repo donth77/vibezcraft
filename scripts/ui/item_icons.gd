@@ -196,6 +196,8 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.BOAT: "boat",
 	Items.RAIL: "rail",
 	Items.MINECART: "minecart",
+	Items.MINECART_CHEST: "minecart_chest",
+	Items.MINECART_FURNACE: "minecart_furnace",
 	# Bow inventory icon is the relaxed (un-drawn) sprite; the held-bow
 	# render in player.gd swaps to bow_pulling_{0,1,2} based on draw
 	# progress.
@@ -204,6 +206,9 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# Painting item — small framed-canvas sprite. Right-click on a
 	# wall to spawn a `Painting` entity.
 	Items.PAINTING: "painting",
+	# Bed item — vanilla Beta 1.3+ small-bed sprite. Right-click on
+	# the top face of a block to place TWO bed half-blocks (foot + head).
+	Items.BED: "bed",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

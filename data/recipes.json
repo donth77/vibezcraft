@@ -253,6 +253,13 @@
       "result": {"id": "painting", "count": 1}
     },
     {
+      "_comment": "Vanilla Beta 1.3 bed: 3 wool above 3 planks (https://minecraft.wiki/w/Bed). Single bed item produces both block halves at placement.",
+      "id": "bed",
+      "pattern": ["WWW", "PPP"],
+      "key": {"W": "wool_white", "P": "planks"},
+      "result": {"id": "bed", "count": 1}
+    },
+    {
       "id": "wood_stairs",
       "pattern": ["#  ", "## ", "###"],
       "key": {"#": "planks"},
@@ -406,6 +413,20 @@
       "result": {"id": "half_slab", "count": 3}
     },
     {
+      "_comment": "Wood slab [BETA 1.3]. 3 planks in a row -> 3 wood half-slabs.",
+      "id": "wood_slab",
+      "pattern": ["PPP"],
+      "key": {"P": "planks"},
+      "result": {"id": "wood_half_slab", "count": 3}
+    },
+    {
+      "_comment": "Cobblestone slab [BETA 1.3]. 3 cobblestone in a row -> 3 cobblestone half-slabs.",
+      "id": "cobblestone_slab",
+      "pattern": ["CCC"],
+      "key": {"C": "cobblestone"},
+      "result": {"id": "cobblestone_half_slab", "count": 3}
+    },
+    {
       "_comment": "Sign — vanilla Alpha CraftingManager: 6 planks in a 3x2 block + 1 stick centered below. Yields 1 sign.",
       "id": "sign",
       "pattern": ["PPP", "PPP", " S "],
@@ -477,6 +498,18 @@
     }
   ],
   "shapeless": [
+    {
+      "_comment": "Chest minecart — vanilla CraftingManager. 1 minecart + 1 chest -> 1 chest minecart. Shapeless.",
+      "id": "minecart_chest",
+      "ingredients": ["minecart", "chest"],
+      "result": {"id": "minecart_chest", "count": 1}
+    },
+    {
+      "_comment": "Furnace minecart — vanilla CraftingManager. 1 minecart + 1 furnace -> 1 furnace minecart. Shapeless.",
+      "id": "minecart_furnace",
+      "ingredients": ["minecart", "furnace"],
+      "result": {"id": "minecart_furnace", "count": 1}
+    },
     {
       "id": "jack_o_lantern",
       "ingredients": ["pumpkin", "torch"],

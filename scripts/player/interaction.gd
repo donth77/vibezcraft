@@ -491,7 +491,7 @@ func _try_attack_minecart() -> bool:
 # Vanilla ItemMinecart::a (the right-click handler) requires a rail
 # under the click; we mirror that — clicking on a non-rail block does
 # nothing.
-func _try_place_minecart() -> bool:
+func _try_place_minecart(variant: int = 0) -> bool:
 	var hit: Dictionary = _raycast()
 	if hit.is_empty():
 		return false
@@ -508,8 +508,12 @@ func _try_place_minecart() -> bool:
 	var yaw: float = _player_yaw()
 	var cart_script: GDScript = load(_MINECART_SCRIPT_PATH)
 	var cart: Node3D = cart_script.new() as Node3D
+	# Set variant BEFORE add_child — Godot fires _ready() (which builds
+	# the visual mesh) on add_child, so setup() called afterward arrives
+	# too late and the chest/furnace add-on mesh would be skipped.
+	cart.set("variant", variant)
 	_chunk_manager.add_child(cart)
-	cart.call("setup", spawn_pos, yaw, get_parent())
+	cart.call("setup", spawn_pos, yaw, get_parent(), variant)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()
@@ -755,6 +759,12 @@ func _complete_break(target: Vector3i) -> void:
 	if broken_id == Blocks.WOODEN_DOOR or broken_id == Blocks.IRON_DOOR:
 		_break_door(target, broken_id)
 		return
+	# Beds: break both halves. Drops 1 BED item total (matches vanilla
+	# bd.java::e_ which drops a single ItemBed regardless of which half
+	# was broken). Both halves vanish in the cascade.
+	if broken_id == Blocks.BED_FOOT or broken_id == Blocks.BED_HEAD:
+		_break_bed(target, broken_id)
+		return
 	# Capture sign meta + drop its stored text BEFORE the block disappears,
 	# so the particle emission box can hug the panel (meta drives
 	# orientation) and SignStorage doesn't leak a phantom entry after the
@@ -855,6 +865,35 @@ func _spawn_dropped_item(block_pos: Vector3i, dropped_id: int) -> void:
 	item.setup(dropped_id)
 
 
+# Cascade-break the two-cell bed. The broken half is at `target`; the
+# partner is one step along (or opposite) the facing direction encoded
+# in the half's meta. Drops a single BED item (vanilla bd.java::e_).
+# Particles spawn at the clicked half so the visual hit cue lines up
+# with where the player aimed.
+func _break_bed(target: Vector3i, broken_id: int) -> void:
+	var meta: int = _chunk_manager.get_world_block_meta(target)
+	var facing: int = meta & 3
+	var partner_offset: Vector3i = _bed_head_offset(facing)
+	# FOOT's partner is in +facing direction (head). HEAD's partner is in
+	# -facing (foot) — invert the offset.
+	if broken_id == Blocks.BED_HEAD:
+		partner_offset = -partner_offset
+	var partner: Vector3i = target + partner_offset
+	_chunk_manager.set_world_block(target, Blocks.AIR)
+	# Only clear the partner cell if it actually holds the matching half
+	# (defensive — handles a partial-bed save state or a manual edit).
+	var partner_id: int = _chunk_manager.get_world_block(partner)
+	if partner_id == Blocks.BED_FOOT or partner_id == Blocks.BED_HEAD:
+		_chunk_manager.set_world_block(partner, Blocks.AIR)
+	SFX.play_break(broken_id)
+	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
+	# Single drop — vanilla doesn't double-drop on the pair break.
+	_spawn_dropped_item(target, Items.BED)
+	var inv: Inventory = _player_inventory()
+	if inv != null and inv.damage_selected_tool():
+		SFX.play_tool_break()
+
+
 func _creative_break(target: Vector3i) -> void:
 	var broken_id: int = _chunk_manager.get_world_block(target)
 	if broken_id == Blocks.AIR:
@@ -873,6 +912,25 @@ func _creative_break(target: Vector3i) -> void:
 		var inventory: Inventory = _player_inventory()
 		if inventory != null:
 			inventory.add_item(Blocks.drops(broken_id), 1)
+		return
+	# Beds: same cascade as the regular break, but creative skips the
+	# dropped item and adds 1 BED straight to inventory.
+	if broken_id == Blocks.BED_FOOT or broken_id == Blocks.BED_HEAD:
+		var bed_meta: int = _chunk_manager.get_world_block_meta(target)
+		var bed_facing: int = bed_meta & 3
+		var bed_partner_offset: Vector3i = _bed_head_offset(bed_facing)
+		if broken_id == Blocks.BED_HEAD:
+			bed_partner_offset = -bed_partner_offset
+		var bed_partner: Vector3i = target + bed_partner_offset
+		_chunk_manager.set_world_block(target, Blocks.AIR)
+		var bed_partner_id: int = _chunk_manager.get_world_block(bed_partner)
+		if bed_partner_id == Blocks.BED_FOOT or bed_partner_id == Blocks.BED_HEAD:
+			_chunk_manager.set_world_block(bed_partner, Blocks.AIR)
+		SFX.play_break(broken_id)
+		_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
+		var inv: Inventory = _player_inventory()
+		if inv != null:
+			inv.add_item(Items.BED, 1)
 		return
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
@@ -1065,9 +1123,18 @@ func _try_place() -> void:
 					_last_place_ms = now
 				return
 			# Minecart — vanilla ItemMinecart spawns EntityMinecart on the
-			# rail block the player is pointing at.
+			# rail block the player is pointing at. Chest cart picks
+			# variant 1 so the entity gets the chest mesh + 27-slot inventory.
 			if held_id == Items.MINECART:
-				if _try_place_minecart():
+				if _try_place_minecart(0):
+					_last_place_ms = now
+				return
+			if held_id == Items.MINECART_CHEST:
+				if _try_place_minecart(1):
+					_last_place_ms = now
+				return
+			if held_id == Items.MINECART_FURNACE:
+				if _try_place_minecart(2):
 					_last_place_ms = now
 				return
 	if hit.is_empty():
@@ -1100,6 +1167,15 @@ func _try_place() -> void:
 		return
 	if hit_id == Blocks.FENCE_GATE:
 		_toggle_fence_gate(hit.block_pos)
+		_last_place_ms = now
+		return
+	# Bed right-click: vanilla bd.java::a(World, ..., EntityHuman) — only
+	# acts at night, sets player spawn to the bed cell, jumps WorldTime
+	# to dawn. Daytime right-click is a no-op (or HUD message). Click on
+	# either half (foot or head) — both route to the same sleep handler
+	# since the foot's facing meta is enough to identify the pair.
+	if hit_id == Blocks.BED_FOOT or hit_id == Blocks.BED_HEAD:
+		_try_sleep_in_bed(hit.block_pos)
 		_last_place_ms = now
 		return
 	# Hoe + dirt/grass + top face hit + air above → till to farmland.
@@ -1619,6 +1695,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# space starting at the click cell.
 	if stack.item_id == Items.PAINTING:
 		return _try_place_painting(hit, stack)
+	# Bed — two-cell block (foot + head). Top-face click only; the head
+	# extends one step in the player's facing direction. Both cells must
+	# be AIR with a solid floor below. See _try_place_bed.
+	if stack.item_id == Items.BED:
+		return _try_place_bed(hit, stack)
 	# Rail item → Blocks.RAIL block on top of clicked support. Auto-
 	# selects meta orientation from neighbor rails.
 	if stack.item_id == Items.RAIL:
@@ -1628,13 +1709,17 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# then places nq.az (BlockCrops) at meta=0 above the farmland.
 	if stack.item_id == Items.WHEAT_SEEDS:
 		return _try_place_wheat_seeds(hit)
-	# Stone slab combine — vanilla qj.java::e(). Placing a HALF_SLAB
-	# onto a cell that already holds a HALF_SLAB (from the top face)
-	# upgrades the cell to DOUBLE_SLAB and consumes the held slab
-	# without spawning a new cell above. Returns true if the combine
-	# fired; falls through to normal placement otherwise (e.g. side-
-	# face click puts a new slab in the neighbor cell as usual).
-	if stack.item_id == Blocks.HALF_SLAB:
+	# Slab combine — vanilla qj.java::e(). Placing a half-slab onto a
+	# cell that already holds the SAME half-slab variant (from the top
+	# face) upgrades the cell to the matching double-slab and consumes
+	# the held slab without spawning a new cell above. Mismatched
+	# variants (e.g. stone half-slab onto wood half-slab) fall through
+	# to normal placement so the new slab lands in the neighbor cell.
+	if (
+		stack.item_id == Blocks.HALF_SLAB
+		or stack.item_id == Blocks.WOOD_HALF_SLAB
+		or stack.item_id == Blocks.COBBLESTONE_HALF_SLAB
+	):
 		if _try_slab_combine(hit, stack):
 			return true
 	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
@@ -2317,6 +2402,135 @@ func _try_place_painting(hit: Dictionary, _stack: ItemStack) -> bool:
 	return true
 
 
+# Sleep in a bed — right-click handler routed from the place dispatch.
+# Vanilla bd.java::a(World, ..., EntityHuman) gate:
+#   * time of day must be within [12541, 23458] ticks (sleep window)
+#   * if day, vanilla shows "You can only sleep at night"; we silently
+#     reject — no chat HUD yet, and the click is a no-op.
+# On a successful sleep:
+#   * Player's bed-respawn point flips to the FOOT cell + half-block Y
+#     so death respawns put the player on the foot of the bed.
+#   * WorldTime jumps to tick 0 (sunrise) — vanilla calls World.b(0)
+#     in the same handler.
+# The clicked cell could be either half; we resolve back to the foot
+# using the meta-encoded facing so the spawn point is consistent.
+func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
+	if _chunk_manager == null:
+		return
+	var tick: int = WorldTime.current_tick()
+	# Vanilla sleep window — between sunset and pre-dawn. Outside this
+	# range, the click is a no-op (matches vanilla's "you can only sleep
+	# at night" rejection minus the chat message).
+	if tick < 12541 or tick > 23458:
+		return
+	var clicked_id: int = _chunk_manager.get_world_block(clicked_pos)
+	var meta: int = _chunk_manager.get_world_block_meta(clicked_pos)
+	var facing: int = meta & 3
+	var foot_pos: Vector3i = clicked_pos
+	# If the player clicked the HEAD, walk back along -facing to find
+	# the foot. Skip if the partner cell isn't a bed half (defensive —
+	# handles a corrupted half-pair from a manual edit).
+	if clicked_id == Blocks.BED_HEAD:
+		foot_pos = clicked_pos - _bed_head_offset(facing)
+		var partner_id: int = _chunk_manager.get_world_block(foot_pos)
+		if partner_id != Blocks.BED_FOOT:
+			return
+	var player: Node3D = get_parent()
+	if "bed_spawn_pos" in player:
+		# Spawn ON the bed's foot cell. Y offset +0.5 puts the player's
+		# feet flush with the cell floor; without it the player teleports
+		# half-inside the cell and depenetrates upward, a visible jolt.
+		player.set("bed_spawn_pos", Vector3(foot_pos) + Vector3(0.5, 0.5, 0.5))
+		player.set("has_bed_spawn", true)
+	WorldTime.set_time_ticks(0)
+
+
+# Bed placement — vanilla Beta bd.java::a (BlockBed.onItemUseFirst).
+# Right-click on the TOP face of a solid block places TWO half-blocks:
+# the FOOT in the AIR cell directly above the clicked block, and the
+# HEAD one cell further in the player's facing direction. Both cells
+# need to be AIR with a solid floor underneath (vanilla also checks
+# isBlockNormalCube on the floor below the head); otherwise reject.
+#
+# Meta layout matches the bed mesher in mesher.gd:
+#   bits 0-1 = facing (direction from FOOT to HEAD)
+#     0 = +Z (south), 1 = -X (west), 2 = -Z (north), 3 = +X (east)
+# Both halves share the same facing meta so the mesher can pick the
+# right face textures + UV rotation without reading the neighbor.
+func _try_place_bed(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty() or _chunk_manager == null:
+		return false
+	# Top-face click only — vanilla bed can't be hung on a wall or
+	# placed on a ceiling. Reject anything other than +Y normal.
+	var normal: Vector3i = hit.normal_i
+	if normal != Vector3i(0, 1, 0):
+		return false
+	var foot_pos: Vector3i = hit.block_pos + normal
+	# Facing = direction from foot to head = player's gaze direction
+	# quantized to a cardinal.
+	var facing: int = _bed_meta_from_yaw()
+	var head_offset: Vector3i = _bed_head_offset(facing)
+	var head_pos: Vector3i = foot_pos + head_offset
+	# Both target cells must be replaceable (vanilla checks isAirBlock;
+	# we include is_replaceable so tall grass / snow_layer don't block
+	# placement either, matching player_use-into-grass behavior).
+	if not Blocks.is_replaceable(_chunk_manager.get_world_block(foot_pos)):
+		return false
+	if not Blocks.is_replaceable(_chunk_manager.get_world_block(head_pos)):
+		return false
+	# Vanilla bd.java requires solid floor under BOTH halves so the bed
+	# can't hang. is_opaque rules out plants / fluids / non-cube blocks.
+	var foot_floor: int = _chunk_manager.get_world_block(foot_pos + Vector3i(0, -1, 0))
+	var head_floor: int = _chunk_manager.get_world_block(head_pos + Vector3i(0, -1, 0))
+	if not Blocks.is_opaque(foot_floor) or not Blocks.is_opaque(head_floor):
+		return false
+	_chunk_manager.set_world_block_with_meta(foot_pos, Blocks.BED_FOOT, facing)
+	_chunk_manager.set_world_block_with_meta(head_pos, Blocks.BED_HEAD, facing)
+	SFX.play_place(Blocks.BED_FOOT)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Player yaw → bed-facing meta. Vanilla EntityHuman.getHorizontalFacing
+# rounds yaw to the nearest cardinal; the bed's facing then matches
+# the player's gaze so the head extends "forward" from where you stand.
+#
+# Quadrants (yaw / (PI/2) rounded):
+#   0 = player facing -Z (Godot forward)  → head at -Z → meta 2
+#   1 = player facing -X (left)           → head at -X → meta 1
+#   2 = player facing +Z (back)           → head at +Z → meta 0
+#   3 = player facing +X (right)          → head at +X → meta 3
+func _bed_meta_from_yaw() -> int:
+	var player: Node3D = get_parent()
+	var yaw: float = player.global_transform.basis.get_euler().y
+	var dir: int = int(round(yaw / (PI / 2.0))) & 3
+	match dir:
+		0:
+			return 2
+		1:
+			return 1
+		2:
+			return 0
+		_:
+			return 3
+
+
+# Foot-cell → head-cell offset for a given facing meta. Symmetric across
+# the cardinal directions.
+func _bed_head_offset(facing: int) -> Vector3i:
+	match facing:
+		0:
+			return Vector3i(0, 0, 1)
+		1:
+			return Vector3i(-1, 0, 0)
+		2:
+			return Vector3i(0, 0, -1)
+		_:
+			return Vector3i(1, 0, 0)
+
+
 # Walks the (front_pos, wall direction) cells looking for the largest
 # rectangle of AIR cells with valid support behind them. Returns the
 # rectangle size (width × height) in blocks, capped at 4×4 (largest
@@ -2488,17 +2702,30 @@ func _wall_sign_meta_from_normal(normal: Vector3i) -> int:
 # converting that cell to DOUBLE_SLAB. Side / bottom clicks return
 # false so the regular block-placement path puts the new slab in the
 # neighbor cell.
-func _try_slab_combine(hit: Dictionary, _stack: ItemStack) -> bool:
+func _try_slab_combine(hit: Dictionary, stack: ItemStack) -> bool:
 	if hit.is_empty():
 		return false
 	# Must be clicking the top face for the combine to fire.
 	if hit.normal_i.y != 1:
 		return false
 	var existing_id: int = _chunk_manager.get_world_block(hit.block_pos)
-	if existing_id != Blocks.HALF_SLAB:
+	# Combine only fires when the held variant matches the target cell's
+	# half-slab variant. Mismatched click (wood slab onto stone slab) =
+	# normal placement in the neighbor cell instead.
+	var double_id: int = -1
+	if stack.item_id == Blocks.HALF_SLAB and existing_id == Blocks.HALF_SLAB:
+		double_id = Blocks.DOUBLE_SLAB
+	elif stack.item_id == Blocks.WOOD_HALF_SLAB and existing_id == Blocks.WOOD_HALF_SLAB:
+		double_id = Blocks.WOOD_DOUBLE_SLAB
+	elif (
+		stack.item_id == Blocks.COBBLESTONE_HALF_SLAB
+		and existing_id == Blocks.COBBLESTONE_HALF_SLAB
+	):
+		double_id = Blocks.COBBLESTONE_DOUBLE_SLAB
+	if double_id < 0:
 		return false
-	_chunk_manager.set_world_block(hit.block_pos, Blocks.DOUBLE_SLAB)
-	SFX.play_place(Blocks.HALF_SLAB)
+	_chunk_manager.set_world_block(hit.block_pos, double_id)
+	SFX.play_place(stack.item_id)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()

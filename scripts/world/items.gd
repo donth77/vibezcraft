@@ -264,6 +264,25 @@ const RAIL: int = 185
 # a rail block to spawn the entity; right-click anywhere else fails.
 const MINECART: int = 186
 
+# Chest minecart. Vanilla ItemMinecart with type=1 (id 342 → 187 here).
+# Spawns a Minecart entity with variant=1; the entity carries its own
+# 27-slot inventory and opens a chest UI on right-click.
+const MINECART_CHEST: int = 187
+
+# Furnace minecart. Vanilla ItemMinecart with type=2 (id 343 → 188 here).
+# Spawns a Minecart entity with variant=2; right-click with coal/charcoal
+# fuels it (vanilla qd.java::g — type 2 stores `f`/`g` push direction +
+# `e` fuel ticks, applies +0.04/tick velocity boost while burning).
+const MINECART_FURNACE: int = 188
+
+# Bed [BETA 1.3 exception] — vanilla ItemBed (id 355). Right-click on
+# the TOP face of a solid block places the bed: foot cell at the click,
+# head cell one step along the placer's facing. Both cells must be AIR
+# and supported. Right-click an already-placed bed during night to set
+# the player's spawn point AND skip time to dawn. Stack size 1 (vanilla
+# ItemBed.aX = 1).
+const BED: int = 189
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -624,6 +643,14 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.HALF_SLAB
 		"double_slab":
 			return Blocks.DOUBLE_SLAB
+		"wood_half_slab":
+			return Blocks.WOOD_HALF_SLAB
+		"wood_double_slab":
+			return Blocks.WOOD_DOUBLE_SLAB
+		"cobblestone_half_slab":
+			return Blocks.COBBLESTONE_HALF_SLAB
+		"cobblestone_double_slab":
+			return Blocks.COBBLESTONE_DOUBLE_SLAB
 		"sign_standing":
 			return Blocks.SIGN_STANDING
 		"sign_wall":
@@ -706,6 +733,12 @@ static func id_from_name(item_name: String) -> int:
 			return RAIL
 		"minecart":
 			return MINECART
+		"minecart_chest":
+			return MINECART_CHEST
+		"minecart_furnace":
+			return MINECART_FURNACE
+		"bed":
+			return BED
 	return -1
 
 
@@ -1013,6 +1046,12 @@ static func display_name(item_id: int) -> String:
 			return "Rail"
 		MINECART:
 			return "Minecart"
+		MINECART_CHEST:
+			return "Minecart with Chest"
+		MINECART_FURNACE:
+			return "Minecart with Furnace"
+		BED:
+			return "Bed"
 	return ""
 
 
@@ -1158,6 +1197,14 @@ static func max_stack_size(item_id: int) -> int:
 	# Vanilla ItemMinecart aX=1 — like the boat, placement spawns a
 	# unique entity and the item never stacks.
 	if item_id == MINECART:
+		return 1
+	if item_id == MINECART_CHEST:
+		return 1
+	if item_id == MINECART_FURNACE:
+		return 1
+	# Vanilla ItemBed aX=1 — placement consumes the single bed item and
+	# converts to TWO block cells (foot + head).
+	if item_id == BED:
 		return 1
 	if item_id == EGG:
 		return 16
