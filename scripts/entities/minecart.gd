@@ -110,30 +110,37 @@ func _build_collider() -> void:
 	add_child(shape)
 
 
-# Build a simple open-top metal hull. Uses planks.png as a placeholder
-# texture since we don't have a dedicated minecart skin in the pack.
-# A vanilla-faithful skin from vendor/mojang/alpha-1.2.6/item/cart.png
-# can be wired through in Stage 2 (same pattern as boat.png).
+# Build the open-top hull. Uses vanilla cart.png skin (64×32) with
+# per-face uv1 cropping to the floor strip vs wall strip — same
+# splotch-free approach as the boat hull. Vanilla cv2.java ModelMinecart
+# uses the same skin layout: floor strip at (0, 10)→(20, 28), wall
+# strips at (0, 0)→(16, 10) and similar.
 func _build_visual_mesh() -> void:
 	_visual_root = Node3D.new()
 	add_child(_visual_root)
-	var planks_tex: Texture2D = load(
-		"res://assets/textures/blocks/packs/%s/planks.png" % BlockAtlas.active_pack
-	)
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	if planks_tex != null:
-		mat.albedo_texture = planks_tex
-	else:
-		mat.albedo_color = Color(0.45, 0.30, 0.20)
+	var cart_tex: Texture2D = _load_cart_texture()
+	# Vanilla cart.png is 64×32. Floor occupies a 20×16 strip at (0, 10)
+	# in pixel coords. Walls occupy 24×8 strips at (0, 0) approx — but
+	# the model is simple enough that we just use the floor region for
+	# the bottom face and the rest of the texture (top half) for walls.
+	# Normalize pixel coords to [0,1] UV.
+	var floor_offset := Vector3(0.0, 10.0 / 32.0, 0.0)
+	var floor_scale := Vector3(20.0 / 64.0, 16.0 / 32.0, 1.0)
+	var wall_offset := Vector3(0.0, 0.0, 0.0)
+	var wall_scale := Vector3(24.0 / 64.0, 8.0 / 32.0, 1.0)
+	var floor_mat: StandardMaterial3D = _make_cart_material(cart_tex)
+	floor_mat.uv1_offset = floor_offset
+	floor_mat.uv1_scale = floor_scale
+	var wall_mat: StandardMaterial3D = _make_cart_material(cart_tex)
+	wall_mat.uv1_offset = wall_offset
+	wall_mat.uv1_scale = wall_scale
 	# Floor slab — full footprint, thin.
 	var floor_mi := MeshInstance3D.new()
 	var floor_mesh := BoxMesh.new()
 	floor_mesh.size = Vector3(HULL_LENGTH, FLOOR_THICKNESS, HULL_WIDTH)
 	floor_mi.mesh = floor_mesh
 	floor_mi.position = Vector3(0, FLOOR_THICKNESS * 0.5, 0)
-	floor_mi.material_override = mat
+	floor_mi.material_override = floor_mat
 	_visual_root.add_child(floor_mi)
 	# 4 walls forming an open-top hull.
 	var wall_y: float = FLOOR_THICKNESS + WALL_HEIGHT * 0.5
@@ -146,7 +153,7 @@ func _build_visual_mesh() -> void:
 		wall_mesh.size = Vector3(inner_len, WALL_HEIGHT, WALL_THICKNESS)
 		wall.mesh = wall_mesh
 		wall.position = Vector3(0, wall_y, sz)
-		wall.material_override = mat
+		wall.material_override = wall_mat
 		_visual_root.add_child(wall)
 	for sx: float in [
 		HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5, -(HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5)
@@ -156,8 +163,28 @@ func _build_visual_mesh() -> void:
 		wall_mesh.size = Vector3(WALL_THICKNESS, WALL_HEIGHT, HULL_WIDTH)
 		wall.mesh = wall_mesh
 		wall.position = Vector3(sx, wall_y, 0)
-		wall.material_override = mat
+		wall.material_override = wall_mat
 		_visual_root.add_child(wall)
+
+
+# Pack-aware cart skin loader. Falls back to the shared entity dir
+# (where the vanilla cart.png was extracted), then to null.
+func _load_cart_texture() -> Texture2D:
+	var pack_path := "res://assets/textures/entities/packs/%s/cart.png" % BlockAtlas.active_pack
+	if ResourceLoader.exists(pack_path):
+		return load(pack_path) as Texture2D
+	return null
+
+
+func _make_cart_material(tex: Texture2D) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	if tex != null:
+		mat.albedo_texture = tex
+	else:
+		mat.albedo_color = Color(0.55, 0.55, 0.60)  # metallic grey fallback
+	return mat
 
 
 # Vanilla c(eb) — right-click while same-player rider dismounts;

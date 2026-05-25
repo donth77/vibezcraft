@@ -879,6 +879,12 @@ func _material_for(block_id: int) -> String:
 		Blocks.SIGN_STANDING, Blocks.SIGN_WALL:
 			# Vanilla ni.java uses hb.e (Material.wood) → wood SFX.
 			return "wood"
+		Blocks.RAIL:
+			# Vanilla qe.java BlockMinecartTrack uses Material.metal (hb.i).
+			# Alpha mapped metal to the stone step pool — same compromise
+			# we use for IRON_BLOCK etc. Clinky metallic thump on place /
+			# break.
+			return "stone"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"
