@@ -92,6 +92,7 @@ const DAMAGE_FALL: String = "fall"
 const DAMAGE_DROWN: String = "drown"
 const DAMAGE_LAVA: String = "lava"
 const DAMAGE_CACTUS: String = "cactus"
+const DAMAGE_MOB: String = "mob"
 # Vanilla BlockCactus damages every tick the entity AABB intersects a
 # cactus cell shrunk by 1/16 on each side. Damage = 1 HP. We rate-limit
 # to half-second intervals (10 vanilla ticks) — matches the apparent

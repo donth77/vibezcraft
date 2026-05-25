@@ -29,6 +29,11 @@ const _ENTRIES: Dictionary = {
 	# wool ONCE on first damage (Alpha first-hit shed mechanic) OR via
 	# right-click with Beta SHEARS item (no damage variant).
 	"sheep": "res://scripts/entities/sheep.gd",
+	# M3 — vanilla lk.java (EntityZombie). First hostile mob. 20 HP,
+	# 3-damage melee, daylight burn, drops 0-2 feather (Alpha 1.2.6
+	# vanilla; Beta 1.8 swapped to rotten flesh). HostileAI = target +
+	# chase + melee, reuses Pathfinder.find_path from the passives.
+	"zombie": "res://scripts/entities/zombie.gd",
 }
 
 

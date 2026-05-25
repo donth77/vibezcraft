@@ -203,6 +203,27 @@ const _SHEEP_SAY_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/sheep/say2.ogg",
 	"res://assets/audio/sfx/mob/sheep/say3.ogg",
 ]
+# Zombie audio — Alpha 1.2.6 sound3/mob/zombie/. lk.java::d() returns
+# "mob.zombie" (idle = say1-3), lk.java::f_() returns "mob.zombiehurt"
+# (hurt1-2), lk.java::f() returns "mob.zombiedeath" (death.ogg). Step
+# pool sourced separately (sound3/mob/zombie/step{1..5}.ogg).
+const _ZOMBIE_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombie/say1.ogg",
+	"res://assets/audio/sfx/mob/zombie/say2.ogg",
+	"res://assets/audio/sfx/mob/zombie/say3.ogg",
+]
+const _ZOMBIE_HURT_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombie/hurt1.ogg",
+	"res://assets/audio/sfx/mob/zombie/hurt2.ogg",
+]
+const _ZOMBIE_DEATH_SOUND: String = "res://assets/audio/sfx/mob/zombie/death.ogg"
+const _ZOMBIE_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombie/step1.ogg",
+	"res://assets/audio/sfx/mob/zombie/step2.ogg",
+	"res://assets/audio/sfx/mob/zombie/step3.ogg",
+	"res://assets/audio/sfx/mob/zombie/step4.ogg",
+	"res://assets/audio/sfx/mob/zombie/step5.ogg",
+]
 # Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
 # water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
 # by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
@@ -300,6 +321,21 @@ func _ready() -> void:
 		# Default falloff is logarithmic; matches MC's perceptual rolloff.
 		add_child(p3)
 		_players_3d.append(p3)
+
+
+# Stop every active SFX player. Called by pause_menu when quitting to
+# title so long-running clips (the fire crackle especially — sampled
+# from a multi-second loop-ish source) don't leak across the scene
+# change. SFX is an autoload so its AudioStreamPlayers survive scene
+# swaps; without an explicit stop they keep playing under the main
+# menu's dirt bg until the clip naturally finishes.
+func stop_all_sfx() -> void:
+	for p: AudioStreamPlayer in _players:
+		if p != null and p.playing:
+			p.stop()
+	for p3: AudioStreamPlayer3D in _players_3d:
+		if p3 != null and p3.playing:
+			p3.stop()
 
 
 func play_break(block_id: int) -> void:
@@ -759,6 +795,28 @@ func play_chicken_plop(pos: Vector3) -> void:
 # callers cleaner; mob_base routes hurt/death through this too.
 func play_sheep_say(pos: Vector3) -> void:
 	_play_mob_sound_3d(_SHEEP_SAY_SOUNDS, pos)
+
+
+# Zombie say / hurt / death / step. Vanilla EntityZombie overrides
+# the four sound methods to "mob.zombie", "mob.zombiehurt",
+# "mob.zombiedeath", and step uses the zombie-specific step pool
+# rather than the block step samples. Step volume is slightly louder
+# than passive mobs (vanilla 0.15 vs 0.1) to convey the "heavier"
+# zombie shuffle — we mirror via the +2 dB delta below.
+func play_zombie_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_ZOMBIE_SAY_SOUNDS, pos)
+
+
+func play_zombie_hurt(pos: Vector3) -> void:
+	_play_mob_sound_3d(_ZOMBIE_HURT_SOUNDS, pos)
+
+
+func play_zombie_death(pos: Vector3) -> void:
+	_play_mob_sound_3d([_ZOMBIE_DEATH_SOUND], pos)
+
+
+func play_zombie_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_ZOMBIE_STEP_SOUNDS, pos, -2.0)
 
 
 # 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D
