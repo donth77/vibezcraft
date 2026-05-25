@@ -283,6 +283,20 @@ const MINECART_FURNACE: int = 188
 # ItemBed.aX = 1).
 const BED: int = 189
 
+# Music discs [BETA 1.4 exception]. Vanilla ItemRecord (one item id
+# per disc — vanilla has 12 of them; we ship 2 to start). Stack size 1
+# (vanilla ItemRecord aX=1). Right-click on a placed jukebox inserts
+# the disc and starts playback through JukeboxAudio; the disc lives
+# in the jukebox's tile-entity slot until ejected.
+#
+# Visual: vanilla Mojang sprites (record_13.png for FIRST_LIGHT — the
+# green disc with red label, record_cat.png for GREEN_DISTANCE — the
+# light-tan disc). Track audio is our own custom music — the discs
+# play First-Light.mp3 / Green-Distance.mp3 respectively, not the
+# vanilla C418 records.
+const MUSIC_DISC_FIRST_LIGHT: int = 190
+const MUSIC_DISC_GREEN_DISTANCE: int = 191
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -567,6 +581,8 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.DIAMOND_ORE
 		"crafting_table":
 			return Blocks.CRAFTING_TABLE
+		"jukebox":
+			return Blocks.JUKEBOX
 		"furnace":
 			return Blocks.FURNACE
 		"lit_furnace":
@@ -739,6 +755,10 @@ static func id_from_name(item_name: String) -> int:
 			return MINECART_FURNACE
 		"bed":
 			return BED
+		"music_disc_first_light":
+			return MUSIC_DISC_FIRST_LIGHT
+		"music_disc_green_distance":
+			return MUSIC_DISC_GREEN_DISTANCE
 	return -1
 
 
@@ -1052,6 +1072,10 @@ static func display_name(item_id: int) -> String:
 			return "Minecart with Furnace"
 		BED:
 			return "Bed"
+		MUSIC_DISC_FIRST_LIGHT:
+			return "Music Disc - First Light"
+		MUSIC_DISC_GREEN_DISTANCE:
+			return "Music Disc - Green Distance"
 	return ""
 
 
@@ -1205,6 +1229,11 @@ static func max_stack_size(item_id: int) -> int:
 	# Vanilla ItemBed aX=1 — placement consumes the single bed item and
 	# converts to TWO block cells (foot + head).
 	if item_id == BED:
+		return 1
+	# Vanilla ItemRecord aX=1 — each disc is unique cargo (you can't
+	# stack a "13" and a "cat" together, and you can't stack two of the
+	# same disc either).
+	if item_id == MUSIC_DISC_FIRST_LIGHT or item_id == MUSIC_DISC_GREEN_DISTANCE:
 		return 1
 	if item_id == EGG:
 		return 16

@@ -260,6 +260,13 @@
       "result": {"id": "bed", "count": 1}
     },
     {
+      "_comment": "Vanilla Beta 1.4 jukebox: 8 planks ring around 1 diamond. (https://minecraft.wiki/w/Jukebox). Music discs are loot-only — no recipe.",
+      "id": "jukebox",
+      "pattern": ["PPP", "PDP", "PPP"],
+      "key": {"P": "planks", "D": "diamond"},
+      "result": {"id": "jukebox", "count": 1}
+    },
+    {
       "id": "wood_stairs",
       "pattern": ["#  ", "## ", "###"],
       "key": {"#": "planks"},

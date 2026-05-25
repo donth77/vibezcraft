@@ -889,6 +889,10 @@ func _material_for(block_id: int) -> String:
 			# Vanilla bd.java BlockBed uses Material.cloth (hb.B) — same
 			# pool as wool blocks. Soft thump on place + break.
 			return "cloth"
+		Blocks.JUKEBOX:
+			# Vanilla BlockJukebox inherits Material.wood (hb.e) — same
+			# wood-knock SFX as planks / log / fence_gate.
+			return "wood"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"

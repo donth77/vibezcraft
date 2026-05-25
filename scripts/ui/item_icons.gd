@@ -209,6 +209,12 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# Bed item — vanilla Beta 1.3+ small-bed sprite. Right-click on
 	# the top face of a block to place TWO bed half-blocks (foot + head).
 	Items.BED: "bed",
+	# Music discs — vanilla Beta 1.4 record_13 / record_cat sprites
+	# (the green and tan disc icons). Right-click on a placed jukebox
+	# to insert; the disc plays our matching custom music track. Disc
+	# stays in the jukebox until ejected.
+	Items.MUSIC_DISC_FIRST_LIGHT: "music_disc_first_light",
+	Items.MUSIC_DISC_GREEN_DISTANCE: "music_disc_green_distance",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

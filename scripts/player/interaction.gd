@@ -768,6 +768,12 @@ func _complete_break(target: Vector3i) -> void:
 	# when the block is broken, then ChestStorage forgets the position.
 	if broken_id == Blocks.CHEST:
 		_drop_chest_contents(target)
+	# Jukebox: drop any contained disc as a separate item BEFORE the
+	# block itself drops (vanilla BlockJukebox::e_ removes the record
+	# via dropBlockAsItem_do). Also stop the audio + clear the tile
+	# entity entry so the cell can be reused without phantom state.
+	if broken_id == Blocks.JUKEBOX:
+		_drop_jukebox_disc(target)
 	# Doors: break both halves. Upper drops nothing (gv.java:163), lower
 	# drops the door item. Also remove the partner half.
 	if broken_id == Blocks.WOODEN_DOOR or broken_id == Blocks.IRON_DOOR:
@@ -841,6 +847,14 @@ func _drop_furnace_contents(target: Vector3i) -> void:
 # (matches the per-item burst vanilla MC produces from
 # Block.dropAsStack). Then forget the position so a future chest at the
 # same coords starts empty.
+func _drop_jukebox_disc(target: Vector3i) -> void:
+	JukeboxAudio.stop_disc(target)
+	var disc_id: int = JukeboxStorage.get_disc(target)
+	if disc_id != 0:
+		_spawn_dropped_item(target, disc_id)
+	JukeboxStorage.forget(target)
+
+
 func _drop_chest_contents(target: Vector3i) -> void:
 	if not ChestStorage.has_chest(target):
 		return
@@ -945,6 +959,21 @@ func _creative_break(target: Vector3i) -> void:
 		var inv: Inventory = _player_inventory()
 		if inv != null:
 			inv.add_item(Items.BED, 1)
+		return
+	# Jukebox in creative — stop playback + return any contained disc
+	# directly to inventory (along with the jukebox block itself).
+	if broken_id == Blocks.JUKEBOX:
+		JukeboxAudio.stop_disc(target)
+		var disc_id: int = JukeboxStorage.get_disc(target)
+		JukeboxStorage.forget(target)
+		_chunk_manager.set_world_block(target, Blocks.AIR)
+		SFX.play_break(broken_id)
+		_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
+		var inv2: Inventory = _player_inventory()
+		if inv2 != null:
+			inv2.add_item(broken_id, 1)
+			if disc_id != 0:
+				inv2.add_item(disc_id, 1)
 		return
 	_chunk_manager.set_world_block(target, Blocks.AIR)
 	SFX.play_break(broken_id)
@@ -1190,6 +1219,14 @@ func _try_place() -> void:
 	# since the foot's facing meta is enough to identify the pair.
 	if hit_id == Blocks.BED_FOOT or hit_id == Blocks.BED_HEAD:
 		_try_sleep_in_bed(hit.block_pos)
+		_last_place_ms = now
+		return
+	# Jukebox right-click: with disc in hand → insert + play; with
+	# empty hand → eject + stop. Vanilla BlockJukebox.interact (Beta
+	# 1.4) handles both in one method; we split the cases in
+	# `_interact_jukebox` for readability.
+	if hit_id == Blocks.JUKEBOX:
+		_interact_jukebox(hit.block_pos)
 		_last_place_ms = now
 		return
 	# Hoe + dirt/grass + top face hit + air above → till to farmland.
@@ -2482,6 +2519,54 @@ func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
 		player.set("bed_spawn_pos", Vector3(foot_pos) + Vector3(0.5, 0.5, 0.5))
 		player.set("has_bed_spawn", true)
 	WorldTime.set_time_ticks(0)
+
+
+# Jukebox right-click — vanilla BlockJukebox.interact (Beta 1.4).
+# Three cases keyed off (held_is_disc, jukebox_has_disc):
+#   * holding a disc + slot empty  → insert + start playback
+#   * holding a disc + slot full   → eject current disc, insert new one
+#   * empty hand    + slot full    → eject current disc, stop playback
+#   * empty hand    + slot empty   → no-op
+# Vanilla pushes the inserted disc's display name into chat ("Now
+# playing..."); we mirror via ChatHud.
+func _interact_jukebox(cell_pos: Vector3i) -> void:
+	if _chunk_manager == null:
+		return
+	var inv: Inventory = _player_inventory()
+	var held_id: int = 0
+	if inv != null:
+		var stack: ItemStack = inv.selected()
+		if stack != null and not stack.is_empty():
+			held_id = stack.item_id
+	var held_is_disc: bool = _is_music_disc(held_id)
+	var current_disc: int = JukeboxStorage.get_disc(cell_pos)
+	if not held_is_disc and current_disc == 0:
+		# Empty hand on empty jukebox — vanilla no-op.
+		return
+	# Eject the current disc (if any) as a DroppedItem just above the
+	# jukebox. Vanilla's BlockJukebox.removeRecord pops the item up
+	# with a small +Y velocity; our DroppedItem handles the pop visual
+	# via its spawn-from-block path.
+	if current_disc != 0:
+		_spawn_dropped_item(cell_pos, current_disc)
+		JukeboxStorage.set_disc(cell_pos, 0)
+		JukeboxAudio.stop_disc(cell_pos)
+	if held_is_disc:
+		# Insert the held disc + start playback. Consume one from the
+		# held stack (discs are stack-size-1 so this always empties the
+		# slot).
+		JukeboxStorage.set_disc(cell_pos, held_id)
+		JukeboxAudio.play_disc(_chunk_manager, cell_pos, held_id)
+		_CHAT_HUD.push("Now playing: %s" % Items.display_name(held_id))
+		if inv != null:
+			inv.consume_one_selected()
+
+
+# True if `item_id` is one of the music disc items. New discs added
+# in future ships should be appended to this guard alongside the
+# JukeboxAudio._TRACKS map.
+func _is_music_disc(item_id: int) -> bool:
+	return item_id == Items.MUSIC_DISC_FIRST_LIGHT or item_id == Items.MUSIC_DISC_GREEN_DISTANCE
 
 
 # Bed placement — vanilla Beta bd.java::a (BlockBed.onItemUseFirst).

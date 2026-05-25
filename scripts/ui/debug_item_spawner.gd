@@ -231,6 +231,11 @@ const _ITEMS: Array = [
 	# place foot + head. Right-click placed bed at night to skip to dawn
 	# + set spawn point.
 	Items.BED,
+	# Jukebox + first 2 music discs. Right-click jukebox with a disc to
+	# insert + start playback; right-click with empty hand to eject.
+	Blocks.JUKEBOX,
+	Items.MUSIC_DISC_FIRST_LIGHT,
+	Items.MUSIC_DISC_GREEN_DISTANCE,
 ]
 
 var _player: Node

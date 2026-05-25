@@ -512,6 +512,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 			var chests: Dictionary = {}
 			var furnaces: Dictionary = {}
 			var signs: Dictionary = {}
+			var jukeboxes: Dictionary = {}
 			for local_pos: Vector3i in tile_entities:
 				var te: Dictionary = tile_entities[local_pos]
 				match te.get("type", ""):
@@ -521,12 +522,16 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 						furnaces[local_pos] = te.get("data", {})
 					"sign":
 						signs[local_pos] = te.get("lines", [])
+					"jukebox":
+						jukeboxes[local_pos] = te.get("disc", 0)
 			if not chests.is_empty():
 				ChestStorage.restore_chunk(coord, chests)
 			if not furnaces.is_empty():
 				FurnaceManager.restore_chunk(coord, furnaces)
 			if not signs.is_empty():
 				SignStorage.restore_chunk(coord, signs)
+			if not jukeboxes.is_empty():
+				JukeboxStorage.restore_chunk(coord, jukeboxes)
 	# Drain cane tops collected during worldgen / decode (worker thread).
 	# Was a 32k-cell column walk on every materialize before — now a small
 	# list iteration (typical chunks: 0-4 entries).
@@ -829,6 +834,8 @@ func flush_dirty_loaded() -> int:
 		coords_to_flush[coord] = true
 	for coord: Vector2i in SignStorage.get_active_chunks():
 		coords_to_flush[coord] = true
+	for coord: Vector2i in JukeboxStorage.get_active_chunks():
+		coords_to_flush[coord] = true
 	var written: int = 0
 	for coord: Vector2i in coords_to_flush.keys():
 		if not _chunks.has(coord):
@@ -861,10 +868,14 @@ func _build_chunk_save_entry(coord: Vector2i, chunk: Chunk, destructive: bool) -
 	var sign_data: Dictionary = SignStorage.serialize_chunk(coord)
 	for local_pos: Vector3i in sign_data:
 		tile_entities[local_pos] = {"type": "sign", "lines": sign_data[local_pos]}
+	var jukebox_data: Dictionary = JukeboxStorage.serialize_chunk(coord)
+	for local_pos: Vector3i in jukebox_data:
+		tile_entities[local_pos] = {"type": "jukebox", "disc": jukebox_data[local_pos]}
 	if destructive:
 		ChestStorage.forget_chunk(coord)
 		FurnaceManager.forget_chunk(coord)
 		SignStorage.forget_chunk(coord)
+		JukeboxStorage.forget_chunk(coord)
 	var pending_ticks: Array
 	if destructive:
 		pending_ticks = TickScheduler.take_for_chunk(coord.x, coord.y)

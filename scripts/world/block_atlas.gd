@@ -180,6 +180,11 @@ const _LAYOUT := {
 	"bed_foot_top": 95,
 	"bed_foot_side": 96,
 	"bed_foot_end": 97,
+	# Jukebox (Beta 1.4 BlockJukebox). TOP carries the inlay groove
+	# where the disc sits; SIDE is the noteblock-style tile reused for
+	# the 4 sides + the bottom.
+	"jukebox_top": 98,
+	"jukebox_side": 99,
 }
 
 # Foliage tint variants.

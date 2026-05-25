@@ -361,6 +361,12 @@ const COBBLESTONE_DOUBLE_SLAB := 82
 # tool, breakable by hand. Drops 1 Items.BED. Light passes through.
 const BED_FOOT := 83
 const BED_HEAD := 84
+# Jukebox [BETA 1.4 exception] — vanilla BlockJukebox (id 84). Full
+# cube, wood material, hardness 2.0, axe-preferred. Stores a single
+# music disc (tile-entity dict at JukeboxStorage); right-click swaps
+# the contained disc, LMB-break drops it along with the jukebox. No
+# meta — orientation is fixed (top is always TOP, sides identical).
+const JUKEBOX := 85
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -1196,6 +1202,10 @@ static func hardness(id: int) -> float:
 			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
 			# doesn't gate on tool; bare-hand breaks in under a second.
 			return 0.2
+		JUKEBOX:
+			# Beta 1.4 BlockJukebox::c(2.0f) — same as a regular wood
+			# block. Axe-preferred (set in preferred_tool_type below).
+			return 2.0
 		WOODEN_DOOR:
 			return 3.0  # gv.java: nq.aE `c(3.0f)` — wood door
 		IRON_DOOR:
@@ -1321,6 +1331,11 @@ static func preferred_tool_type(id: int) -> int:
 			# Wool material — vanilla bd.java doesn't set a tool affinity.
 			# Same as wool blocks: fall through to the default 0 below.
 			return 0
+		JUKEBOX:
+			# Vanilla BlockJukebox extends BlockContainer; the material is
+			# wood (no override on c(Material) in the ctor). Wood material
+			# → axe-preferred.
+			return Items.TOOL_TYPE_AXE
 		SIGN_STANDING, SIGN_WALL:
 			# Vanilla ni.java sets material wood → axe-preferred.
 			return Items.TOOL_TYPE_AXE
@@ -1700,6 +1715,8 @@ static func name_of(id: int) -> String:
 			return "bed_foot"
 		BED_HEAD:
 			return "bed_head"
+		JUKEBOX:
+			return "jukebox"
 	return "unknown"
 
 
@@ -1837,6 +1854,13 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "planks"
 				_:
 					return "crafting_table_side"
+		JUKEBOX:
+			# Vanilla BlockJukebox::a(int) — top returns the inlay-groove
+			# tile, every other face returns the noteblock-side-style tile.
+			# Bottom is the same as the sides (no dedicated bottom tile).
+			if face == "top":
+				return "jukebox_top"
+			return "jukebox_side"
 		BOOKSHELF:
 			match face:
 				"top", "bottom":
