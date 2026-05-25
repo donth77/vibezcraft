@@ -22,10 +22,19 @@ extends RefCounted
 #                              -- per slot: [item_id, count, damage]
 #              }
 #
+# Fire / lava state IS persisted — vanilla MC stores `fireTicks` in
+# the player NBT so saving mid-burn picks up where it left off on
+# reload. Without this, saving while on fire effectively extinguished
+# the timer (a free-escape exploit), even though health damage from
+# the same burn was preserved. The 4 fields below cover the active
+# timer, the per-second damage accumulator, the in-lava edge flag (so
+# we don't double-emit the lava-entry fizz on the first frame post-
+# load), and the lava damage accumulator.
+#
 # Transient fields skipped on save (rebuilt fresh on load):
-#   velocity, _fall_peak_y, _fire_remaining_sec, all mining/swing state,
-#   creative_mode, perspective. These either reset cleanly or are debug
-#   toggles a saved load shouldn't pick up across sessions.
+#   velocity, _fall_peak_y, all mining/swing state, creative_mode,
+#   perspective. These either reset cleanly or are debug toggles a
+#   saved load shouldn't pick up across sessions.
 #
 # Vec3i spawn point lives in world.json (it's per-world, not per-player —
 # beds in §2.10 of pre-mob-roadmap will move it to per-player later).
@@ -109,6 +118,19 @@ static func _build_payload(player: Node3D) -> Dictionary:
 	var has_bed_spawn: bool = (
 		bool(player.get("has_bed_spawn")) if "has_bed_spawn" in player else false
 	)
+	# Fire + lava state — vanilla MC persists fireTicks (and the
+	# adjacent lava-contact accumulator). Without these, a save during
+	# a burn extinguishes the timer on reload while health damage
+	# stays — an inconsistency + a free escape exploit. Default 0/false
+	# fallbacks below let saves predating this field load cleanly.
+	var fire_remaining_sec: float = (
+		float(player.get("_fire_remaining_sec")) if "_fire_remaining_sec" in player else 0.0
+	)
+	var fire_burn_tick: float = (
+		float(player.get("_fire_burn_tick")) if "_fire_burn_tick" in player else 0.0
+	)
+	var was_in_lava: bool = bool(player.get("_was_in_lava")) if "_was_in_lava" in player else false
+	var lava_tick: float = float(player.get("_lava_tick")) if "_lava_tick" in player else 0.0
 	return {
 		"pos": player.global_position,
 		"yaw": yaw,
@@ -118,6 +140,10 @@ static func _build_payload(player: Node3D) -> Dictionary:
 		"inventory": slots_out,
 		"bed_spawn_pos": bed_spawn_pos,
 		"has_bed_spawn": has_bed_spawn,
+		"fire_remaining_sec": fire_remaining_sec,
+		"fire_burn_tick": fire_burn_tick,
+		"was_in_lava": was_in_lava,
+		"lava_tick": lava_tick,
 	}
 
 
@@ -191,6 +217,18 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 		player.set("bed_spawn_pos", payload.get("bed_spawn_pos", Vector3.ZERO))
 	if "has_bed_spawn" in player:
 		player.set("has_bed_spawn", bool(payload.get("has_bed_spawn", false)))
+	# Fire + lava state restore. Missing keys → 0 / false (the same
+	# defaults the Player node initializes to), so older saves load
+	# cleanly with no fire active. Saves written mid-burn put the
+	# player back on fire with the timer where they left off.
+	if "_fire_remaining_sec" in player:
+		player.set("_fire_remaining_sec", float(payload.get("fire_remaining_sec", 0.0)))
+	if "_fire_burn_tick" in player:
+		player.set("_fire_burn_tick", float(payload.get("fire_burn_tick", 0.0)))
+	if "_was_in_lava" in player:
+		player.set("_was_in_lava", bool(payload.get("was_in_lava", false)))
+	if "_lava_tick" in player:
+		player.set("_lava_tick", float(payload.get("lava_tick", 0.0)))
 	var inv: Inventory = player.get("inventory") as Inventory
 	if inv != null:
 		var slots_in: Array = payload.get("inventory", []) as Array

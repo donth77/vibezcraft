@@ -2511,14 +2511,14 @@ func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
 		var partner_id: int = _chunk_manager.get_world_block(foot_pos)
 		if partner_id != Blocks.BED_FOOT:
 			return
-	var player: Node3D = get_parent()
-	if "bed_spawn_pos" in player:
-		# Spawn ON the bed's foot cell. Y offset +0.5 puts the player's
-		# feet flush with the cell floor; without it the player teleports
-		# half-inside the cell and depenetrates upward, a visible jolt.
-		player.set("bed_spawn_pos", Vector3(foot_pos) + Vector3(0.5, 0.5, 0.5))
-		player.set("has_bed_spawn", true)
-	WorldTime.set_time_ticks(0)
+	var player: Node = get_parent()
+	# Vanilla Beta bd.java::interact runs the time skip + spawn-point set
+	# AFTER the player enters the sleep state — the screen darkens during
+	# the sleep phase, then `World.b(0)` fires at the cap (Player drives
+	# the time jump from `_tick_sleep` so the dark frame happens BEFORE
+	# the world flips to dawn, not at the same instant).
+	if player.has_method("start_sleep"):
+		player.call("start_sleep", foot_pos)
 
 
 # Jukebox right-click — vanilla BlockJukebox.interact (Beta 1.4).
@@ -2591,6 +2591,13 @@ func _try_place_bed(hit: Dictionary, _stack: ItemStack) -> bool:
 	if normal != Vector3i(0, 1, 0):
 		return false
 	var foot_pos: Vector3i = hit.block_pos + normal
+	# Snow-layer special case — vanilla snow_layer is is_replaceable, so
+	# clicking the top of a snow-covered cell places the new block AT
+	# the snow cell (replacing it) rather than one cell above. Without
+	# this hop, beds on snowy terrain visibly float 14/16 m above the
+	# snow's top because foot_pos lands at hit.block_pos + (0,1,0).
+	if _chunk_manager.get_world_block(hit.block_pos) == Blocks.SNOW_LAYER:
+		foot_pos = hit.block_pos
 	# Facing = direction from foot to head = player's gaze direction
 	# quantized to a cardinal.
 	var facing: int = _bed_meta_from_yaw()
@@ -2605,9 +2612,11 @@ func _try_place_bed(hit: Dictionary, _stack: ItemStack) -> bool:
 		return false
 	# Vanilla bd.java requires solid floor under BOTH halves so the bed
 	# can't hang. is_opaque rules out plants / fluids / non-cube blocks.
-	var foot_floor: int = _chunk_manager.get_world_block(foot_pos + Vector3i(0, -1, 0))
-	var head_floor: int = _chunk_manager.get_world_block(head_pos + Vector3i(0, -1, 0))
-	if not Blocks.is_opaque(foot_floor) or not Blocks.is_opaque(head_floor):
+	# Snow layer (2/16-tall slab) isn't opaque, but vanilla treats snow-
+	# covered grass / dirt as a valid surface — mob_spawner_manager does
+	# the same look-deeper hop. Match that here so beds can be placed
+	# on snowy biomes without the player digging out the snow first.
+	if not _bed_floor_supports(foot_pos) or not _bed_floor_supports(head_pos):
 		return false
 	_chunk_manager.set_world_block_with_meta(foot_pos, Blocks.BED_FOOT, facing)
 	_chunk_manager.set_world_block_with_meta(head_pos, Blocks.BED_HEAD, facing)
@@ -2654,6 +2663,20 @@ func _bed_head_offset(facing: int) -> Vector3i:
 			return Vector3i(0, 0, -1)
 		_:
 			return Vector3i(1, 0, 0)
+
+
+# True if `target_cell` has a valid floor for bed placement. Mirrors
+# vanilla bd.java's "World.t(this, x, y-1, z)" check (block.canPlaceAt
+# on the block below). We additionally allow snow-on-grass: snow_layer
+# is non-opaque but vanilla treats snow-covered surfaces as walkable,
+# so we hop one cell deeper when the immediate floor is a snow layer.
+# Same look-deeper trick mob_spawner_manager uses for animal spawns.
+func _bed_floor_supports(target_cell: Vector3i) -> bool:
+	var floor_pos: Vector3i = target_cell + Vector3i(0, -1, 0)
+	var floor_id: int = _chunk_manager.get_world_block(floor_pos)
+	if floor_id == Blocks.SNOW_LAYER:
+		floor_id = _chunk_manager.get_world_block(floor_pos + Vector3i(0, -1, 0))
+	return Blocks.is_opaque(floor_id)
 
 
 # Walks the (front_pos, wall direction) cells looking for the largest

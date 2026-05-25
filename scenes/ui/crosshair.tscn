@@ -18,6 +18,7 @@
 [ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
 [ext_resource type="Script" path="res://scripts/ui/pumpkin_overlay.gd" id="16_pumpkin"]
 [ext_resource type="Script" path="res://scripts/ui/chat_hud.gd" id="21_chat"]
+[ext_resource type="Script" path="res://scripts/ui/sleep_overlay.gd" id="22_sleep"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/pumpkinblur.png" id="17_pumpkin_tex"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/icons.png" id="13_icons"]
 [ext_resource type="Shader" path="res://shaders/crosshair.gdshader" id="14_xhair_sh"]
@@ -94,6 +95,18 @@ texture = ExtResource("17_pumpkin_tex")
 script = ExtResource("16_pumpkin")
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
+
+; Vanilla bd.java sleep fade. Fullscreen ColorRect (black) whose
+; alpha is driven by Player.sleep_ticks. Rendered BEFORE ChatHud +
+; HUD bars so the chat / status overlays remain readable through the
+; fade window (vanilla MC does the same — F3 + chat draw on top of
+; the sleep overlay).
+[node name="SleepOverlay" type="ColorRect" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+color = Color(0, 0, 0, 0)
+script = ExtResource("22_sleep")
 
 ; Vanilla GuiNewChat layout — bottom-left, above the hotbar/hp area.
 ; Anchored to the bottom-left corner; the script draws lines stacked

@@ -248,6 +248,23 @@ var health: int = MAX_HEALTH
 var bed_spawn_pos: Vector3 = Vector3.ZERO
 var has_bed_spawn: bool = false
 
+# Sleep state — port of Beta EntityHuman.sleeping / sleepTicks. While
+# is_sleeping the player is frozen (input + physics gated), and the
+# sleep_overlay HUD reads sleep_ticks to fade the screen toward black.
+# At SLEEP_PHASE_TICKS (50 ≈ 2.5 s) the WorldTime jumps to dawn and the
+# auto-wake fires. sleep_ticks continues counting to SLEEP_WAKE_TICKS
+# (110) so the overlay fades back; resets to 0 there.
+#
+# Refs: EntityHuman.java (Beta) lines 161-178 — same numeric thresholds
+# (100 sleep cap, 110 wake cap). Vanilla persists `sleeping` + `sleepTimer`
+# in NBT; we keep these transient on the assumption that a save-during-
+# sleep is unusual (and the wake-up would arrive seconds later anyway).
+const SLEEP_PHASE_TICKS: float = 50.0
+const SLEEP_WAKE_TICKS: float = 110.0
+const SLEEP_CAP_TICKS: float = 100.0
+var is_sleeping: bool = false
+var sleep_ticks: float = 0.0
+
 # Fall tracking — _fall_peak_y is the HIGHEST Y reached during the
 # current air period. On landing we compute (peak - land_y) to get the
 # actual fall distance regardless of jumps bumping the start upward.
@@ -1306,6 +1323,62 @@ func _update_debug_label() -> void:
 func _process(_delta: float) -> void:
 	_update_camera_collision()
 	_tick_held_bow_stage()
+	_tick_sleep(_delta)
+
+
+# Drive the Beta-style sleep state machine. Runs every frame so the
+# overlay fade is smooth; ticks counter in vanilla "ticks" units (×20)
+# to keep the SLEEP_PHASE / SLEEP_WAKE thresholds readable as ticks.
+#
+# Phase diagram (sleep_ticks: float, sleeping: bool):
+#   0..SLEEP_PHASE_TICKS  | sleeping=true   | overlay fading IN
+#   SLEEP_PHASE_TICKS     | (one-shot)      | WorldTime jumps to dawn
+#                                              + auto-wake → sleeping=false
+#   SLEEP_PHASE..SLEEP_CAP| sleeping=false  | overlay still fading IN
+#   SLEEP_CAP..SLEEP_WAKE | sleeping=false  | overlay fading OUT
+#   SLEEP_WAKE            | (reset)         | sleep_ticks = 0
+#
+# Vanilla MC's sleepTicks counter caps at 100 while sleeping and then
+# continues to 110 after wake; we drive the time skip at the halfway
+# point (50 ticks ≈ 2.5 s) so the world advances during the dark phase
+# rather than the bright "waking up" phase.
+func _tick_sleep(delta: float) -> void:
+	if not is_sleeping and sleep_ticks <= 0.0:
+		return
+	sleep_ticks += delta * 20.0
+	if is_sleeping:
+		if sleep_ticks >= SLEEP_PHASE_TICKS:
+			# Vanilla bd.java::interact calls World.b(0) at this point —
+			# screen is fully dark, time advances to dawn, player wakes.
+			WorldTime.set_time_ticks(0)
+			# Vanilla snaps `sleeping = false` immediately after the
+			# time-skip; sleepTicks keeps counting up so the overlay
+			# fades back out gradually.
+			is_sleeping = false
+		# Stay clamped at the cap while sleeping — matches vanilla
+		# `if (this.sleepTicks > 100) this.sleepTicks = 100`.
+		sleep_ticks = minf(sleep_ticks, SLEEP_CAP_TICKS)
+		return
+	# Post-wake fade-out window (sleep_ticks in [SLEEP_CAP, SLEEP_WAKE]).
+	if sleep_ticks >= SLEEP_WAKE_TICKS:
+		sleep_ticks = 0.0
+
+
+# Public API — called by interaction.gd's bed right-click handler when
+# the sleep gate passes (night-time + bed pair intact). Snaps the
+# player to the foot cell and enters the sleep state machine.
+func start_sleep(foot_cell: Vector3i) -> void:
+	if is_sleeping:
+		return
+	is_sleeping = true
+	sleep_ticks = 0.0
+	velocity = Vector3.ZERO
+	# Lay the player on top of the bed's foot cell. Y offset +0.5 lines
+	# the capsule's bottom up with the bed's 9/16 top — close enough that
+	# the camera reads as "sitting on the bed" without per-half-block math.
+	global_position = Vector3(foot_cell) + Vector3(0.5, 0.5, 0.5)
+	bed_spawn_pos = global_position
+	has_bed_spawn = true
 
 
 # Polls the Interaction node's bow charge and swaps the held-bow
@@ -1429,6 +1502,13 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Sleeping — vanilla EntityHuman.B() returns early when isSleeping(),
+	# so nothing else runs (no gravity, no input, no fall tracking). We
+	# still tick `sleep_ticks` in _process so the overlay fade advances
+	# and the auto-wake fires on schedule.
+	if is_sleeping:
+		velocity = Vector3.ZERO
+		return
 	# Defensive unstick pass — repeats every frame until chunks around
 	# the spawn have streamed in AND we've confirmed the capsule isn't
 	# embedded in any solid blocks. Stops after _settle_remaining_frames
