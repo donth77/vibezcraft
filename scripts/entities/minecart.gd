@@ -44,6 +44,12 @@ const HULL_HEIGHT: float = 0.6
 # Collision AABB stays at vanilla 0.98 × 0.7 × 0.98 regardless of visual.
 const COLLISION_WIDTH: float = 0.98
 const COLLISION_HEIGHT: float = 0.7
+# Explicit preload — GUT loads test scripts before class_name registers
+# the global EntityLighting identifier, so bare `EntityLighting.foo()`
+# fails to parse in tests with "Identifier ... not declared in the
+# current scope". Preload via const lets us call the same static
+# methods through the preloaded GDScript instead.
+const _ENTITY_LIGHTING: GDScript = preload("res://scripts/world/entity_lighting.gd")
 const FLOOR_THICKNESS: float = 0.0625  # 1 vanilla unit, thin metal floor
 const WALL_HEIGHT: float = HULL_HEIGHT - FLOOR_THICKNESS
 const WALL_THICKNESS: float = 0.0625
@@ -408,7 +414,7 @@ func _update_entity_lighting() -> void:
 		int(floor(global_position.y + FLOOR_THICKNESS + 0.5)),
 		int(floor(global_position.z))
 	)
-	var b: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	var b: float = _ENTITY_LIGHTING.sample_brightness(_chunk_manager, cell)
 	if absf(b - _last_light_brightness) < 0.01:
 		return
 	_last_light_brightness = b

@@ -23,6 +23,13 @@ extends CharacterBody3D
 # dp.java::a(1.5f, 0.6f) sets the COLLISION box to width=1.5 height=0.6,
 # so the AABB is square (1.5 × 0.6 × 1.5) while the visual is narrower.
 # We use the visual width for HULL_WIDTH so the mesh + collider match.
+# Explicit preload — GUT loads test scripts before class_name registers
+# the global EntityLighting identifier, so bare `EntityLighting.foo()`
+# fails to parse in tests with "Identifier ... not declared in the
+# current scope". Preload via const lets us call the same static
+# methods through the preloaded GDScript instead.
+const _ENTITY_LIGHTING: GDScript = preload("res://scripts/world/entity_lighting.gd")
+
 const HULL_LENGTH: float = 1.5
 const HULL_WIDTH: float = 1.0
 const HULL_HEIGHT: float = 0.625
@@ -695,7 +702,7 @@ func _update_entity_lighting() -> void:
 		int(floor(global_position.y + FLOOR_THICKNESS + 0.5)),
 		int(floor(global_position.z))
 	)
-	var b: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	var b: float = _ENTITY_LIGHTING.sample_brightness(_chunk_manager, cell)
 	if absf(b - _last_light_brightness) < 0.01:
 		return
 	_last_light_brightness = b
