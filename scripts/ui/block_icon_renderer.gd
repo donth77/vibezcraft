@@ -121,6 +121,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# inventory icon shows the recognizable gate silhouette rather than
 	# a flat planks square.
 	Blocks.FENCE_GATE,
+	# Jukebox — full cube with the inlay-groove top + noteblock-style
+	# sides. Needs to be iconified so the inventory slot shows the
+	# proper 3-quarter view instead of a "missing icon" fallback.
+	Blocks.JUKEBOX,
 ]
 
 static var _viewport: SubViewport

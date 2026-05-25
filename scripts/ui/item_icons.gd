@@ -215,6 +215,12 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# stays in the jukebox until ejected.
 	Items.MUSIC_DISC_FIRST_LIGHT: "music_disc_first_light",
 	Items.MUSIC_DISC_GREEN_DISTANCE: "music_disc_green_distance",
+	Items.MUSIC_DISC_LONG_SHADOW: "music_disc_long_shadow",
+	Items.MUSIC_DISC_HOLLOW_EARTH: "music_disc_hollow_earth",
+	Items.MUSIC_DISC_BEDROCK: "music_disc_bedrock",
+	Items.MUSIC_DISC_OPEN_SKY: "music_disc_open_sky",
+	Items.MUSIC_DISC_HEARTHSTONE: "music_disc_hearthstone",
+	Items.MUSIC_DISC_STILL_WATER: "music_disc_still_water",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

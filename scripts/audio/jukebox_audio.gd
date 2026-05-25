@@ -1,5 +1,7 @@
 extends Node
 
+# gdlint: disable=class-definitions-order
+
 # Positional audio player for jukeboxes. Spawns AudioStreamPlayer3D
 # nodes parented to a long-lived host (ChunkManager) so the record's
 # sound radiates from its cell with vanilla-style 64 m falloff. The
@@ -14,15 +16,20 @@ extends Node
 # AudioStreamPlayer3D's `finished` signal queue_free's the player so
 # the next disc insert spawns a fresh one.
 
-# Disc item_id → music track path. Mojang's "13" + "cat" sprites map
-# to our custom tracks (First-Light = ambient piano open; Green-
-# Distance = layered synth + piano warmer follow-up). Filename strings
-# bind at runtime; missing files print one warning + silently no-op.
+# Disc item_id → music track path. Each entry pairs a vanilla Mojang
+# disc sprite (chosen by mood color) with one of our 8 custom tracks.
+# Resolved by id_from_name at _ready so we don't have to depend on
+# Items.gd's load order here; missing files print one warning + the
+# tile entity still tracks the disc (silent fallback).
 const _TRACKS: Dictionary = {
-	# Resolved by id_from_name at JukeboxAudio._init time so we don't
-	# have to depend on Items.gd's load order here.
 	"music_disc_first_light": "res://assets/audio/music/First-Light.mp3",
 	"music_disc_green_distance": "res://assets/audio/music/Green-Distance.mp3",
+	"music_disc_long_shadow": "res://assets/audio/music/Long-Shadow.mp3",
+	"music_disc_hollow_earth": "res://assets/audio/music/Hollow-Earth.mp3",
+	"music_disc_bedrock": "res://assets/audio/music/Bedrock.mp3",
+	"music_disc_open_sky": "res://assets/audio/music/Open-Sky.mp3",
+	"music_disc_hearthstone": "res://assets/audio/music/Hearthstone.mp3",
+	"music_disc_still_water": "res://assets/audio/music/Still-Water.mp3",
 }
 
 # Vanilla audible radius. Records are loud — they cut through the world
@@ -39,6 +46,11 @@ var _players: Dictionary = {}
 # Cached resolved Items.MUSIC_DISC_* → AudioStream so we don't load the
 # same file every play.
 var _stream_cache: Dictionary = {}
+# Cached player ref + last music-pause state. Lookup-deferred so we
+# don't depend on the player scene being ready at autoload _ready time.
+var _cached_player: Node3D = null
+var _music_paused_for_jukebox: bool = false
+var _audibility_accum: float = 0.0
 
 
 func _ready() -> void:
@@ -55,6 +67,85 @@ func _ready() -> void:
 			push_warning("[JukeboxAudio] missing audio file: %s" % path)
 			continue
 		_stream_cache[disc_id] = stream
+	# Drive the audibility poll. Cheap — `_audibility_tick` is a Vector3
+	# distance check per active jukebox, gated to 0.5 s, so the per-frame
+	# cost is one float compare + an early return when no jukebox is
+	# playing (the dominant case).
+	set_process(true)
+
+
+# Poll the player's distance to every active jukebox every 0.5 s. If
+# any is within audible range (= the AudioStreamPlayer3D's
+# max_distance, where the falloff curve reaches zero), pause the
+# ambient MusicPlayer pool so the disc isn't competing with random
+# ambient tracks. Resume when no jukebox is audible.
+#
+# Vanilla MC doesn't actually do this — discs and ambient music can
+# overlap in vanilla — but the overlap reads as a muddy mix on our
+# longer tracks (60-180 s vanilla discs vs minute-long ambient tracks
+# with similar instrumentation). Pausing matches the player-intent
+# "I put a disc on, I want to hear THE disc."
+func _process(delta: float) -> void:
+	if _players.is_empty():
+		# Re-arm the music pool the moment the last jukebox stops. No
+		# distance check needed — without active players, nothing is
+		# audible by definition.
+		if _music_paused_for_jukebox:
+			_resume_music()
+		return
+	_audibility_accum += delta
+	if _audibility_accum < 0.5:
+		return
+	_audibility_accum = 0.0
+	_audibility_tick()
+
+
+func _audibility_tick() -> void:
+	var player: Node3D = _get_player()
+	if player == null:
+		return
+	var threshold_sq: float = _MAX_DISTANCE * _MAX_DISTANCE
+	var any_audible: bool = false
+	for cell_pos: Vector3i in _players.keys():
+		var p: AudioStreamPlayer3D = _players[cell_pos] as AudioStreamPlayer3D
+		if not is_instance_valid(p):
+			continue
+		var d_sq: float = p.global_position.distance_squared_to(player.global_position)
+		if d_sq <= threshold_sq:
+			any_audible = true
+			break
+	if any_audible and not _music_paused_for_jukebox:
+		_pause_music()
+	elif not any_audible and _music_paused_for_jukebox:
+		_resume_music()
+
+
+func _pause_music() -> void:
+	if Music != null and Music.has_method("set_paused"):
+		Music.set_paused(true)
+	_music_paused_for_jukebox = true
+
+
+func _resume_music() -> void:
+	if Music != null and Music.has_method("set_paused"):
+		Music.set_paused(false)
+	_music_paused_for_jukebox = false
+
+
+func _get_player() -> Node3D:
+	if _cached_player != null and is_instance_valid(_cached_player):
+		return _cached_player
+	# Player lives under Main; cached lookup avoids the find_child walk
+	# on every audibility tick. find_child is recursive but bounded by
+	# the small Main subtree, so the cold lookup is cheap too.
+	var root: Window = get_tree().root
+	if root == null:
+		return null
+	var main: Node = root.get_node_or_null("Main")
+	if main == null:
+		return null
+	_cached_player = main.find_child("Player", true, false) as Node3D
+	return _cached_player
 
 
 # Start playback at `cell_pos` with the given disc. Stops any previous

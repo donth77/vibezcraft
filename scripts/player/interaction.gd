@@ -2562,11 +2562,12 @@ func _interact_jukebox(cell_pos: Vector3i) -> void:
 			inv.consume_one_selected()
 
 
-# True if `item_id` is one of the music disc items. New discs added
-# in future ships should be appended to this guard alongside the
-# JukeboxAudio._TRACKS map.
+# True if `item_id` is one of the music disc items. Range check covers
+# the contiguous disc ID block (FIRST_LIGHT = 190 → STILL_WATER = 197);
+# any new disc appended to the end stays covered without extending this
+# guard. Mirror new additions in JukeboxAudio._TRACKS.
 func _is_music_disc(item_id: int) -> bool:
-	return item_id == Items.MUSIC_DISC_FIRST_LIGHT or item_id == Items.MUSIC_DISC_GREEN_DISTANCE
+	return item_id >= Items.MUSIC_DISC_FIRST_LIGHT and item_id <= Items.MUSIC_DISC_STILL_WATER
 
 
 # Bed placement — vanilla Beta bd.java::a (BlockBed.onItemUseFirst).

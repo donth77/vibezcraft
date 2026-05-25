@@ -296,6 +296,21 @@ const BED: int = 189
 # vanilla C418 records.
 const MUSIC_DISC_FIRST_LIGHT: int = 190
 const MUSIC_DISC_GREEN_DISTANCE: int = 191
+# Remaining 6 custom-track discs (full set: 8 discs, one per file in
+# assets/audio/music/). Sprite assignments pick the vanilla Mojang
+# record art whose color matches the track's mood:
+#   long_shadow   → record_strad  (cyan, melancholic piano)
+#   hollow_earth  → record_11     (purple, deep + eerie)
+#   bedrock       → record_blocks (brown, dark drone)
+#   open_sky      → record_chirp  (orange, bright uplift)
+#   hearthstone   → record_far    (pink, warm cozy)
+#   still_water   → record_mall   (light blue, water ambient)
+const MUSIC_DISC_LONG_SHADOW: int = 192
+const MUSIC_DISC_HOLLOW_EARTH: int = 193
+const MUSIC_DISC_BEDROCK: int = 194
+const MUSIC_DISC_OPEN_SKY: int = 195
+const MUSIC_DISC_HEARTHSTONE: int = 196
+const MUSIC_DISC_STILL_WATER: int = 197
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
@@ -759,6 +774,18 @@ static func id_from_name(item_name: String) -> int:
 			return MUSIC_DISC_FIRST_LIGHT
 		"music_disc_green_distance":
 			return MUSIC_DISC_GREEN_DISTANCE
+		"music_disc_long_shadow":
+			return MUSIC_DISC_LONG_SHADOW
+		"music_disc_hollow_earth":
+			return MUSIC_DISC_HOLLOW_EARTH
+		"music_disc_bedrock":
+			return MUSIC_DISC_BEDROCK
+		"music_disc_open_sky":
+			return MUSIC_DISC_OPEN_SKY
+		"music_disc_hearthstone":
+			return MUSIC_DISC_HEARTHSTONE
+		"music_disc_still_water":
+			return MUSIC_DISC_STILL_WATER
 	return -1
 
 
@@ -1076,6 +1103,18 @@ static func display_name(item_id: int) -> String:
 			return "Music Disc - First Light"
 		MUSIC_DISC_GREEN_DISTANCE:
 			return "Music Disc - Green Distance"
+		MUSIC_DISC_LONG_SHADOW:
+			return "Music Disc - Long Shadow"
+		MUSIC_DISC_HOLLOW_EARTH:
+			return "Music Disc - Hollow Earth"
+		MUSIC_DISC_BEDROCK:
+			return "Music Disc - Bedrock"
+		MUSIC_DISC_OPEN_SKY:
+			return "Music Disc - Open Sky"
+		MUSIC_DISC_HEARTHSTONE:
+			return "Music Disc - Hearthstone"
+		MUSIC_DISC_STILL_WATER:
+			return "Music Disc - Still Water"
 	return ""
 
 
@@ -1231,9 +1270,10 @@ static func max_stack_size(item_id: int) -> int:
 	if item_id == BED:
 		return 1
 	# Vanilla ItemRecord aX=1 — each disc is unique cargo (you can't
-	# stack a "13" and a "cat" together, and you can't stack two of the
-	# same disc either).
-	if item_id == MUSIC_DISC_FIRST_LIGHT or item_id == MUSIC_DISC_GREEN_DISTANCE:
+	# stack two of the same disc either). Range check covers all music
+	# disc IDs from FIRST_LIGHT (190) through STILL_WATER (197); future
+	# discs appended to the end stay covered.
+	if item_id >= MUSIC_DISC_FIRST_LIGHT and item_id <= MUSIC_DISC_STILL_WATER:
 		return 1
 	if item_id == EGG:
 		return 16
