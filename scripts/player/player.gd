@@ -1143,6 +1143,19 @@ func _apply_held_visibility() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Sleeping — vanilla bd.java::a holds the player in bed until the
+	# time-skip + auto-wake fire. Block ALL input (camera + actions + UI
+	# toggles) for the ~5 s sleep window except the pause action — that
+	# stays open as a safety hatch in case _tick_sleep ever fails to
+	# auto-wake. The pause menu's "Leave Bed" button in vanilla serves
+	# the same role.
+	if is_sleeping:
+		if event.is_action_pressed("pause"):
+			var pause_menu_node: Control = get_node_or_null("Crosshair/PauseMenu")
+			if pause_menu_node != null:
+				pause_menu_node.open()
+				get_viewport().set_input_as_handled()
+		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_apply_mouse_motion(event)
 		return

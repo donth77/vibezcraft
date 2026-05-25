@@ -537,7 +537,15 @@ func _try_place_minecart(variant: int = 0) -> bool:
 
 func _world_input_active() -> bool:
 	# Mouse-captured == playing the game; visible == a UI screen owns input.
-	return Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	# Sleep state ALSO disables world input — vanilla bd.java locks the
+	# player in bed until the time skip + auto-wake fire, so mining /
+	# placing / raycast highlight all freeze for the ~5 s sleep window.
+	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return false
+	var player: Node = get_parent()
+	if player != null and "is_sleeping" in player and bool(player.get("is_sleeping")):
+		return false
+	return true
 
 
 func _update_highlight(hit: Dictionary) -> void:
