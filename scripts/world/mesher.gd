@@ -3115,47 +3115,42 @@ static func _emit_bed_geometry(
 	indices: PackedInt32Array,
 	collision_faces: PackedVector3Array
 ) -> void:
+	# Bed mesh — verified against Bukkit/mc-dev BlockBed.java + a pixel
+	# inspection of the vendored Mojang 1.6.4 bed_*_top / bed_*_side /
+	# bed_*_end textures. Critical facts:
+	#
+	#   1. bd.java::a[][] = {{0,1},{-1,0},{0,-1},{1,0}} — meta 0..3 →
+	#      foot→head offset (+Z, -X, -Z, +X). Matches our placement
+	#      code's _bed_head_offset.
+	#   2. bed_*_top textures: pillow / leg-end art at the HIGH-U side
+	#      of the image (u=8..15 = right half). Wood frame at LOW U.
+	#      U axis runs ALONG the bed length (foot→head = +U direction).
+	#      V axis runs ACROSS the bed width.
+	#   3. bed_*_side / bed_*_end textures: bed silhouette in rows 7..15
+	#      (bottom 9 rows). Rows 0..6 are alpha=0 — those are above the
+	#      bed in vanilla rendering. Sampling them = visible "gap" at
+	#      the top of the side faces. Side V is clamped to [v_bed_top,
+	#      v1] = [v0 + 7/16·dv, v1] so only the bed-art rows render.
+	#   4. Internal face (where the two halves meet) is skipped so the
+	#      pair seam doesn't z-fight between coplanar half-meshes.
 	var id: int = chunk.get_block(x, y, z)
 	var meta: int = chunk.get_block_meta_unchecked(x, y, z)
 	var facing: int = meta & 3
 	var is_head: bool = id == Blocks.BED_HEAD
-	# Bed silhouette: full XZ footprint, 9/16 tall. Matches the vanilla
-	# Block.setBlockBounds(0, 0, 0, 1, 0.5625, 1) at bd.java:42.
 	var bed_height: float = 9.0 / 16.0
 	var mn := Vector3(float(x), float(y), float(z))
 	var mx := Vector3(float(x) + 1.0, float(y) + bed_height, float(z) + 1.0)
-	# Internal face — the half-side that meets the OTHER half. Coplanar
-	# with the other half's mesh, so skipping it kills the z-fight that
-	# would otherwise flicker the seam between FOOT and HEAD.
-	#   FOOT's internal face points along +facing (toward the head).
-	#   HEAD's internal face points along -facing (toward the foot).
-	# Direction-to-face mapping for the standard mesher face indices:
-	#   0=+Y, 1=-Y, 2=+X, 3=-X, 4=+Z, 5=-Z
-	var internal_face_idx: int = -1
-	if is_head:
-		match facing:
-			0:
-				internal_face_idx = 5  # head's foot side = -Z
-			1:
-				internal_face_idx = 2  # +X
-			2:
-				internal_face_idx = 4  # +Z
-			_:
-				internal_face_idx = 3  # -X
-	else:
-		match facing:
-			0:
-				internal_face_idx = 4  # foot's head side = +Z
-			1:
-				internal_face_idx = 3  # -X
-			2:
-				internal_face_idx = 5  # -Z
-			_:
-				internal_face_idx = 2  # +X
-	# Outer END face — opposite the internal face. Carries the
-	# pillow-end texture (HEAD) or the legs-end texture (FOOT).
-	var end_face_idx: int = _bed_opposite_face(internal_face_idx)
-	# Per-half textures.
+	# Foot→head direction in cell coords (vanilla bd.java::a[]).
+	var head_dir: Vector3i = _bed_head_dir_for_facing(facing)
+	# Internal face normal: FOOT points +head_dir (toward head),
+	# HEAD points -head_dir (toward foot). Skipped to avoid z-fight at
+	# the half-pair seam.
+	var internal_normal: Vector3i = -head_dir if is_head else head_dir
+	var internal_face_idx: int = _face_idx_for_normal(internal_normal)
+	# End face normal: outer end of this half. FOOT = -head_dir (legs
+	# end); HEAD = +head_dir (pillow end). Carries the END texture.
+	var end_normal: Vector3i = head_dir if is_head else -head_dir
+	var end_face_idx: int = _face_idx_for_normal(end_normal)
 	var top_tex: String = "bed_head_top" if is_head else "bed_foot_top"
 	var side_tex: String = "bed_head_side" if is_head else "bed_foot_side"
 	var end_tex: String = "bed_head_end" if is_head else "bed_foot_end"
@@ -3172,10 +3167,7 @@ static func _emit_bed_geometry(
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
 	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
-	# Face table — index matches the dir convention above (0=+Y..5=-Z).
-	# Each entry: [v0, v1, v2, v3, normal] in CCW order so the existing
-	# reversed-index emit pattern (base, base+2, base+1, base, base+3,
-	# base+2) keeps the outward side visible under CULL_BACK.
+	# Face table — index matches the dir convention 0=+Y..5=-Z.
 	var face_geom: Array = [
 		[c010, c011, c111, c110, Vector3.UP],  # 0 +Y top
 		[c001, c000, c100, c101, Vector3.DOWN],  # 1 -Y bottom
@@ -3186,125 +3178,139 @@ static func _emit_bed_geometry(
 	]
 	for face_idx in range(6):
 		if face_idx == internal_face_idx:
-			# Skip — handled by the other bed half's mesh.
 			continue
 		var face: Array = face_geom[face_idx]
-		# Pick texture per face role.
+		var is_top: bool = face_idx == 0
+		var is_bottom: bool = face_idx == 1
+		var is_end: bool = face_idx == end_face_idx
 		var tex_name: String
-		if face_idx == 0:
+		if is_top:
 			tex_name = top_tex
-		elif face_idx == 1:
+		elif is_bottom:
 			tex_name = bottom_tex
-		elif face_idx == end_face_idx:
+		elif is_end:
 			tex_name = end_tex
 		else:
 			tex_name = side_tex
 		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
-		var face_uvs: Array = _bed_face_uvs(rect, face_idx, facing, is_head)
 		var base: int = verts.size()
 		var fv: Vector3 = face[4]
 		for i in range(4):
-			verts.append(face[i])
+			var vert: Vector3 = face[i]
+			verts.append(vert)
 			norms.append(fv)
-			uvs.append(face_uvs[i])
+			uvs.append(_bed_vertex_uv(vert, mn, mx, head_dir, face_idx, rect, is_top, is_bottom))
 			colors.append(face_light)
 		indices.append_array(
 			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
 		)
-	# Collision soup: full 1×9/16×1 box matches the player's walkable +
-	# selection box. Vanilla collision is the same shape; mounting the
-	# bed (right-click) is handled by the cursor raycast independently.
 	_emit_collision_box(collision_faces, mn, mx)
 
 
-# Face-index opposite mapping for the bed's internal-cull pairing.
-# 0↔1 (Y), 2↔3 (X), 4↔5 (Z).
-static func _bed_opposite_face(face_idx: int) -> int:
-	match face_idx:
+# Maps a ±X / ±Y / ±Z normal to the face index used by face_geom
+# (0=+Y, 1=-Y, 2=+X, 3=-X, 4=+Z, 5=-Z). Used by the bed mesher to
+# compute internal-face / end-face indices from the head direction.
+static func _face_idx_for_normal(n: Vector3i) -> int:
+	if n.y > 0:
+		return 0
+	if n.y < 0:
+		return 1
+	if n.x > 0:
+		return 2
+	if n.x < 0:
+		return 3
+	if n.z > 0:
+		return 4
+	return 5
+
+
+# Foot→head offset for a meta facing 0..3, as a Vector3i. Mirrors the
+# vanilla bd.java::a[] table. Separate from the Vector3i variant in
+# interaction.gd because that one is an instance method (Node3D access
+# in _try_place_bed); the mesher needs a static for chunk-thread work.
+static func _bed_head_dir_for_facing(facing: int) -> Vector3i:
+	match facing:
 		0:
-			return 1
+			return Vector3i(0, 0, 1)
 		1:
-			return 0
+			return Vector3i(-1, 0, 0)
 		2:
-			return 3
-		3:
-			return 2
-		4:
-			return 5
+			return Vector3i(0, 0, -1)
 		_:
-			return 4
+			return Vector3i(1, 0, 0)
 
 
-# Bed UV picker — rotates the top / bottom UV mapping per facing so the
-# pillow-top (HEAD) and sheet-stripe (FOOT) line up with the visible
-# head→foot direction. Side faces use the unrotated tile (their texture
-# is already oriented along the bed's length). End faces use a flipped
-# horizontal U for the LEFT vs RIGHT sides of the bed so the symmetric
-# end texture doesn't mirror-double on one side.
+# Per-vertex UV picker for the bed mesh. Computes the UV from the
+# vertex's world position rather than a per-(facing, face_idx) table —
+# the position-driven derivation auto-handles all 4 facings without
+# hand-rolled rotation tables.
 #
-# Returns the 4 UVs matching the CCW vertex order in `face_geom`.
-static func _bed_face_uvs(rect: Rect2, face_idx: int, facing: int, _is_head: bool) -> Array:
-	# Standard UV corner offsets: [top-left, bot-left, bot-right, top-right]
-	# in (u, v) — V grows downward in atlas space.
+# Three UV regimes:
+#   * TOP face — U along bed length (HIGH U at +head_dir end, where the
+#     pillow / leg-end art sits in the source texture). V across bed
+#     width (one stable convention so both halves' top textures align
+#     at the seam).
+#   * BOTTOM face — planks tile, UV doesn't carry orientation.
+#   * SIDE / END face — V clamped to the bed-art rows ([v_bed_top, v1]
+#     in atlas coords, since the top 7/16 of the source texture is
+#     alpha-0 above-the-bed empty space). U along bed length for side
+#     faces (perpendicular to bed length axis), or across bed width
+#     for the end face (parallel to the bed length axis).
+static func _bed_vertex_uv(
+	vert: Vector3,
+	mn: Vector3,
+	mx: Vector3,
+	head_dir: Vector3i,
+	face_idx: int,
+	rect: Rect2,
+	is_top: bool,
+	is_bottom: bool
+) -> Vector2:
 	var u0: float = rect.position.x
 	var v0: float = rect.position.y
 	var u1: float = rect.position.x + rect.size.x
 	var v1: float = rect.position.y + rect.size.y
-	# Default corners — used for side faces and for the bottom.
-	var tl := Vector2(u0, v0)
-	var bl := Vector2(u0, v1)
-	var br := Vector2(u1, v1)
-	var tr := Vector2(u1, v0)
-	if face_idx != 0:
-		# Side / end / bottom — no rotation needed. The mesher's default
-		# UV ordering matches the corners.
-		# Standard "side" UV ordering used by _emit_slab_geometry:
-		#   uv[0] = (u0, v1)  bottom-left
-		#   uv[1] = (u0, v0)  top-left
-		#   uv[2] = (u1, v0)  top-right
-		#   uv[3] = (u1, v1)  bottom-right
-		return [bl, tl, tr, br]
-	# Top face — rotate UVs based on facing direction. Vanilla
-	# bed_head_top / bed_foot_top textures place the END art (pillow on
-	# head, far-strip on foot) at the LOW-V (top-of-image) edge. The
-	# rotation table below maps the +facing direction of the head cell
-	# (= where the pillow should appear in world space) to that LOW-V
-	# edge so the pillow stays at the head end as the bed yaws.
-	# Top-face vertex order (from face_geom[0]): c010, c011, c111, c110
-	#   = (-X, -Z), (-X, +Z), (+X, +Z), (+X, -Z)
-	# For facing 0 (head at +Z), the head-end corners are c011/c111 (+Z)
-	# → they get LOW V (the pillow art).
-	var top_uvs: Array
-	match facing:
-		0:  # head at +Z (south) — pillow on +Z edge → +Z corners = low V
-			top_uvs = [
-				Vector2(u0, v1),  # (-X, -Z) foot-end corner
-				Vector2(u0, v0),  # (-X, +Z) head/pillow corner
-				Vector2(u1, v0),  # (+X, +Z) head/pillow corner
-				Vector2(u1, v1),  # (+X, -Z) foot-end corner
-			]
-		1:  # head at -X (west) — pillow on -X edge → -X corners = low V
-			top_uvs = [
-				Vector2(u0, v0),  # (-X, -Z) head/pillow
-				Vector2(u1, v0),  # (-X, +Z) head/pillow
-				Vector2(u1, v1),  # (+X, +Z) foot-end
-				Vector2(u0, v1),  # (+X, -Z) foot-end
-			]
-		2:  # head at -Z (north) — pillow on -Z edge → -Z corners = low V
-			top_uvs = [
-				Vector2(u1, v0),  # (-X, -Z) head/pillow
-				Vector2(u1, v1),  # (-X, +Z) foot-end
-				Vector2(u0, v1),  # (+X, +Z) foot-end
-				Vector2(u0, v0),  # (+X, -Z) head/pillow
-			]
-		_:  # facing 3 — head at +X (east) → +X corners = low V
-			top_uvs = [
-				Vector2(u1, v1),  # (-X, -Z) foot-end
-				Vector2(u0, v1),  # (-X, +Z) foot-end
-				Vector2(u0, v0),  # (+X, +Z) head/pillow
-				Vector2(u1, v0),  # (+X, -Z) head/pillow
-			]
-	# `_is_head` reserved for future per-half top-UV tweaks (e.g. if the
-	# head and foot top textures need different V flips). Currently both
-	# halves use the same facing-driven rotation above.
-	return top_uvs
+	if is_bottom:
+		# Planks tile — pick corners by world XZ position. No bed-aware
+		# orientation needed here.
+		var bu: float = u1 if vert.x > (mn.x + mx.x) * 0.5 else u0
+		var bv: float = v1 if vert.z > (mn.z + mx.z) * 0.5 else v0
+		return Vector2(bu, bv)
+	# Is this vertex on the +head_dir end of the cell? Sign-aware
+	# threshold against the cell center along the head axis.
+	var head_axis_is_x: bool = head_dir.x != 0
+	var along_at_high: bool
+	if head_axis_is_x:
+		along_at_high = (
+			(vert.x > (mn.x + mx.x) * 0.5) if head_dir.x > 0 else (vert.x < (mn.x + mx.x) * 0.5)
+		)
+	else:
+		along_at_high = (
+			(vert.z > (mn.z + mx.z) * 0.5) if head_dir.z > 0 else (vert.z < (mn.z + mx.z) * 0.5)
+		)
+	# Is this vertex on the +width side? Width axis is perpendicular to
+	# head axis. Stable convention: +X if bed is along Z, +Z if along X.
+	var width_at_high: bool
+	if head_axis_is_x:
+		width_at_high = vert.z > (mn.z + mx.z) * 0.5
+	else:
+		width_at_high = vert.x > (mn.x + mx.x) * 0.5
+	if is_top:
+		var tu: float = u1 if along_at_high else u0
+		var tv: float = v1 if width_at_high else v0
+		return Vector2(tu, tv)
+	# Side / end face. V clamped to bed-art region: top vertex (Y high)
+	# maps to v_bed_top (= v0 + 7/16·dv); bottom vertex maps to v1.
+	var v_bed_top: float = v0 + (7.0 / 16.0) * (v1 - v0)
+	var v_out: float = v_bed_top if vert.y > (mn.y + mx.y) * 0.5 else v1
+	# Distinguish SIDE (perp to bed length, normal axis ≠ head axis)
+	# from END (parallel to bed length, normal axis = head axis).
+	var face_normal_is_x: bool = face_idx == 2 or face_idx == 3
+	var u_out: float
+	if face_normal_is_x == head_axis_is_x:
+		# END face — U across bed width.
+		u_out = u1 if width_at_high else u0
+	else:
+		# SIDE face — U along bed length.
+		u_out = u1 if along_at_high else u0
+	return Vector2(u_out, v_out)

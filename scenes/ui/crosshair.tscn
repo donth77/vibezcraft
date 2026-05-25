@@ -17,6 +17,7 @@
 [ext_resource type="Script" path="res://scripts/ui/debug_mob_spawner.gd" id="19_mob_spawner"]
 [ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
 [ext_resource type="Script" path="res://scripts/ui/pumpkin_overlay.gd" id="16_pumpkin"]
+[ext_resource type="Script" path="res://scripts/ui/chat_hud.gd" id="21_chat"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/pumpkinblur.png" id="17_pumpkin_tex"]
 [ext_resource type="Texture2D" path="res://assets/textures/gui/icons.png" id="13_icons"]
 [ext_resource type="Shader" path="res://shaders/crosshair.gdshader" id="14_xhair_sh"]
@@ -93,6 +94,23 @@ texture = ExtResource("17_pumpkin_tex")
 script = ExtResource("16_pumpkin")
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
+
+; Vanilla GuiNewChat layout — bottom-left, above the hotbar/hp area.
+; Anchored to the bottom-left corner; the script draws lines stacked
+; upward from the bottom of its rect via negative Y in _draw().
+; offset_bottom = -180 puts the chat-line baseline above the hp + armor
+; bars (which sit at -136 and -176 from the screen bottom).
+[node name="ChatHud" type="Control" parent="."]
+anchor_left = 0.0
+anchor_right = 0.0
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 2.0
+offset_right = 2.0
+offset_top = -180.0
+offset_bottom = -180.0
+mouse_filter = 2
+script = ExtResource("21_chat")
 
 [node name="HpBar" type="Control" parent="."]
 anchor_left = 0.5

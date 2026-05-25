@@ -42,6 +42,11 @@ const _MOB_BASE_SCRIPT := preload("res://scripts/entities/mob_base.gd")
 # spawner).
 const _ARROW_SCRIPT := preload("res://scripts/entities/arrow.gd")
 const _PAINTING_SCRIPT := preload("res://scripts/entities/painting.gd")
+# GUT loads test scripts before class_name registers the global ChatHud
+# identifier, so bare `ChatHud.push(...)` fails to parse in tests. Same
+# fix as the EntityLighting preload in boat.gd / minecart.gd — call the
+# static through the preloaded GDScript.
+const _CHAT_HUD: GDScript = preload("res://scripts/ui/chat_hud.gd")
 
 var _last_place_ms: int = 0
 # Bow charge state. `_bow_charging` flips true when interact_place is
@@ -2450,9 +2455,12 @@ func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
 		return
 	var tick: int = WorldTime.current_tick()
 	# Vanilla sleep window — between sunset and pre-dawn. Outside this
-	# range, the click is a no-op (matches vanilla's "you can only sleep
-	# at night" rejection minus the chat message).
+	# range, vanilla bd.java::interact returns EnumBedResult.NOT_POSSIBLE_NOW
+	# and EntityHuman pushes the localized "tile.bed.noSleep" message into
+	# chat. We mirror that via ChatHud.push() so the player gets the same
+	# feedback instead of a silent no-op.
 	if tick < 12541 or tick > 23458:
+		_CHAT_HUD.push("You can only sleep at night")
 		return
 	var clicked_id: int = _chunk_manager.get_world_block(clicked_pos)
 	var meta: int = _chunk_manager.get_world_block_meta(clicked_pos)
