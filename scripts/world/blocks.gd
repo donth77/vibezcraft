@@ -862,6 +862,12 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 				return AABB(Vector3(1.0 - t, y0, 0), Vector3(t, dy, 1.0))
 			_:  # +X face panel on -X side of cell (meta 3)
 				return AABB(Vector3(0, y0, 0), Vector3(t, dy, 1.0))
+	if id == RAIL:
+		# Vanilla qe.java::a(World, int, int, int) — rail bounds are the
+		# bottom 1/16 slab of the cell. Selection box matches the visible
+		# rail plane so the player has a reliable target for break /
+		# right-click instead of a thin 0-height surface.
+		return AABB(Vector3(0, 0, 0), Vector3(1.0, 1.0 / 16.0, 1.0))
 	return AABB(Vector3.ZERO, Vector3.ONE)
 
 

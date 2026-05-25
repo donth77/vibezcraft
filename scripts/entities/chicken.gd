@@ -279,39 +279,22 @@ func _update_wing_animation(delta: float) -> void:
 	_wing_pivot_l.rotation.z = f4
 
 
-# Collision shape — DEVIATES from vanilla's 0.3 × 0.4 × 0.3 BB. The
-# visible chicken model has its head at y≈0.85 (`_HEAD_OFFSET` y=0.75
-# + head height), so a 0.4-tall hitbox sitting on the floor leaves the
-# whole upper half of the bird un-clickable: the player's raycast aims
-# at the visible head and misses the collision box entirely. Extend
-# the box to cover the full visible silhouette so sword + arrow hits
-# register wherever the crosshair lands on the bird.
+# Two-shape collision (MobBase helpers). Body capsule = physics-only
+# (drives move_and_slide; symmetric around Y so yaw doesn't shift its
+# world center; rounded edges slide off block corners). Head Area3D =
+# hit-only (covers head + beak + wattle without ever participating in
+# physics depenetration, which was the root cause of chickens getting
+# stuck clipping through grass blocks).
 #
-# Width also bumped slightly past _BB_WIDTH so the wings (which extend
-# past the body) are within the hitbox. Still narrower than the
-# adjacent block so the bird doesn't get stuck in 1-cell gaps.
+# Head box covers:
+#   * Head cube: HEAD_OFFSET (0, 0.75, -0.28125), 4×6×3 px
+#   * Beak: BEAK_OFFSET (0, 0.75, -0.4375), 4×2×2 px, extends to z=-0.5
+#   * Wattle: 2×2×2 px below the beak
+# Box Z range [-0.515, -0.165] catches beak tip and head back face;
+# Y range [0.55, 0.95] catches head top and bottom of beak.
 func _build_collision_shape() -> void:
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	# Union body + head + beak AABBs. Head extends to z=-0.375 and
-	# beak tip reaches z=-0.5 — both forward of the body. Without the
-	# Z extension, arrows aimed at the head/beak silhouette passed
-	# through the empty space in front of the collision box. Same fix
-	# as cow / pig / sheep, with the beak factored in for chicken
-	# (its narrow protrusion would otherwise still be un-hittable).
-	#   Y: 0 .. ≈head_top (~0.95)
-	#   Z: -0.5 (beak tip) .. +0.25 (body half-depth)
-	#      = size 0.75, centered at z = -0.125
-	var hb_width: float = 0.5
-	var hb_height: float = 0.95
-	var z_min: float = -0.5
-	var z_max: float = 0.25
-	var hb_depth: float = z_max - z_min
-	var hb_z_center: float = (z_min + z_max) * 0.5
-	box.size = Vector3(hb_width, hb_height, hb_depth)
-	col.shape = box
-	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
-	add_child(col)
+	_build_body_capsule(0.25, 0.95)
+	_build_head_hit_area(Vector3(0.3, 0.4, 0.35), Vector3(0.0, 0.75, -0.34))
 
 
 func _build_model() -> void:

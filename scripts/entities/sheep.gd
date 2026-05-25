@@ -245,29 +245,20 @@ func _advance_head_pitch(delta: float) -> void:
 	_head_pivot.rotation.x = _head_pitch_current
 
 
-# Collision shape — DEVIATES from vanilla BB to also cover the head.
-# Same rationale as the chicken / cow / pig collision widening:
-# vanilla's body+leg-only hitbox left the head above the box, so
-# arrows + melee aimed at the head missed. Head top ≈ HEAD_OFFSET.y
-# (1.1875) + head_height/2 (0.1875) = 1.375 m.
+# Two-shape collision (MobBase helpers). Body capsule = physics-only
+# (centered on origin, symmetric around Y → no rotation-induced
+# stuck-clipping). Head Area3D = hit-only, sized to cover the head so
+# arrow + sword hits land on the protruding silhouette.
+#
+# Body capsule: radius = _BODY_SIZE.x / 2 = 0.25, height = body + legs
+# = 0.375 + 0.75 = 1.125. Use 1.375 to keep the wool tuft at the top
+# inside the body's hit volume too.
+#
+# Head box covers HEAD_OFFSET (0, 1.1875, -0.625) for a 6×6×8 px head
+# (0.375 × 0.375 × 0.5). Slightly larger size for edge-hit margin.
 func _build_collision_shape() -> void:
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	# Union body + head AABBs in both Y and Z. Head at HEAD_OFFSET
-	# (0, 1.1875, -0.625), head 8 px depth = 0.5 m:
-	#   Y: 0 .. 1.1875 + 0.1875 = 1.375
-	#   Z: -0.875 .. +0.5 (size 1.375, centered at -0.1875)
-	# Same fix as cow / pig — without the forward Z extent, arrows
-	# from the front hit the visible head but missed the box.
-	var hb_height: float = 1.375
-	var z_min: float = -0.875
-	var z_max: float = _BODY_SIZE.z * 0.5
-	var hb_depth: float = z_max - z_min
-	var hb_z_center: float = (z_min + z_max) * 0.5
-	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
-	col.shape = box
-	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
-	add_child(col)
+	_build_body_capsule(_BODY_SIZE.x * 0.5, 1.375)
+	_build_head_hit_area(Vector3(0.4, 0.4, 0.55), _HEAD_OFFSET)
 
 
 # Builds the base sheep body (always visible) + the wool overlay

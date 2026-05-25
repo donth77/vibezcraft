@@ -188,12 +188,20 @@ var _fire_sprites: Array[Sprite3D] = []
 var _fire_anim_time: float = 0.0
 var _fire_visible: bool = false
 
+# Cached ChunkManager + last-applied brightness so we only push a new
+# albedo_color when it actually changes. World-light reads are dict
+# lookups + small math; the cost is in the material rebuild + GPU
+# uniform write that follows, which we skip on identical values.
+var _chunk_manager_ref: Node = null
+var _last_brightness: float = -1.0
+
 
 func _ready() -> void:
 	_skin_mat = _build_skin_material()
 	_build_parts()
 	_build_fire_billboards()
 	set_process(true)
+	_chunk_manager_ref = get_tree().root.get_node_or_null("Main/ChunkManager")
 
 
 func update_walk_animation(speed: float, delta: float, skip_right_arm: bool = false) -> void:
@@ -368,6 +376,7 @@ func set_on_fire(on: bool) -> void:
 
 
 func _process(delta: float) -> void:
+	_update_world_brightness()
 	if not _fire_visible or _fire_pivot == null or _fire_sprites.is_empty():
 		return
 	# Rotate the pivot around Y so the stack always faces the active
@@ -426,10 +435,19 @@ func _build_skin_material() -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_texture = tex
 	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_PER_VERTEX
+	# UNSHADED so the model renders at the same brightness as surrounding
+	# terrain (chunk.gdshader is also unshaded — both bake their lighting
+	# directly). Vanilla EntityRenderer.setBrightness sampled the world's
+	# cell light at the entity position and multiplied it into the vertex
+	# color; PER_VERTEX shading made the TP body dim to ambient (0.45) on
+	# all shadow-side faces and to near-black at night, while the world
+	# kept its full LUT brightness — read as "player is in a different
+	# light environment than the world". `_process` below now samples
+	# the chunk light at the model's position each frame and applies the
+	# vanilla brightness LUT to albedo_color, so the model matches.
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
 	mat.cull_mode = StandardMaterial3D.CULL_BACK
 	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
-	mat.roughness = 0.95
 	return mat
 
 
@@ -514,7 +532,11 @@ func _armor_material_for(item_id: int) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_texture = tex
 	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_PER_VERTEX
+	# Match the skin material — UNSHADED + world-light modulation in
+	# _process below, otherwise the armor stays at scene-ambient
+	# brightness while the body underneath gets brightened to match the
+	# terrain, producing a "lit body in dark armor" mismatch.
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
 	mat.cull_mode = StandardMaterial3D.CULL_BACK
 	# Alpha-cutoff so transparent pixels in the armor texture show the
 	# body skin behind them (forearms, face, etc. aren't armored).
@@ -693,3 +715,41 @@ func _build_textured_box(
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	return mi
+
+
+# Vanilla EntityRenderer.setBrightness — entity colors are texture ×
+# world.getBrightnessForRender(cell). We mirror that by sampling the
+# chunk light at the model's center cell each frame and pushing it into
+# the (UNSHADED) skin + armor materials as albedo_color. Same brightness
+# LUT chunk.gdshader uses, so the model matches the surrounding terrain
+# brightness (bright in daylight, dim in caves, dark at night).
+func _update_world_brightness() -> void:
+	if _chunk_manager_ref == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + 1.0)),  # sample at body-center, not feet
+		int(floor(global_position.z))
+	)
+	# get_world_sky_light returns 15 for OOB / unloaded chunks; same for
+	# block_light returning 0. Treat both as the daylight default.
+	var sky: int = 15
+	var block: int = 0
+	if _chunk_manager_ref.has_method("get_world_sky_light"):
+		sky = _chunk_manager_ref.get_world_sky_light(cell)
+	if _chunk_manager_ref.has_method("get_world_block_light"):
+		block = _chunk_manager_ref.get_world_block_light(cell)
+	var sky_factor: float = WorldTime.sky_factor() if WorldTime != null else 1.0
+	var light: float = maxf(float(sky) / 15.0 * sky_factor, float(block) / 15.0)
+	# Vanilla brightness LUT (oz.java:22-28) — same constants the chunk
+	# shader uses so terrain + entity brightness curves match.
+	var f3: float = 1.0 - light
+	var lit: float = (1.0 - f3) / (f3 * 3.0 + 1.0) * 0.95 + 0.05
+	if absf(lit - _last_brightness) < 0.005:
+		return  # imperceptible drift, skip the material write
+	_last_brightness = lit
+	var tint := Color(lit, lit, lit, 1.0)
+	if _skin_mat != null:
+		_skin_mat.albedo_color = tint
+	for mat: StandardMaterial3D in _armor_mat_cache.values():
+		mat.albedo_color = tint

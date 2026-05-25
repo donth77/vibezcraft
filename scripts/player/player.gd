@@ -257,6 +257,13 @@ var _fall_immune_next_landing: bool = true
 # chunks haven't loaded yet still gets corrected once they're in.
 # 30 ticks ≈ 0.5 s — well within the chunk-streaming window.
 var _spawn_check_ticks_remaining: int = 90
+# Defensive "unstick" pass — runs on the first physics tick of a world
+# load after PlayerSave.load_player has set the saved position. If the
+# capsule is embedded inside one or more solid blocks (e.g. saved
+# mid-fall onto an emergency platform with feet inside the grass), walks
+# Y up by 1 m at a time until the capsule's foot/center/eye cells are
+# all clear. Consumed once at first tick.
+var _settle_pending: bool = true
 # Counts down each physics tick after a successful damage hit. While > 0,
 # `take_damage` returns early — vanilla's hurtResistantTime behavior so
 # the player can't be ground to death by mob ticks landing on the same
@@ -1381,13 +1388,26 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# First-tick safety: if the saved position has the capsule embedded
+	# inside one or more solid blocks (e.g. mid-fall onto an emergency
+	# platform), push it up until clear. Runs once. Skipped when chunks
+	# around the player aren't loaded yet so we don't false-positive on
+	# OOB reads — _is_in_water + the spawn-relocate logic handle that
+	# case separately.
+	if _settle_pending and not Game.is_loading:
+		_settle_pending = false
+		_settle_out_of_solid_block()
 	# Mount short-circuit — when riding a mob, the mob's _process drives
 	# our global_position to the saddle and the mob reads WASD input
 	# directly. Skip everything else (gravity, water, jump, move_and_slide,
-	# fall tracking). Sneak key dismounts.
+	# fall tracking). The "dismount" action (default Shift) leaves the
+	# mount; settings menu allows rebinding it independently from "sneak"
+	# so a player who wants different keys for crouch and dismount can
+	# split them. Boats + minecarts also accept right-click to dismount
+	# (handled in interaction.gd::_try_place).
 	if _mounted_to != null:
 		velocity = Vector3.ZERO
-		if Input.is_action_just_pressed("sneak"):
+		if Input.is_action_just_pressed("dismount"):
 			if _mounted_to.has_method("dismount"):
 				_mounted_to.dismount()
 		return
@@ -2101,6 +2121,37 @@ func _is_in_water() -> bool:
 	return false
 
 
+# Capsule extends ±0.9 m around the Node3D origin (per scenes/player/
+# player.tscn). Walk Y up by 1 m at a time until none of the cells
+# the capsule overlaps (feet, center, eye) contain a solid block. Caps
+# the walk at 8 m to avoid teleporting the player to the moon if the
+# block lookup is broken. No-op when chunks aren't loaded (OOB returns
+# AIR which is "clear", so the loop exits immediately).
+func _settle_out_of_solid_block() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	var sample_dys: Array = [-0.85, 0.0, 0.7]
+	for _step in range(8):
+		var stuck := false
+		for dy: float in sample_dys:
+			var y: int = int(floor(global_position.y + dy))
+			var b: int = cm.get_world_block(Vector3i(x, y, z))
+			# Only solid blocks count — water, plants, fluids, etc. don't
+			# block the capsule and ARE valid cells for the player.
+			if b != Blocks.AIR and Blocks.is_opaque(b):
+				stuck = true
+				break
+		if not stuck:
+			return
+		global_position.y += 1.0
+	push_warning(
+		"[Player] _settle_out_of_solid_block: gave up after 8 m at y=%.1f" % global_position.y
+	)
+
+
 # True when the player's eye cell is not water — their head has cleared
 # the surface. Used to gate the auto-step (vanilla's 0.6m step-up check
 # only passes when you've already swum high enough to breach, otherwise
@@ -2379,7 +2430,15 @@ func _create_emergency_spawn_platform() -> void:
 			var above: int = cm.get_world_block(Vector3i(gx, platform_y + 1, gz))
 			if Blocks.is_water(above):
 				cm.set_world_block(Vector3i(gx, platform_y + 1, gz), Blocks.AIR)
-	global_position = Vector3(float(px) + 0.5, float(platform_y) + 2.0, float(pz) + 0.5)
+	# Capsule extends ±0.9 m around the Node3D origin. If we set y =
+	# platform_y + 2.0 (= 66), origin=66 → feet=65.1, which sits just
+	# above the grass top at y=65 — feet only ~0.1 m clear. A saved
+	# mid-fall snapshot at y=65.4 (center=65.4, feet=64.5) put the
+	# capsule INSIDE the grass block at y=64, and move_and_slide
+	# couldn't push them out. Bumping the spawn altitude to +3.0
+	# (origin=67, feet=66.1, 1.1 m clear) gives gravity time to settle
+	# the capsule onto the grass without the saved-mid-fall edge case.
+	global_position = Vector3(float(px) + 0.5, float(platform_y) + 3.0, float(pz) + 0.5)
 	velocity = Vector3.ZERO
 	_fall_immune_next_landing = true
 

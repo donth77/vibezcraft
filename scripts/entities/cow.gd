@@ -199,29 +199,22 @@ func _process(delta: float) -> void:
 	_roll_idle_sfx(delta)
 
 
-# Collision shape — DEVIATES from vanilla BB (body+legs only) by also
-# covering the head. Without this the head sits above the hitbox and
-# arrows / melee aimed at the head pass straight through. Same fix
-# as the chicken collision widening. Width stays at body.x so cows
-# don't get stuck in 1-block gaps.
+# Two-shape collision (MobBase helpers). Body capsule = physics-only
+# (centered on origin, symmetric around Y → no rotation-induced
+# stuck-clipping). Head Area3D = hit-only, sized to cover head + both
+# horns so arrow + sword hits land on the protruding silhouette.
+#
+# Body capsule: radius = _BODY_SIZE.x / 2 = 0.375, height covers body +
+# legs (~1.375). Use 1.5 for a small vertical margin.
+#
+# Head box covers HEAD_OFFSET (0, 1.25, -0.6875) plus horn extent:
+# horns at Y=1.46875 ± 0.09375 (top = 1.5625), so we lift the box
+# center to 1.28 and use height 0.65 → Y range [0.955, 1.605]. Width
+# 0.65 covers horn X-extent (±0.3125). Depth 0.5 covers head + horn
+# Z-extent (-0.9375 to -0.4375).
 func _build_collision_shape() -> void:
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	# Body+legs alone leave the head (which sits AT y=1.25 AND sticks
-	# FORWARD to z=-0.875) outside the hitbox — arrows from the front
-	# passed through. Union the body and head AABBs along both axes.
-	#   Y: 0 .. HEAD_OFFSET.y + head_height/2 = 0 .. 1.5
-	#   Z: -|HEAD_OFFSET.z| - head_depth/2 .. +BODY.z/2
-	#      = -0.875 .. +0.5625  (z size 1.4375, centered at -0.15625)
-	var hb_height: float = 1.5
-	var z_min: float = -0.875
-	var z_max: float = _BODY_SIZE.z * 0.5
-	var hb_depth: float = z_max - z_min
-	var hb_z_center: float = (z_min + z_max) * 0.5
-	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
-	col.shape = box
-	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
-	add_child(col)
+	_build_body_capsule(_BODY_SIZE.x * 0.5, 1.5)
+	_build_head_hit_area(Vector3(0.65, 0.65, 0.5), Vector3(0.0, 1.28, -0.6875))
 
 
 # Vanilla `el.java` model build — body + head + 4 legs + 2 horns + udder.

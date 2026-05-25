@@ -2916,8 +2916,9 @@ static func _emit_rail_geometry(
 	var is_turn: bool = meta >= 6 and meta <= 9
 	var tex_name: String = "rail_turn" if is_turn else "rail"
 	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
-	# Top of the supporting block + 1/16 lift so the rail doesn't z-fight
-	# the block's top face.
+	# Top of the supporting block + small lift so the rail doesn't z-
+	# fight the block's top face. Vanilla qe.java lifts by 1/16; we
+	# use 1/16 too (matches the visible rail-on-block look in screenshots).
 	var rail_y: float = float(y) + 1.0 / 16.0
 	var x0: float = float(x)
 	var z0: float = float(z)
@@ -2929,35 +2930,85 @@ static func _emit_rail_geometry(
 	var blocklight: float = float(chunk.get_block_light(x, y, z)) / 15.0
 	var light_color := Color(skylight, blocklight, 0.0, 1.0)
 	# 4 corners of the rail quad. CCW from above (+Y looking down).
-	var v_nw := Vector3(x0, rail_y, z0)  # -X, -Z
-	var v_ne := Vector3(x1, rail_y, z0)  # +X, -Z
-	var v_se := Vector3(x1, rail_y, z1)  # +X, +Z
-	var v_sw := Vector3(x0, rail_y, z1)  # -X, +Z
-	# UVs — orient the rail along its meta direction. Straight rails:
-	#   meta 0 (N-S): planks run along Z → texture U axis aligns with X
-	#   meta 1 (E-W): planks run along X → texture U axis aligns with Z
-	# Ascending and curve variants reuse the corresponding base UV.
+	# Ascending metas (2-5) tilt the plane so one edge is at rail_y + 1
+	# (cell up) and the opposite edge stays at rail_y. The plane reads
+	# as an actual ramp instead of a flat tile — matches vanilla
+	# qe.java rendering.
+	var nw_y: float = rail_y
+	var ne_y: float = rail_y
+	var se_y: float = rail_y
+	var sw_y: float = rail_y
+	match meta:
+		2:  # ascending east — +X edge raised
+			ne_y = rail_y + 1.0
+			se_y = rail_y + 1.0
+		3:  # ascending west — -X edge raised
+			nw_y = rail_y + 1.0
+			sw_y = rail_y + 1.0
+		4:  # ascending north — -Z edge raised
+			nw_y = rail_y + 1.0
+			ne_y = rail_y + 1.0
+		5:  # ascending south — +Z edge raised
+			sw_y = rail_y + 1.0
+			se_y = rail_y + 1.0
+	var v_nw := Vector3(x0, nw_y, z0)  # -X, -Z
+	var v_ne := Vector3(x1, ne_y, z0)  # +X, -Z
+	var v_se := Vector3(x1, se_y, z1)  # +X, +Z
+	var v_sw := Vector3(x0, sw_y, z1)  # -X, +Z
+	# UVs — orient the rail texture so the visible bend / planks line up
+	# with the meta direction. 4 rotations covered:
+	#   straight N-S (meta 0): base orientation (texture U along X)
+	#   straight E-W (meta 1) + X-ascending (2, 3): 90° CW
+	#   curve meta 6 (S+E): base
+	#   curve meta 7 (S+W): 90° CW
+	#   curve meta 8 (N+W): 180°
+	#   curve meta 9 (N+E): 270° CW (90° CCW)
 	var u0: float = rect.position.x
 	var v0: float = rect.position.y
 	var u1: float = rect.position.x + rect.size.x
 	var v1: float = rect.position.y + rect.size.y
-	var rotate_uv: bool = meta == 1 or meta == 3 or meta == 2
-	var uv_nw: Vector2
-	var uv_ne: Vector2
-	var uv_se: Vector2
-	var uv_sw: Vector2
-	if rotate_uv:
-		# E-W or X-ascending — sleepers perpendicular to X axis.
-		uv_nw = Vector2(u0, v0)
-		uv_ne = Vector2(u0, v1)
-		uv_se = Vector2(u1, v1)
-		uv_sw = Vector2(u1, v0)
-	else:
-		# Default (N-S, Z-ascending, curves).
-		uv_nw = Vector2(u0, v0)
-		uv_ne = Vector2(u1, v0)
-		uv_se = Vector2(u1, v1)
-		uv_sw = Vector2(u0, v1)
+	# Each meta → number of 90° CW rotations to apply to the UVs (0..3).
+	var rot: int = 0
+	match meta:
+		0:
+			rot = 0  # N-S straight
+		1, 2, 3:
+			rot = 1  # E-W straight + X-ascending
+		4, 5:
+			rot = 0  # Z-ascending — Z axis already matches the texture
+		6:
+			rot = 0  # S+E curve (wraps SE corner)
+		7:
+			rot = 1  # S+W curve (wraps SW corner)
+		8:
+			rot = 2  # N+W curve (wraps NW corner)
+		9:
+			rot = 3  # N+E curve (wraps NE corner)
+	# Apply CW rotation to the UV corners. Each step rotates the
+	# texture 90° clockwise as seen by the player looking down.
+	var corners: Array = [
+		Vector2(u0, v0),  # nw
+		Vector2(u1, v0),  # ne
+		Vector2(u1, v1),  # se
+		Vector2(u0, v1),  # sw
+	]
+	# Rotate by `rot` positions (each = 90° CW). Direction matters —
+	# shifting the corners array FORWARD (remove-first-append-last)
+	# rotates the visible texture CCW. Shifting BACKWARD (pop-last-
+	# insert-first) rotates CW, which is what the per-meta rot values
+	# assume.
+	for _i in range(rot):
+		var last: Vector2 = corners[corners.size() - 1]
+		corners.remove_at(corners.size() - 1)
+		corners.insert(0, last)
+	var uv_nw: Vector2 = corners[0]
+	var uv_ne: Vector2 = corners[1]
+	var uv_se: Vector2 = corners[2]
+	var uv_sw: Vector2 = corners[3]
+	# Top face (visible from above). Index order [0, 2, 1, 0, 3, 2]
+	# gives triangles (nw, se, ne) and (nw, sw, se), both with cross-
+	# product winding-normal = +Y, which means cull_back keeps them
+	# visible when the camera looks down at the rail.
 	var base: int = verts.size()
 	verts.append(v_nw)
 	verts.append(v_ne)
@@ -2975,15 +3026,41 @@ static func _emit_rail_geometry(
 	colors.append(light_color)
 	colors.append(light_color)
 	colors.append(light_color)
-	# CCW from outside (+Y): order so cull_back keeps the up-face visible.
-	# Reversed-index pattern used elsewhere in the mesher.
 	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
-	# Selection raycast — rails go on the plant_faces collision layer so
-	# the player's targeting raycast hits them for break/highlight but
-	# the player's body (mask layer 1 only) walks straight through.
-	plant_faces.append(v_nw)
-	plant_faces.append(v_se)
-	plant_faces.append(v_ne)
-	plant_faces.append(v_nw)
-	plant_faces.append(v_sw)
-	plant_faces.append(v_se)
+	# Bottom face (visible from below). Reverse winding so cull_back
+	# renders it from a camera looking up at the rail (e.g., from under
+	# a glass roof or while swimming directly below).
+	var base_b: int = verts.size()
+	verts.append(v_nw)
+	verts.append(v_ne)
+	verts.append(v_se)
+	verts.append(v_sw)
+	norms.append(Vector3.DOWN)
+	norms.append(Vector3.DOWN)
+	norms.append(Vector3.DOWN)
+	norms.append(Vector3.DOWN)
+	uvs.append(uv_nw)
+	uvs.append(uv_ne)
+	uvs.append(uv_se)
+	uvs.append(uv_sw)
+	colors.append(light_color)
+	colors.append(light_color)
+	colors.append(light_color)
+	colors.append(light_color)
+	# Reversed order vs the top face → winding normal flips to -Y.
+	indices.append_array(
+		[base_b, base_b + 1, base_b + 2, base_b, base_b + 2, base_b + 3] as PackedInt32Array
+	)
+	# Selection box on plant_faces (layer 2) — player raycast hits it
+	# for break/highlight but player body (mask layer 1) passes through.
+	# Use a thin 1/16-tall box matching the visible rail plane so the
+	# raycast has a proper 3D target instead of an infinitely-thin
+	# quad (which the cursor often misses).
+	var sel_aabb: AABB = Blocks.selection_aabb(Blocks.RAIL, meta)
+	var sel_min := Vector3(
+		float(x) + sel_aabb.position.x,
+		float(y) + sel_aabb.position.y,
+		float(z) + sel_aabb.position.z
+	)
+	var sel_max: Vector3 = sel_min + sel_aabb.size
+	_emit_collision_box(plant_faces, sel_min, sel_max)

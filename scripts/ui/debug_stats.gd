@@ -21,9 +21,10 @@ var _perf_label: Label
 var _copy_button: Button
 var _copied_flash: float = 0.0  # seconds remaining for "Copied!" label
 var _accum: float = 0.0
-# F3 toggles this. Independent of Game.debug_enabled so the panel is
-# available on demand without flipping the broader debug mode (creative,
-# hotbar fill, etc.).
+# F3 toggles this. Gated behind Game.debug_enabled — the stats panel is
+# a dev tool and shouldn't be reachable from a normal survival session.
+# When debug mode is turned off, _process force-hides the panel so the
+# user doesn't end up with a stale FPS overlay after exiting debug.
 var _panel_shown: bool = false
 # Cached cave-scout output. Empty until the user asks for a refresh.
 var _scout_cache: Dictionary = {}
@@ -142,6 +143,12 @@ func _on_copy_pressed() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Every action below is dev-tool-only — gate them all behind
+	# Game.debug_enabled so survival players can't accidentally summon
+	# the FPS panel by hitting F3 or kick the chunk shader into a
+	# heatmap mode by hitting F8.
+	if not Game.debug_enabled:
+		return
 	if event.is_action_pressed("debug_stats_toggle"):
 		_panel_shown = not _panel_shown
 		get_viewport().set_input_as_handled()
@@ -165,7 +172,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		var label: String = ["normal", "sky_light", "block_light", "combined"][_light_view]
 		print("[debug] chunk light heatmap = %d (%s)" % [_light_view, label])
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("debug_biome_scan") and Game.debug_enabled:
+	elif event.is_action_pressed("debug_biome_scan"):
 		_dump_biome_scan()
 		get_viewport().set_input_as_handled()
 
@@ -177,6 +184,12 @@ func _on_scout_pressed() -> void:
 
 
 func _process(delta: float) -> void:
+	# Auto-hide if debug mode was turned off while the panel was open
+	# (e.g. backtick pressed). Without this the panel would linger as
+	# a stale overlay until the next F3 press, which can't fire anyway
+	# because the input handler is now debug-gated.
+	if not Game.debug_enabled and _panel_shown:
+		_panel_shown = false
 	visible = _panel_shown
 	if not visible:
 		return

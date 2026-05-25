@@ -66,6 +66,9 @@ const _SURFACE_OFFSET: float = 1.0 / 16.0
 # real object from any angle (vanilla draws a wooden frame; we
 # approximate with a single solid color).
 const _THICKNESS: float = 1.0 / 16.0
+# Wall-support poll cadence. The support cell never changes in less
+# than 0.5 s of wall time, so polling more often is wasted work.
+const _WALL_CHECK_INTERVAL_SEC: float = 0.5
 
 # AtlasTexture's `region` is honored by 2D samplers but IGNORED by 3D
 # StandardMaterial3D — using one made every painting show the FULL
@@ -93,7 +96,6 @@ static var _variant_particle_materials: Dictionary = {}
 @export var center_pos: Vector3 = Vector3.ZERO
 
 var _chunk_manager: Node = null
-var _wall_check_accum: float = 0.0
 
 
 # Called by the spawner before adding the painting to the tree.
@@ -112,34 +114,57 @@ func _ready() -> void:
 	# moves on layer 1 only, so they walk THROUGH the painting (vanilla
 	# `EntityHanging.isCollidable() = false` — paintings never block
 	# entities). The cursor raycast still hits because interaction.gd
-	# uses mask 0b11 for both block-cube + selection-only colliders.
+	# uses mask 0b111 (cubes + selection-only + mob hit areas).
 	collision_layer = 2
 	collision_mask = 0
 	# Center-pos is set by the spawner via global_position; cache it
 	# so save/load can persist exactly the same spawn coords.
 	center_pos = global_position
+	# Kick off the recurring wall-support poll. Replaces a per-frame
+	# _process that accumulated delta until 0.5 s — at N paintings × 60
+	# fps that's N×60 cheap calls/sec just to sit and wait. The timer
+	# chain self-terminates when the painting is freed: the next
+	# scheduled callback finds `is_inside_tree() == false` and returns
+	# without rescheduling.
+	_schedule_wall_check()
 
 
-func _process(delta: float) -> void:
-	# Cheap wall-support poll. Every 0.5 s, check the support cell —
-	# if it became AIR while the chunk is LOADED, drop the painting.
-	# Skipped when the support chunk is unloaded: `get_world_block`
-	# returns AIR for any unloaded cell, so without this gate every
-	# painting would self-destruct the moment the player walked far
-	# enough away to unload its chunk.
-	_wall_check_accum += delta
-	if _wall_check_accum < 0.5:
+# One-shot SceneTreeTimer + signal connection; _wall_check re-arms it
+# at the end of every successful tick. Cheap (Godot's timer is a tiny
+# RefCounted) and avoids the per-frame churn of a _process accumulator.
+func _schedule_wall_check() -> void:
+	var tree: SceneTree = get_tree()
+	if tree == null:
 		return
-	_wall_check_accum = 0.0
+	tree.create_timer(_WALL_CHECK_INTERVAL_SEC).timeout.connect(_wall_check)
+
+
+# Poll the support cell. If the chunk is loaded AND the support block
+# is AIR, break the painting (drops item, plays SFX, queue_free's).
+# Otherwise reschedule the next tick.
+func _wall_check() -> void:
+	# Painting may have been freed between scheduling and firing —
+	# SceneTreeTimer.timeout still emits but we shouldn't touch a
+	# freed node. is_inside_tree() returns false after queue_free.
+	if not is_inside_tree():
+		return
 	if _chunk_manager == null:
+		_schedule_wall_check()
 		return
 	var chunk_x: int = int(floor(float(support_pos.x) / float(Chunk.SIZE_X)))
 	var chunk_z: int = int(floor(float(support_pos.z) / float(Chunk.SIZE_Z)))
+	# Support chunk unloaded — `get_world_block` returns AIR for any
+	# unloaded cell, so without this gate every painting would self-
+	# destruct the moment the player walked far enough away.
 	if _chunk_manager.get_chunk_at_coord(Vector2i(chunk_x, chunk_z)) == null:
+		_schedule_wall_check()
 		return
 	var id: int = _chunk_manager.get_world_block(support_pos)
 	if id == Blocks.AIR:
 		break_painting()
+		# Don't reschedule — break_painting queue_frees us.
+		return
+	_schedule_wall_check()
 
 
 # Build the visible mesh — a single rectangle facing +local Z with

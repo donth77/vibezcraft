@@ -530,29 +530,20 @@ func _process(delta: float) -> void:
 		_update_rider_transform()
 
 
-# Single collision shape sized to the body — vanilla uses a slightly
-# narrower box than the visual model to keep mobs from getting stuck in
-# 1-block-wide gaps. Width matches body, height covers body+legs.
+# Two-shape collision (MobBase helpers). Body capsule = physics-only
+# (centered on origin, symmetric around Y → no rotation-induced
+# stuck-clipping). Head Area3D = hit-only, sticks forward over the
+# snout so arrow + sword hits land on the visually-protruding head.
+#
+# Body capsule: radius = _BODY_SIZE.x / 2 = 0.3125, height covers
+# body + legs (~0.875). Use 1.0 for a small vertical margin.
+#
+# Head box covers HEAD_OFFSET (0, 0.75, -0.625), an 8×8×8 px head cube
+# (0.5 m). Box at the same position with a slight margin so edge
+# hits register cleanly.
 func _build_collision_shape() -> void:
-	var col := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	# Union body + head AABBs in both Y and Z. Head sits at
-	# HEAD_OFFSET (0, 0.75, -0.625) with head_size 8 px = 0.5 m, so:
-	#   Y: 0 .. 0.75 + 0.25 = 1.0
-	#   Z: min(-BODY.z/2, HEAD_OFFSET.z - head_depth/2)
-	#      = min(-0.5, -0.875) = -0.875 .. +BODY.z/2 (+0.5)
-	#      = 1.375 size, centered at -0.1875
-	# Same approach as cow / sheep — extends forward so arrows from
-	# the front hit the snout, not pass through it.
-	var hb_height: float = 1.0
-	var z_min: float = -0.875
-	var z_max: float = _BODY_SIZE.z * 0.5
-	var hb_depth: float = z_max - z_min
-	var hb_z_center: float = (z_min + z_max) * 0.5
-	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
-	col.shape = box
-	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
-	add_child(col)
+	_build_body_capsule(_BODY_SIZE.x * 0.5, 1.0)
+	_build_head_hit_area(Vector3(0.55, 0.55, 0.55), _HEAD_OFFSET)
 
 
 # Vanilla pig model — head + body + 4 legs, each a UV-mapped cube

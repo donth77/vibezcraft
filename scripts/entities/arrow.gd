@@ -242,23 +242,35 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 	if space == null:
 		return false
 	var query := PhysicsRayQueryParameters3D.create(from, to)
-	query.collide_with_areas = false
+	# Layer 1 = mob bodies (CharacterBody3D capsules) + solid blocks.
+	# Layer 3 = mob hit-only Area3Ds (head/snout/horn boxes, see
+	# MobBase._build_head_hit_area). Skip layer 2 — that's selection-
+	# only shapes (paintings, plants, boats) which arrows shouldn't
+	# treat as mob hits. Same parent-walk filter below covers both
+	# body and area cases since head_area's parent IS the mob.
+	query.collide_with_areas = true
 	query.collide_with_bodies = true
+	query.collision_mask = 0b101
 	if _shooter != null and _shooter is CollisionObject3D:
 		query.exclude = [(_shooter as CollisionObject3D).get_rid()]
 	var result: Dictionary = space.intersect_ray(query)
 	if result.is_empty():
 		return false
 	var node: Node = result.get("collider") as Node
+	# Capture the exact intersection point on the hit collider's surface.
+	# Passed through to _hit_mob → mob.add_stuck_arrow so the visible
+	# stuck arrow lands AT the actual impact pose (head-shot looks like a
+	# head-shot) instead of an RNG-random spot on the body.
+	var hit_pos: Vector3 = result.get("position", to) as Vector3
 	while node != null:
 		if node is MobBase:
-			_hit_mob(node)
+			_hit_mob(node, hit_pos)
 			return true
 		node = node.get_parent()
 	return false
 
 
-func _hit_mob(mob: Node) -> void:
+func _hit_mob(mob: Node, hit_pos: Vector3) -> void:
 	if not mob.has_method("take_damage"):
 		queue_free()
 		return
@@ -284,7 +296,7 @@ func _hit_mob(mob: Node) -> void:
 	# on a landed hit (mob.take_damage returns true) — bouncing off
 	# invuln-cooldown mobs shouldn't add a stuck arrow.
 	if landed and mob.has_method("add_stuck_arrow"):
-		mob.call("add_stuck_arrow")
+		mob.call("add_stuck_arrow", hit_pos, _velocity.normalized())
 	SFX.play_arrow_hit()
 	queue_free()
 

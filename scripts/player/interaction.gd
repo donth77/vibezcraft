@@ -111,10 +111,14 @@ func _process(delta: float) -> void:
 	if not _world_input_active():
 		# Inventory or other modal UI is up — drop any in-progress mining and
 		# stop highlighting so the player isn't accidentally breaking a block
-		# while clicking around the inventory.
+		# while clicking around the inventory. Also cancel any bow charge:
+		# the player isn't actively pulling anymore (UI took input focus), so
+		# the held-item sprite shouldn't freeze at full draw. Matches vanilla
+		# behavior — opening inventory while drawing a bow cancels the shot.
 		_set_player_mining(false)
 		_reset_mining()
 		_highlight.visible = false
+		_cancel_bow_charge()
 		return
 	var hit := _raycast()
 	_update_highlight(hit)
@@ -1977,33 +1981,120 @@ func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
 	var support: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
 	if not Blocks.is_opaque(support):
 		return false
-	# Auto-orient from neighbor rails. If there's a rail along the Z
-	# axis (±Z neighbor), prefer N-S (meta 0). Else if X neighbor, E-W
-	# (meta 1). Default to the player's facing axis when isolated.
-	var n_id: int = _chunk_manager.get_world_block(place + Vector3i(0, 0, -1))
-	var s_id: int = _chunk_manager.get_world_block(place + Vector3i(0, 0, 1))
-	var e_id: int = _chunk_manager.get_world_block(place + Vector3i(1, 0, 0))
-	var w_id: int = _chunk_manager.get_world_block(place + Vector3i(-1, 0, 0))
-	var has_z_neighbor: bool = n_id == Blocks.RAIL or s_id == Blocks.RAIL
-	var has_x_neighbor: bool = e_id == Blocks.RAIL or w_id == Blocks.RAIL
-	var meta: int = 0
-	if has_z_neighbor and not has_x_neighbor:
-		meta = 0  # N-S straight
-	elif has_x_neighbor and not has_z_neighbor:
-		meta = 1  # E-W straight
-	else:
-		# Pick based on the player's facing direction. If looking mostly
-		# along Z, N-S; else E-W. Player.rotation.y = 0 → facing -Z (N).
-		var yaw: float = _player_yaw()
-		var fx: float = absf(sin(yaw))  # X component magnitude of forward
-		var fz: float = absf(cos(yaw))  # Z component magnitude of forward
-		meta = 1 if fx > fz else 0
+	# Auto-orient meta from neighbor rails (vanilla qe.java::e()).
+	# Considers same-Y horizontal neighbors AND neighbors one Y higher
+	# (for ascending ramps).
+	var meta: int = _compute_rail_meta(place)
 	_chunk_manager.set_world_block_with_meta(place, Blocks.RAIL, meta)
 	SFX.play_place(Blocks.RAIL)
+	# Re-evaluate nearby rails so they update to curves / straights /
+	# ascending matching the new layout. Walks 4 same-Y horizontal
+	# neighbors PLUS 4 upper-Y and 4 lower-Y horizontal neighbors
+	# (12 positions). Vanilla qe.java's neighbor-notify code does the
+	# same. Without the upper/lower checks, a lower-Y rail wouldn't
+	# turn into a ramp when you place a rail one block higher next to it.
+	var reeval_offsets: Array = [
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1),
+		Vector3i(1, 1, 0),
+		Vector3i(-1, 1, 0),
+		Vector3i(0, 1, 1),
+		Vector3i(0, 1, -1),
+		Vector3i(1, -1, 0),
+		Vector3i(-1, -1, 0),
+		Vector3i(0, -1, 1),
+		Vector3i(0, -1, -1),
+	]
+	for off: Vector3i in reeval_offsets:
+		var npos: Vector3i = place + off
+		if _chunk_manager.get_world_block(npos) == Blocks.RAIL:
+			var new_meta: int = _compute_rail_meta(npos)
+			_chunk_manager.set_world_block_with_meta(npos, Blocks.RAIL, new_meta)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()
 	return true
+
+
+# Pick the rail meta (0..9) for the rail being placed at `pos` based
+# on its surrounding rails. Mirrors vanilla qe.java::e() priority:
+#   1. Two opposite same-Y neighbors → straight aligned with them
+#   2. One same-Y horizontal + one higher Y → ascending toward higher
+#   3. Two perpendicular same-Y neighbors → curve wrapping their corner
+#   4. One same-Y neighbor → straight aligned with that neighbor
+#   5. No neighbors → straight aligned with the player's facing axis
+func _compute_rail_meta(pos: Vector3i) -> int:
+	var n: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 0, -1)) == Blocks.RAIL
+	var s: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 0, 1)) == Blocks.RAIL
+	var e: bool = _chunk_manager.get_world_block(pos + Vector3i(1, 0, 0)) == Blocks.RAIL
+	var w: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, 0, 0)) == Blocks.RAIL
+	var n_up: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 1, -1)) == Blocks.RAIL
+	var s_up: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 1, 1)) == Blocks.RAIL
+	var e_up: bool = _chunk_manager.get_world_block(pos + Vector3i(1, 1, 0)) == Blocks.RAIL
+	var w_up: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, 1, 0)) == Blocks.RAIL
+	# (1) Two-opposite straight beats everything — even if there's also
+	# a perpendicular neighbor (vanilla picks the straight in that case
+	# and the perpendicular rail will adjust on its own re-evaluation).
+	if n and s:
+		return _ascending_along_z(pos, n_up, s_up)
+	if e and w:
+		return _ascending_along_x(pos, e_up, w_up)
+	# (2) Curves — exactly 2 perpendicular neighbors, no opposite pair.
+	# RAIL_ENDPOINTS meta layout:
+	#   6 = S + E (wraps SE corner)
+	#   7 = S + W (wraps SW corner)
+	#   8 = N + W (wraps NW corner)
+	#   9 = N + E (wraps NE corner)
+	if n and e:
+		return 9
+	if n and w:
+		return 8
+	if s and e:
+		return 6
+	if s and w:
+		return 7
+	# (3) Single same-Y neighbor → straight aligned with it. Also
+	# considers higher-Y neighbors to make a ramp.
+	if n or s:
+		return _ascending_along_z(pos, n_up, s_up)
+	if e or w:
+		return _ascending_along_x(pos, e_up, w_up)
+	# (4) Higher-Y-only neighbors → ascending toward them.
+	if e_up:
+		return 2
+	if w_up:
+		return 3
+	if n_up:
+		return 4
+	if s_up:
+		return 5
+	# (5) Isolated rail → use player facing direction.
+	var yaw: float = _player_yaw()
+	var fx: float = absf(sin(yaw))
+	var fz: float = absf(cos(yaw))
+	return 1 if fx > fz else 0
+
+
+# Helper: a rail straight along Z (meta 0). If one of the Z neighbors
+# is higher, flip to the matching ascending meta (4 = ascending north,
+# 5 = ascending south).
+func _ascending_along_z(_pos: Vector3i, n_up: bool, s_up: bool) -> int:
+	if n_up:
+		return 4
+	if s_up:
+		return 5
+	return 0
+
+
+# Same but for X axis (meta 1, or ascending east 2 / west 3).
+func _ascending_along_x(_pos: Vector3i, e_up: bool, w_up: bool) -> int:
+	if e_up:
+		return 2
+	if w_up:
+		return 3
+	return 1
 
 
 # Fishing rod — vanilla bj.java::a. Branches on player.fishing_bobber:
@@ -2530,10 +2621,16 @@ func _raycast() -> Dictionary:
 	var direction := -_camera.global_transform.basis.z
 	var query := PhysicsRayQueryParameters3D.create(origin, origin + direction * REACH)
 	# Layer 1 = solid world (cube collision). Layer 2 = non-cube selection-
-	# only shapes (sapling cross-quads, future torches/levers/buttons) —
-	# the player physics body ignores layer 2 so plants stay passable, but
-	# the cursor still needs to target them, so the raycast opts both in.
-	query.collision_mask = 0b11
+	# only shapes (sapling cross-quads, paintings, future torches/levers).
+	# Layer 3 = mob hit-only Area3Ds (head/snout/horn boxes — see
+	# MobBase._build_head_hit_area). Without layer 3 the cursor missed
+	# the protruding head silhouette and _try_attack_mob relied on the
+	# body capsule alone, leaving snout-tip / horn-tip hits unreliable.
+	# collide_with_areas opts in to Area3D hits; the parent-walk in
+	# _try_attack_mob / _hit_collider_is_mob handles body-vs-area
+	# uniformly because head_area's parent IS the mob CharacterBody3D.
+	query.collision_mask = 0b111
+	query.collide_with_areas = true
 	var player: CollisionObject3D = get_parent() as CollisionObject3D
 	if player != null:
 		query.exclude = [player.get_rid()]

@@ -121,6 +121,9 @@ var _was_touching_water: bool = false
 # _ready; nullable in case the boat outlives the player or spawns
 # before the Player node exists.
 var _player_ref: Node3D = null
+var _floor_mat: StandardMaterial3D = null
+var _wall_mat: StandardMaterial3D = null
+var _last_light_brightness: float = -1.0
 
 
 func setup(spawn_pos: Vector3, yaw: float, owner: Node3D) -> void:
@@ -195,19 +198,19 @@ func _build_visual_mesh() -> void:
 	var floor_scale := Vector3(24.0 / 64.0, 4.0 / 32.0, 1.0)
 	var wall_offset := Vector3(0.0, 0.0, 0.0)
 	var wall_scale := Vector3(20.0 / 64.0, 6.0 / 32.0, 1.0)
-	var floor_mat: StandardMaterial3D = _make_boat_material(boat_tex)
-	floor_mat.uv1_offset = floor_offset
-	floor_mat.uv1_scale = floor_scale
-	var wall_mat: StandardMaterial3D = _make_boat_material(boat_tex)
-	wall_mat.uv1_offset = wall_offset
-	wall_mat.uv1_scale = wall_scale
+	_floor_mat = _make_boat_material(boat_tex)
+	_floor_mat.uv1_offset = floor_offset
+	_floor_mat.uv1_scale = floor_scale
+	_wall_mat = _make_boat_material(boat_tex)
+	_wall_mat.uv1_offset = wall_offset
+	_wall_mat.uv1_scale = wall_scale
 	# Floor slab — full hull footprint, sits with its bottom at y=0.
 	var floor_mi := MeshInstance3D.new()
 	var floor_mesh := BoxMesh.new()
 	floor_mesh.size = Vector3(HULL_LENGTH, FLOOR_THICKNESS, HULL_WIDTH)
 	floor_mi.mesh = floor_mesh
 	floor_mi.position = Vector3(0, FLOOR_THICKNESS * 0.5, 0)
-	floor_mi.material_override = floor_mat
+	floor_mi.material_override = _floor_mat
 	_visual_root.add_child(floor_mi)
 	# Long sides (along local X = boat's length) — inset by
 	# WALL_THICKNESS so short ends seal the corners.
@@ -221,7 +224,7 @@ func _build_visual_mesh() -> void:
 		wall_mesh.size = Vector3(inner_len, WALL_HEIGHT, WALL_THICKNESS)
 		wall.mesh = wall_mesh
 		wall.position = Vector3(0, wall_y, sz)
-		wall.material_override = wall_mat
+		wall.material_override = _wall_mat
 		_visual_root.add_child(wall)
 	# Short ends (along local Z = boat's width) — span the full width,
 	# owning the corner geometry.
@@ -233,7 +236,7 @@ func _build_visual_mesh() -> void:
 		wall_mesh.size = Vector3(WALL_THICKNESS, WALL_HEIGHT, HULL_WIDTH)
 		wall.mesh = wall_mesh
 		wall.position = Vector3(sx, wall_y, 0)
-		wall.material_override = wall_mat
+		wall.material_override = _wall_mat
 		_visual_root.add_child(wall)
 
 
@@ -677,6 +680,28 @@ func _physics_process(delta: float) -> void:
 	# pitch. Initial implementation used .z (which is pitch with our
 	# axis layout) and read as forward/back tipping — wrong.
 	_update_damage_rock(delta)
+	_update_entity_lighting()
+
+
+# Sample sky+block light at the boat's cell and modulate the hull
+# materials so it dims at night / under cover and brightens near torches.
+# Mirrors the cart's lighting hook — same EntityLighting helper. Cached
+# brightness skips redundant material writes (60-144×/s otherwise).
+func _update_entity_lighting() -> void:
+	if _floor_mat == null or _wall_mat == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + FLOOR_THICKNESS + 0.5)),
+		int(floor(global_position.z))
+	)
+	var b: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(b - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = b
+	var c := Color(b, b, b)
+	_floor_mat.albedo_color = c
+	_wall_mat.albedo_color = c
 
 
 # Apply a small velocity push when a nearby player overlaps the boat's

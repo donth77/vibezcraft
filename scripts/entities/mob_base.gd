@@ -155,6 +155,17 @@ const _FIRE_SCALE_FACTOR: float = 1.4  # vanilla `entity.width * 1.4`
 # bounded by the spawn cap. Keyed by instance_id for cheap erase.
 static var _active_mobs: Dictionary = {}
 
+# Per-mob-class shape caches. Every chicken's body capsule has
+# identical (radius, height); every pig's head box has identical size.
+# Sharing one Shape3D resource across all instances of a class saves
+# N-1 allocations (small per-shape but adds up at the 70-mob spawn
+# cap). Godot's physics server treats Shape3D as immutable, so sharing
+# is safe — no instance can mutate another's collision.
+# Keys are "capsule|<radius>|<height>" and "box|<sx>|<sy>|<sz>" so
+# subclass overrides with different dimensions still get distinct
+# cached resources.
+static var _shape_cache: Dictionary = {}
+
 @export var max_health: int = 10
 @export var drop_item_id: int = 0  # 0 = no drop
 @export var drop_count_min: int = 0
@@ -211,6 +222,75 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	_active_mobs.erase(get_instance_id())
+
+
+# --- Collision-shape helpers (called by subclasses' _build_collision_shape) ---
+#
+# Two-shape design to fix the stuck-clipping issue without losing
+# arrow/sword hit coverage on protruding heads / snouts / horns:
+#
+#   1. Body capsule — vertical CapsuleShape3D on the CharacterBody3D,
+#      centered on the mob's origin. Drives ALL physics resolution
+#      (move_and_slide, floor contact, wall sliding). Rotationally
+#      symmetric around Y so yawing doesn't shift the shape's world
+#      center; rounded edges slide off block corners cleanly.
+#
+#   2. Head Area3D — sibling Area3D with a BoxShape3D positioned at
+#      head height + forward offset. HIT-ONLY: Area3D doesn't
+#      participate in CharacterBody3D collision resolution, so this
+#      can stick forward (covering snouts / horns / beaks) without
+#      ever causing depenetration-stuck. It rotates with the mob,
+#      which is correct — the visible head also rotates with the body.
+#
+# Layer 3 (0b100) is the dedicated mob-hit-volume layer. Arrows +
+# melee raycasts include it in their mask; nothing else reads it.
+
+
+func _build_body_capsule(radius: float, height: float) -> void:
+	var body_col := CollisionShape3D.new()
+	body_col.shape = _cached_capsule(radius, height)
+	# Y offset so the capsule bottom sits at the mob's feet (y = 0).
+	body_col.position = Vector3(0.0, height * 0.5, 0.0)
+	add_child(body_col)
+
+
+func _build_head_hit_area(box_size: Vector3, box_position: Vector3) -> void:
+	var head_area := Area3D.new()
+	head_area.collision_layer = 0b100
+	head_area.collision_mask = 0
+	var head_col := CollisionShape3D.new()
+	head_col.shape = _cached_box(box_size)
+	head_col.position = box_position
+	head_area.add_child(head_col)
+	add_child(head_area)
+
+
+# Static accessors — return a CapsuleShape3D / BoxShape3D unique per
+# (script_path, dimensions) tuple. Same dims on the same mob class →
+# same Shape3D instance; differing dims (subclass override) → fresh
+# entry. RefCounted-style retention means cached shapes outlive any
+# single mob and stay alive while ANY instance still references them.
+static func _cached_capsule(radius: float, height: float) -> CapsuleShape3D:
+	var key: String = "capsule|%f|%f" % [radius, height]
+	var cached: CapsuleShape3D = _shape_cache.get(key) as CapsuleShape3D
+	if cached != null:
+		return cached
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = radius
+	capsule.height = height
+	_shape_cache[key] = capsule
+	return capsule
+
+
+static func _cached_box(size: Vector3) -> BoxShape3D:
+	var key: String = "box|%f|%f|%f" % [size.x, size.y, size.z]
+	var cached: BoxShape3D = _shape_cache.get(key) as BoxShape3D
+	if cached != null:
+		return cached
+	var box := BoxShape3D.new()
+	box.size = size
+	_shape_cache[key] = box
+	return box
 
 
 # Subclasses override to add per-mob AI in _process. The base only handles
@@ -548,38 +628,48 @@ func take_damage(
 # Vanilla EntityLiving caps at ~14 stuck arrows visually; we use 12
 # (`_STUCK_ARROW_MAX`). Stuck arrows are pure render — they don't
 # re-damage or block raycasts (no collision shape on them).
-func add_stuck_arrow() -> void:
+#
+# `hit_world_pos` + `hit_dir_world` come from arrow.gd's raycast —
+# the precise intersection point on the collision shape's surface and
+# the arrow's flight direction at impact. Placing the visual there
+# (instead of an RNG-random spot on the body) is what makes head-shots
+# read as head-shots: vanilla EntityArrow stays embedded at its actual
+# impact pose; we mirror that since we despawn the arrow on hit.
+func add_stuck_arrow(hit_world_pos: Vector3, hit_dir_world: Vector3) -> void:
 	if _dying or _arrows_stuck >= _STUCK_ARROW_MAX:
 		return
 	_arrows_stuck += 1
-	_spawn_stuck_arrow_visual()
+	_spawn_stuck_arrow_visual(hit_world_pos, hit_dir_world)
 
 
-# Deterministic position via RNG seeded with (instance_id, arrow index)
-# so saves/loads place the same arrows at the same spots if we ever
-# wire up persistence. Direction picks a random azimuth + a modest
-# polar angle so most arrows stick into the side / back of the body
-# rather than perfectly straight up. Local -Z is oriented into the
-# body so the arrow's head buries inside, fletching outside.
-func _spawn_stuck_arrow_visual() -> void:
-	var idx: int = _stuck_arrows.size()
-	var rng := RandomNumberGenerator.new()
-	rng.seed = absi(get_instance_id() * 31 + idx * 17)
-	var theta: float = rng.randf_range(0.0, TAU)
-	var phi: float = rng.randf_range(-0.3, 0.3)
-	var dir := Vector3(cos(phi) * cos(theta), sin(phi), cos(phi) * sin(theta))
-	var hw: float = maxf(_get_body_width() * 0.5, 0.1)
-	var hh: float = maxf(_get_body_height() * 0.5, 0.1)
-	# Surface position on an ellipsoid centered at mid-body. Slight
-	# random vertical jitter inside the body height range.
-	var v_jitter: float = rng.randf_range(0.2, 0.95)
-	var surface_pos := Vector3(dir.x * hw, hh * 2.0 * v_jitter, dir.z * hw)
+# Place the stuck-arrow pivot AT the raycast hit point, oriented along
+# the arrow's flight direction. Pivot -Z points along arrow_dir, so:
+#   * shaft (positioned at +Z) trails OUTSIDE the body along -arrow_dir
+#   * head (positioned at -Z) buries INSIDE the body along +arrow_dir
+# Matches vanilla EntityArrow's embedded pose where the arrow tip is at
+# the impact point and the shaft trails back along the flight path.
+func _spawn_stuck_arrow_visual(hit_world_pos: Vector3, hit_dir_world: Vector3) -> void:
 	var pivot := Node3D.new()
-	pivot.position = surface_pos
 	add_child(pivot)
-	# Orient so local -Z points toward the body center.
-	var body_center_world: Vector3 = global_position + Vector3(0.0, hh, 0.0)
-	pivot.look_at(body_center_world, Vector3.UP)
+	pivot.global_position = hit_world_pos
+	# Fallback for missing/zero direction (defensive — arrows always
+	# carry non-zero velocity at the moment of impact, but a future
+	# caller might trigger this). Aim toward the mob's body center.
+	var dir: Vector3 = hit_dir_world
+	if dir.length_squared() < 0.0001:
+		var hh: float = maxf(_get_body_height() * 0.5, 0.1)
+		var body_center: Vector3 = global_position + Vector3(0.0, hh, 0.0)
+		dir = body_center - hit_world_pos
+		if dir.length_squared() < 0.0001:
+			dir = Vector3(0.0, 0.0, -1.0)
+	dir = dir.normalized()
+	# Up vector — Y axis unless the arrow's nearly vertical (look_at
+	# fails when target direction is parallel to up). Pick a sideways
+	# fallback in that edge case.
+	var up: Vector3 = Vector3.UP
+	if absf(dir.dot(up)) > 0.99:
+		up = Vector3.RIGHT
+	pivot.look_at(hit_world_pos + dir, up)
 	# Shaft — narrow brown box stretched along -Z. Placed forward of
 	# the pivot so most of the shaft sticks OUT (more visible) with
 	# the tip burying into the body.

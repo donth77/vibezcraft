@@ -23,6 +23,7 @@ const GAMEPLAY_ACTIONS: Array = [
 	["move_right", "Strafe Right"],
 	["jump", "Jump"],
 	["sneak", "Sneak"],
+	["dismount", "Dismount"],
 	["fly_down", "Descend (Fly)"],
 	["interact_break", "Break / Attack"],
 	["interact_place", "Place / Use"],
@@ -80,6 +81,13 @@ static func register_defaults() -> void:
 	_add_key("move_right", KEY_D)
 	_add_key("jump", KEY_SPACE)
 	_add_key("sneak", KEY_SHIFT)
+	# Dismount — independent rebind from sneak so a player who wants
+	# different keys for "crouch" and "leave my pig/boat/minecart" can
+	# bind them separately. Defaults to Shift so the legacy single-
+	# button experience is preserved for everyone who never visits the
+	# controls menu. Boats and minecarts ALSO accept right-click as a
+	# convenience dismount (see interaction.gd::_try_place).
+	_add_key("dismount", KEY_SHIFT)
 	# Creative-flight descend. Sneak also works (vanilla Java binding) but
 	# Ctrl / Cmd feel more natural for a lot of players and don't collide
 	# with the sneak toggle. Both bind to the same action.
