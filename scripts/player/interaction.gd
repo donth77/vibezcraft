@@ -1998,8 +1998,7 @@ func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
 		var fx: float = absf(sin(yaw))  # X component magnitude of forward
 		var fz: float = absf(cos(yaw))  # Z component magnitude of forward
 		meta = 1 if fx > fz else 0
-	_chunk_manager.set_world_block(place, Blocks.RAIL)
-	_chunk_manager.set_world_block_meta(place, meta)
+	_chunk_manager.set_world_block_with_meta(place, Blocks.RAIL, meta)
 	SFX.play_place(Blocks.RAIL)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
@@ -2210,12 +2209,14 @@ func _try_place_painting(hit: Dictionary, _stack: ItemStack) -> bool:
 	# block so the painting hugs the wall face. Painting's own
 	# `_THICKNESS` push handles the remaining offset.
 	center_local -= Vector3(normal) * 0.5
-	var main: Node = get_tree().root.get_node_or_null("Main")
-	if main == null:
-		return false
+	# Parent under ChunkManager — same as every other persisted entity
+	# (boat, minecart, dropped_item, primed_tnt, bobber). EntitySave's
+	# save_all walks ChunkManager.get_children(), so a painting parented
+	# anywhere else would be invisible to the saver and vanish on
+	# save+quit+reload.
 	var painting: Node3D = _PAINTING_SCRIPT.new()
 	painting.setup(variant_idx, facing, support_pos)
-	main.add_child(painting)
+	_chunk_manager.add_child(painting)
 	painting.global_position = center_local
 	painting.apply_facing()
 	SFX.play_place(Blocks.PLANKS)

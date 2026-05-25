@@ -52,7 +52,6 @@ const VARIANTS: Array = [
 	["burning_skull", 4, 4, 128, 192],
 ]
 
-const ATLAS_SIZE_PX: int = 256
 # Fallback path — the active-pack lookup in `_load_atlas` tries the
 # current pack first. Currently only alpha_vanilla ships a painting
 # atlas; other packs fall back to this canonical Mojang asset.
@@ -67,6 +66,17 @@ const _SURFACE_OFFSET: float = 1.0 / 16.0
 # real object from any angle (vanilla draws a wooden frame; we
 # approximate with a single solid color).
 const _THICKNESS: float = 1.0 / 16.0
+
+# AtlasTexture's `region` is honored by 2D samplers but IGNORED by 3D
+# StandardMaterial3D — using one made every painting show the FULL
+# 256×256 atlas (literally a grid of every variant on every painting).
+# Workaround: pre-crop the variant's pixel rect into a standalone
+# ImageTexture and use that as albedo, so the QuadMesh's default 0..1
+# UVs sample exactly the variant art. Same path BlockFx uses for
+# break particles (block_fx.gd:65-97).
+static var _variant_textures: Dictionary = {}
+static var _variant_materials: Dictionary = {}
+static var _variant_particle_materials: Dictionary = {}
 
 # Set by the spawner BEFORE add_child. `variant` indexes VARIANTS;
 # `facing` is one of 0=south(+Z) / 1=west(-X) / 2=north(-Z) / 3=east(+X)
@@ -141,8 +151,6 @@ func _build_mesh() -> void:
 	var v: Array = VARIANTS[variant]
 	var w_blocks: int = v[1]
 	var h_blocks: int = v[2]
-	var atlas_x: int = v[3]
-	var atlas_y: int = v[4]
 	var w: float = float(w_blocks)
 	var h: float = float(h_blocks)
 	# Front face: textured quad. Local +Z is the visible front; back
@@ -151,16 +159,12 @@ func _build_mesh() -> void:
 	var front_quad := QuadMesh.new()
 	front_quad.size = Vector2(w, h)
 	front_mi.mesh = front_quad
-	# Slight forward push so the front sits flush with the cell face
-	# the painting was placed against (avoids z-fight with the wall).
-	front_mi.position = Vector3(0.0, 0.0, _THICKNESS * 0.5)
-	# UV rect into the canonical atlas — w_blocks × h_blocks cells of
-	# 16 px each.
-	var u0: float = float(atlas_x) / float(ATLAS_SIZE_PX)
-	var v0: float = float(atlas_y) / float(ATLAS_SIZE_PX)
-	var u1: float = float(atlas_x + w_blocks * 16) / float(ATLAS_SIZE_PX)
-	var v1: float = float(atlas_y + h_blocks * 16) / float(ATLAS_SIZE_PX)
-	front_mi.material_override = _make_atlas_material(u0, v0, u1, v1)
+	# Front quad sits just past the frame box's +Z face (offset by 2 mm
+	# = 0.002 blocks). Same plane = z-fight, visible as a flicker when
+	# the camera moves. The 2 mm bias is below visible-pixel resolution
+	# at any sane view distance.
+	front_mi.position = Vector3(0.0, 0.0, _THICKNESS * 0.5 + 0.002)
+	front_mi.material_override = _get_variant_material(variant)
 	add_child(front_mi)
 	# Back + sides as a slim BoxMesh in the planks-brown wood tone so
 	# the painting reads as a 3D object from the side (vanilla has a
@@ -182,36 +186,91 @@ func _build_mesh() -> void:
 # to the canonical alpha_vanilla atlas if the active pack doesn't
 # ship its own. Mirrors the same per-pack-first / fallback-default
 # pattern that ItemIcons._load_item_sprite uses for item textures.
-func _load_atlas() -> Texture2D:
+static func _load_atlas() -> Texture2D:
 	var pack_path: String = "%s/%s/painting_atlas.png" % [_ATLAS_DIR, BlockAtlas.active_pack]
 	if ResourceLoader.exists(pack_path):
 		return load(pack_path) as Texture2D
 	return load(_ATLAS_FALLBACK_PATH) as Texture2D
 
 
-# Build a UV-cropped material that samples a sub-rect of the canonical
-# atlas. Uses TEXTURE_FILTER_NEAREST so the 16-px-per-block art stays
-# crisp at any view distance — vanilla MC's painting render is also
-# nearest-filtered (no mipmaps for blocky pixel art).
-func _make_atlas_material(u0: float, v0: float, u1: float, v1: float) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
+# Crop the canonical atlas down to a standalone ImageTexture for the
+# given variant. Cached after first build — same image gets reused
+# across every placed painting + every break-particles emit of that
+# variant. Returns null if the atlas can't be loaded.
+static func _get_variant_texture(variant_idx: int) -> ImageTexture:
+	if _variant_textures.has(variant_idx):
+		return _variant_textures[variant_idx]
 	var tex: Texture2D = _load_atlas()
 	if tex == null:
+		return null
+	var atlas_img: Image = tex.get_image()
+	if atlas_img == null:
+		return null
+	var v: Array = VARIANTS[variant_idx]
+	var atlas_x: int = v[3]
+	var atlas_y: int = v[4]
+	var w_px: int = v[1] * 16
+	var h_px: int = v[2] * 16
+	var region_img: Image = atlas_img.get_region(Rect2i(atlas_x, atlas_y, w_px, h_px))
+	var img_tex := ImageTexture.create_from_image(region_img)
+	_variant_textures[variant_idx] = img_tex
+	return img_tex
+
+
+# Material for the placed painting's front face. Cached per variant.
+# TEXTURE_FILTER_NEAREST so the 16-px-per-block art stays crisp at any
+# view distance — vanilla MC's painting render is nearest-filtered too.
+static func _get_variant_material(variant_idx: int) -> StandardMaterial3D:
+	if _variant_materials.has(variant_idx):
+		return _variant_materials[variant_idx]
+	var mat := StandardMaterial3D.new()
+	var tex: ImageTexture = _get_variant_texture(variant_idx)
+	if tex == null:
 		mat.albedo_color = Color(0.5, 0.5, 0.5)
-		return mat
-	# Wrap the texture in an AtlasTexture so the QuadMesh's default
-	# (0..1) UVs sample the variant's sub-rect instead of the whole
-	# atlas. Pixel coords because AtlasTexture takes a Rect2 in pixels.
-	var atlas := AtlasTexture.new()
-	atlas.atlas = tex
-	atlas.region = Rect2(
-		u0 * ATLAS_SIZE_PX, v0 * ATLAS_SIZE_PX, (u1 - u0) * ATLAS_SIZE_PX, (v1 - v0) * ATLAS_SIZE_PX
-	)
-	mat.albedo_texture = atlas
+	else:
+		mat.albedo_texture = tex
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_variant_materials[variant_idx] = mat
+	return mat
+
+
+# Material for break-particle fragments. Same cropped texture as the
+# placed painting, plus BILLBOARD_PARTICLES + 4×4 anim-frame slicing so
+# each CPUParticles3D quad picks a random sub-tile of the variant art
+# per particle (vanilla `EntityDiggingFX` does the same — see
+# block_fx.gd:86-101). Brightness modulated to 0.6 to match vanilla's
+# `k = j = i = 0.6f` darkening on break crumbs.
+#
+# Flags MUST match BlockFx.get_material's shader permutation exactly
+# (TRANSPARENCY_ALPHA + UNSHADED + NEAREST + CULL_DISABLED +
+# BILLBOARD_PARTICLES + anim_h/v_frames=4) so Godot reuses the same
+# compiled shader. BlockFx warms this permutation at boot via
+# `ChunkManager._ready → BlockFx.warm_pool`; mismatching even one flag
+# triggers a fresh ~100-300 ms shader compile on first painting break
+# (user-reported as "first break stutters"). The variant texture is
+# opaque so ALPHA blending behaves identically to DISABLED visually.
+static func _get_variant_particle_material(variant_idx: int) -> StandardMaterial3D:
+	if _variant_particle_materials.has(variant_idx):
+		return _variant_particle_materials[variant_idx]
+	var mat := StandardMaterial3D.new()
+	var tex: ImageTexture = _get_variant_texture(variant_idx)
+	if tex == null:
+		mat.albedo_color = Color(0.5, 0.5, 0.5)
+	else:
+		mat.albedo_texture = tex
+		mat.albedo_color = Color(0.6, 0.6, 0.6, 1.0)
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	mat.particles_anim_h_frames = 4
+	mat.particles_anim_v_frames = 4
+	mat.particles_anim_loop = false
+	_variant_particle_materials[variant_idx] = mat
 	return mat
 
 
@@ -239,11 +298,15 @@ func _build_collision() -> void:
 # `EntityHanging` spawns variant-textured particles via the same path).
 func break_painting() -> void:
 	SFX.play_break(Blocks.PLANKS)
-	var main: Node = get_tree().root.get_node_or_null("Main")
-	if main != null:
-		_spawn_break_particles(main)
+	# Particles + dropped item go under ChunkManager (same parent every
+	# other entity uses) so the DroppedItem is persisted by EntitySave's
+	# walk and the particle emitter doesn't get orphaned by Main's
+	# layout. Falls back to nothing if the painting is somehow detached
+	# from its chunk_manager ref.
+	if _chunk_manager != null:
+		_spawn_break_particles(_chunk_manager)
 		var item := DroppedItem.new()
-		main.add_child(item)
+		_chunk_manager.add_child(item)
 		item.global_position = global_position
 		item.setup(Items.PAINTING)
 	queue_free()
@@ -287,21 +350,20 @@ func _spawn_break_particles(parent: Node) -> void:
 	particles.gravity = Vector3(0.0, -8.0, 0.0)
 	particles.scale_amount_min = 0.6
 	particles.scale_amount_max = 1.0
-	# Tiny quad mesh — each fragment is ~1/16 block square, matching
-	# the pixel-art scale of the painting itself.
+	# Tiny quad mesh — each fragment is ~1/16 block square. Material
+	# slices the variant into 16 (4×4) sub-tiles via particles_anim
+	# frames, and anim_offset below picks a random sub-tile per particle.
 	var quad := QuadMesh.new()
 	quad.size = Vector2(0.0625, 0.0625)
-	# Reuse the painting's atlas-cropped material so the fragments
-	# show colors from the SAME variant the player broke. Sharing the
-	# StandardMaterial3D is fine here — particles only read it.
-	var atlas_x: int = v[3]
-	var atlas_y: int = v[4]
-	var u0: float = float(atlas_x) / float(ATLAS_SIZE_PX)
-	var v0: float = float(atlas_y) / float(ATLAS_SIZE_PX)
-	var u1: float = float(atlas_x + w_blocks * 16) / float(ATLAS_SIZE_PX)
-	var v1: float = float(atlas_y + h_blocks * 16) / float(ATLAS_SIZE_PX)
-	quad.material = _make_atlas_material(u0, v0, u1, v1)
+	quad.material = _get_variant_particle_material(variant)
 	particles.mesh = quad
+	# Per-particle random anim_offset → each fragment lands on one of
+	# the 16 sub-tiles of the variant. anim_speed=0 freezes the pick
+	# for the particle's lifetime.
+	particles.anim_offset_min = 0.0
+	particles.anim_offset_max = 1.0
+	particles.anim_speed_min = 0.0
+	particles.anim_speed_max = 0.0
 	particles.emitting = true
 	# Auto-cleanup — wait one full lifetime + buffer, then queue_free.
 	# A SceneTreeTimer is cheaper than wiring up a `finished` signal
