@@ -232,6 +232,38 @@ const SHEARS: int = 180
 # entity, not the item. Spawning logic lives in interaction.gd.
 const BOAT: int = 181
 
+# Bow — vanilla Alpha v1.0.5+ (`ItemBow` in nq.aE = id 261, our 182).
+# Held right-click charges; release fires an EntityArrow whose velocity
+# scales with the charge time per Beta `ItemBow.a()`:
+#   f = held_ticks / 20
+#   velocity_scalar = (f*f + f*2) / 3, clamped [0..1]
+# At full charge velocity_scalar=1.0, arrow speed=3.0 blocks/tick = ~60
+# bps. Vanilla durability 384 (Beta `setMaxDurability(384)`).
+const BOW: int = 182
+# Arrow — vanilla `ItemArrow` (nq.aB = id 262 → 183). Stacks to 64,
+# consumed one per bow-fire. Picked back up if stuck in a block and the
+# player walks over it. Recipe: 1 flint + 1 stick + 1 feather vertical
+# → 4 arrows (vanilla shaped recipe).
+const ARROW: int = 183
+
+# Painting — vanilla `ItemPainting` (item id 321 in vanilla → 184 here).
+# Right-click on a wall to spawn an EntityPainting. The variant is
+# picked randomly from the 26 canonical Mojang paintings whose size
+# fits the open wall space at the click point. Recipe: 8 sticks square
+# + 1 wool center (vanilla shaped). Stack to 64.
+const PAINTING: int = 184
+
+# Rail (item form). Vanilla qe.java::a returns this item id (66 in
+# vanilla → 185 here). Stacks to 64. Right-click on the top face of a
+# solid block places Blocks.RAIL with meta auto-selected from the
+# neighbor rails (same auto-connect pattern as FENCE).
+const RAIL: int = 185
+
+# Minecart. Vanilla ItemMinecart (id 328 → 186 here). Stack size 1
+# (vanilla aX=1) — placement spawns a unique entity. Right-click on
+# a rail block to spawn the entity; right-click anywhere else fails.
+const MINECART: int = 186
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -296,6 +328,10 @@ const TOOL_TYPE_FISHING_ROD: int = 7
 # leaves/web/vines. Its own type so durability + stack=1 route through
 # _TOOL_DATA but the dig-speed/harvest paths can ignore it.
 const TOOL_TYPE_SHEARS: int = 8
+# Bow — vanilla ItemBow. Ranged projectile launcher. Carved out so the
+# durability + stack=1 still routes through _TOOL_DATA, but dig-speed
+# and harvest-level paths skip it (the bow doesn't dig blocks).
+const TOOL_TYPE_BOW: int = 9
 
 # Vanilla armor defense points (Bukkit/mc-dev `EnumArmorMaterial`).
 # Full-set totals: gold 11, iron 15, diamond 20. Damage reduction
@@ -358,6 +394,9 @@ const _TOOL_DATA: Dictionary = {
 	# Beta ItemShears: setMaxDurability(238). One durability tick per
 	# shear, per leaf-block break, per web break. Stack size 1.
 	SHEARS: [TOOL_TYPE_SHEARS, 1.0, 0, 238],
+	# Vanilla ItemBow `setMaxDurability(384)`. Each shot consumes 1.
+	# Stack size 1.
+	BOW: [TOOL_TYPE_BOW, 1.0, 0, 384],
 }
 
 
@@ -657,6 +696,16 @@ static func id_from_name(item_name: String) -> int:
 			return SHEARS
 		"boat":
 			return BOAT
+		"bow":
+			return BOW
+		"arrow":
+			return ARROW
+		"painting":
+			return PAINTING
+		"rail":
+			return RAIL
+		"minecart":
+			return MINECART
 	return -1
 
 
@@ -954,6 +1003,16 @@ static func display_name(item_id: int) -> String:
 			return "Shears"
 		BOAT:
 			return "Boat"
+		BOW:
+			return "Bow"
+		ARROW:
+			return "Arrow"
+		PAINTING:
+			return "Painting"
+		RAIL:
+			return "Rail"
+		MINECART:
+			return "Minecart"
 	return ""
 
 
@@ -1095,6 +1154,10 @@ static func max_stack_size(item_id: int) -> int:
 	# Vanilla nv.java::aX=1 (ItemBoat) — boat item never stacks because
 	# placement consumes one and spawns a unique entity.
 	if item_id == BOAT:
+		return 1
+	# Vanilla ItemMinecart aX=1 — like the boat, placement spawns a
+	# unique entity and the item never stacks.
+	if item_id == MINECART:
 		return 1
 	if item_id == EGG:
 		return 16

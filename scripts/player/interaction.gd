@@ -25,6 +25,7 @@ const _BLOCK_FX: GDScript = preload("res://scripts/world/block_fx.gd")
 # `node.get_script().resource_path` since the Boat class_name isn't
 # always picked up by Godot's editor class index on first reload.
 const _BOAT_SCRIPT_PATH: String = "res://scripts/entities/boat.gd"
+const _MINECART_SCRIPT_PATH: String = "res://scripts/entities/minecart.gd"
 const NO_TARGET: Vector3i = Vector3i(-2147483648, -2147483648, -2147483648)
 const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.png"
 # Hoe + farmland are Beta 1.6 additions, not in Alpha 1.2.6. The recipe
@@ -36,8 +37,21 @@ const HOE_TILL_ENABLED: bool = true
 # class_name cache (which only populates after an editor scan; headless
 # test runs don't trigger that scan).
 const _MOB_BASE_SCRIPT := preload("res://scripts/entities/mob_base.gd")
+# Preload the EntityArrow script so `Arrow.new()` works even before the
+# class_name registry catches up (same pattern as TestMob in the debug
+# spawner).
+const _ARROW_SCRIPT := preload("res://scripts/entities/arrow.gd")
+const _PAINTING_SCRIPT := preload("res://scripts/entities/painting.gd")
 
 var _last_place_ms: int = 0
+# Bow charge state. `_bow_charging` flips true when interact_place is
+# pressed while holding a bow; `_bow_charge_start_ms` is the timestamp
+# we use to compute the vanilla charge formula on release. Both reset
+# in `_release_bow` (fire), `_cancel_bow_charge` (e.g. item swap), and
+# any other path that consumes the right-click. The player's held-bow
+# sprite reads `_bow_charge_seconds()` to pick the right pulling stage.
+var _bow_charging: bool = false
+var _bow_charge_start_ms: int = 0
 # Cached player ref for the food-eating handler. find_child walks the
 # tree, so we cache the result and re-resolve only when the cached
 # node has been freed (scene transition). Same pattern as ItemIcons.
@@ -110,6 +124,19 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not _world_input_active():
 		return
+	# Bow charge flow runs before the normal place handler so right-
+	# click on a bow draws instead of trying to place a "bow block".
+	# Press → start charging; release → fire (charge gated below in
+	# _release_bow). _try_place's `if held == BOW: return` early-out
+	# guards the same direction.
+	if event.is_action_pressed("interact_place"):
+		if _is_holding_bow():
+			_start_bow_charge()
+			return
+	if event.is_action_released("interact_place"):
+		if _bow_charging:
+			_release_bow()
+			return
 	if event.is_action_pressed("interact_place"):
 		_try_place()
 	# Left-click attack: on the EDGE of interact_break (just-pressed),
@@ -118,6 +145,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	# trigger block mining behind it). The hold-to-mine path in
 	# _update_mining still runs continuously for blocks.
 	if event.is_action_pressed("interact_break"):
+		if _try_attack_painting():
+			return
+		if _try_attack_boat():
+			return
+		if _try_attack_minecart():
+			return
 		_try_attack_mob()
 
 
@@ -299,6 +332,53 @@ func _try_right_click_boat(hit: Dictionary) -> bool:
 	return boat.call("right_click_with", 0, get_parent())
 
 
+# Left-click on a boat — damage it. Vanilla EntityBoat takes player
+# punch damage (1 HP for bare hand; sword tiers escalate). Boat is
+# LMB on a Painting entity → break it. One-hit break (vanilla — even
+# bare hand; paintings are fragile). Returns true if a painting was
+# hit so the caller skips the mob / block mining paths.
+func _try_attack_painting() -> bool:
+	var hit: Dictionary = _raycast()
+	if hit.is_empty():
+		return false
+	var node: Node = hit.get("collider") as Node
+	while node != null:
+		if node.get_script() == _PAINTING_SCRIPT:
+			node.call("break_painting")
+			SFX.play_player_hit()
+			return true
+		node = node.get_parent()
+	return false
+
+
+# 4 HP max so a bare-hand player needs 4 hits. On 0 HP the boat
+# self-destructs and drops 3 planks + 2 sticks via its on_destroyed
+# path. Returns true if a boat was hit (consumes the click).
+func _try_attack_boat() -> bool:
+	var hit: Dictionary = _raycast()
+	if hit.is_empty():
+		return false
+	var boat: Node = _find_boat_from_hit(hit)
+	if boat == null:
+		return false
+	if not boat.has_method("take_damage"):
+		return false
+	var inv: Inventory = _player_inventory()
+	var held_id: int = 0
+	if inv != null:
+		var stack: ItemStack = inv.selected()
+		if stack != null and not stack.is_empty():
+			held_id = stack.item_id
+	var damage: int = Items.melee_damage(held_id)
+	boat.call("take_damage", damage)
+	_trigger_player_use_swing()
+	SFX.play_player_hit()
+	if inv != null and held_id != 0 and Items.is_tool_item(held_id):
+		if inv.damage_selected_tool():
+			SFX.play_tool_break()
+	return true
+
+
 # Place a boat on the water the player is pointing at. Casts a ray
 # from the camera and steps along it looking for a water cell; spawns
 # the Boat entity at that cell's surface (y = cell_y + 0.875, matching
@@ -354,6 +434,85 @@ func _try_place_boat() -> bool:
 	return true
 
 
+# Parallel of _find_boat_from_hit / _try_right_click_boat /
+# _try_attack_boat / _try_place_boat for the Minecart entity.
+func _find_minecart_from_hit(hit: Dictionary) -> Node:
+	var collider: Node = hit.get("collider") as Node
+	if collider == null:
+		return null
+	var node: Node = collider
+	while node != null:
+		var script: Script = node.get_script()
+		if script != null and script.resource_path == _MINECART_SCRIPT_PATH:
+			return node
+		node = node.get_parent()
+	return null
+
+
+func _try_right_click_minecart(hit: Dictionary) -> bool:
+	var cart: Node = _find_minecart_from_hit(hit)
+	if cart == null:
+		return false
+	if not cart.has_method("right_click_with"):
+		return false
+	return cart.call("right_click_with", 0, get_parent())
+
+
+func _try_attack_minecart() -> bool:
+	var hit: Dictionary = _raycast()
+	if hit.is_empty():
+		return false
+	var cart: Node = _find_minecart_from_hit(hit)
+	if cart == null:
+		return false
+	if not cart.has_method("take_damage"):
+		return false
+	var inv: Inventory = _player_inventory()
+	var held_id: int = 0
+	if inv != null:
+		var stack: ItemStack = inv.selected()
+		if stack != null and not stack.is_empty():
+			held_id = stack.item_id
+	var damage: int = Items.melee_damage(held_id)
+	cart.call("take_damage", damage)
+	_trigger_player_use_swing()
+	SFX.play_player_hit()
+	if inv != null and held_id != 0 and Items.is_tool_item(held_id):
+		if inv.damage_selected_tool():
+			SFX.play_tool_break()
+	return true
+
+
+# Spawn an EntityMinecart on the RAIL block the player is pointing at.
+# Vanilla ItemMinecart::a (the right-click handler) requires a rail
+# under the click; we mirror that — clicking on a non-rail block does
+# nothing.
+func _try_place_minecart() -> bool:
+	var hit: Dictionary = _raycast()
+	if hit.is_empty():
+		return false
+	var hit_pos: Vector3i = hit.block_pos
+	var hit_id: int = _chunk_manager.get_world_block(hit_pos)
+	if hit_id != Blocks.RAIL:
+		return false
+	# Spawn at the rail cell center; the cart's collider rides on top
+	# of the rail's support block (rail Y = cell.y + 1/16, cart center
+	# at cell.y + 0.35 puts the bottom face just above the rail).
+	var spawn_pos := Vector3(
+		float(hit_pos.x) + 0.5, float(hit_pos.y) + 1.0 / 16.0, float(hit_pos.z) + 0.5
+	)
+	var yaw: float = _player_yaw()
+	var cart_script: GDScript = load(_MINECART_SCRIPT_PATH)
+	var cart: Node3D = cart_script.new() as Node3D
+	_chunk_manager.add_child(cart)
+	cart.call("setup", spawn_pos, yaw, get_parent())
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	_trigger_player_use_swing()
+	return true
+
+
 func _world_input_active() -> bool:
 	# Mouse-captured == playing the game; visible == a UI screen owns input.
 	return Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
@@ -364,11 +523,15 @@ func _update_highlight(hit: Dictionary) -> void:
 		_highlight.visible = false
 		return
 	# Suppress the block-selection wireframe when the cursor is over a
-	# mob. The mob's CharacterBody3D collision shape registers as a hit
-	# the same way a block does; without this check the highlight cube
-	# would render around whatever AIR cell the mob's body happens to
-	# occupy. Vanilla MC also doesn't show the block outline on mobs.
-	if _hit_collider_is_mob(hit):
+	# mob OR a boat. Entity colliders register as raycast hits the same
+	# way blocks do; without this check the highlight cube would render
+	# around whatever AIR cell the entity's body happens to occupy.
+	# Vanilla MC also doesn't show the block outline on entities.
+	if (
+		_hit_collider_is_mob(hit)
+		or _find_boat_from_hit(hit) != null
+		or _find_minecart_from_hit(hit) != null
+	):
 		_highlight.visible = false
 		return
 	_highlight.visible = true
@@ -402,6 +565,19 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		# Stop the animation but PRESERVE progress so a one-frame miss
 		# during chunk re-mesh doesn't undo seconds of work.
 		_set_player_mining(false)
+		return
+	# Entity in the raycast (mob or boat) — mining is for blocks only;
+	# the crack overlay should never appear on entities and we shouldn't
+	# accumulate hardness against whatever cell the entity happens to
+	# overlap. Vanilla treats entity-target and block-target as disjoint
+	# left-click dispatches.
+	if (
+		_find_mob_from_hit(hit) != null
+		or _find_boat_from_hit(hit) != null
+		or _find_minecart_from_hit(hit) != null
+	):
+		_set_player_mining(false)
+		_reset_mining()
 		return
 	_set_player_mining(true)
 	var target: Vector3i = hit.block_pos
@@ -711,9 +887,119 @@ func _is_creative() -> bool:
 
 
 # gdlint: disable=max-returns
+func _is_holding_bow() -> bool:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var sel: ItemStack = inv.selected()
+	return sel != null and not sel.is_empty() and sel.item_id == Items.BOW
+
+
+# Public: seconds the bow has been charging in the current draw. Read
+# by player.gd to pick the held-bow sprite stage (pulling_0/1/2 per
+# vanilla `ItemBow.a`). Returns 0 when no charge is in progress so the
+# default un-drawn sprite shows.
+func bow_charge_seconds() -> float:
+	if not _bow_charging:
+		return 0.0
+	return float(Time.get_ticks_msec() - _bow_charge_start_ms) / 1000.0
+
+
+func _start_bow_charge() -> void:
+	if _bow_charging:
+		return
+	_bow_charging = true
+	_bow_charge_start_ms = Time.get_ticks_msec()
+
+
+func _cancel_bow_charge() -> void:
+	_bow_charging = false
+
+
+# Vanilla `ItemBow.a(stack, world, player, i)` — `i` is ticks remaining
+# of the 72000-tick max-use timer, so `j = max - i` = ticks held. We
+# convert via wall-clock instead.
+#   f = held_ticks / 20         (held_seconds, clamped 0..1)
+#   velocity_scalar = (f² + 2f) / 3, clamped 0..1
+#   if velocity_scalar < 0.1 → no fire (vanilla early-return at line 21)
+# Arrow initial speed = velocity_scalar × 3 blocks/tick × 20 ticks/sec
+# = 60 m/s at full charge. Critical (full charge) adds a random damage
+# bonus inside Arrow._hit_mob.
+func _release_bow() -> void:
+	var was_charging: bool = _bow_charging
+	_bow_charging = false
+	if not was_charging or not _is_holding_bow():
+		return
+	var held_seconds: float = float(Time.get_ticks_msec() - _bow_charge_start_ms) / 1000.0
+	var f: float = clampf(held_seconds, 0.0, 1.0)
+	var velocity_scalar: float = (f * f + 2.0 * f) / 3.0
+	if velocity_scalar < 0.1:
+		return
+	if velocity_scalar > 1.0:
+		velocity_scalar = 1.0
+	# Creative-like infinite-arrows mode could go here later; for now
+	# always require an arrow in inventory + consume one.
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return
+	if not _consume_one_of(inv, Items.ARROW):
+		return
+	# Velocity = camera forward × scalar × max speed. The vanilla
+	# constant is 3.0 blocks/tick = 60 m/s at full charge; we use a
+	# tunable max-speed below to keep open the door to "powered" bows.
+	var camera: Camera3D = _camera
+	var forward: Vector3 = -camera.global_transform.basis.z
+	var max_speed: float = 60.0
+	var velocity: Vector3 = forward * velocity_scalar * max_speed
+	# Spawn the arrow slightly in front of the camera so it doesn't
+	# clip the player capsule and self-collide on the first tick.
+	var spawn_pos: Vector3 = camera.global_position + forward * 0.4
+	var arrow: Node3D = _ARROW_SCRIPT.new()
+	arrow.setup(get_parent(), velocity, velocity_scalar >= 1.0)
+	get_tree().root.get_node("Main").add_child(arrow)
+	arrow.global_position = spawn_pos
+	SFX.play_bow_shoot(velocity_scalar)
+	# Bow durability — vanilla ItemBow.a() calls itemstack.damage(1).
+	var stack: ItemStack = inv.selected()
+	if stack != null and not stack.is_empty():
+		stack.damage_tool(1)
+		inv.changed.emit()
+
+
+# Walk hotbar+main looking for one of `item_id`, decrement by 1, emit
+# changed. Returns true on success. Used for arrow consumption.
+func _consume_one_of(inv: Inventory, item_id: int) -> bool:
+	for i in range(Inventory.MAIN_START + Inventory.MAIN_SIZE):
+		var slot: ItemStack = inv.slots[i]
+		if slot == null or slot.is_empty():
+			continue
+		if slot.item_id != item_id:
+			continue
+		slot.remove(1)
+		inv.changed.emit()
+		return true
+	return false
+
+
 func _try_place() -> void:
+	# Bow's held-right-click is handled in `_unhandled_input` (charge /
+	# release); skip the place pipeline entirely so we don't drop the
+	# bow into the world as a "bow block".
+	if _is_holding_bow():
+		return
 	var now: int = Time.get_ticks_msec()
 	if now - _last_place_ms < PLACE_COOLDOWN_MS:
+		return
+	# Mounted on a boat / pig — right-click dismounts, matching vanilla
+	# `dp.java::c(eb)` (right-click while same-player rider = dismount).
+	# Runs before the raycast so the player can dismount without aiming
+	# at the entity (camera-above-hull means the raycast usually misses
+	# the boat collider from the seat position).
+	var player_node: Node = get_parent()
+	var mount: Variant = player_node.get("_mounted_to") if "_mounted_to" in player_node else null
+	if mount != null and mount.has_method("dismount"):
+		mount.call("dismount")
+		_last_place_ms = now
 		return
 	var hit := _raycast()
 	if _chunk_manager == null:
@@ -729,6 +1015,9 @@ func _try_place() -> void:
 	# while holding another boat doesn't try to spawn a new boat
 	# inside the existing one.
 	if _try_right_click_boat(hit):
+		_last_place_ms = now
+		return
+	if _try_right_click_minecart(hit):
 		_last_place_ms = now
 		return
 	# Buckets run even when `hit` is empty — the bucket's fluid-aware scan
@@ -769,6 +1058,12 @@ func _try_place() -> void:
 			# does its own ray-vs-water scan).
 			if held_id == Items.BOAT:
 				if _try_place_boat():
+					_last_place_ms = now
+				return
+			# Minecart — vanilla ItemMinecart spawns EntityMinecart on the
+			# rail block the player is pointing at.
+			if held_id == Items.MINECART:
+				if _try_place_minecart():
 					_last_place_ms = now
 				return
 	if hit.is_empty():
@@ -1314,6 +1609,16 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# empty 4-line text entry in SignStorage.
 	if stack.item_id == Items.SIGN:
 		return _try_place_sign(hit, stack)
+	# Painting — spawns a wall-mounted Painting entity. Requires a
+	# wall-face click (raycast normal is horizontal). Picks a random
+	# variant from those whose size fits the available open wall
+	# space starting at the click cell.
+	if stack.item_id == Items.PAINTING:
+		return _try_place_painting(hit, stack)
+	# Rail item → Blocks.RAIL block on top of clicked support. Auto-
+	# selects meta orientation from neighbor rails.
+	if stack.item_id == Items.RAIL:
+		return _try_place_rail(hit, stack)
 	# Wheat seeds → CROPS at stage 0. Vanilla la.java (ItemSeeds)
 	# checks the targeted cell is FARMLAND + the cell above is AIR,
 	# then places nq.az (BlockCrops) at meta=0 above the farmland.
@@ -1648,6 +1953,60 @@ func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
 	return true
 
 
+# Place a RAIL block on top of the clicked solid block. Vanilla
+# qe.java::a checks the support cell below is opaque; meta is set
+# from the neighbor rails (auto-connect, same family as FENCE).
+# Stage 1 only writes orientation 0 (N-S) or 1 (E-W) — the more
+# complex curve / ascending meta values land with the minecart
+# rail-physics pass in Stage 2.
+func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty():
+		return false
+	# Replace if hit cell is replaceable, else place in the cell at the
+	# face normal — same dispatch as standard block placement.
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var place: Vector3i
+	if Blocks.is_replaceable(hit_id):
+		place = hit.block_pos
+	else:
+		place = hit.block_pos + hit.normal_i
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# Support check: rail needs a solid (opaque) block below it.
+	var support: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
+	if not Blocks.is_opaque(support):
+		return false
+	# Auto-orient from neighbor rails. If there's a rail along the Z
+	# axis (±Z neighbor), prefer N-S (meta 0). Else if X neighbor, E-W
+	# (meta 1). Default to the player's facing axis when isolated.
+	var n_id: int = _chunk_manager.get_world_block(place + Vector3i(0, 0, -1))
+	var s_id: int = _chunk_manager.get_world_block(place + Vector3i(0, 0, 1))
+	var e_id: int = _chunk_manager.get_world_block(place + Vector3i(1, 0, 0))
+	var w_id: int = _chunk_manager.get_world_block(place + Vector3i(-1, 0, 0))
+	var has_z_neighbor: bool = n_id == Blocks.RAIL or s_id == Blocks.RAIL
+	var has_x_neighbor: bool = e_id == Blocks.RAIL or w_id == Blocks.RAIL
+	var meta: int = 0
+	if has_z_neighbor and not has_x_neighbor:
+		meta = 0  # N-S straight
+	elif has_x_neighbor and not has_z_neighbor:
+		meta = 1  # E-W straight
+	else:
+		# Pick based on the player's facing direction. If looking mostly
+		# along Z, N-S; else E-W. Player.rotation.y = 0 → facing -Z (N).
+		var yaw: float = _player_yaw()
+		var fx: float = absf(sin(yaw))  # X component magnitude of forward
+		var fz: float = absf(cos(yaw))  # Z component magnitude of forward
+		meta = 1 if fx > fz else 0
+	_chunk_manager.set_world_block(place, Blocks.RAIL)
+	_chunk_manager.set_world_block_meta(place, meta)
+	SFX.play_place(Blocks.RAIL)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
 # Fishing rod — vanilla bj.java::a. Branches on player.fishing_bobber:
 #   * nil  → cast: spawn FishingBobber at camera pos with vel toward
 #     look direction. Play "random.bow" sfx (vanilla pi.bj does the
@@ -1792,6 +2151,109 @@ func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 # top of a support cube and SIGN_WALL on a vertical face. Both get
 # meta encoding orientation (16-rotation yaw for standing, 4-direction
 # for wall) and an empty 4-line text entry in SignStorage.
+# Painting placement — vanilla `ItemHangingEntity.onItemUse`: the
+# clicked face must be horizontal (north/south/east/west wall, not a
+# ceiling or floor), the AIR cell on the face's normal side becomes
+# the painting's "front" cell, and the variant is picked randomly from
+# those whose size fits the open wall space starting at that cell.
+# Painting is spawned under Main so it persists independently of the
+# chunk lifecycle (vanilla EntityPainting lives in the world entity
+# list, not in the support chunk).
+func _try_place_painting(hit: Dictionary, _stack: ItemStack) -> bool:
+	if hit.is_empty() or _chunk_manager == null:
+		return false
+	# Reject vertical faces — paintings only mount on walls. The hit
+	# normal_i is the OUTWARD face direction of the support block.
+	var normal: Vector3i = hit.normal_i
+	if normal.y != 0 or (normal.x == 0 and normal.z == 0):
+		return false
+	var support_pos: Vector3i = hit.block_pos
+	var front_pos: Vector3i = support_pos + normal
+	if _chunk_manager.get_world_block(front_pos) != Blocks.AIR:
+		return false
+	# Facing convention: the painting's front faces AWAY from the
+	# support wall — i.e., along the click normal. Map Vector3i normal
+	# → BlockDirectional facing (0=+Z, 1=-X, 2=-Z, 3=+X).
+	var facing: int = 0
+	if normal == Vector3i(0, 0, 1):
+		facing = 0
+	elif normal == Vector3i(-1, 0, 0):
+		facing = 1
+	elif normal == Vector3i(0, 0, -1):
+		facing = 2
+	elif normal == Vector3i(1, 0, 0):
+		facing = 3
+	# Measure the open wall space starting at front_pos. Walks
+	# horizontally + vertically as far as cells are air AND have a
+	# valid support block behind them. Capped at 4×4 (largest vanilla
+	# painting size).
+	var extent: Vector2i = _measure_painting_extent(front_pos, normal)
+	if extent.x <= 0 or extent.y <= 0:
+		return false
+	# Pick a variant that fits. Random per Beta `EnumArt.placeArt`.
+	var variant_idx: int = _PAINTING_SCRIPT.pick_variant_for_size(extent.x, extent.y)
+	if variant_idx < 0:
+		return false
+	var size: Vector2i = _PAINTING_SCRIPT.variant_size(variant_idx)
+	# Position the painting's CENTER at the middle of the (size.x ×
+	# size.y) rectangle starting at front_pos and extending into the
+	# computed extent direction. For odd sizes the center sits at the
+	# cell's center; for even sizes it sits on a cell boundary.
+	var horiz_axis: Vector3i = Vector3i(normal.z, 0, -normal.x)  # rotated 90° around Y
+	var center_local: Vector3 = (
+		Vector3(front_pos)
+		+ Vector3(0.5, 0.5, 0.5)
+		+ Vector3(horiz_axis) * (float(size.x - 1) * 0.5)
+		+ Vector3(0.0, float(size.y - 1) * 0.5, 0.0)
+	)
+	# Pull back from the front cell's center into the wall by half a
+	# block so the painting hugs the wall face. Painting's own
+	# `_THICKNESS` push handles the remaining offset.
+	center_local -= Vector3(normal) * 0.5
+	var main: Node = get_tree().root.get_node_or_null("Main")
+	if main == null:
+		return false
+	var painting: Node3D = _PAINTING_SCRIPT.new()
+	painting.setup(variant_idx, facing, support_pos)
+	main.add_child(painting)
+	painting.global_position = center_local
+	painting.apply_facing()
+	SFX.play_place(Blocks.PLANKS)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Walks the (front_pos, wall direction) cells looking for the largest
+# rectangle of AIR cells with valid support behind them. Returns the
+# rectangle size (width × height) in blocks, capped at 4×4 (largest
+# vanilla painting). Width axis is the horizontal axis perpendicular
+# to the wall normal; height axis is world Y.
+func _measure_painting_extent(front_pos: Vector3i, normal: Vector3i) -> Vector2i:
+	const MAX_DIM: int = 4
+	var horiz_axis: Vector3i = Vector3i(normal.z, 0, -normal.x)
+	# Width — how far we can extend along horiz_axis with AIR + support.
+	var width: int = 0
+	for i in range(MAX_DIM):
+		var cell: Vector3i = front_pos + horiz_axis * i
+		if _chunk_manager.get_world_block(cell) != Blocks.AIR:
+			break
+		if _chunk_manager.get_world_block(cell - normal) == Blocks.AIR:
+			break
+		width = i + 1
+	# Height — how far up.
+	var height: int = 0
+	for j in range(MAX_DIM):
+		var cell: Vector3i = front_pos + Vector3i(0, j, 0)
+		if _chunk_manager.get_world_block(cell) != Blocks.AIR:
+			break
+		if _chunk_manager.get_world_block(cell - normal) == Blocks.AIR:
+			break
+		height = j + 1
+	return Vector2i(width, height)
+
+
 func _try_place_sign(hit: Dictionary, _stack: ItemStack) -> bool:
 	if hit.is_empty():
 		return false

@@ -508,8 +508,10 @@ func _face_walk_direction() -> void:
 # knockback shove (op.java has no attackEntityFrom override). Kept
 # because it makes the mob feel responsive — flagged as a deliberate
 # deviation from strict Alpha behavior.
-func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir)
+func take_damage(
+	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()
@@ -534,9 +536,22 @@ func _process(delta: float) -> void:
 func _build_collision_shape() -> void:
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(_BODY_SIZE.x, _BODY_SIZE.y + _LEG_SIZE.y, _BODY_SIZE.z)
+	# Union body + head AABBs in both Y and Z. Head sits at
+	# HEAD_OFFSET (0, 0.75, -0.625) with head_size 8 px = 0.5 m, so:
+	#   Y: 0 .. 0.75 + 0.25 = 1.0
+	#   Z: min(-BODY.z/2, HEAD_OFFSET.z - head_depth/2)
+	#      = min(-0.5, -0.875) = -0.875 .. +BODY.z/2 (+0.5)
+	#      = 1.375 size, centered at -0.1875
+	# Same approach as cow / sheep — extends forward so arrows from
+	# the front hit the snout, not pass through it.
+	var hb_height: float = 1.0
+	var z_min: float = -0.875
+	var z_max: float = _BODY_SIZE.z * 0.5
+	var hb_depth: float = z_max - z_min
+	var hb_z_center: float = (z_min + z_max) * 0.5
+	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
 	col.shape = box
-	col.position = Vector3(0, (_BODY_SIZE.y + _LEG_SIZE.y) * 0.5, 0)
+	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
 	add_child(col)
 
 

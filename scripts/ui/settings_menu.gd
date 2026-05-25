@@ -63,6 +63,12 @@ var _sfx_checkbox: CheckBox
 # is set to alpha_vanilla. The label + checkbox both hide/show as a pair.
 var _vintage_foliage_row: HBoxContainer
 var _vintage_foliage_checkbox: CheckBox
+# Vbox + button_col promoted to fields so _refresh_vintage_foliage_visibility
+# can resize them on row hide/show. Layout fits 10 rows comfortably at 1080p;
+# the 11th (foliage) row requires tightening row separation to fit the same
+# pixel budget without pushing the seed row behind the buttons.
+var _vbox: VBoxContainer
+var _button_col: VBoxContainer
 var _seed_label: Label
 var _pending_seed: int = 0
 # Overlay mode: Done-equivalents (Save/Cancel) queue_free instead of
@@ -122,26 +128,25 @@ func _build_panel() -> void:
 	title.add_theme_constant_override("shadow_offset_y", 6)
 	add_child(title)
 
-	var vbox := VBoxContainer.new()
-	vbox.anchor_left = 0.5
-	vbox.anchor_right = 0.5
-	vbox.anchor_top = 0.03
-	vbox.anchor_bottom = 0.03
-	vbox.offset_left = -360
-	vbox.offset_right = 360
+	_vbox = VBoxContainer.new()
+	_vbox.anchor_left = 0.5
+	_vbox.anchor_right = 0.5
+	_vbox.anchor_top = 0.03
+	_vbox.anchor_bottom = 0.03
+	_vbox.offset_left = -360
+	_vbox.offset_right = 360
 	# 60 px below the title's anchor. Was 88 before the "Controls..." button
 	# added a third row to button_col (+96 px); shifted vbox up to recover
 	# the bottom-edge margin at 1080p (without this, button_col bottom
 	# landed at y=1098 — off-screen).
-	vbox.offset_top = 60
-	# 11 rows × 60 px + 10 × 10 separation = 760 px. Bumped from 690 to
-	# reserve space for the conditional Alpha-1.1.2-foliage row (visible
-	# only when the pack dropdown is on alpha_vanilla). When hidden, the
-	# bottom 70 px just reads as extra breathing room — acceptable
-	# tradeoff for not having to reflow button_col on every pack change.
-	vbox.offset_bottom = 60 + 760
-	vbox.add_theme_constant_override("separation", 10)
-	add_child(vbox)
+	_vbox.offset_top = 60
+	# Initial sizing = 10 visible rows (foliage hidden). Bumped + tightened
+	# in _apply_layout_for_row_count() when the foliage row is shown.
+	# 10 rows × 60 px + 9 × 10 separation = 690 px.
+	_vbox.offset_bottom = 60 + 690
+	_vbox.add_theme_constant_override("separation", 10)
+	add_child(_vbox)
+	var vbox: VBoxContainer = _vbox
 
 	_add_music_row(vbox)
 	_sfx_checkbox = _add_checkbox_row(vbox, "Sound effects")
@@ -175,21 +180,23 @@ func _build_panel() -> void:
 	_fog_checkbox = _add_checkbox_row(vbox, "Fog")
 	_add_seed_row(vbox)
 
-	var button_col := VBoxContainer.new()
-	button_col.anchor_left = 0.5
-	button_col.anchor_right = 0.5
-	button_col.anchor_top = 0.03
-	button_col.anchor_bottom = 0.03
-	button_col.offset_left = -400
-	button_col.offset_right = 400
+	_button_col = VBoxContainer.new()
+	_button_col.anchor_left = 0.5
+	_button_col.anchor_right = 0.5
+	_button_col.anchor_top = 0.03
+	_button_col.anchor_bottom = 0.03
+	_button_col.offset_left = -400
+	_button_col.offset_right = 400
 	# 766 = vbox bottom (750) + 16 px breathing gap. 3 × 80 px buttons +
 	# 2 × 16 px separation = 272 px, so bottom lands at y=1038 — fits the
-	# 1080p viewport with ~40 px margin to spare.
-	button_col.offset_top = 766
-	button_col.offset_bottom = 766 + 272
-	button_col.add_theme_constant_override("separation", 16)
-	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
-	add_child(button_col)
+	# 1080p viewport with ~40 px margin to spare. Push down when foliage
+	# row shows up — see _apply_layout_for_row_count().
+	_button_col.offset_top = 766
+	_button_col.offset_bottom = 766 + 272
+	_button_col.add_theme_constant_override("separation", 16)
+	_button_col.alignment = BoxContainer.ALIGNMENT_CENTER
+	add_child(_button_col)
+	var button_col: VBoxContainer = _button_col
 	var controls_btn := VanillaButton.new()
 	controls_btn.text = "Controls..."
 	controls_btn.pressed.connect(_on_controls_pressed)
@@ -555,7 +562,32 @@ func _on_pack_selected(idx: int) -> void:
 func _refresh_vintage_foliage_visibility(pack: String) -> void:
 	if _vintage_foliage_row == null:
 		return
-	_vintage_foliage_row.visible = pack == "alpha_vanilla"
+	var show_row: bool = pack == "alpha_vanilla"
+	_vintage_foliage_row.visible = show_row
+	_apply_layout_for_row_count(show_row)
+
+
+# Adjust vbox + button_col offsets based on whether the foliage row is
+# visible. With 10 rows (foliage hidden) the original comfortable layout
+# fits with 40 px margin at 1080p; with 11 rows we have to tighten row
+# separation from 10 → 4 to claw back 60 px and stay on-screen.
+# Without this, the seed row at vbox y=700-760 ends up overlapped by
+# button_col starting at y=706.
+func _apply_layout_for_row_count(has_extra_row: bool) -> void:
+	if _vbox == null or _button_col == null:
+		return
+	if has_extra_row:
+		# 11 rows × 60 px + 10 × 4 separation = 700 px.
+		_vbox.add_theme_constant_override("separation", 4)
+		_vbox.offset_bottom = 60 + 700
+		_button_col.offset_top = 776
+		_button_col.offset_bottom = 776 + 272
+	else:
+		# Original 10-row layout.
+		_vbox.add_theme_constant_override("separation", 10)
+		_vbox.offset_bottom = 60 + 690
+		_button_col.offset_top = 766
+		_button_col.offset_bottom = 766 + 272
 
 
 func _on_save_pressed() -> void:

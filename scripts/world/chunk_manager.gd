@@ -11,6 +11,10 @@ const _COMPRESS_MODE: int = FileAccess.COMPRESSION_FASTLZ
 const _TICK_SCHEDULER: GDScript = preload("res://scripts/world/tick_scheduler.gd")
 const _BLOCK_FX: GDScript = preload("res://scripts/world/block_fx.gd")
 const _SAVE_LOAD: GDScript = preload("res://scripts/persistence/save_load.gd")
+# preload() instead of the class_name to dodge the editor class-index
+# lag that bites new class_name registrations on first reload (same
+# workaround as `_TICK_SCHEDULER` above).
+const _PASSIVE_SPAWNER_SCRIPT: GDScript = preload("res://scripts/world/passive_spawner.gd")
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
 const _AUTOSAVE_INDICATOR_VISIBLE_SEC: float = 1.0
 
@@ -65,6 +69,10 @@ var chunks_generated_total: int = 0
 
 var _player: Node3D
 var _chunks: Dictionary = {}  # Vector2i → Node3D (ChunkNode)
+# Natural-spawning driver — Alpha bg.java port + Beta worldgen-spawn
+# pass. Ticks at 20 Hz from `_process` for ongoing spawns;
+# populate_chunk_at_gen() runs once per fresh chunk for the seed pass.
+var _passive_spawner: RefCounted = _PASSIVE_SPAWNER_SCRIPT.new()
 var _pending: Dictionary = {}  # Vector2i → dispatch_time_ms (currently being computed)
 var _spawn_queue: Array = []  # Vector2i FIFO of chunks to enqueue for workers
 var _result_mutex := Mutex.new()
@@ -258,6 +266,14 @@ func _process(_delta: float) -> void:
 	var t_cane := PerfProbe.begin("chunk_mgr.tick.cane_growth")
 	_tick_cane_growth()
 	PerfProbe.end("chunk_mgr.tick.cane_growth", t_cane)
+	# Natural mob spawning — Alpha bg.java port. Driven from the main
+	# tick loop so the spawner sees a consistent player position +
+	# loaded-chunk set each frame. The spawner has its own 20 Hz
+	# accumulator so this call is cheap on most frames (just an add +
+	# threshold check).
+	var t_spawn := PerfProbe.begin("chunk_mgr.tick.mob_spawn")
+	_passive_spawner.tick(_delta, self, _player)
+	PerfProbe.end("chunk_mgr.tick.mob_spawn", t_spawn)
 	# Scheduled block-tick queue — Flow #2 foundation for fluid flow.
 	# Drains at vanilla 20 Hz (50 ms per tick); fires BlockFluids cascade
 	# and future redstone / growth callbacks. Frame-hitch-safe: the
@@ -517,6 +533,12 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	for cane_pos: Vector3i in data.chunk.cane_tops:
 		_enqueue_cane_growth(cane_pos)
 	data.chunk.cane_tops.clear()
+	# Worldgen-time animal spawn pass — only for fresh chunks. Re-loaded
+	# chunks already had their entities saved via EntitySave, so a second
+	# pass would duplicate them. The spawner reads voxels through
+	# get_world_block so we must call it AFTER the chunk is in `_chunks`.
+	if not data.get("from_save", false):
+		_passive_spawner.populate_chunk_at_gen(self, coord)
 	# Re-dirty loaded neighbors AND this new chunk so the edge-snapshot
 	# re-mesh path (chunk_node._dispatch_remesh → _attach_neighbor_edges)
 	# runs once per seam. The worker's initial mesh (_compute_chunk_data

@@ -32,6 +32,11 @@ static var _pool_parent: Node = null
 # Lava-spark material cache — see get_lava_spark_material below. Kept at
 # the top of the file to satisfy gdlint's class-definitions-order rule.
 static var _lava_spark_material: StandardMaterial3D = null
+# Splash droplet material cache — solid-blue tiny quad. AtlasTexture
+# stretched the whole particles.png across the quad on GPUParticles3D
+# draw passes (Godot 4 quirk, same issue lava_spark hit), so we render
+# a flat-color quad sized to match vanilla's 0.01 m sprite footprint.
+static var _splash_material: StandardMaterial3D = null
 # Torch-flame material cache — small yellow-orange billboard, vanilla
 # `EntityFlameFX` (db.java's flame entry). Lifetime ~1 s, slight upward
 # drift, no gravity.
@@ -290,6 +295,30 @@ static func get_lava_spark_material() -> StandardMaterial3D:
 	return mat
 
 
+# Tiny blue water droplet — sprite indices 20-23 in vanilla particles.png
+# (mf.java does `++this.b` over pc.java's `b = 19 + rand(4)`, so splash
+# lands on cells 20-23). Sampled avg color across those four cells is
+# sRGB (33, 80, 204) ≈ #2150CC; we plug the linear equivalent here so
+# Godot's framebuffer encode lands on that hue on screen. Flat quad
+# (no atlas) — same reasoning as lava_spark above.
+static func get_splash_material() -> StandardMaterial3D:
+	if _splash_material != null:
+		return _splash_material
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
+	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
+	# StandardMaterial3D treats albedo_color floats as sRGB (Godot
+	# linearizes internally), so pass the raw sRGB-normalized values —
+	# NOT the linear conversion. Vanilla splash sprite avg = #2150CC =
+	# (33, 80, 204) sRGB → /255 → (0.129, 0.314, 0.800). Plugging in
+	# linear-space values here (0.015, 0.080, 0.604) made the splash
+	# render almost-black because Godot double-converted.
+	mat.albedo_color = Color(33.0 / 255.0, 80.0 / 255.0, 204.0 / 255.0, 1.0)
+	_splash_material = mat
+	return mat
+
+
 # Single-particle upward arc, Alpha-faithful to ld.java:193-197. Uses the
 # pool via _acquire so lava-heavy caves don't allocate new GPUParticles3D
 # on every spark; amount=1 per call, position = cell top.
@@ -339,17 +368,18 @@ static func get_smoke_subparticle_material() -> StandardMaterial3D:
 static func get_bubble_material() -> StandardMaterial3D:
 	if _bubble_material != null:
 		return _bubble_material
-	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
-	var atlas := AtlasTexture.new()
-	atlas.atlas = sheet
-	atlas.region = Rect2(0, 16, 8, 8)
-	atlas.filter_clip = true
+	# Flat light-cyan quad — vanilla bubble sprite (bh.java:12 sets
+	# `this.b = 32`, particles.png cell (0, 16, 8, 8)) averages sRGB
+	# (97, 205, 255). AtlasTexture on GPUParticles3D draw passes
+	# stretches the whole 128×128 sheet across the quad (same Godot 4
+	# quirk hit by lava_spark + splash), so we flat-color it instead.
+	# Pass the raw sRGB-normalized floats — Godot linearizes albedo_color
+	# internally; pre-linearizing here would double-darken.
 	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = atlas
-	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
+	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
 	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
+	mat.albedo_color = Color(97.0 / 255.0, 205.0 / 255.0, 255.0 / 255.0, 1.0)
 	_bubble_material = mat
 	return mat
 
@@ -396,6 +426,66 @@ static func spawn_water_bubble(
 	particles.lifetime = 1.0
 	particles.position = world_pos
 	particles.sub_emitter = NodePath("")  # clear any leftover from pool reuse
+	particles.visible = true
+	particles.restart()
+	_schedule_return(parent, particles)
+
+
+# Spawn N water-droplet splash particles arcing up + outward from world_pos.
+# Vanilla Entity.N() (vendor/alpha-1.2.6-src/src/lw.java:170-183) fires
+# `1 + width * 20` of these at the water surface every time an entity's
+# inWater flag flips false → true; the "splash" particle is mf.java —
+# a pc.java subclass with `h = 0.04` gravity and a +0.1 Y kick injected
+# when called with horizontal-only motion. We approximate that with
+# directional-up spawn + spread + gravity. Caller passes the entity's
+# pre-impact velocity so high-speed entries throw droplets farther
+# (matches vanilla's `* width` and `entity.az / aA / aB` references).
+static func spawn_water_splash(
+	parent: Node, world_pos: Vector3, motion: Vector3 = Vector3.ZERO, count: int = 8
+) -> void:
+	var particles := _acquire(parent, count, Vector3(0.3, 0.05, 0.3))
+	var proc := ParticleProcessMaterial.new()
+	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	# Flat disc at the water surface — vanilla samples y = floor(box.y) + 1
+	# (line 169) so all 13 splash particles spawn in the same XZ plane.
+	proc.emission_box_extents = Vector3(0.3, 0.02, 0.3)
+	# Outward "burst" — primary +Y kick (the +0.1 vanilla adds) plus spread
+	# so droplets fan into a dome. Faster entries throw farther.
+	var entry_kick: float = clampf(motion.length() * 0.5, 0.0, 3.0)
+	proc.direction = Vector3(0, 1, 0)
+	proc.initial_velocity_min = 1.0 + entry_kick
+	proc.initial_velocity_max = 2.5 + entry_kick
+	proc.spread = 55.0
+	# Vanilla pc.java: `h = 0.06f` per tick (20 TPS) = 1.2 m/s² downward.
+	# We use 2.5 m/s² to give the droplets a snappy arc that's clearly
+	# visible inside the 0.8 s lifetime at 60 fps — pure 1.2 m/s² read as
+	# too floaty in playtesting.
+	proc.gravity = Vector3(0, -2.5, 0)
+	# Vanilla pc.java::e_() multiplies motion by 0.98/tick = mild drag.
+	proc.damping_min = 0.3
+	proc.damping_max = 0.6
+	# Vanilla pc.java sets sprite size to 0.01×0.01 m, but vanilla also
+	# scales each particle's render size by `g *= rand*2 + 0.2` and
+	# again by 0.1 in the render pass — net visible width ≈ 0.05 m.
+	# We bake that into the quad size + scale jitter for the same look.
+	proc.scale_min = 0.6
+	proc.scale_max = 1.2
+	proc.particle_flag_align_y = false
+	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
+	particles.process_material = proc
+	var draw := QuadMesh.new()
+	# 0.05 m base — vanilla's effective on-screen splash droplet size.
+	# Falls inside the lava_spark / smoke range so the splash reads as
+	# the same particle "class" rather than a giant blue rectangle.
+	draw.size = Vector2(0.05, 0.05)
+	draw.material = get_splash_material()
+	particles.draw_pass_1 = draw
+	# Vanilla mf.java inherits from pc.java with lifetime 8..40 ticks
+	# (0.4..2.0 s). Midpoint feels right for splash specifically — the
+	# droplet has time to peak + fall back without lingering.
+	particles.lifetime = 0.8
+	particles.position = world_pos
+	particles.sub_emitter = NodePath("")
 	particles.visible = true
 	particles.restart()
 	_schedule_return(parent, particles)

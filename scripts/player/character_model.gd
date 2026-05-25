@@ -177,6 +177,10 @@ var _armor_leg_r_lower: MeshInstance3D  # boots
 var _armor_mat_cache: Dictionary = {}  # path -> StandardMaterial3D
 var _walk_phase: float = 0.0
 var _swing_progress: float = 0.0  # 0..1 within the current swing cycle
+# Mounted-pose flag — when true the legs lock into a sitting bend at
+# the hip (~90° forward). update_walk_animation skips its leg writes
+# while this is true so the pose stays put. Player.set_mount toggles it.
+var _mounted_pose: bool = false
 var _swing_active_visual: bool = false
 
 var _fire_pivot: Node3D
@@ -193,6 +197,16 @@ func _ready() -> void:
 
 
 func update_walk_animation(speed: float, delta: float, skip_right_arm: bool = false) -> void:
+	# Mounted-pose lock: legs are pinned forward to the sitting bend,
+	# so we don't overwrite their rotation each frame. Arms still relax
+	# / swing normally (vanilla rider's arms stay free while seated).
+	if _mounted_pose:
+		var t_arm: float = clampf(delta * RETURN_TO_REST_RATE, 0.0, 1.0)
+		if not skip_right_arm:
+			arm_r.rotation.x = lerpf(arm_r.rotation.x, 0.0, t_arm)
+		arm_l.rotation.x = lerpf(arm_l.rotation.x, 0.0, t_arm)
+		_walk_phase = 0.0
+		return
 	if speed > 0.4:
 		_walk_phase += delta * (speed * WALK_FREQUENCY * TAU)
 		var swing: float = sin(_walk_phase) * deg_to_rad(WALK_SWING_DEG)
@@ -210,6 +224,30 @@ func update_walk_animation(speed: float, delta: float, skip_right_arm: bool = fa
 		leg_r.rotation.x = lerpf(leg_r.rotation.x, 0.0, t)
 		leg_l.rotation.x = lerpf(leg_l.rotation.x, 0.0, t)
 		_walk_phase = 0.0
+
+
+# Toggle the seated pose — both legs bent forward ~80° at the hip so
+# the rider visibly sits in the boat / pig saddle / minecart instead of
+# standing on top of it. Vanilla MC's ModelBiped.isRiding flag does the
+# same thing (sets rotateAngleX = -PI/2 for legs, -PI/4 for body lean —
+# we skip the body lean for now). Player.set_mount calls this.
+func set_mounted_pose(enabled: bool) -> void:
+	if _mounted_pose == enabled:
+		return
+	_mounted_pose = enabled
+	if not is_inside_tree() or leg_l == null or leg_r == null:
+		return
+	if enabled:
+		# Bend forward at the hip. PI/2 = 90° but vanilla uses slightly
+		# less (~80°) to read as "knees up" rather than "legs straight
+		# forward." Both legs together so the silhouette is the iconic
+		# minecart/boat seated pose.
+		var bend: float = deg_to_rad(80.0)
+		leg_l.rotation.x = bend
+		leg_r.rotation.x = bend
+	else:
+		leg_l.rotation.x = 0.0
+		leg_r.rotation.x = 0.0
 
 
 # Drives the right-arm chopping motion. Returns swing PROGRESS in [0, 1]

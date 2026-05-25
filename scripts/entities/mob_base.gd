@@ -72,6 +72,11 @@ const _DEATH_TILT_ANGLE: float = -PI * 0.5  # 90° fall to left (vanilla)
 # have no enchants, so flat values).
 const KNOCKBACK_HORIZONTAL: float = 5.0
 const KNOCKBACK_VERTICAL: float = 4.0
+# Stuck-arrows cosmetic — see `add_stuck_arrow` for behavior. Max
+# count + decay window mirror vanilla EntityLiving (`arrowsInBody`
+# capped at ~14, one falls off every 600 ticks ≈ 30 s @ 20 tps).
+const _STUCK_ARROW_MAX: int = 12
+const _STUCK_ARROW_DECAY_SEC: float = 30.0
 
 # --- Environment hazards (water / lava / fire) — vanilla hf.java::b
 # (water/lava-aware movement) + hf.java::B (air ticks + contact damage).
@@ -182,6 +187,12 @@ var _on_fire_ticks: int = 0
 var _fire_pivot: Node3D = null
 var _fire_sprites: Array[Sprite3D] = []
 var _fire_anim_time: float = 0.0
+# Stuck arrows cosmetic — see `add_stuck_arrow` for behavior. Each
+# entry in `_stuck_arrows` is a Node3D pivot whose local -Z points
+# into the body; a child MeshInstance3D holds the small visible mesh.
+var _arrows_stuck: int = 0
+var _stuck_arrows: Array[Node3D] = []
+var _stuck_arrow_decay_accum: float = 0.0
 
 
 # Read-only accessor for MobSpawnerManager + future spawn-cap code.
@@ -270,6 +281,7 @@ func _process(delta: float) -> void:
 		if _hurt_flash_remaining == 0.0:
 			_clear_hurt_flash()
 	_tick_fire_animation(delta)
+	_tick_stuck_arrow_decay(delta)
 
 
 # Beta-era `Render.renderEntityOnFire` port — five stacked layered
@@ -495,7 +507,9 @@ func _get_eye_height() -> float:
 #
 # `knockback_dir` is the world-space direction from attacker to mob;
 # pass Vector3.ZERO for damage-without-knockback (lava, drowning).
-func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
+func take_damage(
+	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+) -> bool:
 	if amount <= 0 or health <= 0:
 		return false
 	if _damage_cooldown_remaining > 0.0:
@@ -505,8 +519,15 @@ func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
 	_apply_hurt_flash()
 	if knockback_dir.length_squared() > 0.0001:
 		var dir: Vector3 = knockback_dir.normalized()
-		velocity.x = dir.x * KNOCKBACK_HORIZONTAL
-		velocity.z = dir.z * KNOCKBACK_HORIZONTAL
+		# Strength multiplier ONLY scales horizontal — vanilla
+		# `EntityArrow` applies a fixed ~0.1 vertical regardless of
+		# arrow charge; scaling vertical too (as we used to) launched
+		# mobs ~3 m on full-charge hits, which the user flagged as
+		# "ridiculous". Keep the vertical pop constant so the kick
+		# feels like a flinch, not a takeoff.
+		var ks: float = maxf(knockback_strength, 0.0)
+		velocity.x = dir.x * KNOCKBACK_HORIZONTAL * ks
+		velocity.z = dir.z * KNOCKBACK_HORIZONTAL * ks
 		velocity.y = KNOCKBACK_VERTICAL
 	if health == 0:
 		die()
@@ -523,6 +544,88 @@ func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
 # entity is removed from the world. queue_free is deferred to the
 # end of the animation; drops + SFX fire NOW so the player doesn't
 # have to wait to pick them up.
+# Called by Arrow._hit_mob after a successful damage application.
+# Vanilla EntityLiving caps at ~14 stuck arrows visually; we use 12
+# (`_STUCK_ARROW_MAX`). Stuck arrows are pure render — they don't
+# re-damage or block raycasts (no collision shape on them).
+func add_stuck_arrow() -> void:
+	if _dying or _arrows_stuck >= _STUCK_ARROW_MAX:
+		return
+	_arrows_stuck += 1
+	_spawn_stuck_arrow_visual()
+
+
+# Deterministic position via RNG seeded with (instance_id, arrow index)
+# so saves/loads place the same arrows at the same spots if we ever
+# wire up persistence. Direction picks a random azimuth + a modest
+# polar angle so most arrows stick into the side / back of the body
+# rather than perfectly straight up. Local -Z is oriented into the
+# body so the arrow's head buries inside, fletching outside.
+func _spawn_stuck_arrow_visual() -> void:
+	var idx: int = _stuck_arrows.size()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = absi(get_instance_id() * 31 + idx * 17)
+	var theta: float = rng.randf_range(0.0, TAU)
+	var phi: float = rng.randf_range(-0.3, 0.3)
+	var dir := Vector3(cos(phi) * cos(theta), sin(phi), cos(phi) * sin(theta))
+	var hw: float = maxf(_get_body_width() * 0.5, 0.1)
+	var hh: float = maxf(_get_body_height() * 0.5, 0.1)
+	# Surface position on an ellipsoid centered at mid-body. Slight
+	# random vertical jitter inside the body height range.
+	var v_jitter: float = rng.randf_range(0.2, 0.95)
+	var surface_pos := Vector3(dir.x * hw, hh * 2.0 * v_jitter, dir.z * hw)
+	var pivot := Node3D.new()
+	pivot.position = surface_pos
+	add_child(pivot)
+	# Orient so local -Z points toward the body center.
+	var body_center_world: Vector3 = global_position + Vector3(0.0, hh, 0.0)
+	pivot.look_at(body_center_world, Vector3.UP)
+	# Shaft — narrow brown box stretched along -Z. Placed forward of
+	# the pivot so most of the shaft sticks OUT (more visible) with
+	# the tip burying into the body.
+	var shaft := MeshInstance3D.new()
+	var shaft_box := BoxMesh.new()
+	shaft_box.size = Vector3(0.03, 0.03, 0.3)
+	shaft.mesh = shaft_box
+	shaft.position = Vector3(0.0, 0.0, 0.08)
+	var shaft_mat := StandardMaterial3D.new()
+	shaft_mat.albedo_color = Color(0.55, 0.40, 0.25)
+	shaft_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	shaft.material_override = shaft_mat
+	pivot.add_child(shaft)
+	# Tiny grey head box. Sits at the end that's buried into the body
+	# (local -Z direction from the shaft).
+	var head := MeshInstance3D.new()
+	var head_box := BoxMesh.new()
+	head_box.size = Vector3(0.05, 0.05, 0.05)
+	head.mesh = head_box
+	head.position = Vector3(0.0, 0.0, -0.08)
+	var head_mat := StandardMaterial3D.new()
+	head_mat.albedo_color = Color(0.65, 0.65, 0.7)
+	head_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	head.material_override = head_mat
+	pivot.add_child(head)
+	_stuck_arrows.append(pivot)
+
+
+# Tick the decay timer; remove the oldest stuck arrow when one falls
+# off. Vanilla decays 1 stuck arrow every ~600 ticks (= 30s @ 20 tps);
+# matches `_STUCK_ARROW_DECAY_SEC`. Called from `_process`.
+func _tick_stuck_arrow_decay(delta: float) -> void:
+	if _arrows_stuck == 0:
+		return
+	_stuck_arrow_decay_accum += delta
+	if _stuck_arrow_decay_accum < _STUCK_ARROW_DECAY_SEC:
+		return
+	_stuck_arrow_decay_accum = 0.0
+	_arrows_stuck = maxi(0, _arrows_stuck - 1)
+	if _stuck_arrows.is_empty():
+		return
+	var oldest: Node3D = _stuck_arrows.pop_front()
+	if is_instance_valid(oldest):
+		oldest.queue_free()
+
+
 func die() -> void:
 	if _dying:
 		return
@@ -530,6 +633,14 @@ func die() -> void:
 	_death_time = 0.0
 	_play_death_sfx()
 	_spawn_drops()
+	# Vanilla EntityLiving.onDeath drops stuck arrows alongside the
+	# normal loot. We just clear the visual since no Arrow entities
+	# are tracked here (they queue_free'd on hit).
+	for s: Node3D in _stuck_arrows:
+		if is_instance_valid(s):
+			s.queue_free()
+	_stuck_arrows.clear()
+	_arrows_stuck = 0
 
 
 # Advance the death tilt animation — vanilla `ec.java` lines 40-43:

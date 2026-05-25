@@ -544,7 +544,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL) {
 					continue;
 				}
 
@@ -802,7 +802,7 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL) {
 					continue;
 				}
 				for (int face = 0; face < 6; face++) {

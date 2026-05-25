@@ -235,6 +235,24 @@
       "result": {"id": "fence_gate", "count": 1}
     },
     {
+      "id": "bow",
+      "pattern": [" S#", "S #", " S#"],
+      "key": {"S": "stick", "#": "string"},
+      "result": {"id": "bow", "count": 1}
+    },
+    {
+      "id": "arrow",
+      "pattern": ["F", "S", "f"],
+      "key": {"F": "flint", "S": "stick", "f": "feather"},
+      "result": {"id": "arrow", "count": 4}
+    },
+    {
+      "id": "painting",
+      "pattern": ["SSS", "SWS", "SSS"],
+      "key": {"S": "stick", "W": "wool_white"},
+      "result": {"id": "painting", "count": 1}
+    },
+    {
       "id": "wood_stairs",
       "pattern": ["#  ", "## ", "###"],
       "key": {"#": "planks"},
@@ -442,6 +460,20 @@
       "pattern": ["BB", "BB"],
       "key": {"B": "clay_ball"},
       "result": {"id": "clay", "count": 1}
+    },
+    {
+      "_comment": "Minecart — vanilla CraftingManager. 5 iron ingots in a U: empty top row, iron-air-iron middle, iron across bottom. Yields 1 minecart.",
+      "id": "minecart",
+      "pattern": ["I I", "III"],
+      "key": {"I": "iron_ingot"},
+      "result": {"id": "minecart", "count": 1}
+    },
+    {
+      "_comment": "Rail — vanilla CraftingManager. 6 iron ingots + 1 stick: iron columns on left and right, stick in middle, iron filling top and bottom of middle column. Yields 16 rails per craft.",
+      "id": "rail",
+      "pattern": ["I I", "ISI", "I I"],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "rail", "count": 16}
     }
   ],
   "shapeless": [

@@ -199,13 +199,28 @@ func _process(delta: float) -> void:
 	_roll_idle_sfx(delta)
 
 
-# Collision shape sized to body+legs, like pig.
+# Collision shape — DEVIATES from vanilla BB (body+legs only) by also
+# covering the head. Without this the head sits above the hitbox and
+# arrows / melee aimed at the head pass straight through. Same fix
+# as the chicken collision widening. Width stays at body.x so cows
+# don't get stuck in 1-block gaps.
 func _build_collision_shape() -> void:
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(_BODY_SIZE.x, _BODY_SIZE.y + _LEG_SIZE.y, _BODY_SIZE.z)
+	# Body+legs alone leave the head (which sits AT y=1.25 AND sticks
+	# FORWARD to z=-0.875) outside the hitbox — arrows from the front
+	# passed through. Union the body and head AABBs along both axes.
+	#   Y: 0 .. HEAD_OFFSET.y + head_height/2 = 0 .. 1.5
+	#   Z: -|HEAD_OFFSET.z| - head_depth/2 .. +BODY.z/2
+	#      = -0.875 .. +0.5625  (z size 1.4375, centered at -0.15625)
+	var hb_height: float = 1.5
+	var z_min: float = -0.875
+	var z_max: float = _BODY_SIZE.z * 0.5
+	var hb_depth: float = z_max - z_min
+	var hb_z_center: float = (z_min + z_max) * 0.5
+	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
 	col.shape = box
-	col.position = Vector3(0, (_BODY_SIZE.y + _LEG_SIZE.y) * 0.5, 0)
+	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
 	add_child(col)
 
 
@@ -436,8 +451,10 @@ func _face_walk_direction() -> void:
 	rotation.y += delta
 
 
-func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir)
+func take_damage(
+	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()

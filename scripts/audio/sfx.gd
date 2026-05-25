@@ -72,6 +72,15 @@ const _FUSE_SOUND: String = "res://assets/audio/sfx/random/fuse.ogg"
 # minecraft-assets branch 1.0 (Beta 1.0 = same asset as Alpha 1.2.6,
 # the bow sound wasn't changed across the Alpha→Beta cut).
 const _BOW_SOUND: String = "res://assets/audio/sfx/random/bow.ogg"
+# Arrow impact pool — vanilla EntityArrow.h() picks one of these
+# uniformly per hit (`world.makeSound(..., "random.bowhit", ...)`
+# → sounds/random/bowhit{1..4}.ogg via the legacy asset index).
+const _BOWHIT_SOUNDS: Array = [
+	"res://assets/audio/sfx/random/bowhit1.ogg",
+	"res://assets/audio/sfx/random/bowhit2.ogg",
+	"res://assets/audio/sfx/random/bowhit3.ogg",
+	"res://assets/audio/sfx/random/bowhit4.ogg",
+]
 # Alpha 1.2.6 `sound3/random/explode{1..4}.ogg` — vanilla picks one
 # uniformly per detonation. ks.java::b() pitch jitter envelope is
 # `(1 + (rand-rand) × 0.2) × 0.7` ≈ 0.7 ± 0.14, giving the explosion a
@@ -433,6 +442,37 @@ func _play_one(path: String, volume_db: float, pitch: float) -> void:
 func play_bow_cast() -> void:
 	var pitch: float = 0.4 / (randf_range(0.0, 0.4) + 0.8)
 	_play_one(_BOW_SOUND, linear_to_db(0.5), pitch)
+
+
+# Vanilla ItemBow.a() — `world.makeSound(player, "random.bow", 1.0,
+# 1.0 / (rand*0.4 + 1.2) + f*0.5)`. Pitch range ~0.71..0.91 + charge*0.5
+# so a fully-drawn shot ("twang") is noticeably higher-pitched than a
+# half-charge release. Same sound file as the fishing-rod cast — vanilla
+# shares random.bow.ogg between the two interactions.
+func play_bow_shoot(charge: float) -> void:
+	var pitch: float = 1.0 / (randf_range(0.0, 0.4) + 1.2) + charge * 0.5
+	_play_one(_BOW_SOUND, 0.0, pitch)
+
+
+# Arrow impact — vanilla EntityArrow.h() plays `random.bowhit{1..4}`
+# (picked uniformly per hit). Pitch jitter from the same line:
+# `1.2 / (rand*0.2 + 0.9)` → range ~1.09..1.33. The canonical samples
+# are vendored from Mojang's content-hash CDN; legacy 1.6.4 asset index
+# `sounds/random/bowhit{1..4}.ogg`.
+func play_arrow_hit() -> void:
+	if not Game.sfx_enabled or Game.is_loading:
+		return
+	var path: String = _BOWHIT_SOUNDS[randi() % _BOWHIT_SOUNDS.size()]
+	var stream: AudioStream = _stream_cache.get(path)
+	if stream == null:
+		stream = load(path) as AudioStream
+		_stream_cache[path] = stream
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = 0.0
+	player.pitch_scale = 1.2 / (randf_range(0.0, 0.2) + 0.9)
+	player.play()
 
 
 # soft but audible. Pitch jitter is `1.0 + (rand - rand) * 0.4`.

@@ -303,6 +303,25 @@ const SIGN_WALL := 76
 # Open: passable. Texture is planks on every face (vanilla v.java).
 const FENCE_GATE := 77
 
+# Vanilla Alpha 1.2.6 BlockMinecartTrack (qe.java). Flat 1-pixel rail
+# on top of a solid support block — the minecart entity follows it.
+# Meta encodes orientation (10 values, matching vanilla qd.java's
+# direction lookup table):
+#   0 = N-S straight (along Z)
+#   1 = E-W straight (along X)
+#   2 = ascending east  (climbing +X)
+#   3 = ascending west  (climbing -X)
+#   4 = ascending north (climbing -Z)
+#   5 = ascending south (climbing +Z)
+#   6 = curve N-E
+#   7 = curve S-E
+#   8 = curve S-W
+#   9 = curve N-W
+# Drop: 1 rail item (Items.RAIL). Auto-connect to neighbor rails
+# happens at placement time — same family as FENCE's meta-aware
+# connection logic.
+const RAIL := 78
+
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
 # shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
@@ -359,6 +378,10 @@ const MESH_SHAPE_SIGN: int = 11
 # open/closed state. Same family as the door but with collision toggling
 # rather than two stacked halves.
 const MESH_SHAPE_FENCE_GATE: int = 12
+# Rail — a flat 1-pixel quad on top of a supporting solid block.
+# Texture rotates/swaps based on meta orientation. No collision (player
+# walks straight over rails); only the minecart entity reads the meta.
+const MESH_SHAPE_RAIL: int = 13
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -500,6 +523,10 @@ static func is_opaque(id: int) -> bool:
 		# non-opaque lets the grass/dirt below emit its TOP face right
 		# at the spawner's base.
 		and id != MOB_SPAWNER
+		# Rail is a flat 1-pixel quad on top of the supporting block.
+		# Neighbor cubes (especially the support below) must keep
+		# emitting their faces, since the rail doesn't fill its cell.
+		and id != RAIL
 	)
 
 
@@ -645,6 +672,9 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[WOODEN_DOOR] = 0
 	_light_opacity_lut[IRON_DOOR] = 0
 	_light_opacity_lut[LADDER] = 0
+	# Rail: 1-pixel-tall flat plane, light passes through. Vanilla
+	# qe.java doesn't override isOpaqueCube → defaults to false → 0.
+	_light_opacity_lut[RAIL] = 0
 	# Flowers + mushrooms — cross-quad blocks pass light through, same as
 	# SAPLING. Vanilla mr.java extends ok which extends nq with no opacity
 	# override → defaults to 0 (transparent).
@@ -940,6 +970,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_SLAB
 	if id == SIGN_STANDING or id == SIGN_WALL:
 		return MESH_SHAPE_SIGN
+	if id == RAIL:
+		return MESH_SHAPE_RAIL
 	return MESH_SHAPE_CUBE
 
 
@@ -1075,6 +1107,9 @@ static func hardness(id: int) -> float:
 			# BlockFenceGate (Bukkit) calls `super(Material.WOOD)` and never
 			# overrides hardness, so it inherits the 2.0 wood-material default.
 			return 2.0
+		RAIL:
+			# qe.java::c(0.7f) — soft, breaks fast with bare hand.
+			return 0.7
 		WOODEN_DOOR:
 			return 3.0  # gv.java: nq.aE `c(3.0f)` — wood door
 		IRON_DOOR:
@@ -1177,6 +1212,10 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_SHOVEL
 		HALF_SLAB, DOUBLE_SLAB:
 			# Stone material → pickaxe-preferred. Required-level 0.
+			return Items.TOOL_TYPE_PICKAXE
+		RAIL:
+			# Iron material — pickaxe-preferred. Hardness is low so even a
+			# bare hand breaks it quickly; the pickaxe just speeds it up.
 			return Items.TOOL_TYPE_PICKAXE
 		SIGN_STANDING, SIGN_WALL:
 			# Vanilla ni.java sets material wood → axe-preferred.
@@ -1355,6 +1394,9 @@ static func drops(id: int) -> int:
 			# The text on the sign is discarded — vanilla doesn't preserve
 			# it through item form either.
 			return Items.SIGN
+		RAIL:
+			# Vanilla qe.java drops Items.MINECART_TRACK (item id 66).
+			return Items.RAIL
 	return id
 
 
@@ -1527,6 +1569,8 @@ static func name_of(id: int) -> String:
 			return "sign_wall"
 		FENCE_GATE:
 			return "fence_gate"
+		RAIL:
+			return "rail"
 	return "unknown"
 
 
@@ -1600,6 +1644,13 @@ static func get_face_texture(id: int, face: String) -> String:
 		# from Material.WOOD with no override — every face of every box
 		# (posts + rails) samples the planks tile.
 		return "planks"
+	if id == RAIL:
+		# Rails sample one of two textures based on meta orientation: the
+		# straight strip for orientations 0-5 (N-S, E-W, 4× ascending) or
+		# the curved strip for 6-9 (turns). Meta isn't visible to
+		# get_face_texture; the rail mesher reads meta directly to pick.
+		# Default to straight — the curve case is handled in the mesher.
+		return "rail"
 	match id:
 		BEDROCK:
 			return "bedrock"

@@ -228,6 +228,10 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 					_emit_sign_geometry(
 						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
 					)
+				elif ms == Blocks.MESH_SHAPE_RAIL:
+					_emit_rail_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
 	# Packed*Array types use CoW — `result["key"].append_array()` would
@@ -2885,3 +2889,101 @@ static func _emit_torch_box_face(
 		plant_faces.append(v_tl)
 		plant_faces.append(v_tr)
 		plant_faces.append(v_br)
+
+
+# Emit a flat 1-pixel-thick rail quad sitting on top of the supporting
+# block. Vanilla rails (qe.java) lie 1/16 m above the block's top face
+# so the player walks ON TOP of them (the texture is alpha-tested, so
+# the rail's outer "rectangle" sits over the support block visibly).
+# Meta encodes orientation 0..9 per Blocks.RAIL comments; the texture
+# rotates per direction. Stage-1 scope: flat orientations only
+# (0 = N-S, 1 = E-W). Ascending (2..5) and curves (6..9) are valid
+# meta values but render identically to flat straight here — physics
+# in the minecart entity is the source of truth for slope/curve.
+static func _emit_rail_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	plant_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var is_turn: bool = meta >= 6 and meta <= 9
+	var tex_name: String = "rail_turn" if is_turn else "rail"
+	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+	# Top of the supporting block + 1/16 lift so the rail doesn't z-fight
+	# the block's top face.
+	var rail_y: float = float(y) + 1.0 / 16.0
+	var x0: float = float(x)
+	var z0: float = float(z)
+	var x1: float = x0 + 1.0
+	var z1: float = z0 + 1.0
+	# Light from the cell ABOVE the rail's support (= the rail's own
+	# cell, since the rail lives inside the AIR cell above the support).
+	var skylight: float = float(chunk.get_sky_light(x, y, z)) / 15.0
+	var blocklight: float = float(chunk.get_block_light(x, y, z)) / 15.0
+	var light_color := Color(skylight, blocklight, 0.0, 1.0)
+	# 4 corners of the rail quad. CCW from above (+Y looking down).
+	var v_nw := Vector3(x0, rail_y, z0)  # -X, -Z
+	var v_ne := Vector3(x1, rail_y, z0)  # +X, -Z
+	var v_se := Vector3(x1, rail_y, z1)  # +X, +Z
+	var v_sw := Vector3(x0, rail_y, z1)  # -X, +Z
+	# UVs — orient the rail along its meta direction. Straight rails:
+	#   meta 0 (N-S): planks run along Z → texture U axis aligns with X
+	#   meta 1 (E-W): planks run along X → texture U axis aligns with Z
+	# Ascending and curve variants reuse the corresponding base UV.
+	var u0: float = rect.position.x
+	var v0: float = rect.position.y
+	var u1: float = rect.position.x + rect.size.x
+	var v1: float = rect.position.y + rect.size.y
+	var rotate_uv: bool = meta == 1 or meta == 3 or meta == 2
+	var uv_nw: Vector2
+	var uv_ne: Vector2
+	var uv_se: Vector2
+	var uv_sw: Vector2
+	if rotate_uv:
+		# E-W or X-ascending — sleepers perpendicular to X axis.
+		uv_nw = Vector2(u0, v0)
+		uv_ne = Vector2(u0, v1)
+		uv_se = Vector2(u1, v1)
+		uv_sw = Vector2(u1, v0)
+	else:
+		# Default (N-S, Z-ascending, curves).
+		uv_nw = Vector2(u0, v0)
+		uv_ne = Vector2(u1, v0)
+		uv_se = Vector2(u1, v1)
+		uv_sw = Vector2(u0, v1)
+	var base: int = verts.size()
+	verts.append(v_nw)
+	verts.append(v_ne)
+	verts.append(v_se)
+	verts.append(v_sw)
+	norms.append(Vector3.UP)
+	norms.append(Vector3.UP)
+	norms.append(Vector3.UP)
+	norms.append(Vector3.UP)
+	uvs.append(uv_nw)
+	uvs.append(uv_ne)
+	uvs.append(uv_se)
+	uvs.append(uv_sw)
+	colors.append(light_color)
+	colors.append(light_color)
+	colors.append(light_color)
+	colors.append(light_color)
+	# CCW from outside (+Y): order so cull_back keeps the up-face visible.
+	# Reversed-index pattern used elsewhere in the mesher.
+	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
+	# Selection raycast — rails go on the plant_faces collision layer so
+	# the player's targeting raycast hits them for break/highlight but
+	# the player's body (mask layer 1 only) walks straight through.
+	plant_faces.append(v_nw)
+	plant_faces.append(v_se)
+	plant_faces.append(v_ne)
+	plant_faces.append(v_nw)
+	plant_faces.append(v_sw)
+	plant_faces.append(v_se)

@@ -277,9 +277,11 @@ ITEM_TILES = {
 	# Wooden sign sprite; placed by right-clicking a face.
 	"sign": (10, 2),
 	# Boat item — vanilla ItemBoat (id 333). Sprite at items.png tile
-	# (8, 6) — a side-view wooden hull. Verified against
+	# (8, 8) — a side-view wooden hull. Tile (8, 6) is the SADDLE
+	# (Infdev-era), which looks superficially similar (brown 16×16 hull-
+	# ish shape) and was mistakenly used here before. Verified against
 	# vendor/mojang/alpha-1.2.6/gui/items.png.
-	"boat": (8, 6),
+	"boat": (8, 8),
 	# Gunpowder — vanilla Alpha dx.K(33).a(40) → sprite 40 = (8, 2).
 	# The existing assets/textures/items/gunpowder.png was extracted
 	# from (7, 8) which is actually MINECART, so the inventory icon

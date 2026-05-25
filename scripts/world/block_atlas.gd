@@ -166,26 +166,37 @@ const _LAYOUT := {
 	#                            seam when the side quad spans 0..0.5.
 	"stone_slab_top": 88,
 	"stone_slab_side": 89,
+	# Rail (vanilla qe.java::n). Two tiles: straight (orientations 0-5)
+	# and turn (6-9). The rail mesher reads block meta to pick which.
+	"rail": 90,
+	"rail_turn": 91,
 }
 
-# Foliage tint variants. Default = current vivid screenshot-derived tints
-# baked into chunk.gdshader / chunk_overlay.gdshader. Vintage = sampled
-# from the user's alpha 1.1.2 grass reference (mean sRGB ≈ (105, 165, 61)
-# = #69A53D). Linear-space — same channels as the shader uniforms.
+# Foliage tint variants.
 #
-# Solved per-channel: required tint = target_linear / source_avg_linear.
-# Our grass_top.png ships GRAYSCALE with mean gray = 146 sRGB → linear
-# 0.288. (105,165,61) → linear (0.141, 0.366, 0.046). Tint =
-# (0.490, 1.304, 0.162) — kept rounded to two decimals in code.
+# DEFAULT = restores the pre-rework baked-tint look. Before grass_top /
+# leaves moved into the shader, extract_alpha_pack.py baked GRASS_TINT
+# (#79C05A) and FOLIAGE_TINT (#48B518) into the PNGs themselves. To
+# match that on-screen result via grayscale × shader-tint (linear-space
+# math), solve tint = target_linear / source_linear per channel:
+#   grass: gray 146 sRGB → linear 0.288. Target sRGB (69, 110, 51) =
+#          linear (0.060, 0.158, 0.032). Tint ≈ (0.21, 0.55, 0.11).
+#   leaves: gray 99 sRGB → linear 0.125. Target sRGB (28, 70, 9) =
+#           linear (0.011, 0.057, 0.001). Tint ≈ (0.09, 0.46, 0.01).
 #
-# Leaves: no isolated alpha-1.1.2 leaf reference in the source image, so
-# we follow the same shape as the grass shift — drop ~6% off green vs
-# the shipping value (1.57 → 1.48), nudge red down (0.16 → 0.14), keep
-# blue identical (0.10). Produces a leaves tone that visually pairs with
-# the grass without sampling a non-existent reference.
-const _GRASS_TINT_DEFAULT: Vector3 = Vector3(0.52, 1.38, 0.19)
+# VINTAGE = sampled from the user's alpha 1.1.2 grass reference image
+# (top-left tile, mean sRGB ≈ (105, 165, 61) = #69A53D). Much brighter
+# vivid look than the DEFAULT — kept opt-in behind the toggle.
+#   grass tint solved to hit (105, 165, 61) on our grayscale source =
+#     (0.49, 1.30, 0.16) — G > 1.0 is intentional HDR multiplier; the
+#     brightest source pixels saturate at the framebuffer.
+#   leaves vintage: no isolated alpha-1.1.2 leaf reference in the image,
+#     so we pair-shift from the previous vivid value (1.57 → 1.48,
+#     0.16 → 0.14, blue identical) to keep visual consistency with
+#     the grass when toggled together.
+const _GRASS_TINT_DEFAULT: Vector3 = Vector3(0.21, 0.55, 0.11)
 const _GRASS_TINT_VINTAGE: Vector3 = Vector3(0.49, 1.30, 0.16)
-const _LEAVES_TINT_DEFAULT: Vector3 = Vector3(0.16, 1.57, 0.10)
+const _LEAVES_TINT_DEFAULT: Vector3 = Vector3(0.09, 0.46, 0.01)
 const _LEAVES_TINT_VINTAGE: Vector3 = Vector3(0.14, 1.48, 0.10)
 const _VINTAGE_FOLIAGE_PACK: String = "alpha_vanilla"
 
@@ -232,6 +243,23 @@ static func leaves_tint() -> Vector3:
 	return _LEAVES_TINT_DEFAULT
 
 
+# Maps a slot name to the actual PNG basename to load from the pack.
+# Today the only override is "leaves" → "leaves_opaque" when the
+# alpha_vintage_foliage toggle is OFF on the alpha_vanilla pack: the
+# transparent leaves variant (terrain.png 4,3 — the iconic alpha-tested
+# foliage gaps) only ships when the vintage opt-in is enabled, and the
+# default falls back to the opaque (5,3) variant for the cleaner look.
+# Other packs don't have leaves_opaque.png; they always use leaves.png.
+static func _tile_filename(tex_name: String) -> String:
+	if (
+		tex_name == "leaves"
+		and active_pack == _VINTAGE_FOLIAGE_PACK
+		and not Game.alpha_vintage_foliage
+	):
+		return "leaves_opaque"
+	return tex_name
+
+
 static func build() -> void:
 	# Auto-detect slot size from the first available texture in this pack
 	var first_tex: Texture2D = _load_first_texture()
@@ -257,7 +285,7 @@ static func build() -> void:
 		var idx: int = _LAYOUT[tex_name]
 		var col: int = idx % GRID_SIZE
 		var row: int = idx / GRID_SIZE
-		var path := "%s%s/%s.png" % [PACK_BASE, active_pack, tex_name]
+		var path := "%s%s/%s.png" % [PACK_BASE, active_pack, _tile_filename(tex_name)]
 		var tex := load(path) as Texture2D
 		if tex == null:
 			push_error("BlockAtlas: failed to load %s" % path)
@@ -282,7 +310,15 @@ static func build() -> void:
 			slot_uv - 2.0 * inset,
 			slot_uv - 2.0 * inset,
 		)
-	_texture = ImageTexture.create_from_image(atlas_image)
+	# Reuse the existing ImageTexture handle when we're rebuilding so
+	# materials that already hold a reference (overlay/entity + every
+	# ChunkNode's surface_material) pick up the new pixels without us
+	# having to re-bind atlas_texture on each one. First-time builds
+	# create the texture fresh.
+	if _texture == null:
+		_texture = ImageTexture.create_from_image(atlas_image)
+	else:
+		_texture.update(atlas_image)
 	_build_block_face_uvs()
 
 
@@ -495,12 +531,20 @@ static func entity_material() -> ShaderMaterial:
 
 
 # Push the current `grass_tint()` / `leaves_tint()` to the overlay +
-# entity materials. Called by ChunkManager when Game emits
-# `alpha_vintage_foliage_changed` so toggling the setting takes effect
-# without requiring a relog. ChunkNode handles the per-instance update
-# for the live chunk material separately (instance uniforms can't be set
-# on the material — they live on the MeshInstance3D).
+# entity materials, and re-blit the atlas so the leaves slot swaps
+# between the transparent (4,3) and opaque (5,3) Alpha variants. Called
+# by ChunkManager when Game emits `alpha_vintage_foliage_changed` so
+# toggling the setting takes effect without requiring a relog.
+# ChunkNode handles the per-instance grass/leaves tint update for the
+# live chunk material separately (instance uniforms can't be set on the
+# material — they live on the MeshInstance3D).
 static func apply_foliage_tints() -> void:
+	# Rebuild the atlas in-place. _texture.update() reuses the same
+	# ImageTexture handle so every material that already binds
+	# atlas_texture picks up the new pixels — no per-material rebind.
+	# Pack-conditional; non-alpha_vanilla packs don't ship leaves_opaque.
+	if _texture != null and active_pack == _VINTAGE_FOLIAGE_PACK:
+		build()
 	var g: Vector3 = grass_tint()
 	var l: Vector3 = leaves_tint()
 	if _overlay_material != null:

@@ -359,6 +359,20 @@ var _held_tool_tp_pivot: Node3D  # parent of _held_tool_tp at the wrist (so rota
 var _held_tool_tp_orient: Node3D  # TP orient node (mirrors _held_tool_orient role)
 var _held_block_id: int = 0  # 0 = AIR = nothing held; show the hand instead
 var _tool_tuner: Control  # debug-only slider panel; toggled with T
+# Held-bow draw-stage tracker. `-1` = no stage applied yet (forces a
+# refresh on first tick); 0 = relaxed/standby; 1..3 = pulling_{0,1,2}.
+# Updated each physics tick by `_tick_held_bow_stage` reading
+# `Interaction.bow_charge_seconds()`. When the stage changes the held
+# mesh + shader texture get swapped to the matching sprite. Vanilla
+# thresholds (per `ItemRenderer.renderItem` in Beta) trigger pulling_0
+# the instant the draw starts, pulling_1 at ~9/20s, pulling_2 at ~13/20s.
+var _held_bow_stage: int = -1
+const _BOW_STAGE_TEXTURE_PATHS: Array[String] = [
+	"res://assets/textures/items/bow.png",
+	"res://assets/textures/items/bow_pulling_0.png",
+	"res://assets/textures/items/bow_pulling_1.png",
+	"res://assets/textures/items/bow_pulling_2.png",
+]
 
 @onready var _camera: Camera3D = $Camera3D
 
@@ -605,7 +619,9 @@ func _build_held_tool(id: int) -> void:
 	# boat is mostly opaque rounded hull pixels). Tools / loose items
 	# go through the voxel-extrusion mesh. Either way we fall through
 	# to the TP setup below so the third-person mirror gets built too.
-	var is_flat_sprite_item: bool = id == Items.SIGN or id == Items.BOAT
+	var is_flat_sprite_item: bool = (
+		id == Items.SIGN or id == Items.BOAT or id == Items.MINECART or id == Items.RAIL
+	)
 	if is_flat_sprite_item:
 		var sprite := Sprite3D.new()
 		sprite.texture = tex
@@ -680,7 +696,7 @@ func _build_held_tool(id: int) -> void:
 		# regardless of perspective). Build sprite + early-return so we
 		# skip the scale / position logic that's tailored to the
 		# voxel-extruded mesh path.
-		if id == Items.SIGN or id == Items.BOAT:
+		if id == Items.SIGN or id == Items.BOAT or id == Items.MINECART or id == Items.RAIL:
 			var tp_sprite := Sprite3D.new()
 			tp_sprite.texture = tex
 			tp_sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -1241,6 +1257,73 @@ func _update_debug_label() -> void:
 
 func _process(_delta: float) -> void:
 	_update_camera_collision()
+	_tick_held_bow_stage()
+
+
+# Polls the Interaction node's bow charge and swaps the held-bow
+# texture + voxel mesh as the player draws. Stage thresholds match the
+# vanilla Beta `ItemRenderer.renderItem` bow pulling animation: tap-
+# draw shows pulling_0, ~0.45s in flips to pulling_1, ~0.65s flips to
+# pulling_2 (= fully drawn). Re-running SpriteExtruder.build per stage
+# is cheap after the first build (texture-keyed cache).
+func _tick_held_bow_stage() -> void:
+	if _held_block_id != Items.BOW or _held_tool == null:
+		_held_bow_stage = -1
+		return
+	# Interaction is a sibling Node under Player (player.tscn), so the
+	# path is "Interaction" — the earlier "../Interaction" pointed at
+	# Main/Interaction which doesn't exist, so the early-out silently
+	# skipped the stage swap and the held bow never animated.
+	var interaction: Node = get_node_or_null("Interaction")
+	if interaction == null or not interaction.has_method("bow_charge_seconds"):
+		return
+	var charge: float = interaction.bow_charge_seconds()
+	var stage: int
+	if charge <= 0.0:
+		stage = 0  # standby / relaxed
+	elif charge >= 0.65:
+		stage = 3  # fully drawn (pulling_2)
+	elif charge >= 0.45:
+		stage = 2  # mid-draw (pulling_1)
+	else:
+		stage = 1  # initial draw (pulling_0)
+	if stage == _held_bow_stage:
+		return
+	_held_bow_stage = stage
+	_refresh_held_bow_texture(stage)
+
+
+func _refresh_held_bow_texture(stage: int) -> void:
+	var basename: String = "bow"
+	if stage >= 1 and stage <= 3:
+		basename = "bow_pulling_%d" % (stage - 1)
+	var pack_path: String = (
+		"res://assets/textures/blocks/packs/%s/items/%s.png" % [BlockAtlas.active_pack, basename]
+	)
+	var tex: Texture2D = (
+		(
+			(load(pack_path) as Texture2D)
+			if ResourceLoader.exists(pack_path)
+			else load("res://assets/textures/items/%s.png" % basename)
+		)
+		as Texture2D
+	)
+	if tex == null:
+		return
+	# Swap the voxel mesh + shader texture on the existing held node so
+	# we don't tear down / rebuild the pivot+orient tree every stage.
+	if _held_tool is MeshInstance3D:
+		var mi: MeshInstance3D = _held_tool as MeshInstance3D
+		mi.mesh = SpriteExtruder.build(tex)
+		var mat: ShaderMaterial = mi.material_override as ShaderMaterial
+		if mat != null:
+			mat.set_shader_parameter("item_texture", tex)
+	if _held_tool_tp is MeshInstance3D:
+		var mi_tp: MeshInstance3D = _held_tool_tp as MeshInstance3D
+		mi_tp.mesh = SpriteExtruder.build(tex)
+		var mat_tp: ShaderMaterial = mi_tp.material_override as ShaderMaterial
+		if mat_tp != null:
+			mat_tp.set_shader_parameter("item_texture", tex)
 
 
 # Vanilla MC camera collision: in third-person, raycast from the player's
@@ -1413,6 +1496,20 @@ func _physics_process(delta: float) -> void:
 			):
 				_last_splash_time = now
 				SFX.play_splash(velocity)
+				# Vanilla Entity.N() (lw.java:170-183) spawns `1 + width * 20`
+				# bubbles AND `1 + width * 20` splash droplets at the water
+				# surface on entry. For player width 0.6 that's 13 of each;
+				# we use 8 each to keep frame cost predictable while keeping
+				# the visual read. Both bursts inherit the entry velocity so
+				# fast plunges throw droplets farther.
+				var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+				if cm != null:
+					var surface_y: float = floor(global_position.y) + 1.0
+					var splash_pos: Vector3 = Vector3(
+						global_position.x, surface_y, global_position.z
+					)
+					FluidFx.spawn_water_bubble(cm, splash_pos, velocity, 8)
+					FluidFx.spawn_water_splash(cm, splash_pos, velocity, 8)
 		_was_in_water = true
 		_update_water_physics(delta)
 		var attempted_vx: float = velocity.x
@@ -2331,6 +2428,11 @@ func set_mount(mob: Node3D) -> void:
 	else:
 		if cshape != null:
 			cshape.disabled = _pre_mount_collision_disabled
+	# Toggle the model's seated pose so 3rd-person doesn't show the
+	# rider standing on the saddle / boat floor. Vanilla ModelBiped
+	# does the same via isRiding (legs rotated +X by ~PI/2).
+	if _character_model != null and _character_model.has_method("set_mounted_pose"):
+		_character_model.set_mounted_pose(mob != null)
 
 
 func _find_collision_shape() -> CollisionShape3D:

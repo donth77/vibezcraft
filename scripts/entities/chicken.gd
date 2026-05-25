@@ -191,18 +191,24 @@ var _ai_flee_ticks_remaining: int = 0
 var _ai_flee_from: Vector3 = Vector3.ZERO
 
 
-# MobBase environment overrides — chicken BB is 0.3 wide × 0.4 tall
-# per `ou.a(0.3f, 0.4f)`. Eye height ≈ 0.35 (head at top of BB).
+# MobBase environment overrides. Vanilla `ou.a(0.3f, 0.4f)` set BB to
+# 0.3 × 0.4 but the actual visible chicken silhouette (head + body +
+# legs) is taller and slightly wider. We use the silhouette dims so
+# downstream consumers (fire visual size, swim-check body center,
+# arrow ellipsoid hit test) line up with what the player sees — same
+# rationale as the collision box widening in _build_collision_shape.
+# Eye height stays at the head position (~y=0.85 in the visible model)
+# so head-aware checks read the real head, not the legacy BB top.
 func _get_body_height() -> float:
-	return _BB_HEIGHT
+	return 0.95
 
 
 func _get_eye_height() -> float:
-	return 0.35
+	return 0.85
 
 
 func _get_body_width() -> float:
-	return _BB_WIDTH
+	return 0.5
 
 
 func _ready() -> void:
@@ -273,14 +279,38 @@ func _update_wing_animation(delta: float) -> void:
 	_wing_pivot_l.rotation.z = f4
 
 
-# Collision shape sized to vanilla BB (0.3 × 0.4 × 0.3). Center at half-
-# height so the box sits on the floor at Y=0.
+# Collision shape — DEVIATES from vanilla's 0.3 × 0.4 × 0.3 BB. The
+# visible chicken model has its head at y≈0.85 (`_HEAD_OFFSET` y=0.75
+# + head height), so a 0.4-tall hitbox sitting on the floor leaves the
+# whole upper half of the bird un-clickable: the player's raycast aims
+# at the visible head and misses the collision box entirely. Extend
+# the box to cover the full visible silhouette so sword + arrow hits
+# register wherever the crosshair lands on the bird.
+#
+# Width also bumped slightly past _BB_WIDTH so the wings (which extend
+# past the body) are within the hitbox. Still narrower than the
+# adjacent block so the bird doesn't get stuck in 1-cell gaps.
 func _build_collision_shape() -> void:
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(_BB_WIDTH, _BB_HEIGHT, _BB_WIDTH)
+	# Union body + head + beak AABBs. Head extends to z=-0.375 and
+	# beak tip reaches z=-0.5 — both forward of the body. Without the
+	# Z extension, arrows aimed at the head/beak silhouette passed
+	# through the empty space in front of the collision box. Same fix
+	# as cow / pig / sheep, with the beak factored in for chicken
+	# (its narrow protrusion would otherwise still be un-hittable).
+	#   Y: 0 .. ≈head_top (~0.95)
+	#   Z: -0.5 (beak tip) .. +0.25 (body half-depth)
+	#      = size 0.75, centered at z = -0.125
+	var hb_width: float = 0.5
+	var hb_height: float = 0.95
+	var z_min: float = -0.5
+	var z_max: float = 0.25
+	var hb_depth: float = z_max - z_min
+	var hb_z_center: float = (z_min + z_max) * 0.5
+	box.size = Vector3(hb_width, hb_height, hb_depth)
 	col.shape = box
-	col.position = Vector3(0, _BB_HEIGHT * 0.5, 0)
+	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
 	add_child(col)
 
 
@@ -583,8 +613,10 @@ func _face_walk_direction() -> void:
 	rotation.y += delta
 
 
-func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir)
+func take_damage(
+	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()

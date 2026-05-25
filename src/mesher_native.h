@@ -115,6 +115,10 @@ public:
 	// + cross-rails); native skips the cube pass and GDScript
 	// _emit_fence_gate_geometry handles the mesh + meta-aware collision.
 	static constexpr int FENCE_GATE = 77;
+	// RAIL — vanilla qe.java BlockMinecartTrack. Flat 1-pixel quad on
+	// top of supporting block. Native skips the cube pass; GDScript
+	// _emit_rail_geometry handles the meta-driven plank quad + UV.
+	static constexpr int RAIL = 78;
 	// MOB_SPAWNER — vanilla eb.java cage block. Non-opaque (light
 	// passes through cage) AND emits all 6 faces regardless of
 	// neighbor (vanilla shouldSideBeRendered returns true for any

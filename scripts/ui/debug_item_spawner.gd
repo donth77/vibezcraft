@@ -203,6 +203,20 @@ const _ITEMS: Array = [
 	# Boat — right-click water to spawn an EntityBoat, right-click an
 	# empty boat to mount. Vanilla nv.java (id 333).
 	Items.BOAT,
+	# Rail — right-click the top face of a solid block to place a rail.
+	# Minecart rides on rails. Crafted 6 iron + 1 stick → 16 rails.
+	Items.RAIL,
+	# Minecart — right-click on a placed rail to spawn an EntityMinecart.
+	# Recipe is 5 iron in a U pattern.
+	Items.MINECART,
+	# Bow + arrow — first projectile + ranged damage system. Bow has 384
+	# durability (vanilla ItemBow); arrow stacks to 64 and is consumed
+	# per shot (or re-picked from stuck arrows).
+	Items.BOW,
+	Items.ARROW,
+	# Painting — wall-mounted decoration. Right-click a wall face to
+	# spawn a randomly-chosen variant whose size fits the open space.
+	Items.PAINTING,
 ]
 
 var _player: Node

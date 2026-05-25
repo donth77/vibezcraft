@@ -245,13 +245,28 @@ func _advance_head_pitch(delta: float) -> void:
 	_head_pivot.rotation.x = _head_pitch_current
 
 
-# Collision shape sized to body+legs.
+# Collision shape — DEVIATES from vanilla BB to also cover the head.
+# Same rationale as the chicken / cow / pig collision widening:
+# vanilla's body+leg-only hitbox left the head above the box, so
+# arrows + melee aimed at the head missed. Head top ≈ HEAD_OFFSET.y
+# (1.1875) + head_height/2 (0.1875) = 1.375 m.
 func _build_collision_shape() -> void:
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(_BODY_SIZE.x, _BODY_SIZE.y + _LEG_SIZE.y, _BODY_SIZE.z)
+	# Union body + head AABBs in both Y and Z. Head at HEAD_OFFSET
+	# (0, 1.1875, -0.625), head 8 px depth = 0.5 m:
+	#   Y: 0 .. 1.1875 + 0.1875 = 1.375
+	#   Z: -0.875 .. +0.5 (size 1.375, centered at -0.1875)
+	# Same fix as cow / pig — without the forward Z extent, arrows
+	# from the front hit the visible head but missed the box.
+	var hb_height: float = 1.375
+	var z_min: float = -0.875
+	var z_max: float = _BODY_SIZE.z * 0.5
+	var hb_depth: float = z_max - z_min
+	var hb_z_center: float = (z_min + z_max) * 0.5
+	box.size = Vector3(_BODY_SIZE.x, hb_height, hb_depth)
 	col.shape = box
-	col.position = Vector3(0, (_BODY_SIZE.y + _LEG_SIZE.y) * 0.5, 0)
+	col.position = Vector3(0, hb_height * 0.5, hb_z_center)
 	add_child(col)
 
 
@@ -428,8 +443,10 @@ func _drop_wool() -> void:
 # Standard damage handler — no wool drop here. Beta-style: damage just
 # damages, and shearing only happens via SHEARS right-click. The
 # un-sheared death-loot drop is in `die()`.
-func take_damage(amount: int, knockback_dir: Vector3 = Vector3.ZERO) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir)
+func take_damage(
+	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()

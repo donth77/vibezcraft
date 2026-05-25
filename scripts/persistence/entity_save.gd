@@ -29,14 +29,33 @@ const _HEADER_SIZE: int = 8
 
 # Stable type IDs — persisted in the file, never renumber.
 const TYPE_DROPPED_ITEM: int = 1
+# Boats. Vanilla EntityBoat — placed via right-click on water, breaks
+# into planks + sticks. Persisted with pos, yaw, velocity, health.
+const TYPE_BOAT: int = 4
 # TYPE_MOB — single ID for ANY MobBase descendant. The mob's species
 # (pig/cow/sheep/zombie/etc.) is stored in `payload.mob_name` and looked
 # up via MobRegistry on restore. This indirection means adding new mob
 # species doesn't require renumbering — the on-disk schema stays stable
 # even as MobRegistry grows.
 const TYPE_MOB: int = 6
-# Future: TYPE_FALLING_BLOCK = 2, TYPE_PRIMED_TNT = 3, TYPE_BOAT = 4,
-# TYPE_PAINTING = 5.
+# Paintings — wall-mounted EntityPainting (`scripts/entities/painting.gd`).
+# Persisted with variant index + facing + support_pos + world pos so
+# the painting reappears at exactly the same wall after reload.
+const TYPE_PAINTING: int = 5
+# Minecart — same persistence shape as boat (pos, yaw, velocity,
+# health, has_rider). Three vanilla variants (regular/chest/furnace);
+# Stage 1 only ships regular. payload.kind picks the variant at restore
+# so we don't need separate TYPE_ ids when chest/furnace land.
+const TYPE_MINECART: int = 7
+# Future: TYPE_FALLING_BLOCK = 2, TYPE_PRIMED_TNT = 3.
+# Preload Boat script for instantiation on load. Explicit GDScript
+# type so `.resource_path` resolves cleanly — without the annotation
+# Godot infers the type as `Boat` (the class_name the script declares)
+# and rejects `.resource_path` since Boat extends CharacterBody3D
+# which has no such member.
+const _BOAT_SCRIPT: GDScript = preload("res://scripts/entities/boat.gd")
+const _PAINTING_SCRIPT: GDScript = preload("res://scripts/entities/painting.gd")
+const _MINECART_SCRIPT: GDScript = preload("res://scripts/entities/minecart.gd")
 
 # "MCAE" magic — same const-expression workaround as SaveLoad._magic.
 static var _magic: PackedByteArray = PackedByteArray(_MAGIC_BYTES)
@@ -77,6 +96,20 @@ static func _serialize_one(node: Node) -> Dictionary:
 	if node is DroppedItem:
 		var d: DroppedItem = node
 		return {"type": TYPE_DROPPED_ITEM, "payload": d.to_save_dict()}
+	# Boats — script_path comparison instead of `is Boat` because the
+	# Boat class_name isn't always available outside the editor's
+	# eager-loaded set.
+	var script: Script = node.get_script() as Script
+	if script != null and script.resource_path == _BOAT_SCRIPT.resource_path:
+		return {"type": TYPE_BOAT, "payload": node.call("to_save_dict")}
+	if script != null and script.resource_path == _MINECART_SCRIPT.resource_path:
+		return {"type": TYPE_MINECART, "payload": node.call("to_save_dict")}
+	# Paintings — same script-path comparison pattern. Walls them on
+	# the same support cell + facing they were placed at; the actual
+	# world position is saved too so off-by-half-cell math from the
+	# placement code doesn't have to be re-derived on load.
+	if script != null and script.resource_path == _PAINTING_SCRIPT.resource_path:
+		return {"type": TYPE_PAINTING, "payload": node.call("to_save_dict")}
 	# MobBase descendants (Pig, future Cow/Sheep/Zombie...) — single
 	# TYPE_MOB record tagged with mob_name so we can dispatch via
 	# MobRegistry on restore. Skip mobs whose script isn't registered
@@ -149,6 +182,30 @@ static func _spawn_one(entry: Dictionary, parent: Node) -> bool:
 			parent.add_child(item)
 			item.global_position = payload.get("pos", Vector3.ZERO) as Vector3
 			item.restore_from_dict(payload)
+			return true
+		TYPE_BOAT:
+			var boat: Node3D = _BOAT_SCRIPT.new() as Node3D
+			parent.add_child(boat)
+			boat.call("restore_from_dict", payload)
+			return true
+		TYPE_MINECART:
+			var cart: Node3D = _MINECART_SCRIPT.new() as Node3D
+			parent.add_child(cart)
+			cart.call("restore_from_dict", payload)
+			return true
+		TYPE_PAINTING:
+			var painting: Node3D = _PAINTING_SCRIPT.new() as Node3D
+			# variant + facing + support_pos must be set BEFORE add_child
+			# so `_ready` builds the right mesh + collision the first time.
+			painting.call(
+				"setup",
+				int(payload.get("variant", 0)),
+				int(payload.get("facing", 0)),
+				payload.get("support_pos", Vector3i.ZERO) as Vector3i
+			)
+			parent.add_child(painting)
+			painting.global_position = payload.get("pos", Vector3.ZERO) as Vector3
+			painting.call("apply_facing")
 			return true
 		TYPE_MOB:
 			var mob_name: String = payload.get("mob_name", "") as String
