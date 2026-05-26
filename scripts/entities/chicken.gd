@@ -224,7 +224,7 @@ func _physics_process(delta: float) -> void:
 	# Slow-fall — apply post-gravity dampening when in air + falling.
 	# Vanilla per-tick decay; we use the equivalent per-frame decay
 	# via pow(0.6, 20 × delta) so wall-time behavior is unchanged.
-	if not is_on_floor() and velocity.y < 0.0:
+	if not mob_is_on_floor() and velocity.y < 0.0:
 		velocity.y *= pow(_SLOW_FALL_FACTOR, 20.0 * delta)
 	if _dying:
 		return
@@ -248,7 +248,7 @@ func _update_wing_animation(delta: float) -> void:
 	if _wing_pivot_r == null:
 		return
 	var tick_scale: float = delta / _AI_TICK_DT
-	var on_ground: bool = is_on_floor()
+	var on_ground: bool = mob_is_on_floor()
 	# c (wing_state): -0.3/tick on ground, +1.2/tick in air (clamped 0..1).
 	var state_delta: float = _WING_STATE_GROUND_DELTA if on_ground else _WING_STATE_AIR_DELTA
 	_wing_state = clampf(_wing_state + state_delta * tick_scale, 0.0, 1.0)
@@ -513,7 +513,7 @@ func _tick_walk_path() -> void:
 		return
 	var dir: Vector3 = to_node.normalized()
 	var current_cell_y: int = int(floor(global_position.y + 0.05))
-	if next_node.y > current_cell_y and is_on_floor():
+	if next_node.y > current_cell_y and mob_is_on_floor():
 		velocity.y = _AI_JUMP_VELOCITY
 		velocity.x = dir.x * _AI_STEP_BOOST_SPEED
 		velocity.z = dir.z * _AI_STEP_BOOST_SPEED

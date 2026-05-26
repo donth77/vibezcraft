@@ -490,12 +490,12 @@ func _tick_chase(player: Node3D) -> void:
 		return
 	# Pounce — vanilla `be.java::a` lines 45-52. 10 % per 20 Hz tick
 	# when 2 m < dist < 6 m AND on ground. Vanilla onGround check skips
-	# the pounce roll mid-air; we mirror via is_on_floor().
+	# the pounce roll mid-air; we mirror via mob_is_on_floor().
 	var dist: float = sqrt(dist_sq)
 	if (
 		dist > _AI_POUNCE_RANGE_MIN
 		and dist < _AI_POUNCE_RANGE_MAX
-		and is_on_floor()
+		and mob_is_on_floor()
 		and randf() < _AI_POUNCE_CHANCE
 	):
 		_pounce(player)
@@ -631,7 +631,7 @@ func _tick_walk_path() -> void:
 		return
 	var dir: Vector3 = to_node.normalized()
 	var current_cell_y: int = int(floor(global_position.y + 0.05))
-	if next_node.y > current_cell_y and is_on_floor():
+	if next_node.y > current_cell_y and mob_is_on_floor():
 		velocity.y = _AI_JUMP_VELOCITY
 		velocity.x = dir.x * _AI_STEP_BOOST_SPEED
 		velocity.z = dir.z * _AI_STEP_BOOST_SPEED

@@ -275,7 +275,7 @@ func _physics_process(delta: float) -> void:
 		return
 	if _rider != null:
 		_tick_ridden_motion()
-		if not is_on_floor():
+		if not mob_is_on_floor():
 			velocity.y = maxf(velocity.y + GRAVITY * delta, TERMINAL_VELOCITY)
 		elif velocity.y < 0.0:
 			velocity.y = 0.0
@@ -318,7 +318,7 @@ func _tick_ridden_motion() -> void:
 		# zero-on-release the pig would coast indefinitely at 6 m/s.
 		velocity.x = 0.0
 		velocity.z = 0.0
-	if Input.is_action_just_pressed("jump") and is_on_floor():
+	if Input.is_action_just_pressed("jump") and mob_is_on_floor():
 		velocity.y = _AI_JUMP_VELOCITY
 
 
@@ -388,7 +388,7 @@ func _tick_walk_path() -> void:
 	# × air time can't cover the 1-block gap. Mirrors vanilla `fc.b_()`
 	# line 105 (`ao2.b - n8 > 0` → jump). Down-steps use gravity.
 	var current_cell_y: int = int(floor(global_position.y + 0.05))
-	if next_node.y > current_cell_y and is_on_floor():
+	if next_node.y > current_cell_y and mob_is_on_floor():
 		velocity.y = _AI_JUMP_VELOCITY
 		velocity.x = dir.x * _AI_STEP_BOOST_SPEED
 		velocity.z = dir.z * _AI_STEP_BOOST_SPEED

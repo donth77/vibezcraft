@@ -361,7 +361,7 @@ func _tick_walk_path() -> void:
 	# the jump frame; once grounded again the next tick resets to walk
 	# speed. Down-steps don't need this — gravity handles them.
 	var current_cell_y: int = int(floor(global_position.y + 0.05))
-	if next_node.y > current_cell_y and is_on_floor():
+	if next_node.y > current_cell_y and mob_is_on_floor():
 		velocity.y = _AI_JUMP_VELOCITY
 		velocity.x = dir.x * _AI_STEP_BOOST_SPEED
 		velocity.z = dir.z * _AI_STEP_BOOST_SPEED
