@@ -870,7 +870,9 @@ func _play_random(material: String, base_pitch: float) -> void:
 # gdlint: disable=max-returns
 func _material_for(block_id: int) -> String:
 	match block_id:
-		Blocks.STONE, Blocks.COBBLESTONE, Blocks.COBBLESTONE_STAIRS, Blocks.BEDROCK, Blocks.BRICK:
+		Blocks.STONE, Blocks.COBBLESTONE, Blocks.MOSSY_COBBLESTONE:
+			return "stone"
+		Blocks.COBBLESTONE_STAIRS, Blocks.BEDROCK, Blocks.BRICK:
 			return "stone"
 		Blocks.OBSIDIAN, Blocks.COAL_ORE, Blocks.IRON_ORE, Blocks.GOLD_ORE:
 			return "stone"

@@ -185,6 +185,9 @@ const _LAYOUT := {
 	# the 4 sides + the bottom.
 	"jukebox_top": 98,
 	"jukebox_side": 99,
+	# Mossy cobblestone — dungeon-specific cobble variant. Same atlas
+	# pipeline as plain cobble; the dungeon worldgen mixes the two.
+	"mossy_cobblestone": 100,
 }
 
 # Foliage tint variants.

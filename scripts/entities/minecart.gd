@@ -141,6 +141,13 @@ var _is_burning: bool = false
 # runs at 20 TPS); running it every frame at 60+ FPS triples the push,
 # which made adjacent placement shove much harder than vanilla.
 var _collision_tick_accum: float = 0.0
+# First-tick yaw snap. Cart spawn yaw is set from the player's facing
+# at placement time; the per-frame auto-yaw then interpolates toward
+# the rail axis, which reads as a visible spin on chest/furnace carts
+# (their front face is distinct). Hard-snap on the first tick so the
+# cart appears already aligned and the smoothing only fires on later
+# yaw changes (curve transitions, etc.).
+var _yaw_initialized: bool = false
 
 
 func setup(spawn_pos: Vector3, yaw: float, owner: Node3D, cart_variant: int = 0) -> void:
@@ -360,22 +367,13 @@ func right_click_with(held_id: int, player: Node3D) -> bool:
 
 
 # Vanilla qd.java::g (type==2 with held coal) — `this.e += 1200` and
-# consumes one coal. 1200 ticks = 60 s of burning. If the cart has no
-# current push direction (just placed, idle), seed it from the player's
-# facing so the cart starts thrusting in a sensible direction.
+# consumes one coal. 1200 ticks = 60 s of burning. Push direction is
+# NOT set here; `right_click_with` overwrites it unconditionally on the
+# next two lines (vanilla qd.java:600-601 fires push regardless of held
+# item), so any seed here would just be discarded.
 func _add_fuel(player: Node3D) -> void:
 	_fuel_ticks += 1200
-	if absf(_push_x) < 0.01 and absf(_push_z) < 0.01:
-		if absf(velocity.x) > 0.01 or absf(velocity.z) > 0.01:
-			_push_x = velocity.x
-			_push_z = velocity.z
-		elif player != null:
-			# Use player's yaw to face the cart's push the way they're looking.
-			var yaw: float = player.rotation.y
-			_push_x = -sin(yaw)
-			_push_z = -cos(yaw)
 	_update_burning_visual()
-	# Consume one from the player's selected stack.
 	if player != null:
 		var inv: Inventory = player.get("inventory") as Inventory
 		if inv != null and inv.has_method("consume_one_selected"):
@@ -444,12 +442,25 @@ func _apply_furnace_thrust(delta: float) -> void:
 		_push_z = 0.0
 		_update_burning_visual()
 		return
-	# Apply thrust along normalized push direction. 0.8 m/s² == vanilla
-	# 0.04 b/tick × 20.
+	# Apply thrust along normalized push direction, projected onto the
+	# current rail axis. Vanilla qd.java::e_() lines 186-197 re-snap
+	# velocity magnitude onto the rail axis each tick, so perpendicular
+	# push becomes along-axis speed. We do the projection here directly
+	# so the thrust contribution survives our flat-rail axis zeroing.
 	var mag: float = sqrt(_push_x * _push_x + _push_z * _push_z)
 	if mag > 0.01:
 		var nx: float = _push_x / mag
 		var nz: float = _push_z / mag
+		var rail_info: Dictionary = _find_rail_under_cart()
+		if not rail_info.is_empty():
+			var axis: Vector3 = _rail_axis_for(rail_info.meta)
+			# Project push onto the rail axis (signed). Negative dot
+			# means the player is on the "positive" side of the cart;
+			# we want the cart to move AWAY (negative axis direction),
+			# so the sign carries through.
+			var along: float = nx * axis.x + nz * axis.z
+			nx = axis.x * along
+			nz = axis.z * along
 		var accel: float = 0.8
 		velocity.x += nx * accel * delta
 		velocity.z += nz * accel * delta
@@ -640,11 +651,18 @@ func _physics_process(delta: float) -> void:
 	while diff < -PI:
 		diff += TAU
 	# Carts on rails snap yaw quickly (~half a second) since the rail
-	# orientation is fixed; off-rail cart turns more gradually.
-	var yaw_rate: float = 10.0 if on_rail else 5.0
-	var max_step: float = yaw_rate * delta
-	diff = clampf(diff, -max_step, max_step)
-	rotation.y += diff
+	# orientation is fixed; off-rail cart turns more gradually. Skip
+	# smoothing entirely on the very first tick so a freshly-placed
+	# cart appears already aligned to the rail (avoids the visible spin
+	# on chest/furnace carts whose front face is distinct).
+	if not _yaw_initialized:
+		rotation.y = target_yaw
+		_yaw_initialized = true
+	else:
+		var yaw_rate: float = 10.0 if on_rail else 5.0
+		var max_step: float = yaw_rate * delta
+		diff = clampf(diff, -max_step, max_step)
+		rotation.y += diff
 	# Move. On rails, we translate position directly along the rail
 	# axis instead of using move_and_slide — physics collision response
 	# was shoving the cart off the rail when the player walked into it

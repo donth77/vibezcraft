@@ -119,6 +119,16 @@ public:
 	// top of supporting block. Native skips the cube pass; GDScript
 	// _emit_rail_geometry handles the meta-driven plank quad + UV.
 	static constexpr int RAIL = 78;
+	// Beta 1.3 wood + cobblestone slab variants — same half-height
+	// mesh as HALF_SLAB but with planks / cobblestone textures.
+	// Native skips the cube pass so GDScript _emit_slab_geometry owns
+	// the half-height mesh; without skipping we emit a full 1×1×1
+	// cube using the variant's full-cube face texture (planks /
+	// cobblestone), and the placed block reads as a plain cube.
+	static constexpr int WOOD_HALF_SLAB = 79;
+	static constexpr int WOOD_DOUBLE_SLAB = 80;
+	static constexpr int COBBLESTONE_HALF_SLAB = 81;
+	static constexpr int COBBLESTONE_DOUBLE_SLAB = 82;
 	// BED_FOOT (83) + BED_HEAD (84) — Beta 1.3 BlockBed pair. Non-cube
 	// (9/16 tall with per-face head/foot textures). Native skips the
 	// cube pass; GDScript _emit_bed_geometry owns the mesh + collision.

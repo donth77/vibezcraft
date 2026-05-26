@@ -98,6 +98,7 @@ const _ORE_CONFIGS: Array = [
 # on worldgen_caves.gd would create a circular dependency with Worldgen
 # (the caves module references Worldgen._hash4 / surface_height).
 const _CAVES_SCRIPT: GDScript = preload("res://scripts/world/worldgen_caves.gd")
+const _DUNGEONS_SCRIPT: GDScript = preload("res://scripts/world/worldgen_dungeons.gd")
 
 # Base trees-per-chunk before biome scaling. Vanilla averages 150-300
 # LEAVES/chunk (5-world baseline), and one oak places ~33 LEAVES, so
@@ -384,6 +385,14 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# Trilerp output occasionally produces these in mid-air where
 		# density grazes above zero; vanilla terrain doesn't have them.
 		_strip_floating_terrain(chunk)
+	# 4.5. Dungeons — Alpha cm.java port. Runs AFTER caves so the
+	# wall-opening check sees cave intersections, BEFORE trees so the
+	# roof isn't covered with leaves growing through stone. Per-chunk
+	# attempt count is 8 (vanilla); deterministic hashes derive from
+	# (chunk_x, chunk_z, attempt) so re-loaded chunks reproduce the
+	# same dungeons. See worldgen_dungeons.gd for the loot table +
+	# spawner-mob pool.
+	_DUNGEONS_SCRIPT.scatter(chunk, chunk_x, chunk_z)
 	# 5. Trees — must come after surface placement so we know where grass is.
 	_scatter_trees(chunk, chunk_x, chunk_z)
 	# 6. Flowers + mushrooms — vanilla aj.java port, runs after surface

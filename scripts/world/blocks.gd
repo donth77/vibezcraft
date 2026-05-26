@@ -367,6 +367,15 @@ const BED_HEAD := 84
 # the contained disc, LMB-break drops it along with the jukebox. No
 # meta — orientation is fixed (top is always TOP, sides identical).
 const JUKEBOX := 85
+# Mossy cobblestone [BETA 1.0 exception — Beta promoted it from a
+# dungeon-only worldgen variant to a craftable block, but Alpha
+# 1.2.6 has it as a cobble texture variant already, placed by
+# WorldGenDungeons (`cm.java`)]. Same material as COBBLESTONE
+# (Material.stone, hardness 2.0, pickaxe-required, drops itself), just
+# with the mossy texture. Currently only spawned by the dungeon
+# worldgen pass; future Beta 1.0 recipe `cobblestone + vine` lands
+# alongside vine.
+const MOSSY_COBBLESTONE := 86
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -1111,7 +1120,7 @@ static func explosion_resistance(id: int) -> float:
 			return 6000000.0
 		OBSIDIAN:
 			return 2000.0
-		COBBLESTONE, COBBLESTONE_STAIRS:
+		COBBLESTONE, COBBLESTONE_STAIRS, MOSSY_COBBLESTONE:
 			return 30.0
 		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL:
 			return 500.0
@@ -1212,7 +1221,7 @@ static func hardness(id: int) -> float:
 			return 5.0  # gv.java: nq.aL `c(5.0f)` — iron door
 		CHEST:
 			return 2.5  # c.java:c(2.5f) — slightly tougher than planks
-		STONE, COBBLESTONE, BRICK:
+		STONE, COBBLESTONE, MOSSY_COBBLESTONE, BRICK:
 			return 1.5
 		FURNACE, LIT_FURNACE:
 			return 3.5
@@ -1292,7 +1301,7 @@ static func required_harvest_level(id: int) -> int:
 # 0 = any/none (no bonus from any tool). Mirrors vanilla ItemPickaxe's block list.
 static func preferred_tool_type(id: int) -> int:
 	match id:
-		STONE, COBBLESTONE, COBBLESTONE_STAIRS, BRICK, OBSIDIAN:
+		STONE, COBBLESTONE, MOSSY_COBBLESTONE, COBBLESTONE_STAIRS, BRICK, OBSIDIAN:
 			return Items.TOOL_TYPE_PICKAXE
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
 			return Items.TOOL_TYPE_PICKAXE
@@ -1567,6 +1576,8 @@ static func name_of(id: int) -> String:
 			return "grass"
 		COBBLESTONE:
 			return "cobblestone"
+		MOSSY_COBBLESTONE:
+			return "mossy_cobblestone"
 		LOG:
 			return "log"
 		PLANKS:
@@ -1822,6 +1833,8 @@ static func get_face_texture(id: int, face: String) -> String:
 					return "grass_side"
 		COBBLESTONE:
 			return "cobblestone"
+		MOSSY_COBBLESTONE:
+			return "mossy_cobblestone"
 		BRICK:
 			return "brick"
 		OBSIDIAN:

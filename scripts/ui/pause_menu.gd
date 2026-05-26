@@ -270,6 +270,11 @@ func _on_quit_to_title() -> void:
 	# dirty chunks) doesn't read as a freeze.
 	await _save_world_with_indicator()
 	Music.stop_music()
+	# SFX is an autoload so its AudioStreamPlayers survive the scene
+	# change. Without this, a fire-crackle / drowning / mob-hurt clip
+	# that was mid-playback when the player hit save+quit keeps playing
+	# under the main-menu dirt bg until it naturally finishes.
+	SFX.stop_all_sfx()
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	get_tree().change_scene_to_file("res://scenes/ui/main_menu.tscn")
@@ -281,6 +286,7 @@ func _on_quit_to_desktop() -> void:
 	# the pause menu doesn't drop the session.
 	await _save_world_with_indicator()
 	Music.stop_music()
+	SFX.stop_all_sfx()
 	get_tree().quit()
 
 

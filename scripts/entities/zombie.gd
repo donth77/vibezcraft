@@ -168,6 +168,21 @@ func _ready() -> void:
 	super._ready()
 
 
+# Modern MC zombies have a 2.5% chance to drop one iron ingot per kill
+# (https://minecraft.wiki/w/Zombie#Drops). Alpha never had this, but
+# it's a cheap, well-known QoL deviation that gives the early-game a
+# non-ore iron source. Rolled after the base feather drop so both can
+# fire on the same kill. We don't gate on player-kill or Looting yet.
+func _spawn_drops() -> void:
+	super._spawn_drops()
+	if randf() < 0.025 and _chunk_manager != null:
+		var item := DroppedItem.new()
+		_chunk_manager.add_child(item)
+		var jitter := Vector3(randf_range(-0.2, 0.2), 0.3, randf_range(-0.2, 0.2))
+		item.global_position = global_position + Vector3(0, 0.4, 0) + jitter
+		item.setup(Items.IRON_INGOT)
+
+
 # Two-shape collision (MobBase helpers). Body capsule = physics-only
 # (centered, symmetric → no stuck-clipping). Head Area3D = hit-only,
 # covers the head cube so head-shots register without enlarging the
