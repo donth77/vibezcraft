@@ -142,11 +142,6 @@ const _IDLE_SWAY_AMP: float = 0.05
 const _SWING_DURATION_SEC: float = 6.0 / 20.0
 const _STEP_STRIDE: float = 1.4
 
-# Idle SFX. Vanilla EntityLiving.B() rolls 1/120 per tick to play the
-# species' "living" sound. Same pattern as passive mobs.
-const _IDLE_SFX_ROLL_INTERVAL: float = 0.1
-const _IDLE_SFX_CHANCE: float = 1.0 / 120.0
-
 # --- Visual node refs (rotated by walk animation) ---
 var _head_mesh: MeshInstance3D
 var _arm_l_pivot: Node3D
@@ -167,7 +162,6 @@ var _ai_player_cache: Node3D = null
 var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
 var _step_accum: float = 0.0
-var _idle_sfx_accum: float = 0.0
 # Free-running clock for idle-sway oscillation. Matches vanilla
 # `ageInTicks / 20` semantics.
 var _age_seconds: float = 0.0
@@ -233,8 +227,8 @@ func _build_collision_shape() -> void:
 # limb uses MobCube.build_textured_cube to slice the appropriate UV
 # rectangle out of the 64×32 zombie.png.
 func _build_model() -> void:
-	var tex: Texture2D = load(_ZOMBIE_TEXTURE_PATH) as Texture2D
-	var mat: StandardMaterial3D = _make_textured_material(tex)
+	# Shared cached material — see MobBase.get_shared_material.
+	var mat: StandardMaterial3D = MobBase.get_shared_material(_ZOMBIE_TEXTURE_PATH, false)
 	# Head — static, no animation.
 	var head_size := Vector3(
 		_HEAD_CUBE_PX.x * _PIXEL_TO_METER,
@@ -322,11 +316,18 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 func _physics_process(delta: float) -> void:
 	super._physics_process(delta)
-	if _dying:
+	if _dying or _physics_gated:
 		return
+	# LOD-scaled tick rate — same pattern as skeleton/creeper.
+	var tick_scale: float = 1.0
+	if _lod_tier == LOD_MID:
+		tick_scale = 4.0
+	elif _lod_tier == LOD_FAR:
+		tick_scale = 20.0
+	var effective_dt: float = _AI_TICK_DT * tick_scale
 	_ai_tick_accum += delta
-	while _ai_tick_accum >= _AI_TICK_DT:
-		_ai_tick_accum -= _AI_TICK_DT
+	while _ai_tick_accum >= effective_dt:
+		_ai_tick_accum -= effective_dt
 		_ai_tick()
 	# Melee cooldown ticks independently of the AI Hz so the cooldown
 	# expires precisely 0.5 s after the last hit landed.
@@ -342,8 +343,11 @@ func _physics_process(delta: float) -> void:
 
 func _process(delta: float) -> void:
 	super._process(delta)
+	if _physics_gated:
+		return
+	if _lod_tier == LOD_FAR:
+		return
 	_advance_walk_animation(delta)
-	_roll_idle_sfx(delta)
 
 
 # --- Hostile AI ---
@@ -353,6 +357,11 @@ func _process(delta: float) -> void:
 # to the target); otherwise find a target and start chasing. Re-pathing
 # happens every _AI_REPATH_TICKS so a moving player stays trackable.
 func _ai_tick() -> void:
+	# Vanilla `hf.B()` rolls the idle-sound chance per tick. Centralized
+	# on MobBase so every species uses the same `nextInt(1000) < a++`
+	# pattern (mean ~1 fire per 6 s, matching vanilla `b() = 80`).
+	if roll_idle_sfx_tick():
+		_play_idle_sfx()
 	_ai_repath_counter += 1
 	var player: Node3D = _find_player()
 	if player == null:
@@ -627,15 +636,6 @@ func _play_step() -> void:
 	# step{1..5}.ogg) rather than reusing the block step samples. SFX
 	# helper handles the random pick + 3D positioning.
 	SFX.play_zombie_step(global_position)
-
-
-func _roll_idle_sfx(delta: float) -> void:
-	_idle_sfx_accum += delta
-	if _idle_sfx_accum < _IDLE_SFX_ROLL_INTERVAL:
-		return
-	_idle_sfx_accum -= _IDLE_SFX_ROLL_INTERVAL
-	if randf() < _IDLE_SFX_CHANCE:
-		_play_idle_sfx()
 
 
 # Species SFX overrides — vanilla EntityZombie inherits getLivingSound /

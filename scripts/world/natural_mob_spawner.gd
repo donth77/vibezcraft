@@ -40,27 +40,45 @@ const _SLIME_ATTEMPTS_PER_TICK: int = 2
 const _SLIME_Y_MIN: int = 0
 
 # Vanilla spawn-radius band. Mobs spawn 24..128 m XZ from the player.
+# Spawn band. With LOD tiering in mob_base (NEAR < 32m, MID < 64m,
+# FAR < 96m, GATED beyond), we can spawn out to 80m and the distant
+# mobs will still tick at reduced cadence (5 Hz mid, 1 Hz far). Mobs
+# scatter across the visible band like vanilla but cost a fraction
+# of the CPU. Inner 24m still protected.
 const _SPAWN_MIN_RADIUS: float = 24.0
-const _SPAWN_MAX_RADIUS: float = 128.0
+const _SPAWN_MAX_RADIUS: float = 80.0
 # Y candidate range relative to the player. Vanilla checks the entire
 # column above the chunk's surface; we sample within a ±10 m vertical
 # band of the player which covers caves + surface for now.
 const _SPAWN_Y_BAND: int = 12
 
-# Vanilla per-player hostile cap. Counted across all hostile species
-# (just zombie for now; skeleton/spider/creeper/slime later append).
+# Vanilla per-player hostile cap (gameDifficulty * 70 in Alpha). The
+# mob_base.gd 48 m physics gate + the subclass _physics_gated flag
+# (skeleton / creeper / zombie / spider all check it) skip AI + path-
+# finding for mobs out of range, so only ~10-15 of these 70 actually
+# run full physics at any given moment. The remaining 55+ cost just a
+# distance check per frame each (~100 ns).
 const _HOSTILE_CAP: int = 70
 
-# Tick interval. Vanilla runs the spawn pass every tick (20 Hz), one
-# chunk per call. Our random-cell pass is cheaper and only spawns
-# rarely, so 1 Hz is plenty.
+# Tick interval — 1 Hz. Earlier 2 Hz × 8 attempts × 4-mob pack
+# expansion landed up to 32 mob instantiations in one tick, each
+# costing 5-10 ms in _ready (mesh + collider + fire billboards).
+# That gave a 37 ms spike on main thread (visible as FPS dropping to
+# single digits the instant a pack spawned). 1 Hz with hard cap below
+# keeps per-tick cost bounded.
 const _SPAWN_INTERVAL_SEC: float = 1.0
 
-# Per-tick attempts. Vanilla rolls 3 attempts per chunk; we roll 4
-# attempts per tick at 1 Hz which mathematically matches a moderate
-# vanilla spawn rate (slightly less aggressive — first ship can tune
-# up if needed).
+# Per-tick attempts. Hard cap of 4 — even with pack expansion (up to
+# 4 mobs per seed), the per-tick spawn count is bounded so one bad
+# tick can't stall the main thread.
 const _ATTEMPTS_PER_TICK: int = 4
+# Hard ceiling on mobs instantiated in a single tick. With shared
+# mesh + material caching (MobCube._mesh_cache + MobBase._shared_materials)
+# per-spawn _ready() is ~1-2 ms instead of 5-10 ms, so 4/tick keeps
+# under a 16 ms frame budget and gets the cap fill rate close to
+# vanilla. Pack expansion still drains 1/tick from the queue for
+# graceful smoothing.
+const _MAX_SPAWNS_PER_TICK: int = 4
 
 # Pack-spawn — vanilla `SpawnerCreature.spawnEntities` runs a 4-loop
 # after the seed cell passes, attempting 4 MORE same-species spawns
@@ -77,7 +95,7 @@ const _PACK_JITTER_XZ: int = 6  # vanilla nextInt(6) - nextInt(6) = ±5
 # cave geometry made single hostiles common in practice (most extras
 # failed validity). The explicit roll keeps the variability stable
 # regardless of how cleanly our chunk geometry resembles vanilla.
-const _SOLO_SPAWN_CHANCE: float = 0.25
+const _SOLO_SPAWN_CHANCE: float = 1.0  # TEMP: disable pack expansion for perf
 
 # Cached lookups so the per-tick path avoids find_child + Script load.
 var _player_cache: Node3D = null
@@ -88,6 +106,16 @@ var _chunk_manager_cache: Node = null
 # is close enough until skeleton-vs-zombie biome rules ship.
 var _hostile_script_pool: Array = []
 var _spawn_accum: float = 0.0
+# Per-tick spawn counter, reset at the top of each spawn pass and
+# incremented inside _spawn_mob_at. Caps the actual mob-instantiation
+# work per tick so a lucky pack expansion can't pile 32 mob _ready()
+# calls into one frame.
+var _spawns_this_tick: int = 0
+# Pack-spawn queue. Each entry is [mob_script, cell]. Drained 1 per
+# tick (alongside the seed roll) so a pack of 4 takes 4 ticks to
+# fully materialize instead of all-at-once. Maintains vanilla
+# clustered-pack visuals without the per-frame stutter.
+var _pack_queue: Array = []
 
 
 func _ready() -> void:
@@ -109,13 +137,20 @@ func _run_spawn_pass() -> void:
 	var manager: Node = _get_chunk_manager()
 	if manager == null:
 		return
-	# Cap check — counts ALL MobBase descendants in the world. Once
-	# spider/creeper/slime land, expand to filter by hostile-vs-passive
-	# (MobBase.is_hostile() helper, or a class-list match). For now
-	# the total-cap approach is correct enough — passive mobs spawn
-	# separately via cages, hostile via this path.
+	# Hostile cap — count ONLY hostile species. The old `active.size()`
+	# check counted every MobBase (pigs, cows, sheep, chickens too), so
+	# a normal grass biome with the passive cap full would block all
+	# hostile spawning — explaining "walked 10 min at night and saw 1
+	# spider." Filter the dict to hostile scripts before comparing.
 	var active: Dictionary = _MOB_BASE.active_mobs()
-	if active.size() >= _HOSTILE_CAP:
+	var pool: Array = _get_hostile_script_pool()
+	var hostile_count: int = 0
+	for mob in active.values():
+		if not is_instance_valid(mob):
+			continue
+		if pool.has(mob.get_script()):
+			hostile_count += 1
+	if hostile_count >= _HOSTILE_CAP:
 		return
 	# Slime pass runs every tick regardless of time-of-day. Vanilla
 	# `ns.java::a()` doesn't check sky_factor — slimes spawn 24/7
@@ -127,10 +162,21 @@ func _run_spawn_pass() -> void:
 	# sky_factor ≤ 0.5.
 	if WorldTime.sky_factor() > 0.5:
 		return
-	var pool: Array = _get_hostile_script_pool()
 	if pool.is_empty():
 		return
+	_spawns_this_tick = 0
+	# Drain the pack queue first — these are pre-validated cells
+	# from previous seed spawns. Counts against the per-tick spawn
+	# budget so the queue + new seeds together can't exceed it.
+	while not _pack_queue.is_empty() and _spawns_this_tick < _MAX_SPAWNS_PER_TICK:
+		var entry: Array = _pack_queue.pop_front()
+		var queued_cell: Vector3i = entry[1] as Vector3i
+		if _is_valid_hostile_spawn_cell(manager, queued_cell):
+			_spawn_mob_at(manager, entry[0] as Script, queued_cell)
+	# Then new seed rolls if budget remains.
 	for _i in range(_ATTEMPTS_PER_TICK):
+		if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
+			break
 		# Uniform pick from the hostile pool per attempt.
 		var mob_script: Script = pool[randi() % pool.size()] as Script
 		_try_spawn_one(manager, player, mob_script)
@@ -148,13 +194,19 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 	var r: float = sqrt(r_sq)
 	var dx: int = int(round(cos(theta) * r))
 	var dz: int = int(round(sin(theta) * r))
-	var dy: int = randi_range(-_SPAWN_Y_BAND, _SPAWN_Y_BAND)
+	# Y selection — biased toward the player's altitude so spawns
+	# land on the SAME elevation band the player can see. Earlier
+	# uniform [4, 124] meant a player at Y=106 (mountain top) had
+	# most spawns land at Y=50 (caves below), invisible to the
+	# player. Band of [player.Y - 16, player.Y + 4] covers ground
+	# around the player + the immediate caves underfoot. Validation
+	# gates still filter to AIR cells with opaque floors.
+	var py: int = int(floor(player.global_position.y))
+	var sy: int = clampi(py + randi_range(-16, 4), 4, Chunk.SIZE_Y - 4)
 	var origin: Vector3i = Vector3i(
-		int(floor(player.global_position.x)),
-		int(floor(player.global_position.y)),
-		int(floor(player.global_position.z))
+		int(floor(player.global_position.x)), 0, int(floor(player.global_position.z))
 	)
-	var seed_cell: Vector3i = origin + Vector3i(dx, dy, dz)
+	var seed_cell: Vector3i = Vector3i(origin.x + dx, sy, origin.z + dz)
 	if not _is_valid_hostile_spawn_cell(manager, seed_cell):
 		return
 	# Seed mob — always spawns at the validated seed cell.
@@ -164,31 +216,43 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 	if randf() < _SOLO_SPAWN_CHANCE:
 		return
 	# Vanilla pack loop — `SpawnerCreature.spawnEntities` line ~135.
-	# Up to _PACK_INNER_ATTEMPTS extra spawns, each at a triangular-
-	# jittered cell (±5 X/Z, ZERO Y delta per vanilla `nextInt(1)-
-	# nextInt(1)`). Each extra independently passes validity, so
-	# tight caves naturally trim the pack to 1-2 even though we tried 3.
+	# Up to _PACK_INNER_ATTEMPTS extra spawns at triangular-jittered
+	# cells. We ENQUEUE these for subsequent ticks instead of spawning
+	# inline; the queue drains 1/tick along with seed rolls so per-
+	# frame cost stays bounded. Pre-validate so dead cells don't sit
+	# in the queue (validity re-checked on drain in case terrain
+	# changed in the meantime).
 	var pack_cell: Vector3i = seed_cell
 	for _i in range(_PACK_INNER_ATTEMPTS):
-		# Vanilla jitter — triangular distribution biases toward the
-		# seed cell so packs cluster rather than spread evenly.
 		pack_cell += Vector3i(
 			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ),
 			0,
 			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ)
 		)
 		if _is_valid_hostile_spawn_cell(manager, pack_cell):
-			_spawn_mob_at(manager, mob_script, pack_cell)
+			_pack_queue.append([mob_script, pack_cell])
+	# Bound the queue so a runaway frame can't pile up hundreds of
+	# pending mobs that all spawn over the next 100 seconds.
+	if _pack_queue.size() > 32:
+		_pack_queue.resize(32)
 
 
 # Instantiate the mob script + parent it under the chunk manager.
 # Position-Y nudged 0.05 above the cell floor to avoid z-fighting.
 func _spawn_mob_at(manager: Node, mob_script: Script, cell: Vector3i) -> void:
+	# Hard per-tick budget — silently drop the spawn if we've already
+	# instantiated _MAX_SPAWNS_PER_TICK mobs this tick. The cap still
+	# fills (next tick will spawn more), just spread across multiple
+	# frames so no single frame absorbs the full 10-20 ms of mob
+	# construction work.
+	if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
+		return
 	var mob = mob_script.new() as CharacterBody3D
 	if mob == null:
 		return
 	manager.add_child(mob)
 	mob.global_position = Vector3(cell) + Vector3(0.5, 0.05, 0.5)
+	_spawns_this_tick += 1
 
 
 # Vanilla hostile-spawn cell rules:
@@ -215,13 +279,18 @@ func _is_valid_hostile_spawn_cell(manager: Node, pos: Vector3i) -> bool:
 	var floor_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 	if not Blocks.is_opaque(floor_id):
 		return false
-	# Vanilla light check — both sky AND block light contribute. The
-	# combined max is what `World.getBlockLightValue` returns; ≤ 7 lets
-	# hostile mobs spawn. Caves with no skylight and no torches pass;
-	# torch-lit areas and sunlit surfaces don't.
-	var sky: int = manager.get_world_sky_light(pos)
+	# Vanilla light check — both sky AND block light contribute, but the
+	# SKY component is scaled by the current sun position (vanilla's
+	# `skyLightSubtracted`). Without the scale, surface cells still
+	# read sky=15 at midnight (the chunk stores raw daylight max), so
+	# `max(15, 0) > 7` rejected every surface spawn and hostiles only
+	# appeared in caves. WorldTime.sky_factor() gives 0..1 (0.05 at
+	# midnight, 1.0 at noon) — perfect attenuator. Same formula chunk
+	# shader uses for terrain brightness.
+	var sky_raw: int = manager.get_world_sky_light(pos)
+	var sky_eff: int = int(round(float(sky_raw) * WorldTime.sky_factor()))
 	var blk: int = manager.get_world_block_light(pos)
-	var lit: int = maxi(sky, blk)
+	var lit: int = maxi(sky_eff, blk)
 	if lit > 7:
 		return false
 	return true
@@ -323,7 +392,7 @@ func _get_hostile_script_pool() -> Array:
 	# 2-tall AIR pocket — vanilla Alpha's SpawnerCreature uniformly
 	# checks for humanoid clearance regardless of entity height, so
 	# this matches vanilla even though spider's BB is only 0.9 m tall.
-	for name: String in ["zombie", "skeleton", "spider"]:
+	for name: String in ["zombie", "skeleton", "spider", "creeper"]:
 		var s: Script = _MOB_REGISTRY.script_for(name)
 		if s != null:
 			_hostile_script_pool.append(s)

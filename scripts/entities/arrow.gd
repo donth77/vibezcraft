@@ -49,6 +49,15 @@ var _stuck: bool = false
 var _spawn_time: float = 0.0
 var _is_critical: bool = false
 var _shooter: Node = null
+# Pre-computed list of CollisionObject3D RIDs under _shooter, captured
+# at first physics tick. Without this cache, every per-frame raycast
+# called `_collect_collision_rids` which walked the shooter's entire
+# subtree (body + head Area3D + every bone mesh + fire billboards)
+# and allocated a new Array on every flight frame — major hot spot
+# when several skeletons are shooting at once.
+var _shooter_exclude_rids: Array = []
+var _shooter_exclude_cached: bool = false
+var _stuck_check_accum: float = 0.0
 var _chunk_manager: Node = null
 var _player: Node = null
 var _mesh: MeshInstance3D
@@ -159,8 +168,15 @@ func _update_orientation() -> void:
 
 func _physics_process(delta: float) -> void:
 	if _stuck:
-		_check_pickup()
-		_tick_lifetime()
+		# Stuck arrow — only need to check pickup + lifetime occasionally
+		# (no flight physics). 10 Hz is plenty: vanilla pickup happens
+		# the moment the player walks within range, 100 ms latency is
+		# imperceptible. Cuts stuck-arrow per-frame cost by ~6x at 60 FPS.
+		_stuck_check_accum += delta
+		if _stuck_check_accum >= 0.1:
+			_stuck_check_accum = 0.0
+			_check_pickup()
+			_tick_lifetime()
 		return
 	if _tick_lifetime():
 		return
@@ -208,9 +224,11 @@ func _sweep_block_hit_point(from: Vector3, to: Vector3) -> Variant:
 	var segment_len: float = (to - from).length()
 	if segment_len < 0.001:
 		return null
-	# 16 substeps per block keeps the resolution tight (~0.06 m) so the
-	# stick point is visually flush with the face.
-	var samples: int = maxi(1, int(ceil(segment_len * 16.0)))
+	# 8 substeps per block (~0.125 m) — still visually flush with the
+	# face for arrow-sized geometry, half the chunk lookups vs the
+	# old 16/m sampling. At typical 40 m/s arrow speed that's ~5
+	# get_world_block calls per frame instead of ~11.
+	var samples: int = maxi(1, int(ceil(segment_len * 8.0)))
 	for i in range(1, samples + 1):
 		var t: float = float(i) / float(samples)
 		var p: Vector3 = from.lerp(to, t)
@@ -263,7 +281,10 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 	# the moment they spawn, leaving them stuck mid-air against the
 	# shooter's collision.
 	if _shooter != null:
-		query.exclude = _collect_collision_rids(_shooter)
+		if not _shooter_exclude_cached:
+			_shooter_exclude_rids = _collect_collision_rids(_shooter)
+			_shooter_exclude_cached = true
+		query.exclude = _shooter_exclude_rids
 	var result: Dictionary = space.intersect_ray(query)
 	if result.is_empty():
 		return false
@@ -341,7 +362,10 @@ func _hit_mob(mob: Node, hit_pos: Vector3) -> void:
 	# Clamped 0.5..2.5 so even minimum-charge arrows feel like they
 	# land and crit speeds don't fling mobs off the map.
 	var kb_strength: float = clampf(_velocity.length() / 30.0, 0.5, 2.5)
-	var landed: bool = mob.call("take_damage", dmg, _velocity.normalized(), kb_strength)
+	# Pass `_shooter` as attacker so drop tables can attribute the kill
+	# (vanilla `dq.b(lw)`: creeper killed by skeleton arrow drops a
+	# random music disc on top of the standard gunpowder drop).
+	var landed: bool = mob.call("take_damage", dmg, _velocity.normalized(), kb_strength, _shooter)
 	# Vanilla cosmetic: increment the mob's "arrows stuck in body"
 	# counter so a visible arrow stays embedded for ~30 s. Only fires
 	# on a landed hit (mob.take_damage returns true) — bouncing off

@@ -187,11 +187,6 @@ const _WALK_FREQ: float = 0.6662
 # both share this scalar. Matches the visible spider leg sway exactly.
 const _LEG_ANIM_AMPLITUDE: float = 0.4
 
-# Idle SFX. Vanilla EntityLiving.B() rolls 1/120 per tick. Same pattern
-# the other mobs use; SFX hooks are no-ops until spider audio lands.
-const _IDLE_SFX_ROLL_INTERVAL: float = 0.1
-const _IDLE_SFX_CHANCE: float = 1.0 / 120.0
-
 # --- Visual node refs (rotated by walk animation) ---
 # 8 leg pivots in pair-of-2 order: [rear_l, rear_r, mid_back_l,
 # mid_back_r, mid_front_l, mid_front_r, front_l, front_r]. Matches
@@ -217,7 +212,6 @@ var _ai_revenge_remaining_sec: float = 0.0
 # --- Walk-anim state ---
 var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
-var _idle_sfx_accum: float = 0.0
 
 
 # MobBase environment overrides.
@@ -276,8 +270,8 @@ func _build_collision_shape() -> void:
 #   • abdomen cube at back (Z=+0.5625)
 #   • 4 leg pairs splayed outward with -45° Z-roll droop
 func _build_model() -> void:
-	var tex: Texture2D = load(_TEXTURE_PATH) as Texture2D
-	var mat: StandardMaterial3D = _make_textured_material(tex)
+	# Shared cached material — see MobBase.get_shared_material.
+	var mat: StandardMaterial3D = MobBase.get_shared_material(_TEXTURE_PATH, false)
 	# Head.
 	var head_size := Vector3(
 		_HEAD_CUBE_PX.x * _PIXEL_TO_METER,
@@ -385,11 +379,18 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 func _physics_process(delta: float) -> void:
 	super._physics_process(delta)
-	if _dying:
+	if _dying or _physics_gated:
 		return
+	# LOD-scaled tick rate — same pattern as skeleton/creeper/zombie.
+	var tick_scale: float = 1.0
+	if _lod_tier == LOD_MID:
+		tick_scale = 4.0
+	elif _lod_tier == LOD_FAR:
+		tick_scale = 20.0
+	var effective_dt: float = _AI_TICK_DT * tick_scale
 	_ai_tick_accum += delta
-	while _ai_tick_accum >= _AI_TICK_DT:
-		_ai_tick_accum -= _AI_TICK_DT
+	while _ai_tick_accum >= effective_dt:
+		_ai_tick_accum -= effective_dt
 		_ai_tick()
 	# Melee cooldown ticks independently of the AI Hz so the cooldown
 	# expires precisely 0.5 s after the last hit landed.
@@ -406,9 +407,12 @@ func _physics_process(delta: float) -> void:
 # revenge timer always retargets the player (no need for an explicit
 # attacker reference).
 func take_damage(
-	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
 ) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
 	if landed:
 		_ai_revenge_remaining_sec = _AI_REVENGE_DURATION_SEC
 		# Force re-acquisition next AI tick — drop any stale path so
@@ -420,8 +424,11 @@ func take_damage(
 
 func _process(delta: float) -> void:
 	super._process(delta)
+	if _physics_gated:
+		return
+	if _lod_tier == LOD_FAR:
+		return
 	_advance_walk_animation(delta)
-	_roll_idle_sfx(delta)
 
 
 # --- Hostile AI ---
@@ -434,6 +441,11 @@ func _process(delta: float) -> void:
 # wanders via pathToRandomDirection — so spider doesn't just stand
 # still when the player is far/light is too bright.
 func _ai_tick() -> void:
+	# Vanilla `hf.B()` rolls the idle-sound chance per tick. Centralized
+	# on MobBase so every species uses the same `nextInt(1000) < a++`
+	# pattern (mean ~1 fire per 6 s, matching vanilla `b() = 80`).
+	if roll_idle_sfx_tick():
+		_play_idle_sfx()
 	_ai_repath_counter += 1
 	var bright: bool = _is_brightly_lit()
 	var revenge_active: bool = _ai_revenge_remaining_sec > 0.0
@@ -744,18 +756,6 @@ func _advance_walk_animation(delta: float) -> void:
 		_leg_pivots[r_idx].transform.basis = (
 			Basis(Vector3.UP, r_yaw) * Basis(Vector3.BACK, r_roll)
 		)
-
-
-# Idle SFX roll — vanilla rolls every tick; we cap to one roll per
-# _IDLE_SFX_ROLL_INTERVAL to keep the cost bounded. _play_idle_sfx is
-# a no-op in MobBase until spider audio constants land in sfx.gd.
-func _roll_idle_sfx(delta: float) -> void:
-	_idle_sfx_accum += delta
-	if _idle_sfx_accum < _IDLE_SFX_ROLL_INTERVAL:
-		return
-	_idle_sfx_accum -= _IDLE_SFX_ROLL_INTERVAL
-	if randf() < _IDLE_SFX_CHANCE:
-		_play_idle_sfx()
 
 
 # --- SFX overrides ---

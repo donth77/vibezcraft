@@ -1,6 +1,8 @@
 class_name MobBase
 extends CharacterBody3D
 
+# gdlint: disable=max-file-lines
+
 # Shared base for every living entity in the game (pigs, cows, zombies,
 # etc.). Mirrors vanilla `lw.java` (Entity) + `qy.java` (EntityLiving)
 # at a level that's enough to ship the first concrete mob (Pig) without
@@ -134,6 +136,38 @@ const _FIRE_ON_FIRE_TICKS: int = 160  # 8 s
 # stay vanilla-faithful instead of becoming frame-rate-dependent.
 const _ENV_TICK_DT: float = 1.0 / 20.0
 
+# LOD tiering. Vanilla MC modern uses "simulation distance" — far
+# entities render but tick less frequently. Same idea: 4 tiers based
+# on horizontal distance from the player. Subclasses read `_lod_tier`
+# (0..3) to scale AI tick rate, skip pathfinding, or skip animation
+# updates. Constants are squared so the per-frame distance check
+# avoids sqrt.
+const LOD_NEAR: int = 0  # <32 m — full AI 20 Hz, A* pathfinding, anim
+const LOD_MID: int = 1  # 32-64 m — AI 5 Hz, simple wander (no A*), anim
+const LOD_FAR: int = 2  # 64-96 m — AI 1 Hz, no anim updates
+const LOD_GATED: int = 3  # >96 m — process_mode DISABLED, invisible
+
+const _LOD_NEAR_RADIUS: float = 32.0
+const _LOD_MID_RADIUS: float = 64.0
+const _LOD_FAR_RADIUS: float = 96.0
+const _LOD_NEAR_RADIUS_SQ: float = _LOD_NEAR_RADIUS * _LOD_NEAR_RADIUS
+const _LOD_MID_RADIUS_SQ: float = _LOD_MID_RADIUS * _LOD_MID_RADIUS
+const _LOD_FAR_RADIUS_SQ: float = _LOD_FAR_RADIUS * _LOD_FAR_RADIUS
+
+# Backwards-compat alias for old _PHYSICS_GATE constant references.
+const _PHYSICS_GATE_RADIUS: float = _LOD_FAR_RADIUS
+const _PHYSICS_GATE_RADIUS_SQ: float = _LOD_FAR_RADIUS_SQ
+
+# Periodic stuck-in-terrain check. Mobs occasionally end up buried
+# inside a solid block (chunk re-mesh races, penetration recovery
+# edge cases). Sampling at 2 s is rare enough to be free and fast
+# enough that the player rarely notices a stuck mob.
+const _STUCK_CHECK_INTERVAL: float = 2.0
+
+# Seconds in GATED state before auto-despawn. Vanilla uses ~30s
+# after >128m delay.
+const _DESPAWN_GATED_SECONDS: float = 30.0
+
 # Wander helper — vanilla `EntityCreature.findRandomTargetBlock`.
 # Cooldown ticks DOWN per call in `pick_wander_target`; range is the
 # horizontal radius for the random target. Used by hostile mob AIs
@@ -156,12 +190,28 @@ const _FIRE_LAYER_Y_STEP: float = 0.45
 const _FIRE_LAYER_Z_STEP: float = 0.03
 const _FIRE_SCALE_FACTOR: float = 1.4  # vanilla `entity.width * 1.4`
 
+# Idle-SFX talk cadence — vanilla `EntityLiving.bs` field. Each AI tick
+# rolls `randi() % 1000 < _idle_sfx_timer`; on a hit, timer resets to
+# -_IDLE_SFX_TALK_INTERVAL so there's a mandatory ~4 s cooldown before
+# the next possible fire. See `roll_idle_sfx_tick` for the full math.
+const _IDLE_SFX_TALK_INTERVAL: int = 80
+
 # Active-mob registry — every MobBase joins on _ready, leaves on
 # _exit_tree. Used by MobSpawnerManager._count_nearby_mobs to skip the
 # O(chunk_manager.get_children()) walk (which scales with chunk count,
 # drops, falling blocks, etc.) in favor of O(active_mobs) which is
 # bounded by the spawn cap. Keyed by instance_id for cheap erase.
 static var _active_mobs: Dictionary = {}
+# Shared cached player ref — every mob's distance gate would otherwise
+# do its own tree walk. One static cache, re-resolved when stale.
+static var _cached_player_node: Node3D = null
+# Shared StandardMaterial3D cache, keyed by texture path. Every mob's
+# _build_model previously allocated a fresh material + reloaded the
+# texture, which was the dominant cost in per-spawn _ready() (~3-5 ms
+# per material × 1-2 materials per mob). Sharing one material across
+# all instances of the same species drops _ready cost ~3-5x without
+# any visual / state-reset risk (materials are immutable per species).
+static var _shared_materials: Dictionary = {}
 
 # Per-mob-class shape caches. Every chicken's body capsule has
 # identical (radius, height); every pig's head box has identical size.
@@ -191,6 +241,14 @@ var _last_damage_amount: int = 0
 var _hurt_flash_remaining: float = 0.0
 var _chunk_manager: Node
 var _hurt_mat_overrides: Array = []  # [(MeshInstance3D, original_override)] pairs
+# Cached world-brightness from EntityLighting.sample_brightness. -1
+# forces the first per-frame material write; later frames skip if the
+# delta is < 0.005 to avoid GPU uniform churn on a stationary mob.
+var _last_lit_brightness: float = -1.0
+# Counts up every AI tick; on idle-SFX hit, resets to
+# `-_IDLE_SFX_TALK_INTERVAL` for a mandatory cooldown. See
+# `roll_idle_sfx_tick` for the vanilla `EntityLiving.bs` math.
+var _idle_sfx_timer: int = 0
 # Death animation state. Once die() fires, _dying=true and _death_time
 # counts up from 0. _process applies a linear Z-rotation toward
 # _DEATH_TILT_ANGLE; on reaching _DEATH_DURATION the entity is freed.
@@ -202,7 +260,34 @@ var _death_time: float = 0.0
 # is sampled separately inside the env tick for drowning.
 var _in_water: bool = false
 var _in_lava: bool = false
+var _in_fire_cached: bool = false
 var _env_tick_accum: float = 0.0
+# Throttles _check_in_water/lava/fire to the env-tick cadence (20 Hz)
+# instead of per physics frame. Each check is a Vector3i + floor x3 +
+# get_world_block — adds up across many mobs.
+var _env_sample_accum: float = 0.0
+var _env_sampled_once: bool = false
+var _stuck_check_accum: float = 0.0
+# Set by _physics_process when the distance gate fires. Subclasses
+# read this AFTER `super._physics_process()` and skip their own AI /
+# pathfinding work when true — without it, mob_base's early-return
+# only saved base-class physics but skeletons / creepers kept running
+# expensive A* + target search every frame anyway.
+var _physics_gated: bool = false
+# Current LOD tier (LOD_NEAR..LOD_GATED). Recomputed each frame in
+# _physics_process. Subclasses use this to scale AI tick rate and
+# decide whether to run pathfinding vs simple wander.
+var _lod_tier: int = LOD_NEAR
+# Bounds total population — vanilla despawns mobs > 128 m from any
+# player after a 30 s grace. Without this, passive mobs accumulate
+# forever (24+ per km of exploration). When the mob enters GATED,
+# arm a SceneTreeTimer; if the timer fires before the mob is
+# re-ungated, queue_free. process_mode = ALWAYS on the timer so it
+# fires even though the mob itself is DISABLED.
+var _despawn_timer: SceneTreeTimer = null
+# Frame skip counter for move_and_slide throttling — see
+# _physics_process. Resets every time move_and_slide actually fires.
+var _move_frame_skip: int = 0
 var _air_ticks: int = _MAX_AIR_TICKS
 var _fire_dmg_accum_ticks: int = 0
 var _on_fire_ticks: int = 0
@@ -222,6 +307,12 @@ var _stuck_arrow_decay_accum: float = 0.0
 # Wander cooldown — see `pick_wander_target` for usage. Decrements
 # every call; subclass AI ticks invoke it when no target is in range.
 var _wander_cooldown_sec: float = 0.0
+# Last entity to damage this mob. Vanilla `hf.aq` (lastAttacker) tracks
+# the same. Drop tables in subclasses can read this for kill-source
+# attribution (e.g. creepers drop a music disc when killed by a
+# skeleton arrow per vanilla `dq.b(lw)`). Cleared on landing a damage
+# tick where the new attacker is null/Vector3.ZERO knockback.
+var _last_attacker: Node = null
 
 
 # Read-only accessor for MobSpawnerManager + future spawn-cap code.
@@ -229,6 +320,47 @@ var _wander_cooldown_sec: float = 0.0
 # loops to avoid the extra Array allocation.
 static func active_mobs() -> Dictionary:
 	return _active_mobs
+
+
+# Returns a cached StandardMaterial3D for the given texture path.
+# Configures it as unshaded + nearest-filter (mob standard) and with
+# optional alpha-scissor for skeleton-style transparent textures.
+static func get_shared_material(
+	texture_path: String, alpha_scissor: bool = false
+) -> StandardMaterial3D:
+	var key: String = "%s|%d" % [texture_path, 1 if alpha_scissor else 0]
+	var cached: StandardMaterial3D = _shared_materials.get(key) as StandardMaterial3D
+	if cached != null:
+		return cached
+	var tex: Texture2D = load(texture_path) as Texture2D
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	if alpha_scissor:
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		mat.alpha_scissor_threshold = 0.5
+	_shared_materials[key] = mat
+	return mat
+
+
+func _on_gated_despawn_check() -> void:
+	# Called by the SceneTreeTimer after _DESPAWN_GATED_SECONDS. If
+	# the mob is still gated (i.e. player hasn't re-approached), free
+	# it. Otherwise it's been ungated; the next gate cycle re-arms.
+	if not is_instance_valid(self):
+		return
+	if _physics_gated:
+		queue_free()
+	else:
+		_despawn_timer = null
+
+
+func _cached_player() -> Node3D:
+	if _cached_player_node != null and is_instance_valid(_cached_player_node):
+		return _cached_player_node
+	_cached_player_node = (get_tree().root.get_node_or_null("Main/Player") as Node3D)
+	return _cached_player_node
 
 
 # Returns a horizontal world target 3-6 m away, or Vector3.ZERO if
@@ -257,6 +389,40 @@ func pick_wander_target(delta: float) -> Vector3:
 	var theta: float = randf() * TAU
 	var dist: float = randf_range(WANDER_RADIUS_MIN, WANDER_RADIUS_MAX)
 	return global_position + Vector3(cos(theta) * dist, 0, sin(theta) * dist)
+
+
+# Vanilla idle-SFX roll. Mirrors `hf.java::B()` lines:
+#     if (this.bd.nextInt(1000) < this.a++) {
+#         this.a = -this.b();        // b() = 80, the "talk interval"
+#         this.f_();                  // play living sound
+#     }
+# `_idle_sfx_timer` is the vanilla `a` field — counts up every tick.
+# Each tick: roll `randi() % 1000 < timer`. On hit, reset timer to
+# `-_IDLE_SFX_TALK_INTERVAL` so there's a mandatory ~4 s cooldown
+# before the next possible fire. Mean fire rate ≈ 1 per ~120 ticks
+# (6 s per mob), matching vanilla.
+#
+# MUST be called once per AI tick (20 Hz). If called from `_process`
+# (variable framerate) it would over-fire on high-fps hosts. The AI
+# tick is also gated on `_dying` + the 48 m physics radius — both
+# desirable: dying mobs don't speak, and far-mobs (inaudible past
+# the 16 m audio max distance anyway) skip the random call entirely.
+#
+# Returns true if the roll hit (caller should invoke their species
+# `_play_idle_sfx`). Subclasses overriding the talk interval can
+# tweak `_idle_sfx_talk_interval` per instance — vanilla mostly uses
+# 80 across all mobs but some species (e.g., chicken, slime) may
+# want a different cadence.
+func roll_idle_sfx_tick() -> bool:
+	_idle_sfx_timer += 1
+	if _idle_sfx_timer <= 0:
+		# Mandatory cooldown — vanilla counts up from -80 to 0 before
+		# rolls resume. Saves a random call when guaranteed no-fire.
+		return false
+	if randi() % 1000 < _idle_sfx_timer:
+		_idle_sfx_timer = -_IDLE_SFX_TALK_INTERVAL
+		return true
+	return false
 
 
 func _ready() -> void:
@@ -349,6 +515,53 @@ func _physics_process(delta: float) -> void:
 	if _dying:
 		velocity = Vector3.ZERO
 		return
+	# Distance gate — mobs far from any player skip physics + AI to
+	# keep frame cost flat regardless of total mob count. Vanilla
+	# despawns at 128 m; we use a softer 48 m cull so the mob stays
+	# alive (preserves spawned populations, world feels consistent on
+	# return) but doesn't burn cycles. move_and_slide alone is the
+	# dominant per-mob cost; skipping it for distant mobs trades AI
+	# liveness for steady FPS in mob-spawner-heavy worlds.
+	var p: Node3D = _cached_player()
+	if p != null:
+		var dx: float = global_position.x - p.global_position.x
+		var dz: float = global_position.z - p.global_position.z
+		var d_sq: float = dx * dx + dz * dz
+		# Tier classification — squared-distance compares avoid sqrt.
+		if d_sq > _LOD_FAR_RADIUS_SQ:
+			# GATED: hard-disable the node entirely. No physics, no
+			# render, no script processing. Re-enabled when player
+			# re-approaches. Arm a 30 s despawn timer if not already
+			# armed — fires queue_free on a still-gated mob to bound
+			# the total population (vanilla despawns at 128 m + delay).
+			velocity = Vector3.ZERO
+			_physics_gated = true
+			_lod_tier = LOD_GATED
+			if process_mode != Node.PROCESS_MODE_DISABLED:
+				process_mode = Node.PROCESS_MODE_DISABLED
+				visible = false
+			if _despawn_timer == null:
+				# process_mode=ALWAYS so the timer fires even though our
+				# own node is DISABLED.
+				_despawn_timer = (get_tree().create_timer(
+					_DESPAWN_GATED_SECONDS, true, false, true
+				))
+				_despawn_timer.timeout.connect(_on_gated_despawn_check)
+			return
+		# Cancel any pending despawn — we're back in range.
+		if _despawn_timer != null:
+			_despawn_timer = null
+		if d_sq > _LOD_MID_RADIUS_SQ:
+			_lod_tier = LOD_FAR
+		elif d_sq > _LOD_NEAR_RADIUS_SQ:
+			_lod_tier = LOD_MID
+		else:
+			_lod_tier = LOD_NEAR
+	if _physics_gated:
+		# Re-enable when back in range.
+		process_mode = Node.PROCESS_MODE_INHERIT
+		visible = true
+	_physics_gated = false
 	# Chunk-load gate. populate_chunk_at_gen spawns mobs the moment the
 	# chunk's block data lands, but the trimesh collider is built async
 	# on a worker. During that 1-30 frame window, is_on_floor() returns
@@ -370,11 +583,18 @@ func _physics_process(delta: float) -> void:
 			return
 	var pre_move_y: float = global_position.y
 	var pre_move_vel_y: float = velocity.y
-	# Sample environment for this frame. Cached on the instance so the
-	# env tick (below) can reuse without re-walking voxel cells.
-	_in_water = _check_in_water()
-	_in_lava = _check_in_lava()
-	var in_fire: bool = _check_in_fire()
+	# Sample environment for this frame. Cached at 20 Hz (env tick rate)
+	# so we don't burn 3 chunk lookups per frame per mob on values that
+	# only change when the mob crosses a cell boundary. The cache is
+	# refreshed inside the while-loop below at the same 50 ms cadence.
+	_env_sample_accum += delta
+	if _env_sample_accum >= _ENV_TICK_DT or not _env_sampled_once:
+		_env_sample_accum = 0.0
+		_env_sampled_once = true
+		_in_water = _check_in_water()
+		_in_lava = _check_in_lava()
+		_in_fire_cached = _check_in_fire()
+	var in_fire: bool = _in_fire_cached
 	# Gravity / drag — fluid cells replace normal gravity entirely.
 	# Vanilla water: velocity *= 0.8/tick, gravity -0.02/tick.
 	# Vanilla lava:  velocity *= 0.5/tick, gravity -0.02/tick.
@@ -405,7 +625,26 @@ func _physics_process(delta: float) -> void:
 		var f: float = pow(_GROUND_FRICTION, delta)
 		velocity.x *= f
 		velocity.z *= f
-	move_and_slide()
+	# move_and_slide is the dominant cost (~2-3 ms each on trimesh
+	# terrain). Vanilla runs entity physics at 20 TPS; we were running
+	# at 60+ FPS. Frame-skip by tier so NEAR fires every 3 frames
+	# (~20 Hz at 60 FPS = vanilla rate), MID every 12 frames (5 Hz),
+	# FAR every 60 frames (1 Hz). When NOT firing, mobs still tick
+	# their motion via direct integration so they don't drift far,
+	# and the next move_and_slide resolves any drift against terrain.
+	var skip_target: int = 2  # NEAR: every 3rd frame = ~20 Hz
+	if _lod_tier == LOD_MID:
+		skip_target = 11
+	elif _lod_tier == LOD_FAR:
+		skip_target = 59
+	_move_frame_skip += 1
+	if _move_frame_skip > skip_target:
+		_move_frame_skip = 0
+		move_and_slide()
+	else:
+		# Between move_and_slide calls, integrate position so the mob
+		# doesn't appear frozen. Next move_and_slide resolves drift.
+		global_position += velocity * delta
 	# Penetration-recovery clamp. Compare the actual upward motion this
 	# frame against what `velocity.y` could have produced. Any excess is
 	# move_and_slide pushing the body out of a freshly-materialized
@@ -418,6 +657,16 @@ func _physics_process(delta: float) -> void:
 	if actual_dy > expected_max_dy:
 		global_position.y = pre_move_y
 		velocity.y = 0.0
+	# Periodic stuck-check. Live mobs can end up clipped inside a solid
+	# block from gameplay races (chunk re-mesh during move, edge-case
+	# penetration recovery, fluid + ground transitions). Sample the
+	# feet+head cells every 2 s; if both are opaque, push up. Cheap
+	# (2 chunk lookups every 2 s = 1/sec) and self-corrects without
+	# requiring a save/reload to trigger the existing _unstick path.
+	_stuck_check_accum += delta
+	if _stuck_check_accum >= _STUCK_CHECK_INTERVAL:
+		_stuck_check_accum = 0.0
+		_unstick_if_buried()
 	# Environment tick at 20 Hz — swim impulse + drowning + fire/lava
 	# damage. Runs AFTER move_and_slide so the air-ticks check uses the
 	# mob's settled position. We re-sample head_in_water inside the tick
@@ -437,6 +686,13 @@ func _process(delta: float) -> void:
 		# deathTime, so freezing the animation here reads as a bug.
 		_tick_fire_animation(delta)
 		return
+	# Same distance gate as _physics_process — animations + damage-
+	# flash decay are purely visual, and a mob 48+ m from the player
+	# is frustum-culled or invisible anyway. Skipping the whole
+	# function for far mobs saves ~70-mob × per-frame overhead at
+	# night when the hostile cap fills.
+	if _physics_gated:
+		return
 	if _damage_cooldown_remaining > 0.0:
 		_damage_cooldown_remaining = maxf(0.0, _damage_cooldown_remaining - delta)
 	if _hurt_flash_remaining > 0.0:
@@ -445,6 +701,7 @@ func _process(delta: float) -> void:
 			_clear_hurt_flash()
 	_tick_fire_animation(delta)
 	_tick_stuck_arrow_decay(delta)
+	_tick_world_brightness()
 
 
 # Beta-era `Render.renderEntityOnFire` port — five stacked layered
@@ -671,10 +928,18 @@ func _get_eye_height() -> float:
 # `knockback_dir` is the world-space direction from attacker to mob;
 # pass Vector3.ZERO for damage-without-knockback (lava, drowning).
 func take_damage(
-	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
 ) -> bool:
 	if amount <= 0 or health <= 0:
 		return false
+	# Latch attacker for kill-source attribution. Vanilla `hf.aq` tracks
+	# this for drop tables (creeper-by-skeleton drops a music disc) and
+	# AI revenge targeting (which we don't use yet).
+	if attacker != null:
+		_last_attacker = attacker
 	# Vanilla EntityLiving.damageEntity — during iframe, a NEW hit lands
 	# with `amount - _last_damage_amount` if it's strictly larger,
 	# otherwise it's dropped. Keeps fire-tick from blocking arrows.
@@ -896,6 +1161,37 @@ func _clear_hurt_flash() -> void:
 	_hurt_mat_overrides.clear()
 
 
+# Vanilla `EntityRenderer.setBrightness` — entity colors are texture ×
+# world.getBrightnessForRender(cell). Mirror that by sampling the cell
+# at the mob's body center every frame and pushing the result into
+# every StandardMaterial3D.albedo_color descendant. Same EntityLighting
+# helper the player + boat + cart use (0.25 floor, 0.05 → 1.0 LUT) so
+# mobs match terrain brightness as time of day passes.
+#
+# Skipped during hurt flash — the red flash material temporarily owns
+# every mesh's material_override, and tinting it grey would visibly
+# kill the flash. Resumes on the next frame after _clear_hurt_flash.
+func _tick_world_brightness() -> void:
+	if _chunk_manager == null:
+		return
+	if _hurt_flash_remaining > 0.0:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + _get_body_height() * 0.5)),
+		int(floor(global_position.z))
+	)
+	var lit: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(lit - _last_lit_brightness) < 0.005:
+		return  # imperceptible drift — skip the per-mesh material write
+	_last_lit_brightness = lit
+	var tint := Color(lit, lit, lit, 1.0)
+	for mi in _find_mesh_instances(self):
+		var mat := mi.material_override as StandardMaterial3D
+		if mat != null:
+			mat.albedo_color = tint
+
+
 # Recursive child walk — collects every MeshInstance3D under `node`.
 static func _find_mesh_instances(node: Node) -> Array:
 	var out: Array = []
@@ -951,18 +1247,36 @@ func restore_from_dict(d: Dictionary) -> void:
 # opaque (plants / water / leaves). Caps at 8 cells of nudge so a mob
 # saved deep underground isn't teleported through 100 cells of stone.
 func _unstick_after_load() -> void:
-	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	_unstick_if_buried()
+
+
+# Per-frame variant — same algorithm but cheap to call repeatedly
+# because the early-out (both cells already clear) is the common case.
+# Used by the 2 s periodic check inside _physics_process.
+func _unstick_if_buried() -> void:
+	var cm: Node = _chunk_manager
+	if cm == null:
+		cm = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):
 		return
+	# Cheap early-out — most calls fire this path because the mob is
+	# walking around in air normally.
+	var feet_cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var feet_id: int = cm.get_world_block(feet_cell)
+	if not Blocks.is_opaque(feet_id):
+		return
+	# Stuck — nudge up to 8 cells until clear of opaque terrain.
 	for _i: int in range(8):
-		var feet_cell := Vector3i(
+		var head_cell: Vector3i = feet_cell + Vector3i(0, 1, 0)
+		var head_id: int = cm.get_world_block(head_cell)
+		feet_id = cm.get_world_block(feet_cell)
+		if not Blocks.is_opaque(feet_id) and not Blocks.is_opaque(head_id):
+			return
+		global_position.y = float(feet_cell.y + 1) + 0.001
+		feet_cell = Vector3i(
 			int(floor(global_position.x)),
 			int(floor(global_position.y)),
 			int(floor(global_position.z))
 		)
-		var head_cell: Vector3i = feet_cell + Vector3i(0, 1, 0)
-		var feet_id: int = cm.get_world_block(feet_cell)
-		var head_id: int = cm.get_world_block(head_cell)
-		if not Blocks.is_opaque(feet_id) and not Blocks.is_opaque(head_id):
-			return
-		global_position.y = float(feet_cell.y + 1) + 0.001

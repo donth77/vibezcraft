@@ -1130,19 +1130,40 @@ func get_tuner_mode() -> String:
 
 # Re-applies the (possibly tuner-edited) TP rest-pose vars to the live TP
 # tool pivot + mesh. Mirrors _refresh_tool_pose for the third-person path.
+# Bows take a separate code path: their pivot uses _bow_tp_position /
+# _bow_tp_rotation, the orient is forced to identity (no 50°/-25° tilt),
+# the mesh is centered (not handle-pivot-offset), and the mesh has a
+# 180° Y flip so the string side faces the player.
 func _refresh_tp_pose() -> void:
+	var is_bow: bool = false
+	if inventory != null:
+		var sel: ItemStack = inventory.selected()
+		if sel != null and not sel.is_empty():
+			is_bow = Items.tool_type(sel.item_id) == Items.TOOL_TYPE_BOW
 	if _held_tool_tp_pivot != null:
-		_held_tool_tp_pivot.position = _tp_held_tool_position
-		_held_tool_tp_pivot.rotation = _tp_held_tool_rotation
-	_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp)
+		if is_bow:
+			_held_tool_tp_pivot.position = _bow_tp_position
+			_held_tool_tp_pivot.rotation = _bow_tp_rotation
+		else:
+			_held_tool_tp_pivot.position = _tp_held_tool_position
+			_held_tool_tp_pivot.rotation = _tp_held_tool_rotation
+	# Bows skip the vanilla 50°Y / -25°Z orient — tuner toggles are
+	# ignored for them since the orient lays a symmetric bow sideways.
+	_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp and not is_bow)
 	if _held_tool_tp != null and inventory != null:
 		var ps: float = _tp_held_tool_pixel_size
 		_held_tool_tp.scale = Vector3(ps, ps, ps)
 		var id: int = inventory.selected().item_id
 		var tex: Texture2D = ItemIcons.icon_for(id)
 		if tex != null:
-			var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			_held_tool_tp.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
+			if is_bow:
+				# Bow: center the mesh + 180° Y flip so the string side
+				# faces the player (matches _build_held_tool).
+				_held_tool_tp.position = Vector3.ZERO
+				_held_tool_tp.rotation = Vector3(0, PI, 0)
+			else:
+				var pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+				_held_tool_tp.position = Vector3(-pivot_px.x * ps, -pivot_px.y * ps, 0)
 		if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
 			_held_tool_tp.rotation = _axe_tp_mesh_rotation
 
@@ -1245,7 +1266,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 		return
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		_apply_mouse_motion(event)
+		# Block mouse motion while dead. _apply_death_tilt is currently
+		# rotating _camera.rotation.z (0 → 90° over 1 s); if mouse motion
+		# keeps calling _camera.rotate_x during that window, the rotation
+		# stacks on the TILTED local X axis and corrupts the camera basis.
+		# After respawn the X/Y Euler readout is off-axis, so pitch reads
+		# as inverted. Gating the motion here keeps the basis clean.
+		if health > 0:
+			_apply_mouse_motion(event)
 		return
 	# Dead — block all player-action inputs (perspective swap, inventory,
 	# hotbar cycling, drop, pause, debug toggles, etc.). The Respawn button
@@ -2314,9 +2342,16 @@ func _respawn() -> void:
 	_fire_burn_tick = 0.0
 	_was_in_lava = false
 	_lava_tick = 0.0
-	# Clear death-tilt so the view returns to upright immediately on respawn.
+	# Clear death-tilt so the view returns to upright immediately on
+	# respawn. Reset the camera basis FULLY (pitch + roll) rather than
+	# just rotation.z — if any path corrupted the basis off-axis during
+	# the death window (e.g., a stray mouse-motion event before the
+	# input gate landed), reading rotation.x/y from the bad basis would
+	# read back wrong. Y (yaw vs perspective) is preserved by setting
+	# only X/Z to zero.
 	_death_time_sec = 0.0
 	if _camera != null:
+		_camera.rotation.x = 0.0
 		_camera.rotation.z = 0.0
 	if _character_model != null:
 		_character_model.rotation.z = 0.0
@@ -2544,7 +2579,14 @@ func _is_touching_cactus() -> bool:
 				# triggers contact" behavior.
 				var dx_dist: float = max(0.0, abs(px - (float(cx) + 0.5)) - 0.5 - 0.3)
 				var dz_dist: float = max(0.0, abs(pz - (float(cz) + 0.5)) - 0.5 - 0.3)
-				if dx_dist <= 0.0 and dz_dist <= 0.0:
+				# Tolerance: CharacterBody3D leaves a ~0.001 m safe_margin
+				# between colliders, plus swept-collision quantization can
+				# add another ~0.04 m. Without slop the player is always
+				# ~0.001-0.04 m short of the contact threshold and damage
+				# never fires. 0.05 m covers the worst case while staying
+				# well inside vanilla's 1/16 = 0.0625 m "step into the
+				# inset ring" tolerance.
+				if dx_dist <= 0.05 and dz_dist <= 0.05:
 					return true
 	return false
 

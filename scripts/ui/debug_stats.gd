@@ -246,6 +246,73 @@ func _format_stats() -> String:
 			)
 	var mem_mb: float = float(OS.get_static_memory_usage()) / 1048576.0
 	lines.append("Mem: %.1f MB" % mem_mb)
+	# Entity counts — split into active (processing) and gated
+	# (process_mode DISABLED, visible=false). If you see hundreds of
+	# something here during an FPS drop, that's the culprit.
+	var mob_total: int = 0
+	var mob_active: int = 0
+	var mob_hostile: int = 0
+	var mob_near: int = 0
+	var mob_mid: int = 0
+	var mob_far: int = 0
+	var mob_gated: int = 0
+	for mob in MobBase.active_mobs().values():
+		if not is_instance_valid(mob):
+			continue
+		mob_total += 1
+		if mob.process_mode != Node.PROCESS_MODE_DISABLED:
+			mob_active += 1
+		var tier: int = mob.get("_lod_tier") if mob.get("_lod_tier") != null else -1
+		match tier:
+			0:
+				mob_near += 1
+			1:
+				mob_mid += 1
+			2:
+				mob_far += 1
+			3:
+				mob_gated += 1
+		var script: Script = mob.get_script()
+		var path: String = "" if script == null else script.resource_path
+		if (
+			path.ends_with("/skeleton.gd")
+			or path.ends_with("/creeper.gd")
+			or path.ends_with("/zombie.gd")
+			or path.ends_with("/spider.gd")
+		):
+			mob_hostile += 1
+	var tree: SceneTree = get_tree()
+	var arrows_in_flight: int = 0
+	var arrows_stuck: int = 0
+	for n in tree.get_nodes_in_group("arrows"):
+		if not is_instance_valid(n):
+			continue
+		if bool(n.get("_stuck")):
+			arrows_stuck += 1
+		else:
+			arrows_in_flight += 1
+	var dropped: int = tree.get_nodes_in_group("dropped_items").size()
+	lines.append(
+		(
+			"Mobs: %d total (%d active, %d hostile) | Arrows: %d flight / %d stuck | Items: %d"
+			% [mob_total, mob_active, mob_hostile, arrows_in_flight, arrows_stuck, dropped]
+		)
+	)
+	lines.append("  LOD: NEAR=%d MID=%d FAR=%d GATED=%d" % [mob_near, mob_mid, mob_far, mob_gated])
+	# Godot built-in monitors — reveal GPU + engine costs not in our
+	# perf probes. If FPS tanks but `chunk_mgr.tick` is fine, the
+	# answer is in here (draw calls / video mem / physics-server time).
+	var draws: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	var objs: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	var vmem: float = float(Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED)) / 1048576.0
+	var t_proc: float = float(Performance.get_monitor(Performance.TIME_PROCESS)) * 1000.0
+	var t_phys: float = float(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)) * 1000.0
+	lines.append(
+		(
+			"GPU: %d draws / %d objs / %.0f MB | Engine: proc=%.1fms phys=%.1fms"
+			% [draws, objs, vmem, t_proc, t_phys]
+		)
+	)
 	return "\n".join(lines)
 
 

@@ -517,15 +517,21 @@ static func _get_player() -> Node3D:
 
 # Target compass needle angle in icon-space. Mirrors ae.java:62-69:
 #   d3 = (player_yaw - 90°) * PI/180 - atan2(spawn_z - player_z, spawn_x - player_x)
-# Player yaw is already radians in Godot, so the deg→rad conversion
-# collapses to (yaw - PI/2). Main menu / no-player fallback returns 0.
+# Vanilla MC yaw and Godot rotation.y differ by both offset AND sign
+# convention: vanilla yaw 0 = facing +Z (south) and increases CW from
+# above, while Godot rotation.y 0 = facing -Z and increases CCW (right-
+# hand rule around +Y). The mapping is `vanilla_yaw_rad = PI + godot.y`,
+# so the (yaw - 90°) term resolves to (PI/2 + godot.y), NOT (godot.y -
+# PI/2) as the original port assumed. With the sign flipped, the needle
+# correctly points toward spawn instead of 180° away (which led to
+# players following the compass into the wrong territory).
 static func _compass_target_angle() -> float:
 	var player: Node3D = _get_player()
 	if player == null:
 		return 0.0
 	var dx: float = _cached_spawn.x - player.global_position.x
 	var dz: float = _cached_spawn.z - player.global_position.z
-	return player.rotation.y - PI / 2.0 - atan2(dz, dx)
+	return player.rotation.y + PI / 2.0 - atan2(dz, dx)
 
 
 # Target clock angle. Vanilla gp.java:38-39 reads world.b(1.0)

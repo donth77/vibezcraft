@@ -132,10 +132,6 @@ const _AIM_ARM_PITCH: float = PI * 0.5
 
 const _STEP_STRIDE: float = 1.4
 
-# Idle SFX — vanilla EntityLiving rolls 1/120 per tick.
-const _IDLE_SFX_ROLL_INTERVAL: float = 0.1
-const _IDLE_SFX_CHANCE: float = 1.0 / 120.0
-
 # Bow visual offsets. The bow grip is in the lower-left of the 16×16
 # sprite (image (2, 13) → mesh-local (-6, -7) after extrusion's Y
 # flip). After the Z-rotation in `_build_bow`, the grip ends up at
@@ -144,11 +140,6 @@ const _IDLE_SFX_CHANCE: float = 1.0 / 120.0
 # mesh center.
 const _BOW_GRIP_OFFSET_PIXELS: float = 9.19
 const _BOW_PIXEL_SCALE: float = 1.0 / 32.0
-
-# Debug: print state changes to stdout so AI behavior can be verified
-# without spamming the chat HUD. Set false once the skeleton's flow is
-# confirmed working in-game.
-const DEBUG_AI: bool = true
 
 # --- Visual node refs ---
 var _head_mesh: MeshInstance3D
@@ -178,10 +169,7 @@ var _ai_aiming: bool = false
 var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
 var _step_accum: float = 0.0
-var _idle_sfx_accum: float = 0.0
 var _age_seconds: float = 0.0
-
-var _last_ai_state: String = ""
 
 
 # MobBase env overrides.
@@ -231,8 +219,10 @@ func _build_collision_shape() -> void:
 
 
 func _build_model() -> void:
-	var tex: Texture2D = load(_SKELETON_TEXTURE_PATH) as Texture2D
-	var mat: StandardMaterial3D = _make_textured_material(tex)
+	# Shared cached material — see MobBase.get_shared_material. Drops
+	# per-spawn _ready cost from ~5-10 ms to ~1-2 ms by reusing one
+	# StandardMaterial3D + Texture2D across every skeleton instance.
+	var mat: StandardMaterial3D = MobBase.get_shared_material(_SKELETON_TEXTURE_PATH, true)
 	# Head.
 	var head_size := Vector3(
 		_HEAD_CUBE_PX.x * _PIXEL_TO_METER,
@@ -298,7 +288,6 @@ func _build_bow() -> void:
 	if _bow_mesh.mesh == null:
 		return
 	var pixel_scale: float = _BOW_PIXEL_SCALE
-	_bow_mesh.scale = Vector3(pixel_scale, pixel_scale, pixel_scale)
 	# Parent to the right-arm pivot so the bow rotates WITH the arm
 	# (vanilla `m.java::b(EntityLiving)` does the same — held item
 	# follows the arm's pose).
@@ -307,38 +296,56 @@ func _build_bow() -> void:
 	#   * Grip at image (2, 13) → mesh-local (-6, -7) after the
 	#     SpriteExtruder Y-flip.
 	#   * Tip at image (12, 2) → mesh-local (+4, +6).
-	# Grip→tip vector = (10, 13, 0), perpendicular (in the mesh XY
-	# plane) = (13, -10, 0). Both magnitude √269.
+	# Grip→tip vector = (10, 13, 0), magnitude √269.
 	#
-	# We construct an explicit basis (rather than YXZ Euler) because
-	# we need TWO simultaneous alignments:
-	#   1. Grip→tip direction → arm-local -Y. When arm rotates +π/2
-	#      around X for aim, arm-local -Y maps to world -Z (forward),
-	#      so the bow extends FORWARD from the hand — the vanilla
-	#      skeleton firing pose.
-	#   2. Sprite plane normal (mesh +Z) → arm-local +X. The bow's
-	#      DISC is then in arm-local YZ plane → world YZ when aiming,
-	#      i.e. perpendicular to the aim direction with the curve
-	#      visible from the SIDE (rotated against the skeleton's
-	#      side). Front view shows the bow's thin edge, side view
-	#      shows the curve — matches vanilla skeleton's aim render.
+	# Three simultaneous constraints for "archer firing pose":
+	#   1. Grip→tip VERTICAL in the firing pose. With arm at +π/2 X
+	#      rotation (horizontal forward), arm-local -Z maps to world
+	#      +Y. So grip→tip mesh diagonal → arm-local -Z. Tip points UP.
+	#   2. Sprite PLANE perpendicular to camera (edge-on view). Vanilla
+	#      archers don't show a "flat bow drawing" to the viewer — the
+	#      bow's curve runs vertically in front of the body, viewed
+	#      from the side. Mesh +Z (plane normal) must map to arm-local
+	#      ±X. After arm rotation, arm-local X stays X = world ±X =
+	#      perpendicular to camera view direction.
+	#   3. STRING side faces the SKELETON (not the target). In bow.png
+	#      the curve runs along the diagonal with the string along the
+	#      OPPOSITE diagonal. Mesh "perpendicular toward string" =
+	#      (+13s, -10s, 0); we want this to map to arm-local +Y so
+	#      after the arm rotation (arm-local +Y → skeleton-local +Z =
+	#      behind the skeleton), the string side ends up BEHIND the
+	#      bow's curve relative to the archer — matching a real archer
+	#      holding the bow with the string toward their body.
 	#
-	# Basis columns are the images of mesh +X / +Y / +Z under the
-	# rotation. Derived by solving for the basis that satisfies both
-	# constraints + an orthonormal third column.
+	# Solving for orthonormal basis with these constraints:
+	#   col0 = (0, +13s, -10s)
+	#   col1 = (0, -10s, -13s)
+	#   col2 = (-1, 0, 0)
+	# All three unit-length (s² × (13² + 10²) = 1) and mutually
+	# orthogonal. Verify grip→tip: 10s × col0 + 13s × col1 = (0, 0,
+	# -1) ✓. Verify string side: 13s × col0 + (-10s) × col1 = (0,
+	# +1, 0) → after arm rotation → skeleton-local +Z (behind) ✓.
+	# Pre-multiply each col by pixel_scale (1/32) to bake the bow's
+	# scale into the basis (Godot 4 `basis = Basis(...)` wipes any
+	# separate `node.scale` line).
 	var s: float = 1.0 / sqrt(269.0)
 	_bow_mesh.basis = Basis(
-		Vector3(0.0, -10.0 * s, 13.0 * s),  # mesh +X → this arm-local vec
-		Vector3(0.0, -13.0 * s, -10.0 * s),  # mesh +Y → this
-		Vector3(1.0, 0.0, 0.0)  # mesh +Z → arm-local +X (plane normal)
+		Vector3(0.0, 13.0 * s, -10.0 * s) * pixel_scale,
+		Vector3(0.0, -10.0 * s, -13.0 * s) * pixel_scale,
+		Vector3(-1.0, 0.0, 0.0) * pixel_scale
 	)
-	# Position: place the GRIP at the hand (arm-local (0, -0.75, 0)),
-	# not the bow's mesh center. After the basis above, the grip
-	# (-6, -7, 0) px in mesh-local → ~(0, +9.21, -0.49) px in
-	# arm-local pre-scale. Push the bow center DOWN by that offset so
-	# the grip lands flush with the hand.
-	var s_pixel: float = _BOW_PIXEL_SCALE
-	_bow_mesh.position = Vector3(0.0, -0.75 - 9.21 * s_pixel, 0.49 * s_pixel)
+	# Position: place the bow's CENTER at the hand. Vanilla MC holds
+	# the bow at its MIDDLE — the grip is conceptually in the center
+	# of the sprite with both ends (limbs) of the bow extending
+	# equally above and below the hand. Earlier code offset by the
+	# (-6, -7) corner so one bow end ended up at the hand and the
+	# other 0.5 m above — that looked like the skeleton was holding
+	# the bow by its tip. Centering the mesh on the hand puts the
+	# geometric middle of the bow (≈ the grip) at the hand and both
+	# bow ends symmetric around it. Matches vanilla's `m.java::b`
+	# held-item render: the held item's MESH ORIGIN goes to the hand,
+	# not any specific anchor pixel of the icon.
+	_bow_mesh.position = Vector3(0.0, -0.75, 0.0)
 	_bow_mesh.material_override = _make_bow_material(bow_tex)
 
 
@@ -405,11 +412,21 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 func _physics_process(delta: float) -> void:
 	super._physics_process(delta)
-	if _dying:
+	if _dying or _physics_gated:
 		return
+	# Scale AI tick rate by LOD tier — NEAR 20Hz, MID 5Hz, FAR 1Hz.
+	# Far mobs still tick + can move toward player, just much less
+	# often. _ai_tick itself checks `_lod_tier` to skip pathfinding
+	# (A* is expensive; far mobs use straight-line wander instead).
+	var tick_scale: float = 1.0
+	if _lod_tier == LOD_MID:
+		tick_scale = 4.0
+	elif _lod_tier == LOD_FAR:
+		tick_scale = 20.0
+	var effective_dt: float = _AI_TICK_DT * tick_scale
 	_ai_tick_accum += delta
-	while _ai_tick_accum >= _AI_TICK_DT:
-		_ai_tick_accum -= _AI_TICK_DT
+	while _ai_tick_accum >= effective_dt:
+		_ai_tick_accum -= effective_dt
 		_ai_tick()
 	# Bow charge ticks every frame so the shot timing is smooth.
 	if _ai_aiming:
@@ -423,8 +440,13 @@ func _physics_process(delta: float) -> void:
 
 func _process(delta: float) -> void:
 	super._process(delta)
+	if _physics_gated:
+		return
+	# Skip walk animation for FAR tier — at 64+ m the leg-swing detail
+	# isn't visible and the per-frame cos/sin/sqrt is wasted.
+	if _lod_tier == LOD_FAR:
+		return
 	_advance_walk_animation(delta)
-	_roll_idle_sfx(delta)
 	_update_bow_position()
 
 
@@ -432,17 +454,20 @@ func _process(delta: float) -> void:
 
 
 func _ai_tick() -> void:
+	# Vanilla `hf.B()` rolls the idle-sound chance per tick. Centralized
+	# on MobBase so every species uses the same `nextInt(1000) < a++`
+	# pattern (mean ~1 fire per 6 s, matching vanilla `b() = 80`).
+	if roll_idle_sfx_tick():
+		_play_idle_sfx()
 	_ai_repath_counter += 1
 	var player: Node3D = _find_player()
 	if player == null:
-		_debug_state("no-player")
 		_ai_aiming = false
 		_ai_bow_charge_sec = 0.0
 		_wander_tick()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
 	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		_debug_state("abandoned (dist=%.1f)" % sqrt(dist_sq))
 		_ai_aiming = false
 		_ai_bow_charge_sec = 0.0
 		_ai_player_cache = null
@@ -450,36 +475,21 @@ func _ai_tick() -> void:
 		return
 	var dist: float = sqrt(dist_sq)
 	if dist > _AI_SHOOT_RANGE:
-		_debug_state("pursue (dist=%.1f)" % dist)
 		_ai_aiming = false
 		_ai_bow_charge_sec = 0.0
 		_pursue_player(player)
 	elif dist < _AI_KITE_RANGE:
-		_debug_state("kite (dist=%.1f)" % dist)
 		_ai_aiming = false
 		_ai_bow_charge_sec = 0.0
 		_kite_away_from_player(player)
 	else:
-		_debug_state("aim (dist=%.1f, charge=%.2f)" % [dist, _ai_bow_charge_sec])
 		_ai_path.clear()
 		_face_target(player)
 		_velocity_brake()
 		_ai_aiming = true
 		if _ai_bow_charge_sec >= _AI_BOW_CHARGE_SEC:
-			print("[skeleton] FIRE arrow at player dist=%.1f" % dist)
 			_fire_arrow_at(player)
 			_ai_bow_charge_sec = 0.0
-
-
-func _debug_state(s: String) -> void:
-	if not DEBUG_AI:
-		return
-	# Strip the numeric suffix so "pursue (dist=8.4)" and "pursue (dist=8.5)"
-	# are treated as the same state — we only print when the LABEL changes.
-	var label: String = s.split(" ")[0]
-	if label != _last_ai_state:
-		_last_ai_state = label
-		print("[skeleton@%s] state=%s" % [str(global_position.round()), s])
 
 
 func _find_player() -> Node3D:
@@ -535,6 +545,14 @@ func _kite_away_from_player(player: Node3D) -> void:
 
 func _repath_to(target: Vector3) -> void:
 	if _chunk_manager == null:
+		return
+	# LOD: only NEAR-tier mobs run A* pathfinding. MID / FAR mobs just
+	# steer toward the target along a straight line — Pathfinder is
+	# the most expensive AI call (~1 ms per find), running it for 30+
+	# distant mobs every second was a hidden cost. Distant mobs walk
+	# into walls until the player approaches; acceptable trade.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [Vector3i(int(floor(target.x)), int(floor(target.y)), int(floor(target.z)))]
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
@@ -729,13 +747,14 @@ func _advance_walk_animation(delta: float) -> void:
 # the bow visual.
 func _apply_skeleton_arm_pose(phase: float) -> void:
 	var arm_swing: float = cos(phase + PI) * _ARM_AMPLITUDE * _walk_anim_amount
-	# Right arm: horizontal forward when aiming, otherwise walk swing.
+	# Right arm: ALWAYS horizontal forward — same pose in rest AND aim
+	# so the bow stays vertical/edge-on consistently. Vanilla skeletons
+	# walk with their bow arm raised in front (the iconic "ready"
+	# silhouette); swinging the bow arm with the walk cycle would
+	# rotate the bow through every angle and make it look erratic.
+	# Only the LEFT arm swings normally — that's the hand without a bow.
 	if _arm_r_pivot != null:
-		if _ai_aiming:
-			_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
-		else:
-			_arm_r_pivot.rotation = Vector3(arm_swing, 0.0, 0.0)
-	# Left arm: always walk swing (anti-phase to right).
+		_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
 	if _arm_l_pivot != null:
 		_arm_l_pivot.rotation = Vector3(-arm_swing, 0.0, 0.0)
 
@@ -752,15 +771,6 @@ func _play_step() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_skeleton_step(global_position)
-
-
-func _roll_idle_sfx(delta: float) -> void:
-	_idle_sfx_accum += delta
-	if _idle_sfx_accum < _IDLE_SFX_ROLL_INTERVAL:
-		return
-	_idle_sfx_accum -= _IDLE_SFX_ROLL_INTERVAL
-	if randf() < _IDLE_SFX_CHANCE:
-		_play_idle_sfx()
 
 
 # Species SFX overrides — vanilla nq.java::{d, f_, f} return

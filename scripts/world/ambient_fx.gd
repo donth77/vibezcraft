@@ -32,12 +32,24 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 	var px: int = int(floor(player_pos.x))
 	var py: int = int(floor(player_pos.y))
 	var pz: int = int(floor(player_pos.z))
-	# Single-slot chunk cache. A 30-block-wide scan window hits at most 4
-	# chunks; the cache spares us a chunks.has + dict get on the vast
-	# majority of rolls (most stay in one chunk for many cells in a row).
-	# Sentinel (INT_MIN, INT_MIN) so the first iteration always misses.
-	var last_coord := Vector2i(-2147483648, -2147483648)
-	var last_chunk: Chunk = null
+	var pcx: int = px >> 4
+	var pcz: int = pz >> 4
+	# Pre-fetch the 3x3 chunk window in one pass. The scan radius is 15
+	# blocks centered on the player, so every candidate cell lands in
+	# pcx ± 1, pcz ± 1 — at most 9 chunks. Resolving these once up front
+	# replaces the per-iteration chunks.has + dict get (which the single-
+	# slot cache only avoided ~25% of the time due to the triangular
+	# distribution spreading cells across the 4 player-corner chunks).
+	# Net: ~1500-2000 dict lookups → 9 dict lookups per tick.
+	var nine_chunks: Array = []
+	nine_chunks.resize(9)
+	for dcz in range(-1, 2):
+		for dcx in range(-1, 2):
+			var cc := Vector2i(pcx + dcx, pcz + dcz)
+			var c: Chunk = null
+			if chunks.has(cc):
+				c = (chunks[cc] as Node3D).chunk
+			nine_chunks[(dcz + 1) * 3 + (dcx + 1)] = c
 	for _i in range(_CELLS_PER_SCAN):
 		var dx: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var dy: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
@@ -47,20 +59,16 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 		var wz: int = pz + dz
 		if wy < 1 or wy >= Chunk.SIZE_Y - 1:
 			continue
-		# Chunk coord = floor(wx / 16). Arithmetic right-shift handles
-		# negative wx correctly in GDScript (Python-style: -1 >> 4 == -1).
-		# `& 15` recovers the in-chunk local coord in the same trick.
-		var cx: int = wx >> 4
-		var cz: int = wz >> 4
-		if cx != last_coord.x or cz != last_coord.y:
-			last_coord = Vector2i(cx, cz)
-			last_chunk = null
-			if chunks.has(last_coord):
-				var node: Node3D = chunks[last_coord]
-				last_chunk = node.chunk
-		if last_chunk == null:
+		# Direct array index into the prefetched 3x3 window. The shift
+		# handles negative wx correctly (Python-style: -1 >> 4 == -1).
+		var ddx: int = (wx >> 4) - pcx + 1
+		var ddz: int = (wz >> 4) - pcz + 1
+		if ddx < 0 or ddx > 2 or ddz < 0 or ddz > 2:
+			continue  # outside the 3x3 window (only at scan-radius corners)
+		var chunk_here: Chunk = nine_chunks[ddz * 3 + ddx] as Chunk
+		if chunk_here == null:
 			continue
-		var id: int = last_chunk.get_block(wx & 15, wy, wz & 15)
+		var id: int = chunk_here.get_block(wx & 15, wy, wz & 15)
 		if Blocks.is_lava(id):
 			_lava(manager, wx, wy, wz)
 		elif id == Blocks.FIRE:

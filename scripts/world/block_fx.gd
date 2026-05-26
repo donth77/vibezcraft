@@ -75,6 +75,15 @@ static func get_material(block_id: int) -> StandardMaterial3D:
 	var tile_img: Image = BlockAtlas.tile_image(block_id, BlockAtlas.FACE_SIDE)
 	if tile_img == null:
 		return null
+	# Foliage tint bake. The leaves texture ships GRAYSCALE so the chunk
+	# shader can tint it different greens per biome via `leaves_tint`.
+	# StandardMaterial3D doesn't run the chunk shader, so without baking
+	# the tint into the per-pixel image, leaves particles render as raw
+	# grey/black. Apply the active leaves_tint multiplicatively per pixel.
+	# Tile_image returns a fresh duplicate so the mutation doesn't leak
+	# back into the live atlas.
+	if block_id == Blocks.LEAVES:
+		_apply_tint_in_place(tile_img, BlockAtlas.leaves_tint())
 	var tile_tex := ImageTexture.create_from_image(tile_img)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
@@ -105,6 +114,25 @@ static func get_material(block_id: int) -> StandardMaterial3D:
 	mat.albedo_color = Color(0.6, 0.6, 0.6, 1.0)
 	_materials[block_id] = mat
 	return mat
+
+
+# Multiply each pixel of `img` by `tint` (per-channel). Used to bake
+# the chunk-shader's foliage `leaves_tint` into the standalone particle
+# image so leaves crumbs render green instead of grey. Alpha is left
+# alone. Values clamp to [0..1] — vanilla's HDR > 1.0 green is dropped
+# back to the 8-bit ceiling here (acceptable for the small crumb size).
+static func _apply_tint_in_place(img: Image, tint: Vector3) -> void:
+	if img == null:
+		return
+	for y in range(img.get_height()):
+		for x in range(img.get_width()):
+			var c: Color = img.get_pixel(x, y)
+			if c.a <= 0.0:
+				continue
+			c.r = clampf(c.r * tint.x, 0.0, 1.0)
+			c.g = clampf(c.g * tint.y, 0.0, 1.0)
+			c.b = clampf(c.b * tint.z, 0.0, 1.0)
+			img.set_pixel(x, y, c)
 
 
 # Spawn break particles at `world_pos` (the block's integer coord) for

@@ -17,7 +17,13 @@ uniform sampler2D water_fx_tex : filter_nearest, repeat_enable;
 // 1.0 if the WaterFX driver has pushed a real texture, 0.0 otherwise.
 // Set automatically via texture_query() at fragment time — the hash
 // fallback path activates when no real texture is bound.
-uniform vec3 deep_color : source_color = vec3(0.05, 0.18, 0.42);
+// Bumped from sRGB (0.05, 0.18, 0.42) — that linear-space value
+// (≈0.002, 0.026, 0.155) was too dark even with the 0.6 night floor;
+// the small linear-R + linear-G especially dropped the night water to
+// "barely-tinted dark patch." (0.08, 0.28, 0.55) sRGB → linear
+// (≈0.006, 0.063, 0.262) keeps the daytime look while reading as
+// clearly blue at the floor.
+uniform vec3 deep_color : source_color = vec3(0.08, 0.28, 0.55);
 uniform vec3 shallow_color : source_color = vec3(0.20, 0.48, 0.80);
 // Vanilla nq.A BlockFluid renders water at vertex alpha 0.7 with
 // per-vertex light modulating the color. With lighting now wired into
@@ -131,7 +137,7 @@ void fragment() {
     // not just slightly-tinted darkness. 0.6 keeps night/underground
     // water visibly blue while still dimming dusk and torch-lit caves
     // below daylight.
-    light = mix(0.6, 1.0, light);
+    light = mix(0.7, 1.0, light);
     ALBEDO = col * b * light;
     ALPHA = alpha_strength;
 }

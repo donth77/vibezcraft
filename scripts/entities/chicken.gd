@@ -114,10 +114,6 @@ const _WALK_ANIM_LERP_PER_SEC: float = 8.0
 const _LEG_AMPLITUDE: float = 1.4
 const _STEP_STRIDE: float = 1.0  # short legs → shorter stride than cow
 
-# Idle SFX roll — same rate as other animals (1/120 per random tick).
-const _IDLE_SFX_ROLL_INTERVAL: float = 0.1
-const _IDLE_SFX_CHANCE: float = 1.0 / 120.0
-
 # Egg-lay timer — vanilla `ou.java` line 19: i = rand.nextInt(6000) +
 # 6000 → ticks in [6000, 12000] = 5..10 minutes at 20 TPS.
 const _EGG_TIMER_MIN: int = 6000
@@ -174,7 +170,6 @@ var _wing_pivot_r: Node3D
 var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
 var _step_accum: float = 0.0
-var _idle_sfx_accum: float = 0.0
 
 # Wing flap state (vanilla `ou` fields b, c, f).
 var _wing_state: float = 0.0  # 0..1, vanilla `c`
@@ -243,7 +238,6 @@ func _process(delta: float) -> void:
 	super._process(delta)
 	_advance_walk_animation(delta)
 	_update_wing_animation(delta)
-	_roll_idle_sfx(delta)
 
 
 # Vanilla `ou.k()` wing-state update (lines 23-40) + `fk.a()` wing
@@ -482,6 +476,11 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 
 func _ai_tick() -> void:
+	# Vanilla `hf.B()` rolls the idle-sound chance per tick. Centralized
+	# on MobBase so every species uses the same `nextInt(1000) < a++`
+	# pattern (mean ~1 fire per 6 s, matching vanilla `b() = 80`).
+	if roll_idle_sfx_tick():
+		_play_idle_sfx()
 	# Egg-lay timer fires regardless of AI state (vanilla `ou.k()` runs
 	# every tick before the entity's normal update). Decremented per
 	# AI tick (20 Hz) which matches vanilla's per-tick decrement.
@@ -597,9 +596,12 @@ func _face_walk_direction() -> void:
 
 
 func take_damage(
-	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
 ) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()
@@ -644,15 +646,6 @@ func _play_block_step() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_block_step_3d(block_id, global_position)
-
-
-func _roll_idle_sfx(delta: float) -> void:
-	_idle_sfx_accum += delta
-	if _idle_sfx_accum < _IDLE_SFX_ROLL_INTERVAL:
-		return
-	_idle_sfx_accum -= _IDLE_SFX_ROLL_INTERVAL
-	if randf() < _IDLE_SFX_CHANCE:
-		_play_idle_sfx()
 
 
 # Species SFX overrides — vanilla ou.java d/f_/f → mob.chicken,

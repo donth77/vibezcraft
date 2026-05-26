@@ -125,13 +125,6 @@ const _LEG_AMPLITUDE_FRONT: float = 1.4
 # when it crosses the threshold. Distance carries over between strides.
 const _STEP_STRIDE: float = 1.6
 
-# Idle SFX (mob.pig) — vanilla `lw.java` rolls `1/this.b()` per random
-# tick. Per `ak.java::b() = 120`, that's 1/120 per random tick. Random
-# ticks fire at ~10 Hz, so idle SFX averages once every 12 s. We track
-# elapsed time + roll on a fixed interval to keep this self-contained.
-const _IDLE_SFX_ROLL_INTERVAL: float = 0.1  # 10 Hz roll, matches vanilla rate
-const _IDLE_SFX_CHANCE: float = 1.0 / 120.0  # vanilla's 1/120 odds per roll
-
 # Wander AI — direct port of vanilla `fc.java::b_()` (EntityCreature)
 # + `ak.java::a(x,y,z)` (EntityAnimal cell-scoring) + `hf.java::b_()`
 # (idle yaw twitch from EntityLiving fallback). Runs at 20 TPS via the
@@ -231,7 +224,6 @@ var _walk_dist: float = 0.0
 # velocity oscillates (wall collisions, friction decay, etc.).
 var _walk_anim_amount: float = 0.0
 var _step_accum: float = 0.0
-var _idle_sfx_accum: float = 0.0
 
 var _ai_tick_accum: float = 0.0
 # Remaining path nodes (cell coords). Empty = no active path. The mob
@@ -357,6 +349,11 @@ func dismount() -> void:
 # along it; no target? maybe pick one, else idle yaw twitch. Flee
 # override pre-empts (our non-vanilla addition).
 func _ai_tick() -> void:
+	# Vanilla `hf.B()` rolls the idle-sound chance per tick. Centralized
+	# on MobBase so every species uses the same `nextInt(1000) < a++`
+	# pattern (mean ~1 fire per 6 s, matching vanilla `b() = 80`).
+	if roll_idle_sfx_tick():
+		_play_idle_sfx()
 	if _ai_flee_ticks_remaining > 0:
 		_ai_flee_ticks_remaining -= 1
 		_tick_flee()
@@ -509,9 +506,12 @@ func _face_walk_direction() -> void:
 # because it makes the mob feel responsive — flagged as a deliberate
 # deviation from strict Alpha behavior.
 func take_damage(
-	amount: int, knockback_dir: Vector3 = Vector3.ZERO, knockback_strength: float = 1.0
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
 ) -> bool:
-	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength)
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
 	if landed and knockback_dir.length_squared() > 0.0001:
 		_ai_flee_ticks_remaining = _AI_FLEE_TICKS
 		_ai_flee_from = global_position - knockback_dir.normalized()
@@ -523,7 +523,6 @@ func take_damage(
 func _process(delta: float) -> void:
 	super._process(delta)
 	_advance_walk_animation(delta)
-	_roll_idle_sfx(delta)
 	if _saddle_mesh != null:
 		_saddle_mesh.visible = saddled
 	if _rider != null:
@@ -756,18 +755,6 @@ func _play_block_step() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_block_step_3d(block_id, global_position)
-
-
-# Vanilla lw.java random-tick idle sound roll: 1/this.b() chance per
-# random tick (every 50 ms for active entities). ak.java::b() = 120, so
-# average idle interval is 6 s.
-func _roll_idle_sfx(delta: float) -> void:
-	_idle_sfx_accum += delta
-	if _idle_sfx_accum < _IDLE_SFX_ROLL_INTERVAL:
-		return
-	_idle_sfx_accum -= _IDLE_SFX_ROLL_INTERVAL
-	if randf() < _IDLE_SFX_CHANCE:
-		_play_idle_sfx()
 
 
 # Species SFX overrides — vanilla op.java `d` / `f_` / `f` return

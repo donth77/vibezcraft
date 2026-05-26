@@ -52,6 +52,10 @@ const _ENTRIES: Dictionary = {
 	# Size-1 drops slimeballs; larger drop nothing directly and split
 	# into 4 half-size children on death.
 	"slime": "res://scripts/entities/slime.gd",
+	# M7 — vanilla dq.java (EntityCreeper). Chases the player, ignites
+	# at 3 m proximity, detonates 30 ticks later at power 3.0. Drops
+	# 0-2 gunpowder. Iconic + dangerous; standard hostile spawn.
+	"creeper": "res://scripts/entities/creeper.gd",
 }
 
 

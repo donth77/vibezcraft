@@ -1,6 +1,15 @@
 class_name MobCube
 extends RefCounted
 
+# Mesh cache. Keyed by (physical_size, tex_size, tex_origin, cube_px,
+# mirror_x). Mob _ready() is called per-spawn and rebuilds 5-7 cubes
+# per mob; without caching, each spawn allocates 5-7 fresh ArrayMeshes
+# (4 PackedArrays + index buffer each) which dominates per-mob spawn
+# cost. Cached meshes are shared across all instances of the same
+# species — vanilla `dc.java` does the same (one ModelQuadruped per
+# species, transforms diff between mobs).
+static var _mesh_cache: Dictionary = {}
+
 # Vanilla cube-unfold UV mapping for the per-mob sprite sheets in
 # `assets/textures/mob/` (extracted from `/mob/pig.png`, `/mob/cow.png`,
 # etc.). Mirrors Minecraft's `ka.java` cube renderer in dc.java
@@ -47,6 +56,25 @@ static func build_textured_cube(
 	cube_px: Vector3i,
 	mirror_x: bool = false
 ) -> ArrayMesh:
+	var key: String = (
+		"%.4f,%.4f,%.4f|%d,%d|%d,%d|%d,%d,%d|%d"
+		% [
+			physical_size.x,
+			physical_size.y,
+			physical_size.z,
+			tex_size.x,
+			tex_size.y,
+			tex_origin.x,
+			tex_origin.y,
+			cube_px.x,
+			cube_px.y,
+			cube_px.z,
+			1 if mirror_x else 0,
+		]
+	)
+	var cached: ArrayMesh = _mesh_cache.get(key) as ArrayMesh
+	if cached != null:
+		return cached
 	var sx: float = physical_size.x * 0.5
 	var sy: float = physical_size.y * 0.5
 	var sz: float = physical_size.z * 0.5
@@ -198,6 +226,7 @@ static func build_textured_cube(
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	_mesh_cache[key] = mesh
 	return mesh
 
 

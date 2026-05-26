@@ -33,6 +33,12 @@ const CRACK_ATLAS_PATH: String = "res://assets/textures/effects/destroy_stages.p
 # stays enabled so devs who debug-grant a hoe (J in debug mode) can still
 # exercise the full path.
 const HOE_TILL_ENABLED: bool = true
+
+# Player collision capsule dims — must match scenes/player/player.tscn
+# CapsuleShape3D radius + height. Used by _block_overlaps_player below
+# to test whether a candidate placement would clip the player.
+const _PLAYER_HALF_WIDTH: float = 0.3  # capsule radius
+const _PLAYER_HALF_HEIGHT: float = 0.9  # capsule height / 2
 # Preload the script so we can `is`-test without depending on the
 # class_name cache (which only populates after an editor scan; headless
 # test runs don't trigger that scan).
@@ -586,6 +592,30 @@ func _try_place_minecart(variant: int = 0) -> bool:
 		inv.consume_one_selected()
 	_trigger_player_use_swing()
 	return true
+
+
+# Vanilla `World.checkNoEntityCollision` — returns true if placing a
+# block at `place` would overlap the player's collision capsule, so the
+# caller can reject the placement. Without this, jumping straight up
+# and placing a block under yourself can trap the capsule inside the
+# new block when the chunk's trimesh rebuilds (the player's mid-jump
+# AABB spans the cell below floor(pp.y), which the previous 2-cell
+# check missed).
+func _block_overlaps_player(place: Vector3i) -> bool:
+	var player: Node = get_parent()
+	if player == null:
+		return false
+	var pp: Vector3 = (player as Node3D).global_position
+	var bmin: Vector3 = Vector3(float(place.x), float(place.y), float(place.z))
+	var bmax: Vector3 = bmin + Vector3.ONE
+	return (
+		pp.x - _PLAYER_HALF_WIDTH < bmax.x
+		and pp.x + _PLAYER_HALF_WIDTH > bmin.x
+		and pp.y - _PLAYER_HALF_HEIGHT < bmax.y
+		and pp.y + _PLAYER_HALF_HEIGHT > bmin.y
+		and pp.z - _PLAYER_HALF_WIDTH < bmax.z
+		and pp.z + _PLAYER_HALF_WIDTH > bmin.z
+	)
 
 
 func _world_input_active() -> bool:
@@ -1889,13 +1919,10 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# Per-block placement validity (BlockPlant.canPlace → grass/dirt/
 	# farmland support) AND player-occupancy guard. Blocks the player
 	# from planting saplings on stone / sand / mid-air (vanilla rejects)
-	# and from placing a block inside their own feet/head (would clip).
+	# and from placing a block where the player's collision capsule
+	# currently sits (would clip + trap them).
 	var support_id: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
-	var player: Node3D = get_parent()
-	var pp := player.global_position
-	var player_block := Vector3i(int(floor(pp.x)), int(floor(pp.y)), int(floor(pp.z)))
-	var blocks_player: bool = place == player_block or place == player_block + Vector3i(0, 1, 0)
-	if blocks_player or not Blocks.can_place_at(stack.item_id, support_id):
+	if _block_overlaps_player(place) or not Blocks.can_place_at(stack.item_id, support_id):
 		return false
 	# Vanilla BlockTorch (ob.java:30-64) requires AT LEAST ONE solid neighbor
 	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5

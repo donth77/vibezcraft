@@ -299,6 +299,18 @@ const _SLIME_BIG_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/slime/big3.ogg",
 	"res://assets/audio/sfx/mob/slime/big4.ogg",
 ]
+# Creeper audio — Alpha 1.2.6 `dq.f_()` returns "mob.creeper" (used for
+# idle AND hurt — vanilla doesn't separate them), `dq.f()` returns
+# "mob.creeperdeath". Files sourced from InventivetalentDev's legacy
+# asset mirror (1.7.10) — creeper audio is the same across Alpha→Beta→
+# Release per the wiki.
+const _CREEPER_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/creeper/say1.ogg",
+	"res://assets/audio/sfx/mob/creeper/say2.ogg",
+	"res://assets/audio/sfx/mob/creeper/say3.ogg",
+	"res://assets/audio/sfx/mob/creeper/say4.ogg",
+]
+const _CREEPER_DEATH_SOUND: String = "res://assets/audio/sfx/mob/creeper/death.ogg"
 const _SLIME_ATTACK_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/slime/attack1.ogg",
 	"res://assets/audio/sfx/mob/slime/attack2.ogg",
@@ -757,7 +769,9 @@ func play_click() -> void:
 # TNT fuse hiss — vanilla one-shot at ignition. Pitch jitter ±10% to match
 # the random.* family envelope; `loud` controls volume (chained primed-TNT
 # in close succession would drown the player's ears at full volume each).
-func play_fuse(loud: bool = true) -> void:
+# `base_pitch` lets the creeper play this at vanilla 0.5 (vanilla `dq.java`
+# line 96 uses pitch 0.5 for the creeper fuse, while TNT uses 1.0).
+func play_fuse(loud: bool = true, base_pitch: float = 1.0) -> void:
 	if not Game.sfx_enabled or Game.is_loading:
 		return
 	var stream: AudioStream = _stream_cache.get(_FUSE_SOUND)
@@ -770,7 +784,7 @@ func play_fuse(loud: bool = true) -> void:
 	_next_player = (_next_player + 1) % POOL_SIZE
 	player.stream = stream
 	player.volume_db = 0.0 if loud else -8.0
-	player.pitch_scale = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER)
+	player.pitch_scale = base_pitch + randf_range(-PITCH_JITTER, PITCH_JITTER)
 	player.play()
 
 
@@ -964,6 +978,17 @@ func play_slime_hurt(pos: Vector3, size: int) -> void:
 
 func play_slime_attack(pos: Vector3) -> void:
 	_play_mob_sound_3d(_SLIME_ATTACK_SOUNDS, pos)
+
+
+# Creeper sounds. Vanilla `dq.f_()` returns "mob.creeper" for both idle
+# AND hurt (same pool). `play_fuse` (already wired for TNT) handles
+# the random.fuse ignition SFX from creeper.gd's _tick_fuse_ignite.
+func play_creeper_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_CREEPER_SAY_SOUNDS, pos)
+
+
+func play_creeper_death(pos: Vector3) -> void:
+	_play_mob_sound_3d([_CREEPER_DEATH_SOUND], pos)
 
 
 # 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D
