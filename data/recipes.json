@@ -43,6 +43,37 @@
       "result": {"id": "stone_sword", "count": 1}
     },
     {
+      "_comment": "Hoes — Alpha 1.0.14 farming. Same MM/_S/_S pattern as picks/axes, different material per tier. Tills DIRT/GRASS into FARMLAND via interaction.gd::_try_hoe_till.",
+      "id": "wooden_hoe",
+      "pattern": ["PP", " S", " S"],
+      "key": {"P": "planks", "S": "stick"},
+      "result": {"id": "wooden_hoe", "count": 1}
+    },
+    {
+      "id": "stone_hoe",
+      "pattern": ["CC", " S", " S"],
+      "key": {"C": "cobblestone", "S": "stick"},
+      "result": {"id": "stone_hoe", "count": 1}
+    },
+    {
+      "id": "iron_hoe",
+      "pattern": ["II", " S", " S"],
+      "key": {"I": "iron_ingot", "S": "stick"},
+      "result": {"id": "iron_hoe", "count": 1}
+    },
+    {
+      "id": "gold_hoe",
+      "pattern": ["GG", " S", " S"],
+      "key": {"G": "gold_ingot", "S": "stick"},
+      "result": {"id": "gold_hoe", "count": 1}
+    },
+    {
+      "id": "diamond_hoe",
+      "pattern": ["DD", " S", " S"],
+      "key": {"D": "diamond", "S": "stick"},
+      "result": {"id": "diamond_hoe", "count": 1}
+    },
+    {
       "id": "iron_pickaxe",
       "pattern": ["III", " S ", " S "],
       "key": {"I": "iron_ingot", "S": "stick"},
@@ -393,6 +424,20 @@
       "result": {"id": "brick", "count": 1}
     },
     {
+      "_comment": "Snow block — 4 snowballs in a 2x2 (vanilla CraftingManager.addRecipe). Reverse of breaking a snow block, which drops 4 snowballs.",
+      "id": "snow_block",
+      "pattern": ["XX", "XX"],
+      "key": {"X": "snowball"},
+      "result": {"id": "snow_block", "count": 1}
+    },
+    {
+      "_comment": "Slime block — modern MC recipe (1.8+). 9 slimeballs in 3x3 -> 1 slime_block. Not in Alpha; bundled as modern QoL deviation alongside the slime mob + slimeball drop.",
+      "id": "slime_block",
+      "pattern": ["SSS", "SSS", "SSS"],
+      "key": {"S": "slimeball"},
+      "result": {"id": "slime_block", "count": 1}
+    },
+    {
       "id": "golden_apple",
       "pattern": ["GGG", "GAG", "GGG"],
       "key": {"G": "gold_ingot", "A": "apple"},
@@ -559,13 +604,5 @@
       "result": {"id": "diamond", "count": 9}
     }
   ],
-  "_disabled": [
-    {
-      "_reason": "Beta 1.6 addition; not in Alpha 1.2.6. Move into 'shaped' to re-enable.",
-      "id": "wooden_hoe",
-      "pattern": ["PP", " S", " S"],
-      "key": {"P": "planks", "S": "stick"},
-      "result": {"id": "wooden_hoe", "count": 1}
-    }
-  ]
+  "_disabled": []
 }

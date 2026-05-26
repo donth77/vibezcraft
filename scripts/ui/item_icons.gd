@@ -98,6 +98,11 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.WOODEN_SHOVEL: "wooden_shovel",
 	Items.WOODEN_SWORD: "wooden_sword",
 	Items.WOODEN_HOE: "wooden_hoe",
+	Items.STONE_HOE: "stone_hoe",
+	Items.IRON_HOE: "iron_hoe",
+	Items.GOLD_HOE: "gold_hoe",
+	Items.DIAMOND_HOE: "diamond_hoe",
+	Items.SNOWBALL: "snowball",
 	Items.STONE_PICKAXE: "stone_pickaxe",
 	Items.STONE_AXE: "stone_axe",
 	Items.STONE_SHOVEL: "stone_shovel",
@@ -223,6 +228,10 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.MUSIC_DISC_STILL_WATER: "music_disc_still_water",
 	# Bone — dropped by skeletons (once they land) + dungeon chest loot.
 	Items.BONE: "bone",
+	# Slimeball — dropped by size-1 slimes. Vanilla items.png (14, 1) per
+	# `dx.aK(0).a(229)` → (229 % 16, 229 / 16). Extracted into the
+	# alpha_vanilla pack alongside the slime mob + slime block.
+	Items.SLIMEBALL: "slimeball",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

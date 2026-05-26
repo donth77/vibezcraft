@@ -201,6 +201,14 @@ func _spawn_one_mob(cm: Node, mob_name: String, pos: Vector3i) -> void:
 	var mob: CharacterBody3D = script.new() as CharacterBody3D
 	if mob == null:
 		return
+	# Slime needs a vanilla-style random size (1, 2, or 4) BEFORE
+	# being added to the tree — `_ready()` reads `_size` to compute
+	# HP, BB, and visual scale, and it doesn't rebuild if size changes
+	# later. Without this nudge, every debug-spawned slime is size 1,
+	# which can't damage the player (vanilla `b(EntityHuman)` gates on
+	# `c > 1`) — making the mob impossible to playtest.
+	if mob_name == "slime" and mob.has_method("setup_size"):
+		mob.call("setup_size", 1 << randi_range(0, 2))
 	cm.add_child(mob)
 	mob.global_position = Vector3(pos) + Vector3(0.5, 0.05, 0.5)
 

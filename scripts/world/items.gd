@@ -16,10 +16,11 @@ const DIAMOND_PICKAXE: int = 104
 const WOODEN_SHOVEL: int = 105
 const WOODEN_AXE: int = 106
 const WOODEN_SWORD: int = 107
-# WOODEN_HOE: Beta 1.6 addition. Recipe is parked in recipes.json's
-# "_disabled" array so normal players can't craft one; the rest of the
-# path (tool data, sprite, till logic, farmland block, block icon) stays
-# active so debug-mode (J) testing still exercises end-to-end behavior.
+# Wooden hoe — vanilla Alpha 1.0.14 added farming + the full 5-tier
+# hoe family. Recipe lives in data/recipes.json; right-click on
+# grass/dirt tills to FARMLAND via interaction.gd::_try_hoe_till. The
+# other 4 tiers (STONE_HOE, IRON_HOE, GOLD_HOE, DIAMOND_HOE) are
+# defined below in the 199-202 range and share the same till logic.
 const WOODEN_HOE: int = 108
 const STONE_AXE: int = 109
 const STONE_SHOVEL: int = 110
@@ -318,6 +319,31 @@ const MUSIC_DISC_STILL_WATER: int = 197
 # 11-slot table, count 1-4). Stack to 64.
 const BONE: int = 198
 
+# Hoe tiers — vanilla Alpha 1.0.14 added farming + the 4 non-wood hoe
+# tiers; WOODEN_HOE (108) is the existing entry. Recipes match every
+# other tool family: 2 material on the top row + 2 sticks down the
+# middle column. Durability follows the standard per-tier scaling:
+# wood 59, stone 131, iron 250, gold 32, diamond 1561.
+const STONE_HOE: int = 199
+const IRON_HOE: int = 200
+const DIAMOND_HOE: int = 201
+const GOLD_HOE: int = 202
+
+# Snowball — vanilla ItemSnowball (id 332 → 203 here). Right-click
+# throws a SnowballProjectile in the look direction (vanilla
+# EntitySnowball). Hits blocks: fizzle particle, no melt. Hits mobs:
+# 0 damage + knockback animation only. Stack to 16 (vanilla
+# stackSize=16). Dropped by breaking snow blocks (4 each) and snow
+# layers (1 each); also reagent in the 4 snowballs → 1 snow_block
+# recipe.
+const SNOWBALL: int = 203
+
+# Vanilla `dx.aK` (ItemSlimeBall). Dropped by size-1 (small) slimes
+# only — larger slimes split on death and drop nothing directly.
+# Beta 1.7 introduced sticky pistons that take a slimeball; for now
+# it's just a collectible item with no further use until pistons land.
+const SLIMEBALL: int = 204
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -336,7 +362,7 @@ const TOOL_TYPE_PICKAXE: int = 1
 const TOOL_TYPE_AXE: int = 2
 const TOOL_TYPE_SHOVEL: int = 3
 const TOOL_TYPE_SWORD: int = 4
-const TOOL_TYPE_HOE: int = 5  # Beta-era; see WOODEN_HOE note above
+const TOOL_TYPE_HOE: int = 5  # Vanilla Alpha 1.0.14; see WOODEN_HOE
 
 # Per-tool melee damage applied when the player left-clicks a mob with
 # this item held. Vanilla Item.getDamageVsEntity returns 1 by default;
@@ -420,8 +446,14 @@ const _TOOL_DATA: Dictionary = {
 	WOODEN_AXE: [TOOL_TYPE_AXE, 2.0, 0, 59],
 	WOODEN_SHOVEL: [TOOL_TYPE_SHOVEL, 2.0, 0, 59],
 	WOODEN_SWORD: [TOOL_TYPE_SWORD, 2.0, 0, 59],
-	# Hoe — Beta-era; tool data kept for if/when we re-enable.
+	# Hoes — vanilla Alpha 1.0.14. Hoes never gain harvest-level bonus
+	# (they don't dig blocks faster), only durability scales by tier:
+	# wood 59, stone 131, iron 250, gold 32, diamond 1561.
 	WOODEN_HOE: [TOOL_TYPE_HOE, 1.0, 0, 59],
+	STONE_HOE: [TOOL_TYPE_HOE, 1.0, 0, 131],
+	IRON_HOE: [TOOL_TYPE_HOE, 1.0, 0, 250],
+	GOLD_HOE: [TOOL_TYPE_HOE, 1.0, 0, 32],
+	DIAMOND_HOE: [TOOL_TYPE_HOE, 1.0, 0, 1561],
 	STONE_PICKAXE: [TOOL_TYPE_PICKAXE, 4.0, 1, 131],
 	STONE_AXE: [TOOL_TYPE_AXE, 4.0, 1, 131],
 	STONE_SHOVEL: [TOOL_TYPE_SHOVEL, 4.0, 1, 131],
@@ -508,6 +540,16 @@ static func id_from_name(item_name: String) -> int:
 			return WOODEN_SWORD
 		"wooden_hoe":
 			return WOODEN_HOE
+		"stone_hoe":
+			return STONE_HOE
+		"iron_hoe":
+			return IRON_HOE
+		"diamond_hoe":
+			return DIAMOND_HOE
+		"gold_hoe":
+			return GOLD_HOE
+		"snowball":
+			return SNOWBALL
 		"coal":
 			return COAL
 		"iron_ingot":
@@ -682,6 +724,8 @@ static func id_from_name(item_name: String) -> int:
 			return Blocks.DIAMOND_BLOCK
 		"clay":
 			return Blocks.CLAY
+		"snow_block":
+			return Blocks.SNOW_BLOCK
 		"half_slab":
 			return Blocks.HALF_SLAB
 		"double_slab":
@@ -798,6 +842,10 @@ static func id_from_name(item_name: String) -> int:
 			return MUSIC_DISC_HEARTHSTONE
 		"music_disc_still_water":
 			return MUSIC_DISC_STILL_WATER
+		"slimeball":
+			return SLIMEBALL
+		"slime_block":
+			return Blocks.SLIME_BLOCK
 	return -1
 
 
@@ -853,6 +901,16 @@ static func display_name(item_id: int) -> String:
 			return "Wooden Sword"
 		WOODEN_HOE:
 			return "Wooden Hoe"
+		STONE_HOE:
+			return "Stone Hoe"
+		IRON_HOE:
+			return "Iron Hoe"
+		GOLD_HOE:
+			return "Golden Hoe"
+		DIAMOND_HOE:
+			return "Diamond Hoe"
+		SNOWBALL:
+			return "Snowball"
 		COAL:
 			return "Coal"
 		IRON_INGOT:
@@ -915,6 +973,10 @@ static func display_name(item_id: int) -> String:
 			return "Redstone"
 		BONE:
 			return "Bone"
+		SLIMEBALL:
+			return "Slimeball"
+		Blocks.SLIME_BLOCK:
+			return "Slime Block"
 		Blocks.TNT:
 			return "TNT"
 		Blocks.AIR:
@@ -1290,5 +1352,9 @@ static func max_stack_size(item_id: int) -> int:
 	if item_id >= MUSIC_DISC_FIRST_LIGHT and item_id <= MUSIC_DISC_STILL_WATER:
 		return 1
 	if item_id == EGG:
+		return 16
+	# Vanilla ItemSnowball aX=16 — throwable cap matches egg. Limits
+	# how many you can hold while still being a stackable item.
+	if item_id == SNOWBALL:
 		return 16
 	return ItemStack.MAX_SIZE

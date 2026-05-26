@@ -151,6 +151,14 @@ func _read_dotenv() -> Dictionary:
 
 func _ready() -> void:
 	InputActions.register_defaults()
+	# Runtime window icon. `application/config/icon` only sets the
+	# editor icon + the icon baked into exported builds — in dev mode
+	# the OS sees the Godot engine binary, not our project, so the
+	# window/dock shows the Godot icon. Setting it explicitly here
+	# overrides that for both dev runs and exports.
+	var icon_img: Texture2D = load("res://assets/icon/app_icon.png") as Texture2D
+	if icon_img != null:
+		DisplayServer.set_icon(icon_img.get_image())
 	# One-shot migration of any pre-7.5 single-world data layout
 	# (user://world/) to the multi-world layout (user://World1/). Idempotent.
 	SaveLoad.migrate_legacy_world()

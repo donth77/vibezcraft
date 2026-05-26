@@ -378,8 +378,8 @@ var _axe_tp_mesh_rotation: Vector3 = Vector3(PI, 0, deg_to_rad(-80))
 # and the bottom-pivot handle offset since they're held by the grip in
 # the middle of the sprite — so the standard tool-pose vars don't read
 # right for a bow. These values were dialed in via the Tool Tuner.
-var _bow_tp_position: Vector3 = Vector3(-0.020, -0.540, -0.680)
-var _bow_tp_rotation: Vector3 = Vector3(deg_to_rad(-180.0), deg_to_rad(-39.0), deg_to_rad(-12.0))
+var _bow_tp_position: Vector3 = Vector3(-0.010, -0.320, -0.620)
+var _bow_tp_rotation: Vector3 = Vector3(deg_to_rad(180.0), deg_to_rad(-35.0), deg_to_rad(-1.0))
 
 # "fp" or "tp" — which value set the tuner sliders read/write.
 var _tuner_mode: String = "fp"
@@ -1256,8 +1256,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if health <= 0:
 		return
 	if event.is_action_pressed("toggle_inventory"):
+		_cancel_bow_if_charging()
 		_toggle_inventory_screen()
 	elif event.is_action_pressed("pause"):
+		_cancel_bow_if_charging()
 		# Esc closes any open inventory-style screen first; otherwise opens the
 		# ingame pause menu (which freezes the scene tree — Alpha singleplayer
 		# paused the world while GuiIngameMenu was up).
@@ -1482,6 +1484,17 @@ func _play_footstep() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_step(block_id)
+
+
+func _cancel_bow_if_charging() -> void:
+	# UI-opening hotkeys must clear any in-progress bow draw, otherwise
+	# the bow visual freezes at full pull and the next right-click after
+	# closing the UI sees a stale charge. Pause is the worst case: the
+	# scene-tree freeze stops Interaction._process so the auto-cancel
+	# inside _process never runs.
+	var interaction: Node = get_node_or_null("Interaction")
+	if interaction != null and interaction.has_method("cancel_bow_charge"):
+		interaction.cancel_bow_charge()
 
 
 func _toggle_inventory_screen() -> void:
@@ -2226,9 +2239,16 @@ func _safe_spawn_position() -> Vector3:
 	if not meta.is_empty():
 		var spawn_dict: Dictionary = meta.get("spawn", {}) as Dictionary
 		if not spawn_dict.is_empty():
+			# Floor the Y at 64 m. A corrupt meta with `spawn.y = 0`
+			# (caused by an earlier session where the void-recovery
+			# loop teleported the player to (0,0,0) and then
+			# _resolve_and_publish_world_spawn captured that as the
+			# spawn anchor) would otherwise drop the player back into
+			# the bedrock layer on every respawn. 64 m is sea level —
+			# always above the bedrock floor.
 			return Vector3(
 				float(spawn_dict.get("x", 8.0)),
-				float(spawn_dict.get("y", 100.0)),
+				maxf(float(spawn_dict.get("y", 100.0)), 64.0),
 				float(spawn_dict.get("z", 8.0))
 			)
 	return Vector3(8.0, 100.0, 8.0)
@@ -2512,12 +2532,18 @@ func _is_touching_cactus() -> bool:
 				var cz: int = fz + dz
 				if cm.get_world_block(Vector3i(cx, fy, cz)) != Blocks.CACTUS:
 					continue
-				# Cactus cell occupies (cx + 0.0625, cz + 0.0625) to
-				# (cx + 0.9375, cz + 0.9375). Player is a 0.6-wide capsule
-				# centred at (px, pz). Closest distance from player edge
-				# to cactus AABB along each axis:
-				var dx_dist: float = max(0.0, abs(px - (float(cx) + 0.5)) - 0.4375 - 0.3)
-				var dz_dist: float = max(0.0, abs(pz - (float(cz) + 0.5)) - 0.4375 - 0.3)
+				# Vanilla cactus AABB is 14/16 inset (half = 0.4375); ours
+				# uses the standard full-cube collision (half = 0.5) so
+				# the player's capsule can't push into the outer 1/16
+				# ring. Using 0.4375 here meant the player always stayed
+				# 0.0625m short of the damage threshold and cactus was
+				# silently safe. Use 0.5 to match our actual collider —
+				# damage fires the moment the player's capsule touches
+				# the cactus block face, which is the practical
+				# equivalent of vanilla's "step into the inset ring
+				# triggers contact" behavior.
+				var dx_dist: float = max(0.0, abs(px - (float(cx) + 0.5)) - 0.5 - 0.3)
+				var dz_dist: float = max(0.0, abs(pz - (float(cz) + 0.5)) - 0.5 - 0.3)
 				if dx_dist <= 0.0 and dz_dist <= 0.0:
 					return true
 	return false

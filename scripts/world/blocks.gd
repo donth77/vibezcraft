@@ -377,6 +377,14 @@ const JUKEBOX := 85
 # alongside vine.
 const MOSSY_COBBLESTONE := 86
 
+# Vanilla 1.8+ BlockSlime — NOT in Alpha 1.2.6 (added much later for
+# redstone contraptions + fall-damage cushion). Bundled here as a
+# modern-QoL deviation since the user explicitly asked for it
+# alongside slimeball + slime mob. Render as a translucent green
+# cube; no bounce / no fall-damage cushion mechanics yet (would need
+# a `slow_landing` block-tag layer that the player physics reads).
+const SLIME_BLOCK := 87
+
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
 # shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
@@ -543,6 +551,7 @@ static func is_solid_collision(id: int) -> bool:
 		or id == IRON_DOOR
 		or id == FENCE
 		or id == FENCE_GATE
+		or id == SLIME_BLOCK
 	)
 
 
@@ -580,6 +589,10 @@ static func is_opaque(id: int) -> bool:
 		# air around the post shows the world behind. Vanilla gd.a()
 		# returns false for the same reason.
 		and id != FENCE
+		# Slime block is translucent — the chunk shader's alpha-test on
+		# slime_block pixels would otherwise be hidden behind a culled
+		# adjacent face. Same treatment as GLASS / LEAVES.
+		and id != SLIME_BLOCK
 		and id != WOOD_STAIRS
 		and id != COBBLESTONE_STAIRS
 		and id != WOODEN_DOOR
@@ -1304,6 +1317,11 @@ static func hardness(id: int) -> float:
 			# Vanilla ni.java `c(1.0f)` — fast break with axe, slow bare-
 			# handed but still possible.
 			return 1.0
+		SLIME_BLOCK:
+			# Modern MC BlockSlime is hardness 0 (instabreak by hand,
+			# but the block IS dropped). Modern QoL deviation — not in
+			# Alpha. Drops itself; no tool required.
+			return 0.0
 	return 1.0
 
 
@@ -1494,11 +1512,17 @@ static func drops(id: int) -> int:
 		ICE:
 			return AIR  # vanilla: ice melts to water on break (handled in interaction)
 		SNOW_BLOCK:
-			return SNOW_BLOCK  # vanilla drops 4 snowballs; we drop the block until snowballs ship
+			# Vanilla `bo.java::a(int, Random, int)` returns ItemSnowball.
+			# Quantity 4 is handled in drop_quantity below — matches
+			# vanilla's `idDropped * 4` short-circuit.
+			return Items.SNOWBALL
 		CACTUS:
 			return CACTUS  # drops itself
 		SNOW_LAYER:
-			return AIR  # vanilla drops snowball; defer until snowball item exists
+			# Vanilla BlockSnow drops 1 snowball per layer broken. Modern
+			# scales with layer depth (1-8); we follow Alpha which only
+			# had a single-layer snow_layer block, hence 1.
+			return Items.SNOWBALL
 		SAPLING:
 			return SAPLING  # drops itself when broken
 		FLOWER_RED, FLOWER_YELLOW, MUSHROOM_BROWN, MUSHROOM_RED:
@@ -1590,6 +1614,9 @@ static func drop_quantity(id: int) -> int:
 		# Vanilla qj.java — double-slab is two stacked halves; breaking
 		# drops both back as separate half-slab items.
 		return 2
+	if id == SNOW_BLOCK:
+		# Vanilla bo.java::a — snow block drops 4 snowballs.
+		return 4
 	return 1
 
 
@@ -1759,6 +1786,8 @@ static func name_of(id: int) -> String:
 			return "bed_head"
 		JUKEBOX:
 			return "jukebox"
+		SLIME_BLOCK:
+			return "slime_block"
 	return "unknown"
 
 
@@ -1816,6 +1845,10 @@ static func get_face_texture(id: int, face: String) -> String:
 		return "diamond_block"
 	if id == CLAY:
 		return "clay"
+	if id == SLIME_BLOCK:
+		# All 6 faces share one tile; the chunk shader's per-face shading
+		# LUT still gives the cube edge contrast.
+		return "slime_block"
 	if id == HALF_SLAB or id == DOUBLE_SLAB:
 		# Vanilla qj.java::a(int) returns texture index 6 for top/bottom
 		# (stone_slab_top) and 5 for sides (stone_slab_side).

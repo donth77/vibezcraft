@@ -188,6 +188,11 @@ const _LAYOUT := {
 	# Mossy cobblestone — dungeon-specific cobble variant. Same atlas
 	# pipeline as plain cobble; the dungeon worldgen mixes the two.
 	"mossy_cobblestone": 100,
+	# Slime block — modern MC deviation, not in Alpha terrain.png.
+	# Generated at boot from mob/slime.png (see scripts/dev/extract_alpha_pack.py
+	# comment alongside the asset). Translucent green cube; all 6 faces
+	# share this single tile.
+	"slime_block": 101,
 }
 
 # Foliage tint variants.

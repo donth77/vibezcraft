@@ -1,4 +1,5 @@
 # gdlint: disable=max-public-methods
+# gdlint: disable=max-file-lines
 extends Node
 
 # Block-sound playback. Maintains a small pool of AudioStreamPlayer nodes so
@@ -54,6 +55,18 @@ const _DIG_SOUNDS: Dictionary = {
 		"res://assets/audio/sfx/step/cloth2.ogg",
 		"res://assets/audio/sfx/step/cloth3.ogg",
 		"res://assets/audio/sfx/step/cloth4.ogg",
+	],
+	# Modern MC slime block uses Block.soundSlimeFootstep — the slime's
+	# own squish clips repurposed for dig/place/step. We reuse the small1-5
+	# mob sounds (sourced via minecraft.wiki) — same clips the slime mob
+	# plays on each hop.
+	"slime":
+	[
+		"res://assets/audio/sfx/mob/slime/small1.ogg",
+		"res://assets/audio/sfx/mob/slime/small2.ogg",
+		"res://assets/audio/sfx/mob/slime/small3.ogg",
+		"res://assets/audio/sfx/mob/slime/small4.ogg",
+		"res://assets/audio/sfx/mob/slime/small5.ogg",
 	],
 }
 
@@ -224,6 +237,72 @@ const _ZOMBIE_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/zombie/step4.ogg",
 	"res://assets/audio/sfx/mob/zombie/step5.ogg",
 ]
+# Skeleton audio — Alpha 1.2.6 sound3/mob/skeleton/. nq.java::d()
+# returns "mob.skeleton" (idle/say), f_() returns "mob.skeletonhurt",
+# f() returns "mob.skeletondeath". Files fetched from minecraft.wiki
+# (Category:Skeleton_sounds) — same sound pool used since Alpha. Note
+# the wiki names idle1-3 / hurt1-4 / step1-4 vs zombie's say/hurt/step
+# pool sizes; preserved as-is rather than collapsing to match zombie.
+const _SKELETON_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/skeleton/say1.ogg",
+	"res://assets/audio/sfx/mob/skeleton/say2.ogg",
+	"res://assets/audio/sfx/mob/skeleton/say3.ogg",
+]
+const _SKELETON_HURT_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/skeleton/hurt1.ogg",
+	"res://assets/audio/sfx/mob/skeleton/hurt2.ogg",
+	"res://assets/audio/sfx/mob/skeleton/hurt3.ogg",
+	"res://assets/audio/sfx/mob/skeleton/hurt4.ogg",
+]
+const _SKELETON_DEATH_SOUND: String = "res://assets/audio/sfx/mob/skeleton/death.ogg"
+const _SKELETON_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/skeleton/step1.ogg",
+	"res://assets/audio/sfx/mob/skeleton/step2.ogg",
+	"res://assets/audio/sfx/mob/skeleton/step3.ogg",
+	"res://assets/audio/sfx/mob/skeleton/step4.ogg",
+]
+# Spider audio — Alpha 1.2.6 `be.java::d()` and `f_()` BOTH return
+# "mob.spider" (idle AND hurt share the same hiss pool — vanilla
+# deliberately reuses the say sound for hurt). `f()` returns
+# "mob.spiderdeath". Step pool exists in 1.7+ assets (step1-4) but
+# Alpha used generic block-step sounds — we wire the step files for
+# future use; play_spider_step is opt-in. Files sourced from the
+# 1.7.10 vanilla asset archive (Mojang has not modified spider
+# audio since release).
+const _SPIDER_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/spider/say1.ogg",
+	"res://assets/audio/sfx/mob/spider/say2.ogg",
+	"res://assets/audio/sfx/mob/spider/say3.ogg",
+	"res://assets/audio/sfx/mob/spider/say4.ogg",
+]
+const _SPIDER_DEATH_SOUND: String = "res://assets/audio/sfx/mob/spider/death.ogg"
+const _SPIDER_STEP_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/spider/step1.ogg",
+	"res://assets/audio/sfx/mob/spider/step2.ogg",
+	"res://assets/audio/sfx/mob/spider/step3.ogg",
+	"res://assets/audio/sfx/mob/spider/step4.ogg",
+]
+# Slime audio — Alpha 1.2.6 sound3/mob/slime/. `ns.java::d()` returns
+# "mob.slime", `ns.java::e()` returns "mob.slimeattack". Each mob picks
+# from small1-5 or big1-4 based on size (≤1 → small pool, >1 → big
+# pool). Attack pool fires when a size > 1 slime touches the player.
+const _SLIME_SMALL_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/slime/small1.ogg",
+	"res://assets/audio/sfx/mob/slime/small2.ogg",
+	"res://assets/audio/sfx/mob/slime/small3.ogg",
+	"res://assets/audio/sfx/mob/slime/small4.ogg",
+	"res://assets/audio/sfx/mob/slime/small5.ogg",
+]
+const _SLIME_BIG_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/slime/big1.ogg",
+	"res://assets/audio/sfx/mob/slime/big2.ogg",
+	"res://assets/audio/sfx/mob/slime/big3.ogg",
+	"res://assets/audio/sfx/mob/slime/big4.ogg",
+]
+const _SLIME_ATTACK_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/slime/attack1.ogg",
+	"res://assets/audio/sfx/mob/slime/attack2.ogg",
+]
 # Water audio — Alpha a1.2.6 assets (sound3/liquid/). `splash.ogg` fires on
 # water entry (`Entity.N()` in Bukkit/mc-dev: plays sound with volume scaled
 # by impact speed when `!inWater && justEnteredWater`). `swim1-4.ogg` cycle
@@ -290,6 +369,18 @@ const _STEP_SOUNDS: Dictionary = {
 		"res://assets/audio/sfx/step/gravel2.ogg",
 		"res://assets/audio/sfx/step/gravel3.ogg",
 		"res://assets/audio/sfx/step/gravel4.ogg",
+	],
+	# Modern MC slime block step uses the same small-slime squish pool
+	# as dig/place — Block.soundSlimeFootstep registers one set of
+	# clips and reuses them for all three events. Without this entry,
+	# stepping on a placed slime block crashes the dict lookup.
+	"slime":
+	[
+		"res://assets/audio/sfx/mob/slime/small1.ogg",
+		"res://assets/audio/sfx/mob/slime/small2.ogg",
+		"res://assets/audio/sfx/mob/slime/small3.ogg",
+		"res://assets/audio/sfx/mob/slime/small4.ogg",
+		"res://assets/audio/sfx/mob/slime/small5.ogg",
 	],
 }
 
@@ -819,6 +910,62 @@ func play_zombie_step(pos: Vector3) -> void:
 	_play_mob_sound_3d(_ZOMBIE_STEP_SOUNDS, pos, -2.0)
 
 
+func play_skeleton_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SKELETON_SAY_SOUNDS, pos)
+
+
+func play_skeleton_hurt(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SKELETON_HURT_SOUNDS, pos)
+
+
+func play_skeleton_death(pos: Vector3) -> void:
+	_play_mob_sound_3d([_SKELETON_DEATH_SOUND], pos)
+
+
+func play_skeleton_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SKELETON_STEP_SOUNDS, pos, -2.0)
+
+
+# Vanilla `be.java::d()` and `f_()` both return "mob.spider" so the
+# idle (`say`) pool also serves as the hurt pool. play_spider_hurt is
+# wired to the same SAY array intentionally.
+func play_spider_say(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SPIDER_SAY_SOUNDS, pos)
+
+
+func play_spider_hurt(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SPIDER_SAY_SOUNDS, pos)
+
+
+func play_spider_death(pos: Vector3) -> void:
+	_play_mob_sound_3d([_SPIDER_DEATH_SOUND], pos)
+
+
+func play_spider_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SPIDER_STEP_SOUNDS, pos, -2.0)
+
+
+# Slime sounds. Vanilla picks small/big pool by `c > 1`. We accept the
+# size int directly so the caller doesn't need to know the threshold.
+# Hurt + death share the same pool (vanilla `ns.java` f_() + f() both
+# return "mob.slime{small,big}"). `play_slime_hop` is the bounce SFX
+# fired from slime.gd's _do_hop.
+func play_slime_hop(pos: Vector3, size: int) -> void:
+	var pool: Array = _SLIME_SMALL_SOUNDS if size <= 1 else _SLIME_BIG_SOUNDS
+	# Slightly quieter than say sounds — vanilla volume 0.4-0.6 vs the
+	# 0.6-1.0 of the say pool. Match by dropping a few dB.
+	_play_mob_sound_3d(pool, pos, -4.0)
+
+
+func play_slime_hurt(pos: Vector3, size: int) -> void:
+	var pool: Array = _SLIME_SMALL_SOUNDS if size <= 1 else _SLIME_BIG_SOUNDS
+	_play_mob_sound_3d(pool, pos)
+
+
+func play_slime_attack(pos: Vector3) -> void:
+	_play_mob_sound_3d(_SLIME_ATTACK_SOUNDS, pos)
+
+
 # 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D
 # pool so falloff with distance kicks in automatically (max_distance =
 # 16 m, unit_size = 4 m for the perceptual sweet-spot). Pool round-
@@ -936,6 +1083,12 @@ func _material_for(block_id: int) -> String:
 			# Vanilla qj.java uses hb.d (Material.stone) but with no
 			# step-sound override — defaults to stone SFX pool.
 			return "stone"
+		Blocks.WOOD_HALF_SLAB, Blocks.WOOD_DOUBLE_SLAB:
+			# Beta wood-slab variant — Material.wood → wood SFX pool.
+			return "wood"
+		Blocks.COBBLESTONE_HALF_SLAB, Blocks.COBBLESTONE_DOUBLE_SLAB:
+			# Cobblestone variant — Material.stone same as the stone slab.
+			return "stone"
 		Blocks.SIGN_STANDING, Blocks.SIGN_WALL:
 			# Vanilla ni.java uses hb.e (Material.wood) → wood SFX.
 			return "wood"
@@ -953,6 +1106,13 @@ func _material_for(block_id: int) -> String:
 			# Vanilla BlockJukebox inherits Material.wood (hb.e) — same
 			# wood-knock SFX as planks / log / fence_gate.
 			return "wood"
+		Blocks.SLIME_BLOCK:
+			# Modern MC BlockSlime uses Block.soundSlimeFootstep — a
+			# dedicated slime-squish material distinct from cloth/wood.
+			# Without this case, _material_for returns "" and play_break
+			# silently early-returns, so the block snapped instantly with
+			# no SFX — matches the user's report.
+			return "slime"
 	# Wool family (16 colors at contiguous IDs) — cloth material.
 	if Blocks.is_wool(block_id):
 		return "cloth"

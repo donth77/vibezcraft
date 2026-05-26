@@ -204,7 +204,18 @@ func _restore_world_state() -> void:
 #     re-anchor on the player's current position, and rewrite meta so
 #     the anchor stays stable from now on.
 func _resolve_and_publish_world_spawn(player: Node3D, meta: Dictionary) -> void:
-	var fallback_pos: Vector3 = player.global_position if player != null else Vector3(0, 70, 0)
+	# Sanitize the fallback. If the player's Y is below sea level (e.g.,
+	# they fell through the void during initial chunk streaming and the
+	# recovery teleport hasn't restored them yet), the player's current
+	# position is NOT a valid spawn anchor — committing it would write
+	# meta.spawn.y = 0 and brick subsequent void recoveries by teleport-
+	# ing the player into bedrock on every respawn. Lift any low Y to a
+	# safe altitude above the bedrock layer.
+	var fallback_pos: Vector3 = Vector3(0, 70, 0)
+	if player != null:
+		fallback_pos = player.global_position
+		if fallback_pos.y < 32.0:
+			fallback_pos.y = 70.0
 	var spawn: Vector3 = fallback_pos
 	var should_persist: bool = false
 	if meta.is_empty():
@@ -219,9 +230,12 @@ func _resolve_and_publish_world_spawn(player: Node3D, meta: Dictionary) -> void:
 				float(spawn_dict.get("y", 70)),
 				float(spawn_dict.get("z", 0))
 			)
-			if spawn == Vector3(0, 70, 0) and player != null:
-				# Legacy default — re-anchor on the player so the compass
-				# stops permanently pointing at chunk-origin.
+			# Repair corrupt meta — any spawn whose Y is below sea level
+			# came from the (0,0,0) regression and would re-launch the
+			# bedrock-spawn loop. Re-anchor on the (sanitized) player
+			# position and overwrite. Legacy default Vector3(0, 70, 0)
+			# falls through the same way.
+			if (spawn.y < 32.0 or spawn == Vector3(0, 70, 0)) and player != null:
 				spawn = fallback_pos
 				should_persist = true
 	ItemIcons.set_world_spawn(spawn)

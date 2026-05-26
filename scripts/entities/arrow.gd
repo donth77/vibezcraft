@@ -216,7 +216,13 @@ func _sweep_block_hit_point(from: Vector3, to: Vector3) -> Variant:
 		var p: Vector3 = from.lerp(to, t)
 		var cell := Vector3i(int(floor(p.x)), int(floor(p.y)), int(floor(p.z)))
 		var id: int = _chunk_manager.get_world_block(cell)
-		if id == Blocks.AIR or Blocks.is_water(id) or Blocks.is_lava(id):
+		# Only stick on PHYSICALLY SOLID blocks. Anything else (air,
+		# fluids, plants/saplings/flowers, torches, fire, signs,
+		# ladders) lets the arrow fly through — matches vanilla
+		# EntityArrow which only stops on `material.isSolid()`. Before
+		# this, arrows stuck on a torch or flower mid-flight, looking
+		# like they froze in midair from the player's POV.
+		if not Blocks.is_solid_collision(id):
 			continue
 		# Step back to the previous substep — that's the last point
 		# inside an open cell before the arrowhead crossed the block
@@ -251,8 +257,13 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 	query.collide_with_areas = true
 	query.collide_with_bodies = true
 	query.collision_mask = 0b101
-	if _shooter != null and _shooter is CollisionObject3D:
-		query.exclude = [(_shooter as CollisionObject3D).get_rid()]
+	# Exclude the shooter AND every CollisionObject3D descendant under
+	# it. Without the recursive walk, a skeleton's head Area3D (a
+	# separate RID, child of the skeleton root) blocks its own arrows
+	# the moment they spawn, leaving them stuck mid-air against the
+	# shooter's collision.
+	if _shooter != null:
+		query.exclude = _collect_collision_rids(_shooter)
 	var result: Dictionary = space.intersect_ray(query)
 	if result.is_empty():
 		return false
@@ -266,8 +277,48 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 		if node is MobBase:
 			_hit_mob(node, hit_pos)
 			return true
+		# Player isn't a MobBase (just `extends CharacterBody3D`). Check
+		# by name + take_damage method so skeleton arrows can damage
+		# them. Self-shooter exclude above already filters out the
+		# player's own arrows from re-hitting the player.
+		if node.name == "Player" and node.has_method("take_damage"):
+			_hit_player(node, hit_pos)
+			return true
 		node = node.get_parent()
 	return false
+
+
+# Recursively gather all CollisionObject3D RIDs under `root`. Used to
+# build the raycast exclude list so the arrow can't self-collide with
+# the shooter's body OR any of its child collision objects (hit boxes,
+# head Area3D, etc.) on the spawn frame.
+func _collect_collision_rids(root: Node) -> Array:
+	var rids: Array = []
+	_collect_collision_rids_recursive(root, rids)
+	return rids
+
+
+func _collect_collision_rids_recursive(node: Node, out: Array) -> void:
+	if node is CollisionObject3D:
+		out.append((node as CollisionObject3D).get_rid())
+	for child in node.get_children():
+		_collect_collision_rids_recursive(child, out)
+
+
+# Arrow → player hit. Player.take_damage(amount: int, source: String)
+# uses the "arrow" source tag for projectile damage.
+func _hit_player(player: Node, _hit_pos: Vector3) -> void:
+	var speed_per_tick: float = _velocity.length() / TICKS_PER_SEC
+	var raw: float = speed_per_tick * BASE_DAMAGE
+	var dmg: int = maxi(1, int(ceil(raw)))
+	if _is_critical:
+		dmg += randi() % (dmg / 2 + 2)
+	# Use a string source tag, matching player.gd's take_damage
+	# signature. Other call sites (zombie melee, fall) pass tags like
+	# "mob" / "fall"; "arrow" mirrors vanilla EntityArrow.attackEntityFrom.
+	player.call("take_damage", dmg, "arrow")
+	SFX.play_arrow_hit()
+	queue_free()
 
 
 func _hit_mob(mob: Node, hit_pos: Vector3) -> void:

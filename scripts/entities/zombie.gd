@@ -356,15 +356,18 @@ func _ai_tick() -> void:
 	_ai_repath_counter += 1
 	var player: Node3D = _find_player()
 	if player == null:
-		_ai_path.clear()
+		# No target — wander. Vanilla zombies inherit EntityCreature's
+		# random-target wander; without it the zombie freezes wherever
+		# it spawned, which reads as a bug. See MobBase.pick_wander_target.
+		_wander_tick()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
 	# Drop the chase when the player gets too far. _AI_ABANDON_RADIUS is
 	# bigger than _AI_DETECT_RADIUS so we don't oscillate between chase
 	# and idle at the boundary.
 	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		_ai_path.clear()
 		_ai_player_cache = null
+		_wander_tick()
 		return
 	# In-melee? Vanilla EntityMob.l(EntityLiving target) attacks when
 	# `distSqr < e²` where e is the attack-range setting (~2.0² for
@@ -460,6 +463,39 @@ func _attack_player(player: Node3D) -> void:
 
 # Slow the zombie to a near-stop on in-melee frames so it doesn't push
 # the player around while attacking.
+# Vanilla EntityCreature wander — picks a random nearby target every
+# few seconds and pathfinds there at half walk speed. Uses the shared
+# `MobBase.pick_wander_target` cooldown so other hostile mobs match.
+# Without this the zombie freezes when no player is in detect range.
+func _wander_tick() -> void:
+	if not _ai_path.is_empty():
+		_tick_walk_path()
+		velocity.x *= 0.5
+		velocity.z *= 0.5
+		return
+	var target: Vector3 = pick_wander_target(_AI_TICK_DT)
+	if target != Vector3.ZERO:
+		_repath_toward_position(target)
+	else:
+		_velocity_brake()
+
+
+# Same as `_repath_toward(player)` but takes a raw world position so
+# the wander tick can ask the pathfinder for an arbitrary point.
+func _repath_toward_position(target_pos: Vector3) -> void:
+	if _chunk_manager == null:
+		return
+	var origin: Vector3i = Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var goal: Vector3i = Vector3i(
+		int(floor(target_pos.x)), int(floor(target_pos.y)), int(floor(target_pos.z))
+	)
+	_ai_path = Pathfinder.find_path(
+		_chunk_manager, origin, goal, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
+	)
+
+
 func _velocity_brake() -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0

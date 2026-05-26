@@ -94,6 +94,10 @@ const _BLOCKS: Array = [
 	# Clay block — also worldgen-placed in lakes; spawnable here for
 	# convenience.
 	Blocks.CLAY,
+	# Slime block — modern-MC deviation (not Alpha). Crafted from 9
+	# slimeballs; no bounce / piston interaction yet, just a placeable
+	# translucent green cube.
+	Blocks.SLIME_BLOCK,
 	# Stone / wood / cobblestone slabs — half-slab is the placeable form;
 	# double-slab is normally only formed by stacking two halves but
 	# exposed here so testers can place it directly.
@@ -137,18 +141,22 @@ const _ITEMS: Array = [
 	Items.STONE_AXE,
 	Items.STONE_SHOVEL,
 	Items.STONE_SWORD,
+	Items.STONE_HOE,
 	Items.IRON_PICKAXE,
 	Items.IRON_AXE,
 	Items.IRON_SHOVEL,
 	Items.IRON_SWORD,
+	Items.IRON_HOE,
 	Items.GOLD_PICKAXE,
 	Items.GOLD_AXE,
 	Items.GOLD_SHOVEL,
 	Items.GOLD_SWORD,
+	Items.GOLD_HOE,
 	Items.DIAMOND_PICKAXE,
 	Items.DIAMOND_AXE,
 	Items.DIAMOND_SHOVEL,
 	Items.DIAMOND_SWORD,
+	Items.DIAMOND_HOE,
 	Items.IRON_HELMET,
 	Items.IRON_CHESTPLATE,
 	Items.IRON_LEGGINGS,
@@ -242,6 +250,10 @@ const _ITEMS: Array = [
 	Items.MUSIC_DISC_OPEN_SKY,
 	Items.MUSIC_DISC_HEARTHSTONE,
 	Items.MUSIC_DISC_STILL_WATER,
+	# Slimeball — dropped by size-1 slimes. Reagent for the slime block
+	# recipe (9 → 1). Right-click does nothing for now (sticky pistons
+	# / lead crafting would consume them in modern MC; not in our scope).
+	Items.SLIMEBALL,
 ]
 
 var _player: Node

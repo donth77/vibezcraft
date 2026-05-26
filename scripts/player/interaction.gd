@@ -41,6 +41,7 @@ const _MOB_BASE_SCRIPT := preload("res://scripts/entities/mob_base.gd")
 # class_name registry catches up (same pattern as TestMob in the debug
 # spawner).
 const _ARROW_SCRIPT := preload("res://scripts/entities/arrow.gd")
+const _SNOWBALL_SCRIPT := preload("res://scripts/entities/snowball.gd")
 const _PAINTING_SCRIPT := preload("res://scripts/entities/painting.gd")
 # GUT loads test scripts before class_name registers the global ChatHud
 # identifier, so bare `ChatHud.push(...)` fails to parse in tests. Same
@@ -507,6 +508,49 @@ func _try_attack_minecart() -> bool:
 	if inv != null and held_id != 0 and Items.is_tool_item(held_id):
 		if inv.damage_selected_tool():
 			SFX.play_tool_break()
+	return true
+
+
+# Vanilla `ag.java` (ItemSnowball.a) — right-click consumes one
+# snowball and spawns EntitySnowball with the player's look direction
+# × throw speed. No raycast required; the projectile flies wherever
+# pointed and physics carries it. Returns true if a snowball was
+# thrown (caller resets place-cooldown).
+func _try_throw_snowball() -> bool:
+	var inv: Inventory = _player_inventory()
+	if inv == null:
+		return false
+	var stack: ItemStack = inv.selected()
+	if stack == null or stack.is_empty() or stack.item_id != Items.SNOWBALL:
+		return false
+	var player: Node3D = get_parent() as Node3D
+	if player == null:
+		return false
+	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
+	if camera == null:
+		return false
+	var forward: Vector3 = -camera.global_transform.basis.z
+	# Vanilla `setThrowableHeading` adds a small downward bias to the
+	# initial velocity. We bake it in here so the throw arcs naturally
+	# under gravity instead of flying perfectly straight then dipping.
+	# (Vanilla's bias is built into the random `nextGaussian * 0.0075`
+	# inaccuracy — we use a fixed -0.05 on Y for the same look.)
+	var velocity: Vector3 = forward * _SNOWBALL_SCRIPT.THROW_SPEED
+	velocity.y -= 0.05 * _SNOWBALL_SCRIPT.THROW_SPEED
+	# Spawn at camera position + small forward offset so the snowball
+	# doesn't collide with the player capsule on the first tick.
+	var spawn_pos: Vector3 = camera.global_position + forward * 0.4
+	var snowball: Node3D = _SNOWBALL_SCRIPT.new()
+	snowball.call("setup", player, velocity)
+	get_tree().root.get_node("Main").add_child(snowball)
+	snowball.global_position = spawn_pos
+	# Vanilla plays "random.bow" (the bow shoot sound) on snowball
+	# throw — we reuse play_bow_shoot at half-charge for a quieter
+	# whoosh that reads as a thrown ball rather than a fired arrow.
+	SFX.play_bow_shoot(0.5)
+	# Consume one snowball from the selected stack.
+	if inv.has_method("consume_one_selected"):
+		inv.consume_one_selected()
 	return true
 
 
@@ -1054,6 +1098,14 @@ func _cancel_bow_charge() -> void:
 	_bow_charging = false
 
 
+# Public entry point — UI screens (inventory, pause, chest, etc.) call
+# this when they open so the bow's visual + charge state resets instead
+# of freezing mid-draw. Pause is the worst case: it freezes the scene
+# tree so Interaction._process can't run the auto-cancel.
+func cancel_bow_charge() -> void:
+	_cancel_bow_charge()
+
+
 # Vanilla `ItemBow.a(stack, world, player, i)` — `i` is ticks remaining
 # of the 72000-tick max-use timer, so `j = max - i` = ticks held. We
 # convert via wall-clock instead.
@@ -1211,6 +1263,13 @@ func _try_place() -> void:
 				return
 			if held_id == Items.MINECART_FURNACE:
 				if _try_place_minecart(2):
+					_last_place_ms = now
+				return
+			# Snowball — vanilla ag.java spawns an EntitySnowball with
+			# the player's look direction × throw speed. Hit-irrelevant
+			# (snowball flies wherever pointed; physics carries it).
+			if held_id == Items.SNOWBALL:
+				if _try_throw_snowball():
 					_last_place_ms = now
 				return
 	if hit.is_empty():

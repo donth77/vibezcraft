@@ -289,6 +289,9 @@ ITEM_TILES = {
 	# (item_icons.gd's _load_item_sprite tries the pack dir FIRST,
 	# then falls back to assets/textures/items/).
 	"gunpowder": (8, 2),
+	# Slimeball — vanilla dx.aK(85).a(30) → sprite 30 = (14, 1).
+	# Dropped by size-1 slimes only (vanilla ns.java::g_()).
+	"slimeball": (14, 1),
 }
 
 # Items added in Beta+ that don't have an Alpha 1.2.6 sprite. Drawn

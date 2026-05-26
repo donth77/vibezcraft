@@ -134,6 +134,14 @@ const _FIRE_ON_FIRE_TICKS: int = 160  # 8 s
 # stay vanilla-faithful instead of becoming frame-rate-dependent.
 const _ENV_TICK_DT: float = 1.0 / 20.0
 
+# Wander helper — vanilla `EntityCreature.findRandomTargetBlock`.
+# Cooldown ticks DOWN per call in `pick_wander_target`; range is the
+# horizontal radius for the random target. Used by hostile mob AIs
+# when no player target is in detect range.
+const WANDER_COOLDOWN_SEC: float = 4.0
+const WANDER_RADIUS_MIN: float = 3.0
+const WANDER_RADIUS_MAX: float = 6.0
+
 # Fire-billboard constants — port of `character_model.gd`'s Beta-era
 # Render.renderEntityOnFire. Mob-specific dimensions come from
 # `_get_body_height()` + `_get_body_width()`. Sprite count = how many
@@ -211,6 +219,9 @@ var _fire_anim_time: float = 0.0
 var _arrows_stuck: int = 0
 var _stuck_arrows: Array[Node3D] = []
 var _stuck_arrow_decay_accum: float = 0.0
+# Wander cooldown — see `pick_wander_target` for usage. Decrements
+# every call; subclass AI ticks invoke it when no target is in range.
+var _wander_cooldown_sec: float = 0.0
 
 
 # Read-only accessor for MobSpawnerManager + future spawn-cap code.
@@ -218,6 +229,34 @@ var _stuck_arrow_decay_accum: float = 0.0
 # loops to avoid the extra Array allocation.
 static func active_mobs() -> Dictionary:
 	return _active_mobs
+
+
+# Returns a horizontal world target 3-6 m away, or Vector3.ZERO if
+# the cooldown hasn't expired yet. Shared `EntityCreature.find
+# RandomTargetBlock` wander helper for hostile mobs (zombie, skeleton,
+# future creeper / spider) — keeps the mob moving when no target is
+# in detect range so it doesn't freeze in place. Decrement happens
+# here on every call, so route this through the AI tick (delta = AI
+# tick dt) — NOT per-frame, or the cooldown burns 3× faster on 60 fps
+# hosts. Passive mobs (pig / cow / sheep / chicken) have their own
+# species-specific wander FSMs (flee + idle eat); leaving those
+# separate until a passive-mob refactor sweeps through.
+#
+# Usage in a hostile AI tick:
+#   if _ai_path.is_empty():
+#       var t := pick_wander_target(_AI_TICK_DT)
+#       if t != Vector3.ZERO:
+#           _repath_to(t)
+#   else:
+#       _tick_walk_path()  # half-speed for ambient stroll
+func pick_wander_target(delta: float) -> Vector3:
+	_wander_cooldown_sec -= delta
+	if _wander_cooldown_sec > 0.0:
+		return Vector3.ZERO
+	_wander_cooldown_sec = WANDER_COOLDOWN_SEC
+	var theta: float = randf() * TAU
+	var dist: float = randf_range(WANDER_RADIUS_MIN, WANDER_RADIUS_MAX)
+	return global_position + Vector3(cos(theta) * dist, 0, sin(theta) * dist)
 
 
 func _ready() -> void:
@@ -896,7 +935,34 @@ func restore_from_dict(d: Dictionary) -> void:
 	# pattern PlayerSave uses for saves that captured a void plunge.
 	if pos.y < 0.0 or pos.y > 128.0:
 		pos.y = 120.0
+	# Unstick — if the saved Y has the mob's feet INSIDE a solid block
+	# (live-spawn or worldgen race could have placed it inside grass),
+	# nudge up cell-by-cell until both feet+head cells are clear. Done
+	# after the chunk has had a chance to load — call_deferred so
+	# get_world_block sees the real terrain, not pre-load AIR.
 	global_position = pos
+	call_deferred("_unstick_after_load")
 	velocity = d.get("vel", Vector3.ZERO)
 	rotation.y = d.get("yaw", 0.0)
 	health = clampi(d.get("hp", max_health), 0, max_health)
+
+
+# Push the mob upward until its feet + head cells are both AIR or non-
+# opaque (plants / water / leaves). Caps at 8 cells of nudge so a mob
+# saved deep underground isn't teleported through 100 cells of stone.
+func _unstick_after_load() -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return
+	for _i: int in range(8):
+		var feet_cell := Vector3i(
+			int(floor(global_position.x)),
+			int(floor(global_position.y)),
+			int(floor(global_position.z))
+		)
+		var head_cell: Vector3i = feet_cell + Vector3i(0, 1, 0)
+		var feet_id: int = cm.get_world_block(feet_cell)
+		var head_id: int = cm.get_world_block(head_cell)
+		if not Blocks.is_opaque(feet_id) and not Blocks.is_opaque(head_id):
+			return
+		global_position.y = float(feet_cell.y + 1) + 0.001

@@ -46,10 +46,11 @@ const _ROOM_HEIGHT: int = 4
 const _FLOOR_MOSSY_RATIO: float = 0.3
 
 # Hostile mob pool the spawner is configured to spawn. Vanilla Alpha
-# picks one of {zombie, skeleton, spider} per dungeon. We have only
-# zombie for now; the array still hashes-down to one entry, but the
-# rest will land here as skeleton/spider classes ship.
-const _SPAWNER_MOB_POOL: Array = ["zombie"]
+# `cp.java::b(Random)` picks one of {Skeleton, Zombie, Zombie, Spider}
+# (zombie weighted 2× because it appears twice in the source switch).
+# Mirror that distribution — the deterministic mob hash takes the
+# modulo so duplicate entries weight the pool naturally.
+const _SPAWNER_MOB_POOL: Array = ["skeleton", "zombie", "zombie", "spider"]
 
 # Chest loot — Alpha 1.2.6 `cp.java::a(Random)` does an 11-slot roll
 # where most items have weight 1 (equal probability) and two items

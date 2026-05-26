@@ -34,6 +34,24 @@ const _ENTRIES: Dictionary = {
 	# vanilla; Beta 1.8 swapped to rotten flesh). HostileAI = target +
 	# chase + melee, reuses Pathfinder.find_path from the passives.
 	"zombie": "res://scripts/entities/zombie.gd",
+	# M4 — vanilla nq.java (EntitySkeleton). Second hostile, RANGED.
+	# 20 HP, kites at bow range [4, 10] m, charges 1.5 s then fires an
+	# Arrow at the player's torso. Drops 0-2 bone + 0-2 arrow.
+	# Daylight burn (same as zombie).
+	"skeleton": "res://scripts/entities/skeleton.gd",
+	# M5 — vanilla be.java (EntitySpider). Light-gated hostile (neutral
+	# in bright light, targets nearest player ≤ 16 m when brightness
+	# < 0.5). 16 HP, 2-damage melee, drops 0-2 string. No daylight burn.
+	# Pounces toward the player at 2-6 m range instead of Beta's wall
+	# climb (Alpha be.java has no climbable-block flag).
+	"spider": "res://scripts/entities/spider.gd",
+	# M6 — vanilla ns.java (EntitySlime). Hops, splits on death, only
+	# spawns in "slime chunks" (1-in-10 by world seed) below Y=16.
+	# Light-independent: vanilla `ns.a()` skips the hostile light gate,
+	# so slimes can spawn in lit caves. Sizes 1/2/4 with HP = size².
+	# Size-1 drops slimeballs; larger drop nothing directly and split
+	# into 4 half-size children on death.
+	"slime": "res://scripts/entities/slime.gd",
 }
 
 

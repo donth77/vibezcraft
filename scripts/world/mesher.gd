@@ -1076,17 +1076,30 @@ static func _emit_slab_geometry(
 		[c101, c111, c011, c001, Vector3.BACK, side_rect],
 		[c000, c010, c110, c100, Vector3.FORWARD, side_rect],
 	]
-	for face in faces:
+	# Side face indices 2..5 emit a half-height quad (Y span 0..0.5);
+	# sampling the FULL tile across that span squishes the texture 2×.
+	# Vanilla samples only the BOTTOM HALF of the tile so the aspect
+	# stays 1:1 — for stone_slab_side that's where the slab silhouette
+	# was painted; for wood / cobblestone variants it shows the bottom
+	# 8 rows of the plain tile (no visible distortion). Matches the
+	# inventory-icon path in BlockMesh._build_slab.
+	for fi in range(faces.size()):
+		var face: Array = faces[fi]
 		var base: int = verts.size()
 		var fv: Vector3 = face[4]
 		var rect: Rect2 = face[5]
 		for i in range(4):
 			verts.append(face[i])
 			norms.append(fv)
-		uvs.append(Vector2(rect.position.x, rect.position.y + rect.size.y))
-		uvs.append(Vector2(rect.position.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y))
-		uvs.append(Vector2(rect.position.x + rect.size.x, rect.position.y + rect.size.y))
+		var v_top: float = rect.position.y
+		var v_bot: float = rect.position.y + rect.size.y
+		if fi >= 2:
+			# Side face — bottom-half slice (V ∈ [mid, max]).
+			v_top = rect.position.y + rect.size.y * 0.5
+		uvs.append(Vector2(rect.position.x, v_bot))
+		uvs.append(Vector2(rect.position.x, v_top))
+		uvs.append(Vector2(rect.position.x + rect.size.x, v_top))
+		uvs.append(Vector2(rect.position.x + rect.size.x, v_bot))
 		colors.append(face_light)
 		colors.append(face_light)
 		colors.append(face_light)

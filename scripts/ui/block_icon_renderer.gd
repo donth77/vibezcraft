@@ -125,6 +125,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# sides. Needs to be iconified so the inventory slot shows the
 	# proper 3-quarter view instead of a "missing icon" fallback.
 	Blocks.JUKEBOX,
+	# Slime block — translucent green cube (modern MC deviation). Iso
+	# bake gives an inventory icon; without this entry the slot falls
+	# back to a flat 2D sprite which we don't ship for slime_block.
+	Blocks.SLIME_BLOCK,
 ]
 
 static var _viewport: SubViewport

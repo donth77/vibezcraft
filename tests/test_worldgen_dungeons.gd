@@ -166,7 +166,11 @@ func test_spawner_persists_through_serialize_restore() -> void:
 	)
 	assert_true(serialized.has(local), "serialized dict has the spawner's local coord")
 	var mob_name: String = str(serialized[local])
-	assert_eq(mob_name, "zombie", "spawner stores zombie (only entry in _SPAWNER_MOB_POOL)")
+	# Spawner pool contains both zombie and skeleton — accept either.
+	var valid_pool: Array = ["zombie", "skeleton", "spider"]
+	assert_true(
+		mob_name in valid_pool, "spawner mob_name %s should be in %s" % [mob_name, str(valid_pool)]
+	)
 	# Round-trip: forget then restore.
 	MobSpawnerManager.forget_chunk(chunk_coord)
 	var after_forget: Dictionary = MobSpawnerManager.serialize_chunk(chunk_coord)
@@ -174,4 +178,4 @@ func test_spawner_persists_through_serialize_restore() -> void:
 	MobSpawnerManager.restore_chunk(chunk_coord, serialized)
 	var after_restore: Dictionary = MobSpawnerManager.serialize_chunk(chunk_coord)
 	assert_eq(after_restore.size(), serialized.size(), "restore_chunk re-populates entries")
-	assert_eq(str(after_restore[local]), "zombie", "restored mob name matches")
+	assert_eq(str(after_restore[local]), mob_name, "restored mob name matches pre-serialize")
