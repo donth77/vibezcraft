@@ -19,36 +19,33 @@ extends RefCounted
 const _SOLID_LAYER: int = 0b01  # informational only; we ignore Godot layers
 
 
-# Move a mob with AABB collision against the voxel grid. Returns the
-# new world position. Mutates `velocity_inout`: sets Y to 0 on floor
-# contact, sets X/Z to 0 on wall contact (vanilla behaviour).
+# Move a mob with AABB collision against the voxel grid.
 #
 #   chunk_manager — needed for get_world_block
-#   pos_in        — current world-space center of the mob's CAPSULE
-#                   (matches CharacterBody3D's global_position convention)
+#   pos_in        — current world-space AABB center
 #   half_extents  — mob's AABB half-size (e.g. zombie = (0.3, 0.95, 0.3))
-#   velocity_inout — m/s, X/Y/Z. Y/X/Z clamped on impact.
+#   velocity      — m/s
 #   delta         — frame time
 #
-# Returns: out dict { pos: Vector3, on_floor: bool }
+# Returns: { pos: Vector3, vel: Vector3, on_floor: bool }
+# CALLER MUST write `vel` back to its mob's velocity — GDScript passes
+# Vector3 by VALUE, so in-out parameter mutation doesn't propagate.
+# Bug that caused the "stuck chickens" regression in the first attempt.
 static func move(
-	chunk_manager: Node,
-	pos_in: Vector3,
-	half_extents: Vector3,
-	velocity_inout: Vector3,
-	delta: float
+	chunk_manager: Node, pos_in: Vector3, half_extents: Vector3, velocity: Vector3, delta: float
 ) -> Dictionary:
 	if chunk_manager == null:
-		return {"pos": pos_in + velocity_inout * delta, "on_floor": false}
-	var step: Vector3 = velocity_inout * delta
+		return {"pos": pos_in + velocity * delta, "vel": velocity, "on_floor": false}
+	var step: Vector3 = velocity * delta
 	var pos: Vector3 = pos_in
+	var vel: Vector3 = velocity
 	var on_floor: bool = false
 	# X step
 	if absf(step.x) > 0.0001:
 		var clipped: float = _clip_x(chunk_manager, pos, half_extents, step.x)
 		pos.x += clipped
 		if absf(clipped - step.x) > 0.0001:
-			velocity_inout.x = 0.0
+			vel.x = 0.0
 	# Y step
 	if absf(step.y) > 0.0001:
 		var clipped_y: float = _clip_y(chunk_manager, pos, half_extents, step.y)
@@ -56,7 +53,7 @@ static func move(
 		if absf(clipped_y - step.y) > 0.0001:
 			if step.y < 0.0:
 				on_floor = true
-			velocity_inout.y = 0.0
+			vel.y = 0.0
 	else:
 		# Even with no Y motion, check if the cell just below is solid
 		# so AI can detect "grounded" state.
@@ -66,8 +63,8 @@ static func move(
 		var clipped_z: float = _clip_z(chunk_manager, pos, half_extents, step.z)
 		pos.z += clipped_z
 		if absf(clipped_z - step.z) > 0.0001:
-			velocity_inout.z = 0.0
-	return {"pos": pos, "on_floor": on_floor}
+			vel.z = 0.0
+	return {"pos": pos, "vel": vel, "on_floor": on_floor}
 
 
 # Walks integer cells the AABB overlaps in the X direction and finds

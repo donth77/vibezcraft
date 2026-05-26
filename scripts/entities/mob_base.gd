@@ -662,6 +662,11 @@ func _physics_process(delta: float) -> void:
 	)
 	var new_center: Vector3 = collide_result.get("pos", center) as Vector3
 	global_position = new_center - Vector3(0.0, half.y, 0.0)
+	# Write clipped velocity back — VoxelCollider zeros components that
+	# hit walls/floors. Without this, mob's velocity stays at pre-clip
+	# value and AI thinks it's moving while position stays stuck. This
+	# was the root cause of the stuck-chickens bug in the first attempt.
+	velocity = collide_result.get("vel", velocity) as Vector3
 	_voxel_on_floor = bool(collide_result.get("on_floor", false))
 	# Penetration-recovery clamp. Compare the actual upward motion this
 	# frame against what `velocity.y` could have produced. Any excess is
