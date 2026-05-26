@@ -95,7 +95,7 @@ const _PACK_JITTER_XZ: int = 6  # vanilla nextInt(6) - nextInt(6) = ±5
 # cave geometry made single hostiles common in practice (most extras
 # failed validity). The explicit roll keeps the variability stable
 # regardless of how cleanly our chunk geometry resembles vanilla.
-const _SOLO_SPAWN_CHANCE: float = 1.0  # TEMP: disable pack expansion for perf
+const _SOLO_SPAWN_CHANCE: float = 0.25  # vanilla — 75% of seeds expand into packs
 
 # Cached lookups so the per-tick path avoids find_child + Script load.
 var _player_cache: Node3D = null

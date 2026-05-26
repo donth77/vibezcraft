@@ -598,19 +598,28 @@ func _fire_arrow_at(player: Node3D) -> void:
 	# eye-offset like vanilla does to feet-pos would land us above
 	# the head. Just use global_position direct.
 	var target_pos: Vector3 = player.global_position
-	# Spawn at body height AND in front of the skeleton so the
-	# arrow's first-frame raycast doesn't hit the skeleton's own
-	# collision (body capsule + head Area3D on a separate RID — Godot
-	# only excludes the direct shooter, not its child collision
-	# objects). Pushing 0.6 m forward in the AIM direction clears the
-	# capsule (radius 0.3) + the head box (radius 0.275) comfortably.
+	# Spawn AT THE BOW. The bow mesh is parented to the right-arm
+	# pivot at arm-local (0, -0.75, 0) — the hand. With the arm raised
+	# to the aim pose (+π/2 X), the hand extends forward of the
+	# skeleton's body, putting `_bow_mesh.global_position` at the
+	# correct world position for the arrow to launch from. Previous
+	# spawn at `body_offset + 0.2` was chest level — arrows visibly
+	# came out of the skeleton's torso, not from the bow.
+	#
+	# Push slightly further forward (0.2 m in aim direction) so the
+	# first-frame raycast clears the bow's own geometry + any nearby
+	# child collision objects. The hand is already ~0.45 m past the
+	# body capsule's surface, so this is only insurance.
 	var aim_horiz: Vector3 = (
 		Vector3(target_pos.x, 0, target_pos.z) - Vector3(global_position.x, 0, global_position.z)
 	)
 	if aim_horiz.length_squared() < 0.01:
 		return
-	var spawn_forward: Vector3 = aim_horiz.normalized() * 0.6
-	var spawn_pos: Vector3 = global_position + Vector3(0, _BODY_Y_OFFSET + 0.2, 0) + spawn_forward
+	var spawn_forward: Vector3 = aim_horiz.normalized() * 0.2
+	var bow_world: Vector3 = (
+		_bow_mesh.global_position if _bow_mesh != null else global_position + Vector3(0, 1.5, 0)
+	)
+	var spawn_pos: Vector3 = bow_world + spawn_forward
 	var to_target: Vector3 = target_pos - spawn_pos
 	if to_target.length_squared() < 0.01:
 		return
@@ -747,12 +756,9 @@ func _advance_walk_animation(delta: float) -> void:
 # the bow visual.
 func _apply_skeleton_arm_pose(phase: float) -> void:
 	var arm_swing: float = cos(phase + PI) * _ARM_AMPLITUDE * _walk_anim_amount
-	# Right arm: ALWAYS horizontal forward — same pose in rest AND aim
-	# so the bow stays vertical/edge-on consistently. Vanilla skeletons
-	# walk with their bow arm raised in front (the iconic "ready"
-	# silhouette); swinging the bow arm with the walk cycle would
-	# rotate the bow through every angle and make it look erratic.
-	# Only the LEFT arm swings normally — that's the hand without a bow.
+	# Right arm always raised — keeps the bow visible + oriented
+	# consistently regardless of walk vs aim state. Only the LEFT arm
+	# swings naturally during walk (no bow there).
 	if _arm_r_pivot != null:
 		_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
 	if _arm_l_pivot != null:

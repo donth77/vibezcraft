@@ -46,10 +46,11 @@ extends RefCounted
 # 8 chunks per Alpha bg.java line 24 (`int n5 = 8`).
 const _SPAWN_RADIUS_CHUNKS: int = 8
 
-# Per-creature-type cap denominator. Vanilla `gy.b.d = 20` for
-# animals — `cap = 20 * chunks / 256`. With 17×17=289 chunks the cap
-# is ~22 animals. Skip the type when count >= cap.
-const _CAP_PER_256_CHUNKS: int = 20
+# Per-creature-type cap denominator. Vanilla `gy.b.d = 20` for animals
+# (Alpha 1.2.6 gy.java:5) gives ~22 animals max — felt too dense in
+# playtest with our smaller render distance. 16 = ~18 max active
+# animals, a moderate reduction from vanilla. Deliberate deviation.
+const _CAP_PER_256_CHUNKS: int = 16
 
 # 1/50 chance per chunk per tick (`bg.java` line 38:
 # `cy2.l.nextInt(50) != 0`). With ~289 chunks × 1/50 ≈ 5.8 attempts

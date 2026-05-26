@@ -61,7 +61,7 @@ const _CANE_MAX_HEIGHT: int = 3
 @export var apply_budget_per_frame: int = 1
 # Chebyshev radius of the live-physics ring around the player. Saves
 # ~1-2 MB × outer chunks of trimesh + BVH at FAR.
-@export var collision_radius: int = 2
+@export var collision_radius: int = 1
 
 # Cumulative count of chunks fully materialized this session — never
 # decremented when chunks unload. Read by the debug stats panel.
