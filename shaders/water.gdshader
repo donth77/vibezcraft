@@ -124,10 +124,14 @@ void fragment() {
     // floor); water can't — ALPHA stays at 0.7, so a near-black ALBEDO
     // composites to background-with-a-faint-dark-tint, which reads as
     // "the water turned transparent / black" rather than dim blue.
-    // Remap [0..1] → [0.35..1.0] so the deep_color stays clearly visible
-    // even at the SKY_FACTOR_MIN=0.10 midnight floor. Daytime still
-    // peaks at full brightness; dusk and caves dim BUT stay blue.
-    light = mix(0.35, 1.0, light);
+    // Remap [0..1] → [0.6..1.0]. deep_color = (0.05, 0.18, 0.42) sRGB
+    // is already dark in linear space (~0.002, 0.026, 0.155); the
+    // floor needs to be high enough that the deepest cave / midnight
+    // water still reads as a recognizable blue against the background,
+    // not just slightly-tinted darkness. 0.6 keeps night/underground
+    // water visibly blue while still dimming dusk and torch-lit caves
+    // below daylight.
+    light = mix(0.6, 1.0, light);
     ALBEDO = col * b * light;
     ALPHA = alpha_strength;
 }

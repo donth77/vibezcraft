@@ -718,33 +718,21 @@ func _build_textured_box(
 
 
 # Vanilla EntityRenderer.setBrightness — entity colors are texture ×
-# world.getBrightnessForRender(cell). We mirror that by sampling the
-# chunk light at the model's center cell each frame and pushing it into
-# the (UNSHADED) skin + armor materials as albedo_color. Same brightness
-# LUT chunk.gdshader uses, so the model matches the surrounding terrain
-# brightness (bright in daylight, dim in caves, dark at night).
+# world.getBrightnessForRender(cell). Sample at body-center cell each
+# frame and push as albedo_color tint on the UNSHADED skin + armor
+# materials. Uses the shared EntityLighting helper so the player model
+# matches the same 0.25 floor used by boats / carts / mobs (vanilla's
+# 0.05 floor renders entities near-black at night in our linear-space
+# pipeline — read EntityLighting._FLOOR for the reasoning).
 func _update_world_brightness() -> void:
 	if _chunk_manager_ref == null:
 		return
 	var cell := Vector3i(
 		int(floor(global_position.x)),
-		int(floor(global_position.y + 1.0)),  # sample at body-center, not feet
+		int(floor(global_position.y + 1.0)),  # body-center, not feet
 		int(floor(global_position.z))
 	)
-	# get_world_sky_light returns 15 for OOB / unloaded chunks; same for
-	# block_light returning 0. Treat both as the daylight default.
-	var sky: int = 15
-	var block: int = 0
-	if _chunk_manager_ref.has_method("get_world_sky_light"):
-		sky = _chunk_manager_ref.get_world_sky_light(cell)
-	if _chunk_manager_ref.has_method("get_world_block_light"):
-		block = _chunk_manager_ref.get_world_block_light(cell)
-	var sky_factor: float = WorldTime.sky_factor() if WorldTime != null else 1.0
-	var light: float = maxf(float(sky) / 15.0 * sky_factor, float(block) / 15.0)
-	# Vanilla brightness LUT (oz.java:22-28) — same constants the chunk
-	# shader uses so terrain + entity brightness curves match.
-	var f3: float = 1.0 - light
-	var lit: float = (1.0 - f3) / (f3 * 3.0 + 1.0) * 0.95 + 0.05
+	var lit: float = EntityLighting.sample_brightness(_chunk_manager_ref, cell)
 	if absf(lit - _last_brightness) < 0.005:
 		return  # imperceptible drift, skip the material write
 	_last_brightness = lit

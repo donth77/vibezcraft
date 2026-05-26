@@ -18,6 +18,18 @@ const _SLOT_COUNT: int = 27
 var _chests: Dictionary = {}
 
 
+# Wipe all in-memory chest entries. Called from ChunkManager._ready on
+# every world load so leftover chests from a previous world (loaded
+# during this same engine process) don't bleed into the new world if a
+# player places a chest at the same world coord. Without this, the
+# new chest inherits the old chest's items via `get_or_create`. Most
+# at-risk are WORLDGEN-placed chests (dungeon loot) since their
+# chunks may evict non-dirty and skip `forget_chunk` — see
+# `chunk_manager.gd:337-343` eviction flow.
+func clear_all() -> void:
+	_chests.clear()
+
+
 # Returns the live 27-slot array for the chest at `pos`, creating an
 # empty inventory if this is the first access. Caller is responsible
 # for ensuring `pos` is actually a chest block (interaction.gd does this

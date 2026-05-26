@@ -7,6 +7,12 @@ shader_type spatial;
 render_mode cull_back, unshaded;
 
 uniform sampler2D item_texture : filter_nearest, source_color;
+// Vanilla EntityRenderer.setBrightness — entities are texture ×
+// world.getBrightnessForRender(cell). 1.0 = full daylight (default,
+// matches the third-person held tool which keeps the player's own
+// brightness). Dropped items push a per-frame value from
+// EntityLighting.sample_brightness so they dim at night / in caves.
+uniform float world_brightness : hint_range(0.0, 1.0) = 1.0;
 
 varying vec3 v_normal;
 
@@ -31,5 +37,5 @@ void fragment() {
 	} else {
 		b = 0.55;
 	}
-	ALBEDO = c.rgb * b;
+	ALBEDO = c.rgb * b * world_brightness;
 }

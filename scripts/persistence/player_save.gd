@@ -131,11 +131,46 @@ static func _build_payload(player: Node3D) -> Dictionary:
 	)
 	var was_in_lava: bool = bool(player.get("_was_in_lava")) if "_was_in_lava" in player else false
 	var lava_tick: float = float(player.get("_lava_tick")) if "_lava_tick" in player else 0.0
+	# Death snapshot guard. If autosave (or quit-to-title) fires while the
+	# death screen is showing, the raw snapshot captures health=0 + an
+	# active fire timer; the next world load then drops the player into
+	# "dead, still on fire" before they can respawn. Sanitize: write a
+	# fresh-respawn snapshot pinned to the bed/world spawn instead. Cheap
+	# defensive guard — should never fire on a normal session, but
+	# recovers gracefully if it does.
+	var health_now: int = int(player.get("health")) if "health" in player else 20
+	var dying: bool = bool(player.get("_dying")) if "_dying" in player else false
+	if health_now <= 0 or dying:
+		var respawn_pos: Vector3
+		if has_bed_spawn:
+			respawn_pos = bed_spawn_pos
+		else:
+			var meta: Dictionary = WorldMeta.load_meta()
+			var spawn_dict: Dictionary = meta.get("spawn", {}) as Dictionary
+			respawn_pos = Vector3(
+				float(spawn_dict.get("x", 8.0)),
+				float(spawn_dict.get("y", 100.0)),
+				float(spawn_dict.get("z", 8.0))
+			)
+		return {
+			"pos": respawn_pos,
+			"yaw": 0.0,
+			"pitch": 0.0,
+			"health": 20,
+			"hotbar_selected": inv.selected_slot if inv != null else 0,
+			"inventory": slots_out,
+			"bed_spawn_pos": bed_spawn_pos,
+			"has_bed_spawn": has_bed_spawn,
+			"fire_remaining_sec": 0.0,
+			"fire_burn_tick": 0.0,
+			"was_in_lava": false,
+			"lava_tick": 0.0,
+		}
 	return {
 		"pos": player.global_position,
 		"yaw": yaw,
 		"pitch": pitch,
-		"health": int(player.get("health")) if "health" in player else 20,
+		"health": health_now,
 		"hotbar_selected": inv.selected_slot if inv != null else 0,
 		"inventory": slots_out,
 		"bed_spawn_pos": bed_spawn_pos,
@@ -203,7 +238,14 @@ static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
 		)
 		push_warning(msg)
 		saved_pos.y = maxf(spawn_y, 64.0)
-	player.global_position = saved_pos
+	# Route through `Player.safe_teleport` so the 3×3 chunk neighborhood
+	# around the saved coord is sync-loaded before the capsule lands.
+	# Otherwise the player drops through unloaded space into the void
+	# before per-frame streaming catches up — see `safe_teleport` docs.
+	if player.has_method("safe_teleport"):
+		player.call("safe_teleport", saved_pos)
+	else:
+		player.global_position = saved_pos
 	player.rotation.y = float(payload.get("yaw", 0.0))
 	var camera: Camera3D = player.get_node_or_null("Camera3D") as Camera3D
 	if camera != null:

@@ -130,11 +130,18 @@ static func is_walkable(cm: Node, pos: Vector3i) -> bool:
 
 
 static func _is_walkable(cm: Node, pos: Vector3i) -> bool:
+	# Use `is_solid_collision` rather than `is_opaque` for both gates so
+	# physically-solid-but-non-opaque blocks (CHEST, MOB_SPAWNER,
+	# LEAVES, GLASS) are handled correctly. Without this, the cell ABOVE
+	# a chest is rejected as floor (vanilla mobs CAN step onto chests —
+	# player safespot by standing on a chest), and mobs would also try
+	# to walk THROUGH chests / spawner cages because the cell here was
+	# classified as passable.
 	var here_id: int = cm.get_world_block(pos)
-	if Blocks.is_opaque(here_id):
+	if Blocks.is_solid_collision(here_id):
 		return false
 	var floor_id: int = cm.get_world_block(pos + Vector3i(0, -1, 0))
-	return Blocks.is_opaque(floor_id)
+	return Blocks.is_solid_collision(floor_id)
 
 
 # Walk the came_from chain back from `end` to the start. Result is

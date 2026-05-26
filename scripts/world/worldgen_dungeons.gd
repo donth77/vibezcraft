@@ -1,46 +1,43 @@
 class_name WorldgenDungeons
 extends RefCounted
 
-# Vanilla Alpha 1.2.6 WorldGenDungeons port (`cm.java`). Called once
+# Vanilla Alpha 1.2.6 WorldGenDungeons port (`cp.java`). Called once
 # per chunk during worldgen decoration, between caves and trees.
-# Places 5×4×5 cobblestone rooms with a MOB_SPAWNER block at the
-# center, 0-2 chests against walls with loot, and a 30% mossy-cobble
-# floor + 100% cobble walls.
+# Places 5×4×5 or 7×4×7 cobblestone rooms (vanilla rolls 2-or-3 per
+# axis independently) with a MOB_SPAWNER at the center, ≤2 chests
+# against walls with loot, and a 30% mossy-cobble floor + 100% cobble
+# walls.
 #
 # Vanilla algorithm:
-#   * 8 attempts per chunk.
-#   * Per attempt: random (x, y, z) within chunk × Y in [1, 50].
-#     Room half-extents from rand.nextInt(2)+2 → 2 or 3 cells each
-#     side of center on X / Z. Y is always 4 cells tall (floor + 3
-#     interior + roof).
-#   * Validity: walls must enclose mostly-solid blocks; floor + roof
-#     must be 100% solid; 1-5 wall openings (cave intersections) are
-#     allowed for access. Outside that range → reject.
-#   * On success: carve interior, place walls (70% cobble / 30% mossy
-#     for the floor; pure cobble for walls + roof), place spawner +
-#     0-2 chests with random hostile mob type + loot.
+#   * 8 attempts per chunk (`px.java:294`).
+#   * Per attempt: random (x, y, z) in chunk × Y in [0, 128). Room
+#     half-extents = nextInt(2) + 2 → 2 or 3 cells each side, X and Z
+#     independent. Interior 4 cells tall (floor + 3 + roof).
+#   * Validity (`cp.java:11-28`): 7×7 floor + ceiling rings must be
+#     entirely solid material (treats water/lava as non-solid); 1-5
+#     two-tall non-solid "doorways" on the outside-wall perimeter.
+#   * On success: place walls + roof (pure cobble), mix mossy into
+#     the floor, write spawner cell at center, attempt up to 2 chest
+#     placements against valid 1-wall-touch interior cells.
 #
 # We use deterministic `_hash4(chunk_x, chunk_z, attempt, salt)` RNG
-# (same scheme worldgen.gd's _scatter_ores + _scatter_trees use) so
-# chunk re-load reproduces identical dungeons. Vanilla's JavaRandom
-# stream would be more bit-faithful but is overkill for first ship.
-#
-# Scope cut from vanilla:
-#   * Fixed room size (half-extent always 2 → 5×4×5 interior). Vanilla
-#     varies between 2 and 3, producing 5×4×5 to 7×4×7 rooms.
-#   * Wall-opening count check is approximate: we require ≥1 wall
-#     cell to be AIR (cave intersection = guaranteed access) but
-#     don't enforce the upper bound. Vanilla rejects >5 openings to
-#     avoid dungeons in giant caverns.
-#   * No mossy ratio jitter on walls — only the floor gets mossy mix.
+# rather than vanilla's JavaRandom stream — bit-parity isn't required
+# and the hash is cheaper for chunk-reload determinism.
 
-const _ATTEMPTS_PER_CHUNK: int = 8
+const _ATTEMPTS_PER_CHUNK: int = 8  # vanilla `px.java:294`
+# Y range matches vanilla `px.java:296` (`nextInt(128)`) modulo the
+# bedrock-clear margin. Earlier restriction to [8, 50] was useless:
+# our cave gen carves at Y ~[40, 90], so dungeons in [8, 50] never
+# saw the cave-opening that `_is_valid_dungeon_site` requires.
 const _MIN_Y: int = 8  # avoid bedrock
-const _MAX_Y: int = 50  # below sea level, in the cave layer
+const _MAX_Y: int = 90  # full cave layer
 
-# Room geometry. Half-extents fixed at 2 → 5 wide × 4 tall × 5 deep.
-const _HALF_EXTENT_X: int = 2
-const _HALF_EXTENT_Z: int = 2
+# Room half-extents — vanilla `cp.java:5-6` rolls `nextInt(2) + 2` per
+# axis (independently), so each axis lands on 2 or 3 with equal
+# probability. Combined room sizes 5×5, 5×7, 7×5, or 7×7 (25% each).
+# Y is fixed 4-cell interior (vanilla `n8 = 3`; floor + 3 + ceiling).
+const _HALF_EXTENT_MIN: int = 2
+const _HALF_EXTENT_MAX: int = 3
 const _ROOM_HEIGHT: int = 4
 
 # Floor mossy-cobble ratio. Vanilla `rand.nextInt(4) != 0` → cobble
@@ -125,9 +122,10 @@ const _SALT_Y: int = 700013
 const _SALT_Z: int = 700031
 const _SALT_MOB: int = 700057
 const _SALT_FLOOR: int = 700099  # per-cell mossy decision on the floor
-const _SALT_CHEST_COUNT: int = 700121
 const _SALT_CHEST_POS: int = 700139
 const _SALT_LOOT: int = 700171
+const _SALT_HX: int = 700203  # X half-extent (2 or 3) per attempt
+const _SALT_HZ: int = 700227  # Z half-extent
 
 
 # Entry point — called by worldgen.gd's decoration phase. Mutates
@@ -139,73 +137,92 @@ static func scatter(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 
 
 static func _try_place_dungeon(chunk: Chunk, chunk_x: int, chunk_z: int, attempt: int) -> void:
-	# Local-chunk coordinates for the dungeon CENTER. Keep clear of
-	# chunk edges so the 5x5 walls fit inside the current chunk (we
-	# don't carve into neighbor chunks).
-	var margin: int = _HALF_EXTENT_X + 1
-	var range_xz: int = Chunk.SIZE_X - margin * 2
-	if range_xz <= 0:
+	# Per-attempt room shape — vanilla `cp.java:5-6` rolls each axis
+	# independently. With _HALF_EXTENT_{MIN,MAX} = (2, 3) → 2 or 3.
+	var hx_hash: int = _hash4(chunk_x, chunk_z, attempt, _SALT_HX)
+	var hz_hash: int = _hash4(chunk_x, chunk_z, attempt, _SALT_HZ)
+	var hx: int = _HALF_EXTENT_MIN + (hx_hash % (_HALF_EXTENT_MAX - _HALF_EXTENT_MIN + 1))
+	var hz: int = _HALF_EXTENT_MIN + (hz_hash % (_HALF_EXTENT_MAX - _HALF_EXTENT_MIN + 1))
+	# Margin = max half-extent + 1 (room of size 2*hx+1 plus a 1-cell
+	# outside-perimeter for the validity check, all inside the chunk).
+	var margin: int = maxi(hx, hz) + 1
+	var range_x: int = Chunk.SIZE_X - margin * 2
+	var range_z: int = Chunk.SIZE_Z - margin * 2
+	if range_x <= 0 or range_z <= 0:
 		return
-	var hx: int = _hash4(chunk_x, chunk_z, attempt, _SALT_X)
-	var hz: int = _hash4(chunk_x, chunk_z, attempt, _SALT_Z)
+	var lx_hash: int = _hash4(chunk_x, chunk_z, attempt, _SALT_X)
+	var lz_hash: int = _hash4(chunk_x, chunk_z, attempt, _SALT_Z)
 	var hy: int = _hash4(chunk_x, chunk_z, attempt, _SALT_Y)
-	var lx: int = margin + (hx % range_xz)
-	var lz: int = margin + (hz % range_xz)
+	var lx: int = margin + (lx_hash % range_x)
+	var lz: int = margin + (lz_hash % range_z)
 	var y: int = _MIN_Y + (hy % (_MAX_Y - _MIN_Y + 1))
-	# Validate the candidate room location. Vanilla's check (walls
-	# mostly opaque, floor + roof 100% opaque, 1-5 AIR openings) needs
-	# the surrounding terrain present. Our approximation: room walls
-	# touch ≥1 AIR cell (cave intersection = guaranteed player access)
-	# AND room INTERIOR is currently mostly stone so we have something
-	# to carve. Skip if either fails.
-	if not _is_valid_dungeon_site(chunk, lx, y, lz):
+	if not _is_valid_dungeon_site(chunk, lx, y, lz, hx, hz):
 		return
-	# Build the room. Order: walls first (so the carve doesn't expose
-	# raw stone behind them), then interior carve, then spawner +
-	# chests.
-	_build_room(chunk, lx, y, lz, chunk_x, chunk_z, attempt)
+	# Build order: walls first (carve doesn't expose raw stone behind
+	# them), then interior carve, then spawner + chests.
+	_build_room(chunk, lx, y, lz, hx, hz, chunk_x, chunk_z, attempt)
 	_place_spawner(chunk, lx, y, lz, chunk_x, chunk_z, attempt)
-	_place_chests(chunk, lx, y, lz, chunk_x, chunk_z, attempt)
+	_place_chests(chunk, lx, y, lz, hx, hz, chunk_x, chunk_z, attempt)
 
 
-# Room is valid if:
-#   * Room center cell + the 4 cardinal floor neighbors are inside
-#     the current chunk (already gated by `margin` above) AND inside
-#     world Y bounds.
-#   * At least one wall-perimeter cell at the floor level is AIR —
-#     this proxies the "cave opening" check; without it, dungeons
-#     spawn in solid stone with no way in. Vanilla requires 1-5
-#     openings; we just require ≥1.
-#   * Room interior has any STONE/DIRT cells (vs already-AIR) — guards
-#     against placing a dungeon entirely inside a cave.
-static func _is_valid_dungeon_site(chunk: Chunk, cx: int, cy: int, cz: int) -> bool:
-	if cy <= 1 or cy + _ROOM_HEIGHT >= Chunk.SIZE_Y - 1:
+# Vanilla `cp.java:11-28` port. Three checks against the surrounding
+# terrain (sampled in a 7×7 plan centered on the room — the dungeon
+# walls plus one cell of outside terrain on each side):
+#   1. Every floor cell (`y = cy - 1`) is solid material (not AIR /
+#      water / lava). Without this the room would hang over a void.
+#   2. Every ceiling cell (`y = cy + _ROOM_HEIGHT - 1`) is solid —
+#      prevents above-ground placements where the sky is the roof.
+#   3. The outside-perimeter ring (one cell beyond the wall, at floor
+#      level + the cell above) has 1-5 "doorway" gaps where BOTH
+#      cells are non-solid. Forces ≥1 cave connection and <6 (so it
+#      isn't a hillside with three walls missing).
+# Vanilla `material.isSolid` treats water + lava as non-solid (they
+# carve and flow). Below SEA_LEVEL our 3D-terrain post-pass converts
+# cave AIR to WATER, so dungeons in underwater caves only work if we
+# match vanilla's "fluid counts as opening" semantics. Treating only
+# AIR as passable is the bug that made dungeons effectively impossible
+# below Y=60 (where almost all our caves carve).
+# Bounds-safe: margin in `_try_place_dungeon` already keeps the room
+# center 3 cells from any chunk edge.
+static func _is_solid_for_dungeon(block_id: int) -> bool:
+	return (
+		block_id != Blocks.AIR
+		and block_id != Blocks.WATER_FLOWING
+		and block_id != Blocks.WATER_STILL
+		and block_id != Blocks.LAVA_FLOWING
+		and block_id != Blocks.LAVA_STILL
+	)
+
+
+static func _is_valid_dungeon_site(
+	chunk: Chunk, cx: int, cy: int, cz: int, hx: int, hz: int
+) -> bool:
+	var room_h: int = _ROOM_HEIGHT
+	if cy <= 1 or cy + room_h >= Chunk.SIZE_Y:
 		return false
-	# Count AIR cells on the wall perimeter at the floor level.
+	var x0: int = cx - hx - 1
+	var x1: int = cx + hx + 1
+	var z0: int = cz - hz - 1
+	var z1: int = cz + hz + 1
+	var floor_y: int = cy - 1
+	var ceiling_y: int = cy + room_h - 1
+	for ax in range(x0, x1 + 1):
+		for az in range(z0, z1 + 1):
+			if not _is_solid_for_dungeon(chunk.get_block(ax, floor_y, az)):
+				return false
+			if not _is_solid_for_dungeon(chunk.get_block(ax, ceiling_y, az)):
+				return false
 	var openings: int = 0
-	for wx in range(cx - _HALF_EXTENT_X, cx + _HALF_EXTENT_X + 1):
-		for wz in range(cz - _HALF_EXTENT_Z, cz + _HALF_EXTENT_Z + 1):
-			var on_perim: bool = (
-				wx == cx - _HALF_EXTENT_X
-				or wx == cx + _HALF_EXTENT_X
-				or wz == cz - _HALF_EXTENT_Z
-				or wz == cz + _HALF_EXTENT_Z
-			)
-			if on_perim and chunk.get_block(wx, cy, wz) == Blocks.AIR:
+	for ax in range(x0, x1 + 1):
+		for az in range(z0, z1 + 1):
+			var on_outer: bool = ax == x0 or ax == x1 or az == z0 or az == z1
+			if not on_outer:
+				continue
+			var here_solid: bool = _is_solid_for_dungeon(chunk.get_block(ax, cy, az))
+			var above_solid: bool = _is_solid_for_dungeon(chunk.get_block(ax, cy + 1, az))
+			if not here_solid and not above_solid:
 				openings += 1
-	if openings < 1:
-		return false
-	# Confirm room INTERIOR has solid cells to carve. Counts STONE,
-	# DIRT, GRAVEL (cave-floor materials) — pure-AIR interior means
-	# we're already inside a cavern and the dungeon would float.
-	var solid_interior: int = 0
-	for ix in range(cx - _HALF_EXTENT_X + 1, cx + _HALF_EXTENT_X):
-		for iz in range(cz - _HALF_EXTENT_Z + 1, cz + _HALF_EXTENT_Z):
-			for iy in range(cy, cy + _ROOM_HEIGHT - 1):
-				var b: int = chunk.get_block(ix, iy, iz)
-				if b == Blocks.STONE or b == Blocks.DIRT or b == Blocks.GRAVEL:
-					solid_interior += 1
-	if solid_interior < 4:  # roughly 1/3 of the 3×2×3 = 18 interior
+	if openings < 1 or openings > 5:
 		return false
 	return true
 
@@ -213,18 +230,23 @@ static func _is_valid_dungeon_site(chunk: Chunk, cx: int, cy: int, cz: int) -> b
 # Carve interior + place walls/floor/roof. Floor mixes cobble (70%)
 # and mossy cobble (30%) per cell; walls and roof are pure cobble.
 static func _build_room(
-	chunk: Chunk, cx: int, cy: int, cz: int, chunk_x: int, chunk_z: int, attempt: int
+	chunk: Chunk,
+	cx: int,
+	cy: int,
+	cz: int,
+	hx: int,
+	hz: int,
+	chunk_x: int,
+	chunk_z: int,
+	attempt: int
 ) -> void:
-	for wx in range(cx - _HALF_EXTENT_X, cx + _HALF_EXTENT_X + 1):
-		for wz in range(cz - _HALF_EXTENT_Z, cz + _HALF_EXTENT_Z + 1):
+	for wx in range(cx - hx, cx + hx + 1):
+		for wz in range(cz - hz, cz + hz + 1):
 			for wy in range(cy - 1, cy + _ROOM_HEIGHT):
 				var on_floor: bool = wy == cy - 1
 				var on_roof: bool = wy == cy + _ROOM_HEIGHT - 1
 				var on_perim_xz: bool = (
-					wx == cx - _HALF_EXTENT_X
-					or wx == cx + _HALF_EXTENT_X
-					or wz == cz - _HALF_EXTENT_Z
-					or wz == cz + _HALF_EXTENT_Z
+					wx == cx - hx or wx == cx + hx or wz == cz - hz or wz == cz + hz
 				)
 				if on_floor:
 					var floor_seed: int = _hash4(
@@ -255,66 +277,106 @@ static func _place_spawner(
 	chunk.set_block(cx, cy, cz, Blocks.MOB_SPAWNER)
 	var mob_idx: int = _hash4(chunk_x, chunk_z, attempt, _SALT_MOB) % _SPAWNER_MOB_POOL.size()
 	var mob_name: String = _SPAWNER_MOB_POOL[mob_idx]
-	# World coords for the tile-entity key. MobSpawnerManager reads it
-	# on the next tick of the world spawner loop.
-	var world_x: int = chunk_x * Chunk.SIZE_X + cx
-	var world_z: int = chunk_z * Chunk.SIZE_Z + cz
-	MobSpawnerManager.configure(Vector3i(world_x, cy, world_z), mob_name)
+	# Worldgen runs on a WorkerThreadPool task. MobSpawnerManager's
+	# static `_spawners` dict + TickScheduler queue are owned by the
+	# main thread, so we record the intent here and let
+	# ChunkManager._materialize_chunk drain it. Same pattern as
+	# `cane_tops` (worker→main hand-off).
+	chunk.pending_tile_entities.append(
+		{"type": "spawner", "pos": Vector3i(cx, cy, cz), "mob": mob_name}
+	)
 
 
-# Place 0-2 chests against walls. Vanilla cm.java loops `i < 2`, each
-# iteration tries 3 random positions inside the room and places a
-# chest at one that's adjacent to EXACTLY ONE wall (so the chest's
-# back is against the wall, never floating in the middle).
+# Attempt 2 chest placements (vanilla `cp.java:51` always loops 2).
+# Each iteration tries 3 random interior positions; the first that's
+# adjacent to EXACTLY ONE wall gets a chest (back to wall, opening to
+# the interior). All 3 tries can fail, in which case that iteration
+# places nothing — vanilla behavior. Realised count is 0-2; typically 2.
 static func _place_chests(
-	chunk: Chunk, cx: int, cy: int, cz: int, chunk_x: int, chunk_z: int, attempt: int
+	chunk: Chunk,
+	cx: int,
+	cy: int,
+	cz: int,
+	hx: int,
+	hz: int,
+	chunk_x: int,
+	chunk_z: int,
+	attempt: int
 ) -> void:
-	var count_seed: int = _hash4(chunk_x, chunk_z, attempt, _SALT_CHEST_COUNT)
-	var count: int = count_seed % 3  # 0, 1, or 2 chests per dungeon
-	for chest_idx in range(count):
+	# Vanilla `cp.java:51` always loops 2 chest-placement iterations.
+	# Each iteration may FAIL to find a valid 1-wall-touch spot (after
+	# 3 position tries), so realised chest count is 0-2 with typical
+	# of 2. Previously `count = seed % 3` made 33% of dungeons
+	# chestless on purpose — strictly less faithful than vanilla.
+	for chest_idx in range(2):
 		for try_idx in range(3):
 			var pos_seed: int = _hash4(
 				chunk_x * 53 + attempt, chunk_z * 53 + chest_idx, try_idx, _SALT_CHEST_POS
 			)
-			var range_x: int = _HALF_EXTENT_X * 2 - 1  # interior X range
-			var range_z: int = _HALF_EXTENT_Z * 2 - 1
-			var ox: int = (pos_seed & 0xFF) % range_x - _HALF_EXTENT_X + 1
-			var oz: int = ((pos_seed >> 8) & 0xFF) % range_z - _HALF_EXTENT_Z + 1
+			# Interior X / Z extents = (2*h - 1) cells (excludes walls).
+			var range_x: int = hx * 2 - 1
+			var range_z: int = hz * 2 - 1
+			var ox: int = (pos_seed & 0xFF) % range_x - hx + 1
+			var oz: int = ((pos_seed >> 8) & 0xFF) % range_z - hz + 1
 			var chest_x: int = cx + ox
 			var chest_z: int = cz + oz
 			# Must be AIR (interior). Skip the spawner cell.
 			if chunk.get_block(chest_x, cy, chest_z) != Blocks.AIR:
 				continue
-			# Count adjacent walls — vanilla requires exactly 1 wall touch.
+			# Count adjacent walls — vanilla `cp.java:60-72` requires
+			# exactly 1 wall touch so the chest sits flush against a
+			# single wall (back to wall, opening toward room interior).
 			var walls: int = 0
-			if chunk.get_block(chest_x - 1, cy, chest_z) == Blocks.COBBLESTONE:
+			var wall_neg_x: bool = chunk.get_block(chest_x - 1, cy, chest_z) == Blocks.COBBLESTONE
+			var wall_pos_x: bool = chunk.get_block(chest_x + 1, cy, chest_z) == Blocks.COBBLESTONE
+			var wall_neg_z: bool = chunk.get_block(chest_x, cy, chest_z - 1) == Blocks.COBBLESTONE
+			var wall_pos_z: bool = chunk.get_block(chest_x, cy, chest_z + 1) == Blocks.COBBLESTONE
+			if wall_neg_x:
 				walls += 1
-			if chunk.get_block(chest_x + 1, cy, chest_z) == Blocks.COBBLESTONE:
+			if wall_pos_x:
 				walls += 1
-			if chunk.get_block(chest_x, cy, chest_z - 1) == Blocks.COBBLESTONE:
+			if wall_neg_z:
 				walls += 1
-			if chunk.get_block(chest_x, cy, chest_z + 1) == Blocks.COBBLESTONE:
+			if wall_pos_z:
 				walls += 1
 			if walls != 1:
 				continue
 			chunk.set_block(chest_x, cy, chest_z, Blocks.CHEST)
-			# Fill the chest with random loot.
-			var world_x: int = chunk_x * Chunk.SIZE_X + chest_x
-			var world_z: int = chunk_z * Chunk.SIZE_Z + chest_z
-			_fill_chest(Vector3i(world_x, cy, world_z), chunk_x, chunk_z, attempt, chest_idx)
+			# Face the chest AWAY from the adjacent wall (latch toward
+			# room interior — matches vanilla MC chest orientation and
+			# the player-placement convention in `interaction.gd::
+			# _chest_meta_from_yaw`). Meta encoding: 0=-Z, 1=-X, 2=+Z,
+			# 3=+X (the direction the FRONT/latch faces).
+			var chest_meta: int = 0
+			if wall_neg_x:
+				chest_meta = 3  # wall at -X → face +X
+			elif wall_pos_x:
+				chest_meta = 1  # wall at +X → face -X
+			elif wall_neg_z:
+				chest_meta = 2  # wall at -Z → face +Z
+			else:  # wall_pos_z
+				chest_meta = 0  # wall at +Z → face -Z
+			chunk.set_block_meta(chest_x, cy, chest_z, chest_meta)
+			# Roll the loot here (deterministic), and queue the slot
+			# writes for main-thread application. Same threading rule
+			# as the spawner above.
+			var items: Array = _roll_chest_loot(chunk_x, chunk_z, attempt, chest_idx)
+			chunk.pending_tile_entities.append(
+				{"type": "chest_fill", "pos": Vector3i(chest_x, cy, chest_z), "items": items}
+			)
 			break
 
 
-# Fill a freshly-placed chest with 3-5 random items from the loot
-# table. Each pick rolls the weighted table; if the landed slot has
-# a `rare_chance` field, it ALSO has to pass a 1/N sub-roll (vanilla
-# Alpha cp.java pattern for golden_apple at 1/100 and music_disc at
-# 1/10). Rare-roll failures drop the pick so the empty slot stays
-# empty — keeps the rare items rare without distorting outer weights.
-static func _fill_chest(
-	world_pos: Vector3i, chunk_x: int, chunk_z: int, attempt: int, chest_idx: int
-) -> void:
-	var slots: Array = ChestStorage.get_or_create(world_pos)
+# Deterministic loot roll. Returns `Array[[item_id, count]]` of length
+# 3-5 (matches realised vanilla chest density). Each pick rolls the
+# weighted loot table; if the landed slot has a `rare_chance` field,
+# it ALSO has to pass a 1/N sub-roll (vanilla Alpha cp.java pattern
+# for golden_apple at 1/100 and music_disc at 1/10). Rare-roll
+# failures are filtered out so the slot just stays empty. Caller
+# (main thread) writes these into ChestStorage via the chunk's
+# pending_tile_entities array.
+static func _roll_chest_loot(chunk_x: int, chunk_z: int, attempt: int, chest_idx: int) -> Array:
+	var result: Array = []
 	var picks_seed: int = _hash4(chunk_x * 41 + attempt, chunk_z * 41 + chest_idx, 1, _SALT_LOOT)
 	var pick_range: int = _LOOT_PICKS_PER_CHEST_MAX - _LOOT_PICKS_PER_CHEST_MIN + 1
 	var picks: int = _LOOT_PICKS_PER_CHEST_MIN + (picks_seed % pick_range)
@@ -339,16 +401,11 @@ static func _fill_chest(
 			if roll < acc:
 				entry = candidate
 				break
-		# Rare-roll gate. Vanilla `random.nextInt(N) == 0` pattern; if
-		# the slot has `rare_chance: N`, only 1 in N picks actually fills.
 		if entry.has("rare_chance"):
 			var rare_chance: int = int(entry["rare_chance"])
 			if rare_chance > 1 and (rare_seed % rare_chance) != 0:
 				continue
 		var item_name: String = entry["item"]
-		# `music_disc` is a meta-name — resolve to one of the 8 disc
-		# items by hashing into _DISC_POOL. Alpha cp.java picks 1-of-2
-		# discs via `dx.c[dx.aU.aW + random.nextInt(2)]`; same shape here.
 		if item_name == "music_disc":
 			var disc_seed: int = _hash4(
 				chunk_x * 79 + chest_idx, chunk_z * 79 + pick_idx, attempt, _SALT_LOOT + 4
@@ -359,12 +416,8 @@ static func _fill_chest(
 			continue
 		var count_max: int = int(entry["count_max"])
 		var count: int = 1 + (count_seed % count_max)
-		for slot_idx in range(slots.size()):
-			var stack: ItemStack = slots[slot_idx]
-			if stack.is_empty():
-				stack.item_id = item_id
-				stack.count = count
-				break
+		result.append([item_id, count])
+	return result
 
 
 # Deterministic 4-input integer hash. Same shape as worldgen.gd's

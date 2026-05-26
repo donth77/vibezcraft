@@ -158,6 +158,21 @@ var _session_start_msec: int = 0
 
 func _ready() -> void:
 	_player = get_node_or_null(player_path) as Node3D
+	# Wipe leftover tile-entity state from any prior world load in this
+	# same engine process. Without this, the autoload Dictionaries keep
+	# entries from World 1 when the player picks World 2 from the menu.
+	# Most at-risk are WORLDGEN-placed tile entities (dungeon chests +
+	# spawners today; mineshaft / village chests if/when added) — their
+	# chunks may evict non-dirty and skip `forget_chunk`, leaving stale
+	# entries indefinitely. If a coord collides between worlds, the new
+	# world's chest would inherit the old world's loot via
+	# `get_or_create`. Player-placed TEs are normally safe (their
+	# chunks dirty on edit), but we wipe everything for uniformity.
+	MobSpawnerManager.clear_all()
+	ChestStorage.clear_all()
+	FurnaceManager.clear_all()
+	SignStorage.clear_all()
+	JukeboxStorage.clear_all()
 	# Pre-warm the fluid-FX particle pool so the first water-on-lava fizz
 	# doesn't pay a GPU shader-compile hitch. Safe here (ChunkManager
 	# outlives the gameplay session) and cheap (builds 6 inert emitters).
@@ -513,6 +528,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 			var furnaces: Dictionary = {}
 			var signs: Dictionary = {}
 			var jukeboxes: Dictionary = {}
+			var spawners: Dictionary = {}
 			for local_pos: Vector3i in tile_entities:
 				var te: Dictionary = tile_entities[local_pos]
 				match te.get("type", ""):
@@ -524,6 +540,8 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 						signs[local_pos] = te.get("lines", [])
 					"jukebox":
 						jukeboxes[local_pos] = te.get("disc", 0)
+					"spawner":
+						spawners[local_pos] = te.get("mob", "")
 			if not chests.is_empty():
 				ChestStorage.restore_chunk(coord, chests)
 			if not furnaces.is_empty():
@@ -532,12 +550,54 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 				SignStorage.restore_chunk(coord, signs)
 			if not jukeboxes.is_empty():
 				JukeboxStorage.restore_chunk(coord, jukeboxes)
+			if not spawners.is_empty():
+				MobSpawnerManager.restore_chunk(coord, spawners)
 	# Drain cane tops collected during worldgen / decode (worker thread).
 	# Was a 32k-cell column walk on every materialize before — now a small
 	# list iteration (typical chunks: 0-4 entries).
 	for cane_pos: Vector3i in data.chunk.cane_tops:
 		_enqueue_cane_growth(cane_pos)
 	data.chunk.cane_tops.clear()
+	# Drain pending tile-entity registrations queued by worldgen (e.g.
+	# dungeon spawners + chest loot). Done HERE on main thread because
+	# MobSpawnerManager / ChestStorage / TickScheduler aren't worker-safe.
+	# Empty for saved chunks (their tile entities went through the
+	# tile_entities restore path above).
+	if not data.chunk.pending_tile_entities.is_empty():
+		var origin_x: int = coord.x * Chunk.SIZE_X
+		var origin_z: int = coord.y * Chunk.SIZE_Z
+		for te: Dictionary in data.chunk.pending_tile_entities:
+			var local_pos: Vector3i = te.get("pos", Vector3i.ZERO)
+			var world_pos := Vector3i(origin_x + local_pos.x, local_pos.y, origin_z + local_pos.z)
+			match te.get("type", ""):
+				"spawner":
+					MobSpawnerManager.configure(world_pos, str(te.get("mob", "")))
+				"chest_fill":
+					# Skip if this chest already holds any items. Worldgen
+					# determinism + ChestStorage entries surviving non-dirty
+					# chunk eviction means a revisit would otherwise APPEND
+					# another fresh roll's items into the empty slots,
+					# producing duplicate stacks across visits (two of the
+					# same music disc, two stacks of bone, etc). Also
+					# preserves player-modified chest contents.
+					var slots: Array = ChestStorage.get_or_create(world_pos)
+					var already_filled: bool = false
+					for s: ItemStack in slots:
+						if not s.is_empty():
+							already_filled = true
+							break
+					if already_filled:
+						continue
+					var items: Array = te.get("items", []) as Array
+					var slot_idx: int = 0
+					for pick: Array in items:
+						while slot_idx < slots.size() and not slots[slot_idx].is_empty():
+							slot_idx += 1
+						if slot_idx >= slots.size():
+							break
+						slots[slot_idx].item_id = int(pick[0])
+						slots[slot_idx].count = int(pick[1])
+		data.chunk.pending_tile_entities.clear()
 	# Worldgen-time animal spawn pass — only for fresh chunks. Re-loaded
 	# chunks already had their entities saved via EntitySave, so a second
 	# pass would duplicate them. The spawner reads voxels through
@@ -601,6 +661,20 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 # Decode runs on the main thread here (the worker-thread decode lives
 # in _compute_chunk_data). That's a 1-3 ms hit per saved chunk during
 # the loading screen, well inside its budget.
+# Load the 3×3 patch around `center` synchronously. The player's
+# capsule (radius 0.3) can straddle a chunk boundary at any cell-edge
+# spawn coord — e.g. spawn at world (16, 92, 15) lives on the X-axis
+# boundary and the capsule overlaps chunks (0,0) AND (1,0). Loading
+# only the center leaves an unloaded neighbor where collision is
+# absent, so the player falls through. The 3×3 is overkill in interior
+# cases but cheap (each call sync-generates ~9 chunks if all uncached;
+# ~100 ms one-off respawn hit, acceptable).
+func _spawn_chunk_sync_neighborhood(center: Vector2i) -> void:
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			_spawn_chunk_sync(Vector2i(center.x + dx, center.y + dz))
+
+
 func _spawn_chunk_sync(coord: Vector2i) -> void:
 	if _chunks.has(coord):
 		return
@@ -871,11 +945,15 @@ func _build_chunk_save_entry(coord: Vector2i, chunk: Chunk, destructive: bool) -
 	var jukebox_data: Dictionary = JukeboxStorage.serialize_chunk(coord)
 	for local_pos: Vector3i in jukebox_data:
 		tile_entities[local_pos] = {"type": "jukebox", "disc": jukebox_data[local_pos]}
+	var spawner_data: Dictionary = MobSpawnerManager.serialize_chunk(coord)
+	for local_pos: Vector3i in spawner_data:
+		tile_entities[local_pos] = {"type": "spawner", "mob": spawner_data[local_pos]}
 	if destructive:
 		ChestStorage.forget_chunk(coord)
 		FurnaceManager.forget_chunk(coord)
 		SignStorage.forget_chunk(coord)
 		JukeboxStorage.forget_chunk(coord)
+		MobSpawnerManager.forget_chunk(coord)
 	var pending_ticks: Array
 	if destructive:
 		pending_ticks = TickScheduler.take_for_chunk(coord.x, coord.y)

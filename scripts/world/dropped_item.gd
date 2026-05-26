@@ -44,6 +44,10 @@ var _player: Node3D
 var _camera: Camera3D  # cached — used to billboard sprite items
 var _chunk_manager: Node  # cached — used by push-out-of-solid-block
 var _ray_query: PhysicsRayQueryParameters3D  # reused per-frame to avoid allocs
+# Last `world_brightness` pushed to the sprite material. -1 forces the
+# first write. Vanilla af.java samples every render frame; we skip
+# negligible deltas to avoid GPU uniform churn on a stack of items.
+var _last_brightness: float = -1.0
 
 
 func setup(
@@ -99,6 +103,7 @@ func _process(delta: float) -> void:
 	# angle instead of flashing through a thin edge-on view each rotation.
 	if _is_sprite_item:
 		_billboard_to_camera()
+		_update_world_brightness()
 	else:
 		rotate_y(delta * SPIN_SPEED)
 
@@ -191,6 +196,40 @@ func _build_sprite_mesh(id: int) -> void:
 	mat.shader = load("res://shaders/held_item_world.gdshader") as Shader
 	mat.set_shader_parameter("item_texture", tex)
 	_mesh.material_override = mat
+
+
+# Vanilla af.java RenderItem tints dropped items by world brightness via
+# the same lightmap path mobs/boats use. We mirror that with the shared
+# EntityLighting helper (0.25 floor — see EntityLighting._FLOOR), pushed
+# into the sprite material's `world_brightness` uniform.
+# Cube-block drops (id < 100, full-cube shape) use BlockAtlas.entity_material
+# which is shared across all entities; per-instance brightness for those
+# would need an instance_uniform on chunk.gdshader — deferred until any
+# cube drop reads as too dark in practice.
+func _update_world_brightness() -> void:
+	if _mesh == null or _mesh.material_override == null:
+		return
+	# Resolve via get_parent() optimistically — in gameplay we're added
+	# as a ChunkManager child. In tests our parent is a plain Node, so
+	# check that it actually has the chunk API before caching it (or
+	# we'd poison `_chunk_manager` and break `_push_out_of_solid_block`
+	# next tick too). Visual tint is non-critical — bail silently.
+	if _chunk_manager == null:
+		var parent: Node = get_parent()
+		if parent != null and parent.has_method("get_world_sky_light"):
+			_chunk_manager = parent
+	if _chunk_manager == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var lit: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(lit - _last_brightness) < 0.01:
+		return
+	_last_brightness = lit
+	var mat: ShaderMaterial = _mesh.material_override as ShaderMaterial
+	if mat != null:
+		mat.set_shader_parameter("world_brightness", lit)
 
 
 func _try_pickup(player: Node3D) -> void:

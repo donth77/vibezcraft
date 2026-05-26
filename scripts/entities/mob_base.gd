@@ -173,6 +173,13 @@ static var _shape_cache: Dictionary = {}
 
 var health: int = 0
 var _damage_cooldown_remaining: float = 0.0
+# Vanilla EntityLiving.aN — remembers the magnitude of the hit that
+# started the current iframe. A new hit during iframe is dropped if
+# `new <= aN`, otherwise it lands with `new - aN` damage (and aN
+# updates). Without this, fire-tick damage (1 HP, 0.5s rearm) gates
+# arrow damage (4-7 HP) for a full second per tick — a burning zombie
+# tanks arrows it should otherwise eat in 1 hit.
+var _last_damage_amount: int = 0
 var _hurt_flash_remaining: float = 0.0
 var _chunk_manager: Node
 var _hurt_mat_overrides: Array = []  # [(MeshInstance3D, original_override)] pairs
@@ -303,6 +310,27 @@ func _physics_process(delta: float) -> void:
 	if _dying:
 		velocity = Vector3.ZERO
 		return
+	# Chunk-load gate. populate_chunk_at_gen spawns mobs the moment the
+	# chunk's block data lands, but the trimesh collider is built async
+	# on a worker. During that 1-30 frame window, is_on_floor() returns
+	# false (no collider), gravity drops the mob below the eventual
+	# floor cell, then the trimesh materializes — move_and_slide's
+	# penetration recovery pops the mob UP through the geometry. Same
+	# pattern fires when the player walks into a fresh chunk and the
+	# trimesh appears around an existing mob at the boundary. Freeze
+	# transform + zero velocity until the chunk's coord is in _chunks
+	# AND a downward-facing collider is reachable (via is_on_floor or
+	# a short cooldown after first contact).
+	if _chunk_manager != null and _chunk_manager.has_method("is_chunk_loaded"):
+		var mob_chunk := Vector2i(
+			int(floor(global_position.x / float(Chunk.SIZE_X))),
+			int(floor(global_position.z / float(Chunk.SIZE_Z)))
+		)
+		if not _chunk_manager.is_chunk_loaded(mob_chunk):
+			velocity = Vector3.ZERO
+			return
+	var pre_move_y: float = global_position.y
+	var pre_move_vel_y: float = velocity.y
 	# Sample environment for this frame. Cached on the instance so the
 	# env tick (below) can reuse without re-walking voxel cells.
 	_in_water = _check_in_water()
@@ -339,6 +367,18 @@ func _physics_process(delta: float) -> void:
 		velocity.x *= f
 		velocity.z *= f
 	move_and_slide()
+	# Penetration-recovery clamp. Compare the actual upward motion this
+	# frame against what `velocity.y` could have produced. Any excess is
+	# move_and_slide pushing the body out of a freshly-materialized
+	# collider (chunk trimesh just attached) — snap back so the mob
+	# doesn't ride that pop into the stratosphere. Slop of 0.2 m covers
+	# normal step-up snapping. Vanilla swim impulse (in water) leaves
+	# velocity.y positive in advance, so it doesn't get caught.
+	var actual_dy: float = global_position.y - pre_move_y
+	var expected_max_dy: float = maxf(pre_move_vel_y, 0.0) * delta + 0.2
+	if actual_dy > expected_max_dy:
+		global_position.y = pre_move_y
+		velocity.y = 0.0
 	# Environment tick at 20 Hz — swim impulse + drowning + fire/lava
 	# damage. Runs AFTER move_and_slide so the air-ticks check uses the
 	# mob's settled position. We re-sample head_in_water inside the tick
@@ -353,6 +393,10 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float) -> void:
 	if _dying:
 		_tick_death_animation(delta)
+		# Keep the flame UV strip advancing during the fall-over —
+		# vanilla `Render.renderEntityOnFire` runs regardless of
+		# deathTime, so freezing the animation here reads as a bug.
+		_tick_fire_animation(delta)
 		return
 	if _damage_cooldown_remaining > 0.0:
 		_damage_cooldown_remaining = maxf(0.0, _damage_cooldown_remaining - delta)
@@ -592,9 +636,16 @@ func take_damage(
 ) -> bool:
 	if amount <= 0 or health <= 0:
 		return false
+	# Vanilla EntityLiving.damageEntity — during iframe, a NEW hit lands
+	# with `amount - _last_damage_amount` if it's strictly larger,
+	# otherwise it's dropped. Keeps fire-tick from blocking arrows.
+	var applied: int = amount
 	if _damage_cooldown_remaining > 0.0:
-		return false
-	health = maxi(0, health - amount)
+		if amount <= _last_damage_amount:
+			return false
+		applied = amount - _last_damage_amount
+	_last_damage_amount = amount
+	health = maxi(0, health - applied)
 	_damage_cooldown_remaining = _DAMAGE_COOLDOWN_SEC
 	_apply_hurt_flash()
 	if knockback_dir.length_squared() > 0.0001:
@@ -836,7 +887,16 @@ func to_save_dict() -> Dictionary:
 # to consume per-mob fields; always call super so the base does its
 # part on the same payload Dictionary.
 func restore_from_dict(d: Dictionary) -> void:
-	global_position = d.get("pos", global_position)
+	var pos: Vector3 = d.get("pos", global_position) as Vector3
+	# Old saves (before the chunk-load physics gate) accumulated mobs
+	# launched into the upper atmosphere by penetration-recovery pops
+	# during chunk re-meshing — Y values up in the 2000-5000 range. Snap
+	# any out-of-world Y to a safe altitude near the world ceiling so
+	# they fall back to ground instead of staying stuck up there. Same
+	# pattern PlayerSave uses for saves that captured a void plunge.
+	if pos.y < 0.0 or pos.y > 128.0:
+		pos.y = 120.0
+	global_position = pos
 	velocity = d.get("vel", Vector3.ZERO)
 	rotation.y = d.get("yaw", 0.0)
 	health = clampi(d.get("hp", max_health), 0, max_health)

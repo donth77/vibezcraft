@@ -515,6 +515,37 @@ static func _tick_crops(manager, pos: Vector3i) -> void:
 	TickScheduler.schedule(pos, CROPS, jitter)
 
 
+# Blocks with full-cell physical collision: a mob can't walk INTO the
+# cell, fluid can't flow INTO the cell, and the top face is a valid
+# place to stand. Distinct from `is_opaque` (a rendering concept).
+# Covers cases like CHEST and MOB_SPAWNER which are non-opaque for
+# face-culling reasons but physically solid — without this distinction,
+# water flow overwrites mob spawners, the pathfinder lets mobs walk
+# THROUGH chests, and players can safespot mobs by standing on a chest.
+# LEAVES / GLASS / ICE / CACTUS render with alpha-test (`is_opaque`
+# false) but have full cube collision in vanilla.
+static func is_solid_collision(id: int) -> bool:
+	if is_opaque(id):
+		return true
+	return (
+		id == CHEST
+		or id == MOB_SPAWNER
+		or id == LEAVES
+		or id == GLASS
+		or id == ICE
+		or id == CACTUS
+		or id == HALF_SLAB
+		or id == WOOD_HALF_SLAB
+		or id == COBBLESTONE_HALF_SLAB
+		or id == WOOD_STAIRS
+		or id == COBBLESTONE_STAIRS
+		or id == WOODEN_DOOR
+		or id == IRON_DOOR
+		or id == FENCE
+		or id == FENCE_GATE
+	)
+
+
 static func is_opaque(id: int) -> bool:
 	# LEAVES + GLASS + SAPLING render with alpha-test (discard in
 	# chunk.gdshader); treating any as opaque would cull the stone/dirt

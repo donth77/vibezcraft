@@ -1,5 +1,6 @@
 # gdlint: disable=max-file-lines
 # gdlint: disable=class-definitions-order
+# gdlint: disable=max-returns
 extends CharacterBody3D
 
 signal health_changed(current: int, maximum: int)
@@ -85,14 +86,20 @@ const DAMAGE_COOLDOWN_SEC: float = 1.0
 const HEALTH_REGEN_INTERVAL_SEC: float = 4.0
 
 # Damage types — affects whether armor reduction kicks in. Vanilla Alpha
-# armor DOES NOT reduce fall damage (DamageSource.FALL.ignoresArmor),
-# unlike mob damage which it does reduce.
+# `DamageSource.ignoresArmor` returns true for FALL, DROWN, and FIRE_TICK
+# (the on-fire tick that runs after leaving lava / a fire block). Cactus
+# and direct LAVA contact still go through armor. Mob hits + generic
+# damage always apply armor.
 const DAMAGE_GENERIC: String = "generic"
 const DAMAGE_FALL: String = "fall"
 const DAMAGE_DROWN: String = "drown"
 const DAMAGE_LAVA: String = "lava"
 const DAMAGE_CACTUS: String = "cactus"
 const DAMAGE_MOB: String = "mob"
+# Fire-burn tick while the entity's onFire timer > 0. Separate from
+# DAMAGE_LAVA so the armor-bypass check matches vanilla (fire_tick
+# ignoresArmor=true, lava contact ignoresArmor=false).
+const DAMAGE_FIRE: String = "fire"
 # Vanilla BlockCactus damages every tick the entity AABB intersects a
 # cactus cell shrunk by 1/16 on each side. Damage = 1 HP. We rate-limit
 # to half-second intervals (10 vanilla ticks) — matches the apparent
@@ -266,6 +273,20 @@ const SLEEP_CAP_TICKS: float = 100.0
 var is_sleeping: bool = false
 var sleep_ticks: float = 0.0
 
+# F2 teleport pin-and-wait. The dungeon-finder spirals through
+# Worldgen.generate_chunk to LOCATE a spawner, but those throwaway
+# chunks aren't in ChunkManager._chunks. Teleporting drops the player
+# at a coord without collision, so gravity pulls them through air
+# (and into void recovery) before streaming catches up. While this
+# flag is true, _physics_process pins the player at the destination
+# and skips gravity / move_and_slide / void recovery. Cleared once
+# the destination chunk lands in ChunkManager._chunks (or a generous
+# 30 s timeout, in case streaming stalls).
+var _pending_teleport: bool = false
+var _pending_teleport_dest: Vector3 = Vector3.ZERO
+var _pending_teleport_chunk: Vector2i = Vector2i.ZERO
+var _pending_teleport_deadline_ms: int = 0
+
 # Fall tracking — _fall_peak_y is the HIGHEST Y reached during the
 # current air period. On landing we compute (peak - land_y) to get the
 # actual fall distance regardless of jumps bumping the start upward.
@@ -302,6 +323,11 @@ var _damage_cooldown_remaining: float = 0.0
 # Counts up while below max HP. When >= HEALTH_REGEN_INTERVAL_SEC, +1 HP
 # and resets. Cleared on death; doesn't tick while at max.
 var _regen_accum: float = 0.0
+# Vanilla armor-formula carry. `eb.a` in vendor/alpha-1.2.6-src holds
+# the modulo-25 remainder between hits so weak attacks against heavy
+# armor drip through over many hits instead of being permanently
+# absorbed (and turning the player invincible). Cleared on respawn.
+var _armor_damage_carry: int = 0
 
 # Tunable at runtime via the FP Tool Tuner panel. These defaults are the
 # user's hand-tuned best preset (closest match to vanilla MC) — keep in
@@ -347,6 +373,13 @@ var _tp_held_tool_pixel_size: float = 0.035
 # that, after the shared orient rotations, points up into the player's face.
 # These offsets apply to _held_tool_tp.rotation when the held item is an axe.
 var _axe_tp_mesh_rotation: Vector3 = Vector3(PI, 0, deg_to_rad(-80))
+
+# Bow-specific TP pivot pose. Bows skip the vanilla orient (50°Y/-25°Z)
+# and the bottom-pivot handle offset since they're held by the grip in
+# the middle of the sprite — so the standard tool-pose vars don't read
+# right for a bow. These values were dialed in via the Tool Tuner.
+var _bow_tp_position: Vector3 = Vector3(-0.020, -0.540, -0.680)
+var _bow_tp_rotation: Vector3 = Vector3(deg_to_rad(-180.0), deg_to_rad(-39.0), deg_to_rad(-12.0))
 
 # "fp" or "tp" — which value set the tuner sliders read/write.
 var _tuner_mode: String = "fp"
@@ -723,14 +756,26 @@ func _build_held_tool(id: int) -> void:
 		# the pickaxe isn't buried inside the arm geometry. Upright pose
 		# (head up, handle in fist) with a Y twist for 3D visibility.
 		_held_tool_tp_pivot = Node3D.new()
-		_held_tool_tp_pivot.position = _tp_held_tool_position
-		_held_tool_tp_pivot.rotation = _tp_held_tool_rotation
+		if Items.tool_type(id) == Items.TOOL_TYPE_BOW:
+			_held_tool_tp_pivot.position = _bow_tp_position
+			_held_tool_tp_pivot.rotation = _bow_tp_rotation
+		else:
+			_held_tool_tp_pivot.position = _tp_held_tool_position
+			_held_tool_tp_pivot.rotation = _tp_held_tool_rotation
 		arm_r.add_child(_held_tool_tp_pivot)
 
 		# TP orient node — same role as FP _held_tool_orient. Carries vanilla
-		# 50°Y / -25°Z inner sprite tilt when the toggle is on.
+		# 50°Y / -25°Z inner sprite tilt when the toggle is on. Bows are an
+		# exception: the orient is designed for tools whose handle pivots in
+		# the fist (axe blade arcs forward as the swing rotates). A bow is
+		# held symmetrically by the grip in the middle of the sprite, so
+		# the orient just lays it sideways. Render bows flat (identity
+		# orient) — matches FP, which already runs with orient=false.
+		var apply_tp_orient: bool = (
+			_use_vanilla_orient_tp and Items.tool_type(id) != Items.TOOL_TYPE_BOW
+		)
 		_held_tool_tp_orient = Node3D.new()
-		_apply_orient_to(_held_tool_tp_orient, _use_vanilla_orient_tp)
+		_apply_orient_to(_held_tool_tp_orient, apply_tp_orient)
 		_held_tool_tp_pivot.add_child(_held_tool_tp_orient)
 
 		# Same Sprite3D treatment for the third-person sign (matches
@@ -777,10 +822,24 @@ func _build_held_tool(id: int) -> void:
 			if id == Items.FLINT_AND_STEEL:
 				effective_ps = tp_ps * 0.5
 			_held_tool_tp.scale = Vector3(effective_ps, effective_ps, effective_ps)
-			var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
-			_held_tool_tp.position = Vector3(
-				-tp_pivot_px.x * effective_ps, -tp_pivot_px.y * effective_ps, 0
-			)
+			# Bows are held by the GRIP (middle of sprite), not the bottom
+			# tip — get_handle_pivot_offset returns the bottom-most opaque
+			# pixel which for a bow is the lower-right curve tip. Using
+			# that as the wrist anchor floats the bow above the hand.
+			# Center it instead, same as the loose-item branch.
+			if Items.tool_type(id) == Items.TOOL_TYPE_BOW:
+				_held_tool_tp.position = Vector3.ZERO
+				# Mirror the sprite plane around its vertical axis so the
+				# string side faces the player (vanilla: wood curve away
+				# from player, string + arrow nock toward player). Without
+				# this the player looks like they're aiming the arrow at
+				# themselves.
+				_held_tool_tp.rotation = Vector3(0, PI, 0)
+			else:
+				var tp_pivot_px: Vector2 = SpriteExtruder.get_handle_pivot_offset(tex)
+				_held_tool_tp.position = Vector3(
+					-tp_pivot_px.x * effective_ps, -tp_pivot_px.y * effective_ps, 0
+				)
 			if Items.tool_type(id) == Items.TOOL_TYPE_AXE:
 				_held_tool_tp.rotation = _axe_tp_mesh_rotation
 		else:
@@ -1096,6 +1155,34 @@ func _refresh_axe_tp_rotation() -> void:
 		_held_tool_tp.rotation = _axe_tp_mesh_rotation
 
 
+# Route mining-swing progress to whichever first-person prop is
+# currently visible: bare hand, held block, or held tool. Called from
+# every _physics_process branch (air, water, ladder, ...) so the swing
+# animates regardless of what the player is standing in. Without the
+# water branch calling this, holding a pickaxe and mining underwater
+# left the tool static — only the bare-hand swing was applied.
+func _apply_swing_to_fp_props(progress: float) -> void:
+	if _fp_hand != null and _fp_hand.visible:
+		_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
+	if _held_block != null and _held_block.visible:
+		# Fence held in FP uses its own rest-pose vars (live-tuneable via
+		# ToolTuner). Passing the cube constants here would overwrite the
+		# tuner's edits every physics tick — the visible "flash back" the
+		# user reported. Route based on the currently-selected item.
+		var hb_base_pos: Vector3 = _HELD_BLOCK_POSITION
+		var hb_base_rot: Vector3 = _HELD_BLOCK_ROTATION
+		if inventory != null:
+			var sel: ItemStack = inventory.selected()
+			if sel != null and not sel.is_empty() and sel.item_id == Blocks.FENCE:
+				hb_base_pos = _held_fence_position
+				hb_base_rot = _held_fence_rotation
+		_apply_fp_swing(_held_block, hb_base_pos, hb_base_rot, progress)
+	# Apply swing to the PIVOT (which sits at the fist), not the mesh —
+	# this makes the head arc forward while the handle stays in place.
+	if _held_tool_pivot != null and _held_tool_pivot.visible:
+		_apply_tool_swing(_held_tool_pivot, _held_tool_position, _held_tool_rotation, progress)
+
+
 # Original FP-hand / held-block swing — vanilla MC's bare-hand path uses
 # different curves than the item path (3-axis translate + Y-twist). Kept
 # separate so tools can use their own ItemRenderer-faithful swing above.
@@ -1206,6 +1293,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("debug_tool_tuner"):
 		if _tool_tuner != null and _tool_tuner.has_method("toggle"):
 			_tool_tuner.toggle()
+	elif event.is_action_pressed("debug_find_dungeon"):
+		if Game.debug_enabled:
+			_teleport_to_nearest_dungeon()
 	elif event.is_action_pressed("drop_selected"):
 		_drop_selected_item(_drop_modifier_held())
 	elif event.is_action_pressed("hotbar_prev"):
@@ -1214,6 +1304,150 @@ func _unhandled_input(event: InputEvent) -> void:
 		_cycle_hotbar(1)
 	else:
 		_select_hotbar_from_event(event)
+
+
+# Scan currently-loaded chunks for the nearest MOB_SPAWNER block and
+# teleport the player to it. Debug-only QA shortcut for the dungeon
+# worldgen pass — without this you'd have to spelunk caves at Y 8-50
+# to find one. Only the dungeon decoration places spawners, so any
+# hit is a guaranteed dungeon room with cobble walls + chest(s).
+func _teleport_to_nearest_dungeon() -> void:
+	# Dungeon Y band — `worldgen_dungeons._MIN_Y` to `_MAX_Y`.
+	var min_y: int = 8
+	var max_y: int = 90
+	# Fast path: scan loaded chunks first. Catches dungeons the player
+	# already explored or stood near.
+	var loaded_hit: Vector3i = _scan_loaded_chunks_for_spawner(min_y, max_y)
+	if loaded_hit.y >= 0:
+		ChatHud.push(
+			"F2: found in loaded chunks @ (%d,%d,%d)" % [loaded_hit.x, loaded_hit.y, loaded_hit.z]
+		)
+		_teleport_to_spawner(loaded_hit, "loaded")
+		return
+	# Slow path: spiral outward from the player's chunk. PREFER SAVED
+	# CHUNKS on disk over fresh worldgen — the saved data is what the
+	# player actually lives in. Falling back to `Worldgen.generate_chunk`
+	# would point us at coords that the CURRENT worldgen code places, but
+	# those coords often don't match a save written by an older worldgen
+	# (validity-check / room-size / attempt-count changes shift placements).
+	# Result of that mismatch: teleport to a "spawner coord" that has
+	# nothing in the actual on-disk world → player drops into missing
+	# chunks or empty stone.
+	var pcx: int = int(floor(global_position.x / Chunk.SIZE_X))
+	var pcz: int = int(floor(global_position.z / Chunk.SIZE_Z))
+	var max_radius: int = 10
+	ChatHud.push("F2: scanning %d chunks..." % ((max_radius * 2 + 1) ** 2))
+	for radius in range(0, max_radius + 1):
+		for dx in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				if absi(dx) != radius and absi(dz) != radius:
+					continue
+				var cx: int = pcx + dx
+				var cz: int = pcz + dz
+				var hit: Vector3i = _find_spawner_via_disk_or_gen(cx, cz, min_y, max_y)
+				if hit.y >= 0:
+					ChatHud.push("F2: hit r=%d @ (%d,%d,%d)" % [radius, hit.x, hit.y, hit.z])
+					_teleport_to_spawner(hit, "r=%d" % radius)
+					return
+	ChatHud.push("No dungeons within %d chunks of you" % max_radius)
+
+
+# Try to locate a MOB_SPAWNER block in chunk (cx, cz). Reads the saved
+# chunk from disk first (so the spiral finds what's ACTUALLY in the
+# world, including dungeons placed by older worldgen versions). Falls
+# back to `Worldgen.generate_chunk` only when there's no save file
+# (unexplored chunk). Returns the world coord on hit, or Vector3i(0,-1,0)
+# sentinel on miss.
+func _find_spawner_via_disk_or_gen(cx: int, cz: int, min_y: int, max_y: int) -> Vector3i:
+	var blocks: PackedByteArray = PackedByteArray()
+	var saved: Dictionary = SaveLoad.load_chunk(Vector2i(cx, cz))
+	if not saved.is_empty():
+		var compressed: PackedByteArray = saved.get("bytes", PackedByteArray())
+		if not compressed.is_empty():
+			var expected_size: int = Chunk.SIZE_X * Chunk.SIZE_Y * Chunk.SIZE_Z
+			blocks = compressed.decompress(expected_size, FileAccess.COMPRESSION_FASTLZ)
+			if blocks.size() != expected_size:
+				blocks = PackedByteArray()
+	if blocks.is_empty():
+		# No save for this chunk — fall back to a fresh worldgen scan.
+		var chunk: Chunk = Worldgen.generate_chunk(cx, cz)
+		blocks = chunk.blocks
+	for y in range(min_y, max_y + 1):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var idx: int = y * Chunk.SIZE_X * Chunk.SIZE_Z + z * Chunk.SIZE_X + x
+				if blocks[idx] == Blocks.MOB_SPAWNER:
+					return Vector3i(cx * Chunk.SIZE_X + x, y, cz * Chunk.SIZE_Z + z)
+	return Vector3i(0, -1, 0)
+
+
+# Helper: scan loaded chunks for the closest MOB_SPAWNER. Returns the
+# spawner world coord on hit, or Vector3i(0, -1, 0) (Y=-1 = sentinel)
+# if no dungeon was found in any loaded chunk.
+func _scan_loaded_chunks_for_spawner(min_y: int, max_y: int) -> Vector3i:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null:
+		return Vector3i(0, -1, 0)
+	var chunks_dict: Dictionary = cm.get("_chunks")
+	if chunks_dict == null:
+		return Vector3i(0, -1, 0)
+	var best_pos: Vector3i = Vector3i(0, -1, 0)
+	var best_dist_sq: float = INF
+	for coord_v in chunks_dict.keys():
+		var coord: Vector2i = coord_v
+		var chunk_node: Node = chunks_dict[coord]
+		if chunk_node == null or not is_instance_valid(chunk_node):
+			continue
+		var chunk: Chunk = chunk_node.get("chunk")
+		if chunk == null:
+			continue
+		var chunk_world_x: int = coord.x * Chunk.SIZE_X
+		var chunk_world_z: int = coord.y * Chunk.SIZE_Z
+		for y in range(min_y, max_y + 1):
+			for z in range(Chunk.SIZE_Z):
+				for x in range(Chunk.SIZE_X):
+					if chunk.get_block(x, y, z) != Blocks.MOB_SPAWNER:
+						continue
+					var wp := Vector3i(chunk_world_x + x, y, chunk_world_z + z)
+					var d_sq: float = global_position.distance_squared_to(Vector3(wp))
+					if d_sq < best_dist_sq:
+						best_dist_sq = d_sq
+						best_pos = wp
+	return best_pos
+
+
+func _teleport_to_spawner(pos: Vector3i, source: String) -> void:
+	# Drop player ABOVE the spawner cell. Capsule is 1.8 m tall
+	# centered on origin (feet at origin.y - 0.9), so we need an
+	# origin offset of ≥1.9 to keep the feet above the spawner's top
+	# face. +2.0 leaves a tiny margin and fits comfortably in the
+	# 2-block-tall room interior (cy+1, cy+2) without head-clipping
+	# the cobble ceiling at cy+3.
+	var dest := Vector3(pos) + Vector3(0.5, 2.0, 0.5)
+	# Pre-load the 3×3 patch around the destination synchronously
+	# (same mechanism respawn uses). The spiral search above used
+	# THROWAWAY `Worldgen.generate_chunk` results to find the spawner;
+	# those chunks aren't in `ChunkManager._chunks`. Without this sync
+	# load the player teleports into an unloaded chunk, gravity has no
+	# floor, and they drop into the void faster than per-frame
+	# streaming can catch up. Sync cost: ~9 chunks × ~100 ms = ~1 s
+	# added to the F2 freeze. Acceptable for a debug shortcut.
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	var chunk_coord := Vector2i(pos.x >> 4, pos.z >> 4)
+	if cm != null and cm.has_method("_spawn_chunk_sync_neighborhood"):
+		cm.call("_spawn_chunk_sync_neighborhood", chunk_coord)
+	global_position = dest
+	velocity = Vector3.ZERO
+	_fall_immune_next_landing = true
+	ChatHud.push("Teleported to dungeon at (%d, %d, %d) [%s]" % [pos.x, pos.y, pos.z, source])
+	# Belt-and-suspenders: pin the player in case the sync load somehow
+	# didn't materialize the destination chunk (worker race, etc).
+	# Normally clears within one physics tick because the sync load
+	# already put the chunk in `_chunks`.
+	_pending_teleport_dest = dest
+	_pending_teleport_chunk = chunk_coord
+	_pending_teleport_deadline_ms = Time.get_ticks_msec() + 5000
+	_pending_teleport = true
 
 
 func _cycle_hotbar(direction: int) -> void:
@@ -1516,6 +1750,25 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# F2 dungeon-teleport hold — pin player at destination until the
+	# target chunk lands in ChunkManager._chunks. Without this, gravity
+	# drops them through the missing-chunk void faster than streaming
+	# can catch up. See the field declaration for the full rationale.
+	if _pending_teleport:
+		global_position = _pending_teleport_dest
+		velocity = Vector3.ZERO
+		var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+		if cm != null:
+			var chunks: Dictionary = cm.get("_chunks")
+			if chunks != null and chunks.has(_pending_teleport_chunk):
+				_pending_teleport = false
+				_fall_immune_next_landing = true
+		# Safety: if the chunk never loads, release after the deadline
+		# so the player isn't permanently frozen on a worldgen stall.
+		if _pending_teleport and Time.get_ticks_msec() >= _pending_teleport_deadline_ms:
+			_pending_teleport = false
+			_fall_immune_next_landing = true
+		return
 	# Sleeping — vanilla EntityHuman.B() returns early when isSleeping(),
 	# so nothing else runs (no gravity, no input, no fall tracking). We
 	# still tick `sleep_ticks` in _process so the overlay fade advances
@@ -1555,8 +1808,7 @@ func _physics_process(delta: float) -> void:
 		# swing tick so the arm stayed at rest.
 		if _character_model != null and _character_model.has_method("update_mining_swing"):
 			var progress: float = _character_model.update_mining_swing(is_mining, delta)
-			if _fp_hand != null and _fp_hand.visible:
-				_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
+			_apply_swing_to_fp_props(progress)
 		return
 	# While the sign-edit screen is open the player is typing text and
 	# Input.is_action_pressed("jump") / get_vector still see WASD + Space
@@ -1715,8 +1967,7 @@ func _physics_process(delta: float) -> void:
 			var progress: float = _character_model.update_mining_swing(is_mining, delta)
 			var arm_locked: bool = _character_model.is_mining_visually()
 			_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
-			if _fp_hand != null and _fp_hand.visible:
-				_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
+			_apply_swing_to_fp_props(progress)
 		_fall_peak_y = global_position.y
 		_was_on_floor = false
 		return
@@ -1779,31 +2030,13 @@ func _physics_process(delta: float) -> void:
 		var progress: float = _character_model.update_mining_swing(is_mining, delta)
 		var arm_locked: bool = _character_model.is_mining_visually()
 		_character_model.update_walk_animation(horiz_speed, delta, arm_locked)
-		# Drive the swing on whichever first-person prop is currently visible.
-		if _fp_hand != null and _fp_hand.visible:
-			_apply_fp_swing(_fp_hand, _fp_hand_base_position, _fp_hand_base_rotation, progress)
-		if _held_block != null and _held_block.visible:
-			# Fence held in FP uses its own rest-pose vars (live-tuneable via
-			# ToolTuner). Passing the cube constants here would overwrite the
-			# tuner's edits every physics tick — the visible "flash back" the
-			# user reported. Route based on the currently-selected item.
-			var hb_base_pos: Vector3 = _HELD_BLOCK_POSITION
-			var hb_base_rot: Vector3 = _HELD_BLOCK_ROTATION
-			if inventory != null:
-				var sel: ItemStack = inventory.selected()
-				if sel != null and not sel.is_empty() and sel.item_id == Blocks.FENCE:
-					hb_base_pos = _held_fence_position
-					hb_base_rot = _held_fence_rotation
-			_apply_fp_swing(_held_block, hb_base_pos, hb_base_rot, progress)
-		# Apply swing to the PIVOT (which sits at the fist), not the mesh —
-		# this makes the head arc forward while the handle stays in place.
-		if _held_tool_pivot != null and _held_tool_pivot.visible:
-			_apply_tool_swing(_held_tool_pivot, _held_tool_position, _held_tool_rotation, progress)
+		_apply_swing_to_fp_props(progress)
 
 	if on_ladder:
 		_fall_peak_y = global_position.y
 	_update_fall_tracking()
 	_tick_health_regen(delta)
+	_check_void_recovery()
 
 
 # Pre-Beta 1.8 health regen: +1 HP every HEALTH_REGEN_INTERVAL_SEC while
@@ -1818,9 +2051,24 @@ func _tick_health_regen(delta: float) -> void:
 		health = mini(MAX_HEALTH, health + 1)
 		health_changed.emit(health, MAX_HEALTH)
 
-	# Recover if we fall through the world
+
+# Recover if we fall through the world. Common cause: a chunk-load
+# race where the saved player position lands in a not-yet-streamed
+# cell (unloaded reads as AIR). Use the world's actual spawn (bed
+# spawn if set, else WorldMeta.spawn, else (8,100,8) for fresh
+# worlds) instead of the hardcoded origin — without this, a player
+# who saved at (200,?,200) would teleport to chunk (0,0) which is
+# also outside the loaded ring, then fall through again, looping
+# forever. Sync-load the destination chunk before placing them so
+# there's terrain under their feet on landing.
+#
+# Must NOT live inside _tick_health_regen — that function returns
+# early when health == MAX_HEALTH, which let a full-HP player who
+# fell through a chunk-load gap keep falling forever until autosave
+# captured them at y=-740 (real bug from World 2).
+func _check_void_recovery() -> void:
 	if global_position.y < -20.0:
-		global_position = Vector3(8, 100.0, 8)
+		_recover_from_void()
 		velocity = Vector3.ZERO
 
 
@@ -1864,18 +2112,34 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 	if _damage_cooldown_remaining > DAMAGE_COOLDOWN_SEC * 0.5:
 		return
 	var final_amount: int = amount
-	if source != DAMAGE_FALL and inventory != null:
-		# Vanilla armor formula: final = damage × (25 - total_points) / 25.
+	# Vanilla DamageSource.ignoresArmor — fall, drown, and fire-tick
+	# all skip the armor formula entirely. Cactus + lava still go
+	# through armor.
+	var bypasses_armor: bool = (
+		source == DAMAGE_FALL or source == DAMAGE_DROWN or source == DAMAGE_FIRE
+	)
+	if not bypasses_armor and inventory != null:
+		# Vanilla armor formula (`eb.b` in vendor/alpha-1.2.6-src):
+		#   n4 = damage × (25 - armor_points) + carry
+		#   final = n4 / 25 (int div)
+		#   carry = n4 % 25  (saved for next hit)
+		# The carry-remainder makes weak hits drip through over time:
+		# 8× 3-dmg zombie hits on full diamond (20 def) accumulate
+		# 8×15=120 → 4 HP of leak over the run. No `< 1` floor: a
+		# single 3-dmg hit on full diamond resolves to 0 damage,
+		# which is intended.
 		var total_defense: int = 0
 		for i in range(Inventory.ARMOR_SIZE):
 			var stack: ItemStack = inventory.slots[Inventory.ARMOR_START + i]
 			total_defense += Items.armor_defense(stack.item_id)
-		final_amount = int(round(float(amount) * float(25 - total_defense) / 25.0))
-		if final_amount < 1:
-			final_amount = 1  # vanilla: at least 1 damage if any made it through
-		# Vanilla EntityPlayer.damageArmor — each worn piece loses
-		# max(1, absorbed/4) durability per hit.
-		_damage_armor(amount - final_amount)
+		var n4: int = amount * (25 - total_defense) + _armor_damage_carry
+		final_amount = n4 / 25
+		_armor_damage_carry = n4 % 25
+		# Vanilla `eb.b` calls `this.e.e(n2)` BEFORE computing final
+		# damage — armor takes the FULL incoming damage as durability
+		# loss, not just the absorbed portion. Otherwise light hits that
+		# round away never wear armor down at all.
+		_damage_armor(amount)
 	health = maxi(0, health - final_amount)
 	_damage_cooldown_remaining = DAMAGE_COOLDOWN_SEC
 	# Vanilla branches on source: fall damage plays fall.big/.small,
@@ -1950,31 +2214,72 @@ func _show_death_screen() -> void:
 # Instant-respawn: teleport to the scene's spawn position and restore
 # health. Vanilla shows a death screen with a Respawn button; that's
 # deferred until the death-flow UI lands.
+# Resolve the world's safe spawn point: bed_spawn if the player has
+# slept, otherwise WorldMeta's recorded spawn, otherwise the fresh-
+# world default (8, 100, 8). Used by both respawn and the void-fall
+# recovery so they always teleport somewhere the world ring will
+# stream chunks around.
+func _safe_spawn_position() -> Vector3:
+	if has_bed_spawn:
+		return bed_spawn_pos
+	var meta: Dictionary = WorldMeta.load_meta()
+	if not meta.is_empty():
+		var spawn_dict: Dictionary = meta.get("spawn", {}) as Dictionary
+		if not spawn_dict.is_empty():
+			return Vector3(
+				float(spawn_dict.get("x", 8.0)),
+				float(spawn_dict.get("y", 100.0)),
+				float(spawn_dict.get("z", 8.0))
+			)
+	return Vector3(8.0, 100.0, 8.0)
+
+
+# Place the player at the world's safe spawn AND synchronously load
+# the destination chunk first — without the sync load, the player
+# teleports into AIR (unloaded chunks read as AIR), drops past y=-20,
+# and the void-fall recovery teleports them again to the same spot in
+# an infinite loop.
+func _teleport_to_safe_spawn() -> void:
+	safe_teleport(_safe_spawn_position())
+
+
+# Sync-load the 3×3 chunk neighborhood around `pos` THEN move the
+# player there. Every code path that writes `global_position` to a
+# coord that might not be in `ChunkManager._chunks` should route
+# through here — without the pre-load, the capsule lands in unloaded
+# space and gravity drops it through the void before the per-frame
+# streaming pass catches up. Hit a lot of regressions chasing
+# individual call sites (initial load, respawn, void recovery, F2
+# teleport); centralising prevents the next one from forgetting.
+func safe_teleport(pos: Vector3) -> void:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm != null and cm.has_method("_spawn_chunk_sync_neighborhood"):
+		var coord := Vector2i(
+			int(floor(pos.x / float(Chunk.SIZE_X))), int(floor(pos.z / float(Chunk.SIZE_Z)))
+		)
+		cm.call("_spawn_chunk_sync_neighborhood", coord)
+	global_position = pos
+
+
+# Called from the y < -20 fallback. Same chunk-sync + safe-spawn
+# teleport as respawn, but doesn't touch health / fire / inventory —
+# it's a recovery, not a death.
+func _recover_from_void() -> void:
+	_teleport_to_safe_spawn()
+	_fall_peak_y = global_position.y
+	_fall_immune_next_landing = true
+	_spawn_check_ticks_remaining = 90
+
+
 func _respawn() -> void:
 	Music.set_paused(false)
-	# Force-load the spawn chunk synchronously. Without this, dying far
-	# from origin can return to an unloaded chunk (0,0) — the player
-	# falls through AIR (unloaded cells read as AIR), drops past y=-20,
-	# the y < -20 fallback teleports back to the same unloaded chunk,
-	# and the cycle repeats indefinitely. Initial boot has this same
-	# protection via ChunkManager._initial_load → _spawn_chunk_sync.
-	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
-	if cm != null and cm.has_method("_spawn_chunk_sync"):
-		cm.call("_spawn_chunk_sync", Vector2i(0, 0))
-	# Bed-spawn override — if the player slept in a bed since the last
-	# death, respawn at that bed cell instead of the world spawn. Same
-	# spawn-chunk safety net (above) covers the bed location too; the
-	# _spawn_check_ticks_remaining budget below relocates the player if
-	# the bed cell happens to be inside a not-yet-streamed chunk.
-	if has_bed_spawn:
-		global_position = bed_spawn_pos
-	else:
-		global_position = Vector3(8, 100.0, 8)
+	_teleport_to_safe_spawn()
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y
 	_fall_immune_next_landing = true
 	_damage_cooldown_remaining = 0.0
 	_regen_accum = 0.0
+	_armor_damage_carry = 0
 	health = MAX_HEALTH
 	# Re-arm the spawn-relocate check so a respawn into water / floating /
 	# above an unloaded chunk gets corrected over the next ~30 physics
@@ -2026,11 +2331,17 @@ func _damage_armor(absorbed: int) -> void:
 		return
 	var per_piece_loss: int = maxi(1, absorbed / 4)
 	var any_changed: bool = false
+	var any_broke: bool = false
 	for i in range(Inventory.ARMOR_SIZE):
 		var stack: ItemStack = inventory.slots[Inventory.ARMOR_START + i]
 		if not stack.is_empty() and stack.max_durability() > 0:
-			stack.damage_tool(per_piece_loss)
+			if stack.damage_tool(per_piece_loss):
+				any_broke = true
 			any_changed = true
+	if any_broke:
+		# Vanilla `random.break` snap — reuse the tool-break SFX since
+		# ItemArmor.damageArmor calls the same break sound bus.
+		SFX.play_tool_break()
 	if any_changed:
 		inventory.changed.emit()
 
@@ -2155,7 +2466,7 @@ func _tick_lava(delta: float) -> void:
 				# Only tick the trailing burn OUTSIDE lava — while in
 				# lava, _LAVA_DAMAGE above already dominates. Avoids
 				# stacking 4+1 hits per tick.
-				take_damage(_FIRE_BURN_DAMAGE, DAMAGE_LAVA)
+				take_damage(_FIRE_BURN_DAMAGE, DAMAGE_FIRE)
 	else:
 		_fire_burn_tick = 0.0
 	# Third-person flame billboards on the character model. FP is handled

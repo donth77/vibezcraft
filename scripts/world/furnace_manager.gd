@@ -31,6 +31,16 @@ var _accum: float = 0.0
 var _chunk_manager: Node
 
 
+# Wipe all in-memory furnace state. Called from ChunkManager._ready
+# on every world load — see ChestStorage.clear_all for the
+# cross-world-bleed rationale. Resets the tick accumulator too so
+# the new world starts with a clean per-frame budget.
+func clear_all() -> void:
+	_furnaces.clear()
+	_lit_changes.clear()
+	_accum = 0.0
+
+
 func _process(delta: float) -> void:
 	if _chunk_manager == null:
 		_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")

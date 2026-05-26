@@ -15,11 +15,14 @@ extends "res://scripts/entities/mob_base.gd"
 #   * Drop count uses our standard 0-2 feather (Alpha 1.2.6 vanilla;
 #     Beta 1.8 swapped to rotten flesh — we keep the Alpha drop).
 #
-# Visual model: vanilla 64×32 `mh.java` ModelBiped — head (8×8×8) +
-# body (8×12×4) + 2 arms (4×12×4) + 2 legs (4×12×4). Limb-swing
-# animation on walk drives both arms (anti-phase) and both legs
-# (anti-phase). Arms swing FORWARD when chasing (vanilla raises arms
-# horizontally — the famous "shamble" pose).
+# Visual model: vanilla 64×32 ModelBiped (Alpha `dc.java`) — head
+# (8×8×8) + body (8×12×4) + 2 arms (4×12×4) + 2 legs (4×12×4). Walk
+# anim swings legs only (`dc.java::a()`); ModelZombie (`ck.java`)
+# overwrites the parent's arm swing with a locked horizontal pose +
+# subtle idle sway. Attack animation is a Beta-era addition (Alpha's
+# `eb.java::b_()` ticked swingProgress only on EntityPlayer; Beta
+# moved swing handling to EntityLiving + EntityMob.attackEntity, so
+# Beta zombies overhead-chomp on every melee hit).
 
 const _ZOMBIE_TEXTURE_PATH: String = "res://assets/textures/mob/zombie.png"
 const _ZOMBIE_TEXTURE_SIZE: Vector2i = Vector2i(64, 32)
@@ -99,16 +102,44 @@ const _AI_ARRIVE_DIST: float = 0.6
 const _AI_BURN_CHECK_INTERVAL: float = 1.0  # vanilla checks every tick; 1 s is plenty
 const _AI_BURN_DURATION_SEC: float = 8.0  # vanilla `setFire(8)` (8 s)
 
-# Walk-animation params — matches the pig/cow/sheep convention.
+# Walk-animation params — vanilla `dc.java::a()` (ModelBiped).
 const _WALK_FREQ: float = 0.6662
 const _WALK_DIST_SCALE: float = 12.0
 const _WALK_ANIM_LERP_PER_SEC: float = 8.0
-const _LEG_AMPLITUDE: float = 1.0  # legs swing through ±~57°
-const _ARM_AMPLITUDE: float = 0.8  # arms swing slightly less
-# Vanilla zombie pose: arms raised horizontally forward when targeting
-# a player. We add a fixed forward-pitch offset to the arm rotation
-# when chasing (i.e. when we have a path active).
-const _ARM_CHASE_PITCH: float = -PI * 0.4  # ~72° forward of vertical
+const _LEG_AMPLITUDE: float = 1.4  # vanilla: cos(phase) * 1.4 * walkAmount
+
+# Vanilla Alpha zombie arm pose — `ck.java::a()`. Both arms locked to
+# horizontal forward, parent ModelBiped's walk swing is OVERWRITTEN.
+# Only motion is idle sway + (Beta) attack swing.
+# Coord-system note: vanilla uses rotateAngleX = -π/2 because MC's Y
+# axis is inverted (+Y points DOWN, limbs extend in +Y from the
+# shoulder). Our pivot in Godot has the limb hanging in -Y, so rotating
+# +π/2 around X aims it at -Z (Godot's "forward"). All pitch math is
+# therefore SIGN-FLIPPED relative to `ck.java`: the chomp adds to pitch
+# instead of subtracting.
+const _ARM_HORIZONTAL_PITCH: float = PI * 0.5
+
+# Idle pitch sway — vanilla `ck.java::20-21` (`sin(ageInTicks * 0.067) *
+# 0.05`). 20 tps × 0.067 rad/tick = 1.34 rad/sec → ~4.7 s period;
+# amplitude 0.05 rad ≈ 3°. We drop the vanilla yaw + Z-roll terms
+# because (a) the roll axis is invisible under Godot's default YXZ
+# rotation order (Z applies AFTER the X pitch, so it rotates around
+# the limb's own forward axis — no visible tilt), and (b) the yaw
+# sign convention differs between MC and Godot so the chomp ends up
+# diverging instead of converging. Pitch-only is faithful to the
+# silhouette without the sign-convention pitfalls.
+const _IDLE_PITCH_FREQ_RPS: float = 20.0 * 0.067
+const _IDLE_SWAY_AMP: float = 0.05
+
+# Beta-style attack swing. `EntityLiving.swingItem()` set
+# `isSwingInProgress=true`; `onLivingUpdate()` ticked `swingProgressInt`
+# 0→6 (renderer reads `swingProgress = int/6`). EntityMob's melee path
+# called `swingItem()` so Beta zombies DID animate their hit (Alpha did
+# not — `b_()` was only overridden on EntityPlayer). 6 ticks at 20 tps
+# = 300 ms swing duration. We drive it from a real-time accumulator
+# rather than an int counter so the animation interpolates smoothly at
+# 60 Hz process rate.
+const _SWING_DURATION_SEC: float = 6.0 / 20.0
 const _STEP_STRIDE: float = 1.4
 
 # Idle SFX. Vanilla EntityLiving.B() rolls 1/120 per tick to play the
@@ -137,9 +168,12 @@ var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
 var _step_accum: float = 0.0
 var _idle_sfx_accum: float = 0.0
-# `true` while we have an active chase path — drives the arm-forward
-# shamble pose.
-var _is_chasing: bool = false
+# Free-running clock for idle-sway oscillation. Matches vanilla
+# `ageInTicks / 20` semantics.
+var _age_seconds: float = 0.0
+# Beta swing animation. > 0 ⇒ swing in progress; counts down each
+# frame. _swing_progress is the eased 0→1 ratio the chomp math reads.
+var _swing_remaining_sec: float = 0.0
 
 
 # MobBase environment overrides.
@@ -322,7 +356,6 @@ func _ai_tick() -> void:
 	_ai_repath_counter += 1
 	var player: Node3D = _find_player()
 	if player == null:
-		_is_chasing = false
 		_ai_path.clear()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
@@ -330,7 +363,6 @@ func _ai_tick() -> void:
 	# bigger than _AI_DETECT_RADIUS so we don't oscillate between chase
 	# and idle at the boundary.
 	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		_is_chasing = false
 		_ai_path.clear()
 		_ai_player_cache = null
 		return
@@ -342,7 +374,6 @@ func _ai_tick() -> void:
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
 			_attack_player(player)
-		_is_chasing = false
 		return
 	# Re-pathfind to the player's current cell every _AI_REPATH_TICKS or
 	# whenever we run out of path mid-chase. Vanilla rebuilds via
@@ -352,9 +383,6 @@ func _ai_tick() -> void:
 		_repath_toward(player)
 	if not _ai_path.is_empty():
 		_tick_walk_path()
-		_is_chasing = true
-	else:
-		_is_chasing = false
 
 
 # Locate the player node under Main. Cached after first hit since the
@@ -416,9 +444,18 @@ func _attack_player(player: Node3D) -> void:
 		return
 	# Vanilla EntityMob.l calls EntityHuman.a(this, attackDamage) which
 	# routes to EntityHuman.attackEntityFrom. We mirror via
-	# Player.take_damage(amount, source).
-	player.call("take_damage", _AI_MELEE_DAMAGE, Player.DAMAGE_MOB)
+	# Player.take_damage(amount, source). Source tag is the literal
+	# string "mob" instead of Player.DAMAGE_MOB because `Player` isn't
+	# declared as a global class_name (player.gd just `extends
+	# CharacterBody3D`), so the bare reference fails to parse at
+	# script load. Player.gd's DAMAGE_MOB const is `"mob"`.
+	player.call("take_damage", _AI_MELEE_DAMAGE, "mob")
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
+	# Beta `EntityLiving.swingItem()` — flip the swing flag so the
+	# overhead-chomp animation plays. Vanilla restarts the swing even
+	# mid-cycle by setting swingProgressInt = -1, so overlapping
+	# attacks always look like a fresh hit.
+	_swing_remaining_sec = _SWING_DURATION_SEC
 
 
 # Slow the zombie to a near-stop on in-melee frames so it doesn't push
@@ -490,6 +527,9 @@ func _is_world_daytime() -> bool:
 
 
 func _advance_walk_animation(delta: float) -> void:
+	_age_seconds += delta
+	if _swing_remaining_sec > 0.0:
+		_swing_remaining_sec = maxf(0.0, _swing_remaining_sec - delta)
 	var vx: float = velocity.x
 	var vz: float = velocity.z
 	var sp_sq: float = vx * vx + vz * vz
@@ -499,24 +539,41 @@ func _advance_walk_animation(delta: float) -> void:
 	_walk_anim_amount = lerpf(_walk_anim_amount, target_amount, lerp_t)
 	_walk_dist += _walk_anim_amount * delta * _WALK_DIST_SCALE
 	var phase: float = _walk_dist * _WALK_FREQ
-	var leg_swing: float = sin(phase) * _LEG_AMPLITUDE * _walk_anim_amount
-	var arm_swing: float = sin(phase + PI) * _ARM_AMPLITUDE * _walk_anim_amount
-	# Vanilla ModelZombie raises both arms forward (parallel) while
-	# chasing — the "shamble" pose. Without a chase, arms swing
-	# anti-phase to legs (normal walk).
-	var arm_base: float = _ARM_CHASE_PITCH if _is_chasing else 0.0
+	# Legs: vanilla dc.java:70-71 — cos(phase) * 1.4 * walkAmount, hips
+	# anti-phase. Period matches the arm-swing of a normal biped, but
+	# here only legs swing.
+	var leg_swing: float = cos(phase) * _LEG_AMPLITUDE * _walk_anim_amount
 	if _leg_l_pivot != null:
 		_leg_l_pivot.rotation.x = leg_swing
 	if _leg_r_pivot != null:
 		_leg_r_pivot.rotation.x = -leg_swing
-	if _arm_l_pivot != null:
-		_arm_l_pivot.rotation.x = arm_base + arm_swing
-	if _arm_r_pivot != null:
-		_arm_r_pivot.rotation.x = arm_base - arm_swing
+	_apply_zombie_arm_pose()
 	_step_accum += speed * delta
 	if _step_accum >= _STEP_STRIDE:
 		_step_accum -= _STEP_STRIDE
 		_play_step()
+
+
+# Apply the vanilla Alpha zombie arm pose — `ck.java::a()`. Arms hang
+# horizontal forward (-π/2 pitch), idle-sway in pitch+roll, plus the
+# Beta overhead-chomp added by `swingProgress`.
+func _apply_zombie_arm_pose() -> void:
+	var swing: float = 0.0
+	if _swing_remaining_sec > 0.0:
+		swing = 1.0 - (_swing_remaining_sec / _SWING_DURATION_SEC)
+	# Vanilla ck.java:8-9: f8 = sin(swing * π); f9 = sin((1-(1-swing)²)*π).
+	# Chomp peaks at swing=0.5 with arms ~46° above horizontal, returns
+	# to horizontal at swing=1.
+	var f8: float = sin(swing * PI)
+	var inv: float = 1.0 - swing
+	var f9: float = sin((1.0 - inv * inv) * PI)
+	var chomp_pitch: float = f8 * 1.2 - f9 * 0.4
+	# Idle sway mirrored L/R so arms wobble in counter-phase.
+	var idle_pitch: float = sin(_age_seconds * _IDLE_PITCH_FREQ_RPS) * _IDLE_SWAY_AMP
+	if _arm_r_pivot != null:
+		_arm_r_pivot.rotation = Vector3(_ARM_HORIZONTAL_PITCH + chomp_pitch + idle_pitch, 0.0, 0.0)
+	if _arm_l_pivot != null:
+		_arm_l_pivot.rotation = Vector3(_ARM_HORIZONTAL_PITCH + chomp_pitch - idle_pitch, 0.0, 0.0)
 
 
 func _play_step() -> void:

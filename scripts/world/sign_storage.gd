@@ -24,6 +24,13 @@ const MAX_CHARS_PER_LINE: int = 15
 var _signs: Dictionary = {}
 
 
+# Wipe all in-memory sign entries. Called from ChunkManager._ready
+# on every world load — see ChestStorage.clear_all for the
+# cross-world-bleed rationale.
+func clear_all() -> void:
+	_signs.clear()
+
+
 # Live 4-string array for the sign at `pos`, creating an empty entry
 # (4 empty strings) on first access.
 func get_or_create(pos: Vector3i) -> Array:

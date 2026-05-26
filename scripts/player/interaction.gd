@@ -47,6 +47,14 @@ const _PAINTING_SCRIPT := preload("res://scripts/entities/painting.gd")
 # fix as the EntityLighting preload in boat.gd / minecart.gd — call the
 # static through the preloaded GDScript.
 const _CHAT_HUD: GDScript = preload("res://scripts/ui/chat_hud.gd")
+# Debounce window for "transient mining cancel" — the empty-hit and
+# AIR-target branches in _update_mining can fire for 1-2 frames during
+# chunk re-mesh (e.g. just after surfacing from water where the trimesh
+# under the player is still rebuilding). Each transient-cancel frame
+# increments _mining_cancel_streak; only when it crosses the threshold
+# do we actually flip is_mining to false. LMB-release + entity-hit are
+# real intent changes and bypass the debounce.
+const _MINING_CANCEL_DEBOUNCE_FRAMES: int = 2
 
 var _last_place_ms: int = 0
 # Bow charge state. `_bow_charging` flips true when interact_place is
@@ -96,6 +104,7 @@ var _last_mining_particle_ms: int = 0
 # Wall-clock timestamp when the current mining session started (sec).
 # Used purely by the debug logger to compare expected vs measured break.
 var _mining_started_at: float = 0.0
+var _mining_cancel_streak: int = 0
 
 @onready var _camera: Camera3D = get_parent().get_node("Camera3D")
 @onready var _chunk_manager: Node3D = get_tree().root.get_node_or_null("Main/ChunkManager")
@@ -588,13 +597,19 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 	# long as the click is held and only re-targets when a different
 	# block is under the cursor.
 	if not holding:
+		_mining_cancel_streak = 0
 		_set_player_mining(false)
 		_reset_mining()
 		return
 	if hit.is_empty() or _chunk_manager == null:
 		# Stop the animation but PRESERVE progress so a one-frame miss
-		# during chunk re-mesh doesn't undo seconds of work.
-		_set_player_mining(false)
+		# during chunk re-mesh doesn't undo seconds of work. Debounce
+		# the cancel so a single transient frame (e.g. surfacing from
+		# water while the chunk re-meshes) doesn't visibly freeze the
+		# swing for a tick.
+		_mining_cancel_streak += 1
+		if _mining_cancel_streak > _MINING_CANCEL_DEBOUNCE_FRAMES:
+			_set_player_mining(false)
 		return
 	# Entity in the raycast (mob or boat) — mining is for blocks only;
 	# the crack overlay should never appear on entities and we shouldn't
@@ -606,13 +621,15 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 		or _find_boat_from_hit(hit) != null
 		or _find_minecart_from_hit(hit) != null
 	):
+		_mining_cancel_streak = 0
 		_set_player_mining(false)
 		_reset_mining()
 		return
-	_set_player_mining(true)
 	var target: Vector3i = hit.block_pos
 	# Creative mode: instant break, ignore bedrock indestructibility, always drop
 	if _is_creative():
+		_mining_cancel_streak = 0
+		_set_player_mining(true)
 		_creative_break(target)
 		_reset_mining()
 		return
@@ -623,10 +640,18 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 	# `Blocks.break_time(AIR, ...)` fall through hardness' match and return
 	# the default 1.0 hardness → a spurious ~1.5 s "slow" timer that the
 	# player sees as the crack resetting and progressing slowly.
+	# Same debounce as the empty-hit branch — a fresh chunk's first
+	# raycast frame can briefly report AIR while the worker is finishing
+	# the trimesh; cancelling immediately makes the swing visibly stutter.
 	var target_id_now: int = _chunk_manager.get_world_block(target)
 	if target_id_now == Blocks.AIR:
-		_set_player_mining(false)
+		_mining_cancel_streak += 1
+		if _mining_cancel_streak > _MINING_CANCEL_DEBOUNCE_FRAMES:
+			_set_player_mining(false)
 		return
+	# Valid target — clear the transient-cancel streak and commit.
+	_mining_cancel_streak = 0
+	_set_player_mining(true)
 	if target != _mining_target:
 		_start_mining(target)
 		if _mining_total_time < 0.0:

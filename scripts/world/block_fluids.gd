@@ -377,8 +377,13 @@ static func _is_solid_blocker(id: int) -> bool:
 		return false
 	if Blocks.is_water(id) or Blocks.is_lava(id):
 		return false
-	# Plants / glass / sapling don't block fluid in vanilla.
-	return Blocks.is_opaque(id)
+	# Use `is_solid_collision` instead of `is_opaque` so blocks that are
+	# rendered non-opaque but physically solid (CHEST, MOB_SPAWNER,
+	# LEAVES, GLASS, etc.) correctly block fluid flow. Vanilla water
+	# flows AROUND chests / over leaves rather than through them, and a
+	# dungeon spawner shouldn't get overwritten by an adjacent water
+	# stream just because its cage renders see-through.
+	return Blocks.is_solid_collision(id)
 
 
 # True if the cell below `pos` is a solid blocker — fluid pools on top of

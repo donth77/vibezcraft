@@ -82,6 +82,85 @@ static func clear(pos: Vector3i) -> void:
 	_spawners.erase(pos)
 
 
+# --- Persistence hooks ---
+
+
+# Returns {Vector3i_local: mob_name_string} for every spawner whose
+# world coord falls inside the chunk at `chunk_coord`. Used by
+# ChunkManager._persist_chunk to bundle the configured mob type into
+# the saved chunk's tile_entities dict. Mirrors ChestStorage's API.
+static func serialize_chunk(chunk_coord: Vector2i) -> Dictionary:
+	var result: Dictionary = {}
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	for world_pos: Vector3i in _spawners.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		var local_pos := Vector3i(world_pos.x - min_x, world_pos.y, world_pos.z - min_z)
+		result[local_pos] = _spawners[world_pos].get("mob_name", "")
+	return result
+
+
+# Drop every spawner in the given chunk from the live store. Called
+# by ChunkManager._persist_chunk right after serialize_chunk so the
+# unloaded chunk's tile entities don't linger in memory.
+static func forget_chunk(chunk_coord: Vector2i) -> void:
+	var min_x: int = chunk_coord.x * Chunk.SIZE_X
+	var min_z: int = chunk_coord.y * Chunk.SIZE_Z
+	var max_x: int = min_x + Chunk.SIZE_X
+	var max_z: int = min_z + Chunk.SIZE_Z
+	var to_remove: Array[Vector3i] = []
+	for world_pos: Vector3i in _spawners.keys():
+		if world_pos.x < min_x or world_pos.x >= max_x:
+			continue
+		if world_pos.z < min_z or world_pos.z >= max_z:
+			continue
+		to_remove.append(world_pos)
+	for pos: Vector3i in to_remove:
+		_spawners.erase(pos)
+
+
+# Inverse of serialize_chunk. `dict` is {Vector3i_local:
+# mob_name_string}. Called from ChunkManager._materialize_chunk after
+# a saved chunk loads.
+#
+# We DON'T call `configure` here because configure schedules a new
+# first-tick (1 s), which would stack on top of the spawner's ORIGINAL
+# pending tick that ChunkManager already restored via
+# `TickScheduler.restore_ticks` (chunk_manager.gd:505, fires BEFORE this
+# restore). Doing both produces two scheduled ticks per spawner and
+# resets the cooldown to 1 s on every reload — a save-scum. Just
+# populate the dict; the existing tick will fire on its rolled delay.
+static func restore_chunk(chunk_coord: Vector2i, dict: Dictionary) -> void:
+	var origin_x: int = chunk_coord.x * Chunk.SIZE_X
+	var origin_z: int = chunk_coord.y * Chunk.SIZE_Z
+	for local_pos: Vector3i in dict.keys():
+		var world_pos := Vector3i(origin_x + local_pos.x, local_pos.y, origin_z + local_pos.z)
+		var mob_name: String = str(dict[local_pos])
+		if mob_name.is_empty():
+			continue
+		if not _MOB_REGISTRY.has(mob_name):
+			push_warning("[mob_spawner] unknown mob name on restore: %s" % mob_name)
+			continue
+		_spawners[world_pos] = {"mob_name": mob_name}
+
+
+# Wipe all in-memory spawner entries. Called from ChunkManager._ready
+# (new world load) so leftover entries from the previous world don't
+# leak — without this, switching from World 1 to World 2 keeps old
+# spawner positions in _spawners, and they self-clean lazily on first
+# on_tick (one wasted scheduling cycle per stale entry). Same pattern
+# as ChestStorage/JukeboxStorage would benefit from but is broader
+# than this feature.
+static func clear_all() -> void:
+	_spawners.clear()
+	_player_cache = null
+
+
 # Fired by Blocks.on_scheduled_tick → BlockTickDispatcher.
 # Tries to spawn mobs, then re-schedules another tick.
 static func on_tick(manager: Node, pos: Vector3i) -> void:

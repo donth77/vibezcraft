@@ -19,6 +19,13 @@ extends Node
 var _jukeboxes: Dictionary = {}
 
 
+# Wipe all in-memory jukebox entries. Called from ChunkManager._ready
+# on every world load — see ChestStorage.clear_all for the
+# cross-world-bleed rationale.
+func clear_all() -> void:
+	_jukeboxes.clear()
+
+
 # Insert / replace the disc in this jukebox. Returns the PREVIOUS disc
 # id (or 0 if the slot was empty) so the caller can spawn it as a
 # DroppedItem (the "eject before insert" path).

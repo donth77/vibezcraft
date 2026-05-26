@@ -51,6 +51,15 @@ var has_non_cube_blocks: bool = false
 # instead of scanning all 32 KB of chunk.blocks on the main thread —
 # `_enqueue_existing_canes` used to be ~12 ms per materialize.
 var cane_tops: Array[Vector3i] = []
+# Worker-thread → main-thread handoff for tile-entity registrations
+# produced during worldgen (e.g. dungeon spawner mob-name, dungeon
+# chest contents). The worker can't safely mutate the global
+# MobSpawnerManager / ChestStorage dicts, so it records intent here
+# and ChunkManager._materialize_chunk drains the list on the main
+# thread once the chunk is in _chunks. Cleared on drain. Each entry
+# is `{"type": String, "pos": Vector3i_local, ...}` — see
+# scripts/world/worldgen_dungeons.gd for the per-type payload shape.
+var pending_tile_entities: Array = []
 # Sticky flag set when any water cell exists in the chunk. Mesher uses it
 # to build the water sub-mesh; chunk_node.gd uses it to spawn the second
 # MeshInstance3D with the water shader material. Same sticky-only-grows

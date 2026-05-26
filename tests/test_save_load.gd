@@ -227,6 +227,15 @@ func test_default_world_name_routes_to_active_world() -> void:
 	Game.active_world = "test_save_load_active_routing"
 	SaveLoad.delete_world(Game.active_world)
 	SaveLoad.clear_cache()
+	# Snapshot World1's chunk(0,0) state. The regression we're testing
+	# is "save_chunk without world_name shouldn't accidentally write to
+	# the historical 'World1' default" — so we just need to confirm
+	# World1's chunk is BYTE-IDENTICAL before and after our save. This
+	# works whether World1 is empty on disk or holds real player data
+	# (CI vs. dev machine, where the user has actually played).
+	var world1_before: Dictionary = SaveLoad.load_chunk(Vector2i(0, 0), "World1")
+	var world1_had_bytes: bool = world1_before.has("bytes")
+	var world1_bytes_before: PackedByteArray = world1_before.get("bytes", PackedByteArray())
 	var blocks := PackedByteArray()
 	blocks.resize(Chunk.TOTAL_BLOCKS)
 	blocks.fill(Blocks.STONE)
@@ -236,10 +245,19 @@ func test_default_world_name_routes_to_active_world() -> void:
 		FileAccess.file_exists(SaveLoad.region_path(0, 0, "test_save_load_active_routing")),
 		"region file written to active world"
 	)
-	assert_false(
-		SaveLoad.load_chunk(Vector2i(0, 0), "World1").has("bytes"),
-		"World1 untouched when active world differs"
+	SaveLoad.clear_cache()
+	var world1_after: Dictionary = SaveLoad.load_chunk(Vector2i(0, 0), "World1")
+	assert_eq(
+		world1_after.has("bytes"),
+		world1_had_bytes,
+		"World1 chunk(0,0) presence unchanged by save to a different active world"
 	)
+	if world1_had_bytes:
+		assert_eq(
+			world1_after.get("bytes", PackedByteArray()),
+			world1_bytes_before,
+			"World1 chunk(0,0) bytes unchanged by save to a different active world"
+		)
 	# Cleanup
 	SaveLoad.delete_world(Game.active_world)
 	Game.active_world = saved_active

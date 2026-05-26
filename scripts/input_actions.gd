@@ -62,6 +62,7 @@ const DEBUG_ACTIONS: Array = [
 	["debug_lighting_view", "Cycle Light Heatmap"],
 	["debug_biome_scan", "Dump Biome Map"],
 	["debug_fast_day", "Toggle Fast Day Cycle"],
+	["debug_find_dungeon", "Teleport to Nearest Dungeon"],
 ]
 
 
@@ -155,6 +156,11 @@ static func register_defaults() -> void:
 	# dev watch lighting through a full cycle without sitting around for
 	# 20 minutes. Handled in day_night_driver.gd.
 	_add_key("debug_fast_day", KEY_N)
+	# F2 = teleport to the nearest dungeon spawner in any loaded chunk.
+	# Debug-only — used to QA the dungeon worldgen pass without
+	# spelunking through caves. F2 is unused on macOS by default
+	# (unlike F9/F10/F11 which Mission Control eats).
+	_add_key("debug_find_dungeon", KEY_F2)
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:
