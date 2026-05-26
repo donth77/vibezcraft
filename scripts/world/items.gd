@@ -312,6 +312,12 @@ const MUSIC_DISC_OPEN_SKY: int = 195
 const MUSIC_DISC_HEARTHSTONE: int = 196
 const MUSIC_DISC_STILL_WATER: int = 197
 
+# Bone — vanilla ItemBone (id 352 → 198 here). Skeleton drop (skeletons
+# ship in a follow-up alongside spider/creeper). Also a primary
+# loot-table entry in dungeon chests (vanilla cm.java's index 5 in the
+# 11-slot table, count 1-4). Stack to 64.
+const BONE: int = 198
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -560,6 +566,12 @@ static func id_from_name(item_name: String) -> int:
 			return CLOCK
 		"redstone":
 			return REDSTONE
+		"redstone_dust":
+			# Alias — vanilla calls the item "redstone" pre-Beta + most
+			# wikis call it "Redstone Dust". Loot tables read either name.
+			return REDSTONE
+		"bone":
+			return BONE
 		"tnt":
 			return Blocks.TNT
 		"air":
@@ -901,6 +913,8 @@ static func display_name(item_id: int) -> String:
 			return "Clock"
 		REDSTONE:
 			return "Redstone"
+		BONE:
+			return "Bone"
 		Blocks.TNT:
 			return "TNT"
 		Blocks.AIR:

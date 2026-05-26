@@ -529,6 +529,12 @@
       "result": {"id": "mushroom_stew", "count": 1}
     },
     {
+      "_comment": "Bone meal — Beta 1.2 ItemDye recipe. 1 bone → 3 bonemeal. Shapeless. https://minecraft.wiki/w/Bone_Meal — vanilla yield is 3 per bone since Beta 1.2.",
+      "id": "bonemeal",
+      "ingredients": ["bone"],
+      "result": {"id": "bonemeal", "count": 3}
+    },
+    {
       "_comment": "Sugar [BETA 1.2]. 1 sugar_cane → 1 sugar. Shapeless single-input.",
       "id": "sugar",
       "ingredients": ["sugar_cane"],

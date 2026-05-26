@@ -221,6 +221,8 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	Items.MUSIC_DISC_OPEN_SKY: "music_disc_open_sky",
 	Items.MUSIC_DISC_HEARTHSTONE: "music_disc_hearthstone",
 	Items.MUSIC_DISC_STILL_WATER: "music_disc_still_water",
+	# Bone — dropped by skeletons (once they land) + dungeon chest loot.
+	Items.BONE: "bone",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

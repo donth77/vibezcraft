@@ -54,25 +54,68 @@ const _FLOOR_MOSSY_RATIO: float = 0.3
 # rest will land here as skeleton/spider classes ship.
 const _SPAWNER_MOB_POOL: Array = ["zombie"]
 
-# Chest loot — vanilla cm.java::a uses an 8-item table with weights.
-# Each chest rolls 3-5 random picks. We mirror the table; the
-# `count_max` per item caps the stack size at the vanilla maximum.
+# Chest loot — Alpha 1.2.6 `cp.java::a(Random)` does an 11-slot roll
+# where most items have weight 1 (equal probability) and two items
+# (golden apple + music disc) are gated behind a secondary rare roll.
+# We mirror that shape: common items get weight 1, golden apple +
+# music disc are SECONDARY rolls (only triggered when the outer slot
+# rolls onto them AND a sub-roll passes). Modern Monster Room wiki
+# extends the table with bone + coal + leather + redstone — those
+# slot in as additional weight-1 entries.
+#
+# Per slot:
+#   * "item" — id_from_name lookup at fill time (alias "redstone_dust"
+#     resolves to REDSTONE; "music_disc" picks one of our 8 discs).
+#   * "weight" — relative odds within the outer roll.
+#   * "count_max" — count rolled uniformly in [1, count_max].
+#   * "rare_chance" — if present, an additional 1/N sub-roll gates
+#     the slot. Mirrors vanilla cp.java's `random.nextInt(N) == 0`
+#     pattern for golden_apple (1/100) and music_disc (1/10).
 const _LOOT_TABLE: Array = [
-	# {item_name, weight, count_max}. Weights sum to 16; the picker
-	# does a weighted roll. Items resolved via Items.id_from_name at
-	# fill time so the table reads as configuration data.
-	{"item": "saddle", "weight": 1, "count_max": 1},
-	{"item": "iron_ingot", "weight": 2, "count_max": 4},
-	{"item": "bread", "weight": 4, "count_max": 1},
-	{"item": "wheat", "weight": 1, "count_max": 4},
-	{"item": "gunpowder", "weight": 2, "count_max": 4},
-	{"item": "string", "weight": 4, "count_max": 4},
+	# Bulk drops — most common (1-4 per slot). Direct from Alpha's
+	# equal-weight slot pattern.
+	{"item": "bone", "weight": 1, "count_max": 4},
+	{"item": "gunpowder", "weight": 1, "count_max": 4},
+	{"item": "string", "weight": 1, "count_max": 4},
+	{"item": "coal", "weight": 1, "count_max": 4},
+	{"item": "redstone_dust", "weight": 1, "count_max": 4},
+	{"item": "iron_ingot", "weight": 1, "count_max": 4},
+	{"item": "gold_ingot", "weight": 1, "count_max": 4},
+	# Modest counts — vanilla 1-2 per slot.
+	{"item": "wheat", "weight": 1, "count_max": 2},
+	{"item": "leather", "weight": 1, "count_max": 2},
+	# Single-item slots — vanilla 1 only.
+	{"item": "bread", "weight": 1, "count_max": 1},
 	{"item": "bucket_empty", "weight": 1, "count_max": 1},
-	{"item": "golden_apple", "weight": 1, "count_max": 1},
+	{"item": "saddle", "weight": 1, "count_max": 1},
+	# Rare slots — gated by an additional sub-roll. Alpha cp.java has
+	# golden_apple at 1/100 and music_disc at 1/10. Lower outer weight
+	# would push the rare items off entirely; keeping weight 1 + the
+	# sub-roll matches vanilla's published rarity.
+	{"item": "golden_apple", "weight": 1, "count_max": 1, "rare_chance": 100},
+	{"item": "music_disc", "weight": 1, "count_max": 1, "rare_chance": 10},
 ]
 
+# Picks per chest — Alpha `cm.java` runs 8 fill iterations against a
+# 27-slot inventory; many roll `null` (no item) and don't drop in.
+# Realised drops per chest land around 3-5. We just roll 3-5 directly
+# so the player sees a consistent loot density.
 const _LOOT_PICKS_PER_CHEST_MIN: int = 3
 const _LOOT_PICKS_PER_CHEST_MAX: int = 5
+
+# Music disc pool — when the "music_disc" loot slot lands, pick one
+# of our 8 discs uniformly. Vanilla Alpha had 2 discs (13 + cat) so
+# the random.nextInt(2) pick maps a similar choice across our set.
+const _DISC_POOL: Array = [
+	"music_disc_first_light",
+	"music_disc_green_distance",
+	"music_disc_long_shadow",
+	"music_disc_hollow_earth",
+	"music_disc_bedrock",
+	"music_disc_open_sky",
+	"music_disc_hearthstone",
+	"music_disc_still_water",
+]
 
 # Salts for the deterministic per-attempt hashes. Distinct from
 # worldgen.gd's tree / ore salts (those use 999983, 1, 2, 3, etc.) so
@@ -263,8 +306,11 @@ static func _place_chests(
 
 
 # Fill a freshly-placed chest with 3-5 random items from the loot
-# table. Picks each slot by weighted roll over _LOOT_TABLE; count per
-# slot is 1..count_max.
+# table. Each pick rolls the weighted table; if the landed slot has
+# a `rare_chance` field, it ALSO has to pass a 1/N sub-roll (vanilla
+# Alpha cp.java pattern for golden_apple at 1/100 and music_disc at
+# 1/10). Rare-roll failures drop the pick so the empty slot stays
+# empty — keeps the rare items rare without distorting outer weights.
 static func _fill_chest(
 	world_pos: Vector3i, chunk_x: int, chunk_z: int, attempt: int, chest_idx: int
 ) -> void:
@@ -272,19 +318,18 @@ static func _fill_chest(
 	var picks_seed: int = _hash4(chunk_x * 41 + attempt, chunk_z * 41 + chest_idx, 1, _SALT_LOOT)
 	var pick_range: int = _LOOT_PICKS_PER_CHEST_MAX - _LOOT_PICKS_PER_CHEST_MIN + 1
 	var picks: int = _LOOT_PICKS_PER_CHEST_MIN + (picks_seed % pick_range)
-	# Weight totals for the weighted roll. Computed up-front so the
-	# inner loop is one hash + mod + linear scan over the table.
 	var total_weight: int = 0
 	for entry: Dictionary in _LOOT_TABLE:
 		total_weight += int(entry["weight"])
 	for pick_idx in range(picks):
-		# Two hashes per pick: one for item-index selection, one for
-		# the stack count. Same `attempt + chest_idx + pick_idx` key.
 		var item_seed: int = _hash4(
 			chunk_x * 67 + chest_idx, chunk_z * 67 + pick_idx, attempt, _SALT_LOOT + 1
 		)
 		var count_seed: int = _hash4(
 			chunk_x * 71 + chest_idx, chunk_z * 71 + pick_idx, attempt, _SALT_LOOT + 2
+		)
+		var rare_seed: int = _hash4(
+			chunk_x * 73 + chest_idx, chunk_z * 73 + pick_idx, attempt, _SALT_LOOT + 3
 		)
 		var roll: int = item_seed % total_weight
 		var entry: Dictionary = _LOOT_TABLE[0]
@@ -294,15 +339,26 @@ static func _fill_chest(
 			if roll < acc:
 				entry = candidate
 				break
+		# Rare-roll gate. Vanilla `random.nextInt(N) == 0` pattern; if
+		# the slot has `rare_chance: N`, only 1 in N picks actually fills.
+		if entry.has("rare_chance"):
+			var rare_chance: int = int(entry["rare_chance"])
+			if rare_chance > 1 and (rare_seed % rare_chance) != 0:
+				continue
 		var item_name: String = entry["item"]
+		# `music_disc` is a meta-name — resolve to one of the 8 disc
+		# items by hashing into _DISC_POOL. Alpha cp.java picks 1-of-2
+		# discs via `dx.c[dx.aU.aW + random.nextInt(2)]`; same shape here.
+		if item_name == "music_disc":
+			var disc_seed: int = _hash4(
+				chunk_x * 79 + chest_idx, chunk_z * 79 + pick_idx, attempt, _SALT_LOOT + 4
+			)
+			item_name = _DISC_POOL[disc_seed % _DISC_POOL.size()]
 		var item_id: int = Items.id_from_name(item_name)
 		if item_id < 0:
-			continue  # unknown item — silently skip
+			continue
 		var count_max: int = int(entry["count_max"])
 		var count: int = 1 + (count_seed % count_max)
-		# Find the first empty slot in the chest's 27-slot inventory
-		# and drop the stack there. ChestStorage.get_or_create returns
-		# Array[ItemStack] with empty stacks pre-populated.
 		for slot_idx in range(slots.size()):
 			var stack: ItemStack = slots[slot_idx]
 			if stack.is_empty():
