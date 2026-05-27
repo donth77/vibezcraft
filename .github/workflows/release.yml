@@ -1,0 +1,184 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/version label for the draft release (e.g. v1.0.0)"
+        required: true
+        default: "v0.0.0-test"
+
+env:
+  GODOT_VERSION: "4.6.2"
+  GODOT_RELEASE: "4.6.2-stable"
+
+jobs:
+  build-macos:
+    name: macOS (arm64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install scons
+        run: pip3 install --break-system-packages scons
+
+      - name: Build native (arm64)
+        run: |
+          scons platform=macos target=template_release arch=arm64 -j$(sysctl -n hw.ncpu)
+          scons platform=macos target=template_release arch=x86_64 -j$(sysctl -n hw.ncpu)
+          lipo -create \
+            bin/libmesher_native.macos.template_release.arm64.dylib \
+            bin/libmesher_native.macos.template_release.x86_64.dylib \
+            -output bin/libmesher_native.macos.template_release.universal.dylib
+          ls -la bin/
+
+      - name: Install Godot + export templates
+        run: |
+          set -e
+          GODOT_ZIP="Godot_v${GODOT_RELEASE}_macos.universal.zip"
+          TEMPLATES_TPZ="Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          curl -fL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${GODOT_ZIP}" -o godot.zip
+          unzip -q godot.zip
+          mv "Godot.app" "/Applications/Godot.app"
+          curl -fL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${TEMPLATES_TPZ}" -o templates.tpz
+          TPL_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$TPL_DIR"
+          unzip -q templates.tpz
+          mv templates/* "$TPL_DIR/"
+          ls "$TPL_DIR" | head
+
+      - name: Import project (warms .godot cache)
+        run: |
+          /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --import || true
+          /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --import
+
+      - name: Export macOS
+        run: |
+          mkdir -p exports/macos
+          /Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
+            --export-release "macOS" exports/macos/VibezCraft.zip
+          ls -la exports/macos/
+
+      - name: Rename artifact
+        run: mv exports/macos/VibezCraft.zip exports/macos/VibezCraft-macOS-universal.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibezcraft-macos
+          path: exports/macos/VibezCraft-macOS-universal.zip
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install scons
+        run: python -m pip install scons
+
+      - name: Build native (x86_64)
+        shell: bash
+        run: |
+          scons platform=windows target=template_release arch=x86_64 -j$(nproc)
+          ls bin/
+
+      - name: Install Godot + export templates
+        shell: bash
+        run: |
+          set -e
+          GODOT_ZIP="Godot_v${GODOT_RELEASE}_win64.exe.zip"
+          TEMPLATES_TPZ="Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          curl -fL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${GODOT_ZIP}" -o godot.zip
+          unzip -q godot.zip
+          mv "Godot_v${GODOT_RELEASE}_win64.exe" godot.exe
+          curl -fL "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/${TEMPLATES_TPZ}" -o templates.tpz
+          TPL_DIR="$APPDATA/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$TPL_DIR"
+          unzip -q templates.tpz
+          mv templates/* "$TPL_DIR/"
+          ls "$TPL_DIR" | head
+
+      - name: Import project (warms .godot cache)
+        shell: bash
+        run: |
+          ./godot.exe --headless --path . --import || true
+          ./godot.exe --headless --path . --import
+
+      - name: Export Windows
+        shell: bash
+        run: |
+          mkdir -p exports/windows
+          ./godot.exe --headless --path . \
+            --export-release "Windows Desktop" exports/windows/VibezCraft.exe
+          ls -la exports/windows/
+
+      - name: Bundle Windows artifact
+        shell: bash
+        run: |
+          cd exports/windows
+          7z a VibezCraft-Windows-x86_64.zip VibezCraft.exe VibezCraft.console.exe VibezCraft.pck 2>/dev/null || \
+          7z a VibezCraft-Windows-x86_64.zip *
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibezcraft-windows
+          path: exports/windows/VibezCraft-Windows-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vibezcraft-macos
+          path: dist/
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vibezcraft-windows
+          path: dist/
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist/
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --draft \
+            --title "VibezCraft ${{ steps.tag.outputs.tag }}" \
+            --notes-file .github/RELEASE_NOTES.md \
+            dist/*.zip
