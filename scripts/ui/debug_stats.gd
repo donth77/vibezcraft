@@ -39,22 +39,23 @@ func _ready() -> void:
 	# has released the mouse (Esc). Label + scroll child are IGNORE, the
 	# Button defaults to STOP on its own hit rect.
 	mouse_filter = Control.MOUSE_FILTER_PASS
-	# Anchor top-right. Width is fixed by the offset pair (560 → 16 from
-	# the right edge = 544 px). Vertical: anchored to the TOP only and
-	# explicitly told to grow downward so the perf-label re-layout per
-	# update doesn't bounce the panel position around. The ScrollContainer
-	# below caps perf-text height so the overall panel never escapes the
-	# viewport.
+	# Anchor top-right AND bottom-right so the panel has a defined max
+	# height — viewport_height - 56 (top inset) - 16 (bottom inset) ≈ 1008 px
+	# at 1080p. Previously the panel only anchored to TOP and grew
+	# downward indefinitely, so the inner ScrollContainer's "min size 420"
+	# was treated as natural size and the SC grew to match its content —
+	# no scrollbar, panel just ran off the bottom of the screen as more
+	# probes landed. Bottom-anchor + SIZE_EXPAND_FILL on the SC below
+	# gives it a hard rect; content beyond that scrolls.
 	anchor_left = 1.0
 	anchor_top = 0.0
 	anchor_right = 1.0
-	anchor_bottom = 0.0
+	anchor_bottom = 1.0
 	offset_left = -560
 	offset_top = 56
 	offset_right = -16
-	offset_bottom = 56  # container will expand downward as needed
+	offset_bottom = -16
 	grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	grow_vertical = Control.GROW_DIRECTION_END
 	# Belt-and-braces: don't paint outside our own rect even if a child's
 	# minimum size ever does briefly exceed it during a layout pass.
 	clip_contents = true
@@ -88,17 +89,18 @@ func _ready() -> void:
 	_label.text = ""
 	vbox.add_child(_label)
 
-	# Perf probes — wrapped in a ScrollContainer with a fixed max height so
-	# adding sub-probes can never push the FPS line (in `_label` above) or
-	# the buttons (below) off-screen. The probe list now exceeds 35 rows in
-	# typical use and the cumulative height was overflowing the viewport.
+	# Perf probes — wrapped in a ScrollContainer that takes whatever
+	# vertical space remains after the FPS label + buttons. Now that the
+	# panel is anchored both top AND bottom of the viewport, the SC's
+	# SIZE_EXPAND_FILL gives it a hard rect = (panel height − siblings),
+	# so content beyond that height scrolls properly. The 200 px min
+	# keeps a reasonable visible window even on short viewports.
 	var perf_scroll := ScrollContainer.new()
 	perf_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	# Cap vertical at 420 px — fits ~24 rows at 18 px font + 4 px line
-	# spacing. Anything beyond scrolls inside the panel.
-	perf_scroll.custom_minimum_size = Vector2(0, 420)
+	perf_scroll.custom_minimum_size = Vector2(0, 200)
 	perf_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	perf_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	perf_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(perf_scroll)
 	_perf_label = Label.new()
 	_perf_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -304,13 +306,55 @@ func _format_stats() -> String:
 	# answer is in here (draw calls / video mem / physics-server time).
 	var draws: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 	var objs: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	var prims: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME))
 	var vmem: float = float(Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED)) / 1048576.0
+	var tex_mem: float = (
+		float(Performance.get_monitor(Performance.RENDER_TEXTURE_MEM_USED)) / 1048576.0
+	)
+	var buf_mem: float = (
+		float(Performance.get_monitor(Performance.RENDER_BUFFER_MEM_USED)) / 1048576.0
+	)
 	var t_proc: float = float(Performance.get_monitor(Performance.TIME_PROCESS)) * 1000.0
 	var t_phys: float = float(Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)) * 1000.0
+	# Physics-server internal step (broad-phase + collision) is NOT in
+	# t_phys — that's just our _physics_process scripts. PHYSICS_3D_*
+	# monitors expose what PhysicsServer3D is actually tracking. Heavy
+	# collision pair count is a tell for "trimesh chunks dragging on
+	# every body in the world."
+	var phys_objs: int = int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS))
+	var phys_pairs: int = int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS))
+	var phys_islands: int = int(Performance.get_monitor(Performance.PHYSICS_3D_ISLAND_COUNT))
+	# True frame time = 1000 / FPS. Engine total = proc + phys. The
+	# delta is render + PhysicsServer3D step + scheduler waits — i.e.
+	# everything we DON'T see in the script-time monitors. If
+	# `other_ms` dwarfs `proc + phys`, the bottleneck is GPU / render /
+	# worker contention, not GDScript.
+	var fps: float = float(Performance.get_monitor(Performance.TIME_FPS))
+	var frame_ms: float = (1000.0 / fps) if fps > 0.0 else 0.0
+	var other_ms: float = maxf(0.0, frame_ms - t_proc - t_phys)
+	# Worker queue depth — number of chunks waiting to materialize.
+	# A growing number means workers can't keep up with player movement.
+	var worker_pending: int = 0
+	if _chunk_manager != null:
+		var pending = _chunk_manager.get("_pending")
+		if pending is Dictionary:
+			worker_pending = pending.size()
 	lines.append(
 		(
-			"GPU: %d draws / %d objs / %.0f MB | Engine: proc=%.1fms phys=%.1fms"
-			% [draws, objs, vmem, t_proc, t_phys]
+			"GPU: %d draws / %d objs / %d prims / %.0f MB (tex=%.0f buf=%.0f)"
+			% [draws, objs, prims, vmem, tex_mem, buf_mem]
+		)
+	)
+	lines.append(
+		(
+			"Engine: proc=%.1fms phys=%.1fms other=%.1fms frame=%.1fms"
+			% [t_proc, t_phys, other_ms, frame_ms]
+		)
+	)
+	lines.append(
+		(
+			"PhysSrv: %d active / %d pairs / %d islands | Workers pending: %d"
+			% [phys_objs, phys_pairs, phys_islands, worker_pending]
 		)
 	)
 	return "\n".join(lines)

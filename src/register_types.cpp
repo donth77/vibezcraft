@@ -2,6 +2,8 @@
 
 #include "lighting_native.h"
 #include "mesher_native.h"
+#include "pathfinder_native.h"
+#include "voxel_collider_native.h"
 #include "water_fx_native.h"
 #include "worldgen_native.h"
 
@@ -19,6 +21,8 @@ void initialize_mesher_native_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(WorldgenNative);
 	GDREGISTER_CLASS(LightingNative);
 	GDREGISTER_CLASS(WaterFXNative);
+	GDREGISTER_CLASS(VoxelColliderNative);
+	GDREGISTER_CLASS(PathfinderNative);
 }
 
 void uninitialize_mesher_native_module(ModuleInitializationLevel p_level) {

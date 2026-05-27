@@ -52,6 +52,60 @@ const _NEIGHBOR_DELTAS: Array = [
 	Vector3i(1, 0, 1),
 ]
 
+# Set by Game._ready() after the GDExtension loads. When non-null,
+# find_path() dispatches to the C++ PathfinderNative — ~10× faster than
+# the GDScript reference. Same lazy-instantiation pattern as Lighting.
+static var _native: RefCounted
+# 256-entry solid-collision LUT handed to PathfinderNative on every call.
+# Identical to VoxelCollider's; cached lazily.
+static var _native_solid_lut: PackedByteArray
+
+
+static func enable_native() -> bool:
+	if _native != null:
+		return true
+	if not ClassDB.class_exists("PathfinderNative"):
+		push_warning("Pathfinder.enable_native: PathfinderNative class not in ClassDB")
+		return false
+	_native = ClassDB.instantiate("PathfinderNative")
+	return _native != null
+
+
+static func _solid_lut_for_native() -> PackedByteArray:
+	if _native_solid_lut.is_empty():
+		_native_solid_lut = PackedByteArray()
+		_native_solid_lut.resize(256)
+		for i in range(256):
+			_native_solid_lut[i] = 1 if Blocks.is_solid_collision(i) else 0
+	return _native_solid_lut
+
+
+# Gather chunks the A* search might touch. Use a generous box around the
+# bounding rect of start+goal expanded by max_dist on each side, since A*
+# can wander outside the direct line. Caller pays one chunk-dict lookup
+# per chunk in the box (typically 1-4) plus a small Array build.
+static func _gather_chunks_for_native(
+	cm: Node, start: Vector3i, goal: Vector3i, max_dist: float
+) -> Array:
+	var pad: int = int(ceil(max_dist))
+	var min_x: int = mini(start.x, goal.x) - pad
+	var max_x: int = maxi(start.x, goal.x) + pad
+	var min_z: int = mini(start.z, goal.z) - pad
+	var max_z: int = maxi(start.z, goal.z) + pad
+	var min_cx: int = int(floor(float(min_x) / float(Chunk.SIZE_X)))
+	var max_cx: int = int(floor(float(max_x) / float(Chunk.SIZE_X)))
+	var min_cz: int = int(floor(float(min_z) / float(Chunk.SIZE_Z)))
+	var max_cz: int = int(floor(float(max_z) / float(Chunk.SIZE_Z)))
+	var out: Array = []
+	for cx in range(min_cx, max_cx + 1):
+		for cz in range(min_cz, max_cz + 1):
+			# Untyped so test stubs (FakeChunk) don't trip Chunk coercion.
+			var chunk = cm.get_chunk_at_coord(Vector2i(cx, cz))
+			if chunk == null:
+				continue
+			out.append([cx, cz, chunk.blocks])
+	return out
+
 
 # Run A* from `start` to `goal`. Returns the path EXCLUDING start
 # (callers walk straight from current position to result[0]).
@@ -62,6 +116,11 @@ static func find_path(
 ) -> Array:
 	if start == goal:
 		return []
+	if _native != null:
+		var chunk_data: Array = _gather_chunks_for_native(cm, start, goal, max_dist)
+		return _native.find_path(
+			start, goal, max_dist, max_iters, chunk_data, _solid_lut_for_native()
+		)
 	# Open set: Array of [f_score, position]. Closed set tracked
 	# implicitly via g_score (any cell in g_score with current_g
 	# >= stored is "closed" — we just skip re-expansion).
@@ -126,6 +185,11 @@ static func _heuristic(a: Vector3i, b: Vector3i) -> float:
 # Public — exposed so the wander-target picker in pig.gd can prefilter
 # samples (skip unreachable goals before scoring).
 static func is_walkable(cm: Node, pos: Vector3i) -> bool:
+	if _native != null:
+		# Tiny gather — single cell needs at most the chunk containing
+		# the cell and the chunk containing the floor cell directly below.
+		var chunk_data: Array = _gather_chunks_for_native(cm, pos, pos, 1.0)
+		return _native.is_walkable(pos, chunk_data, _solid_lut_for_native())
 	return _is_walkable(cm, pos)
 
 

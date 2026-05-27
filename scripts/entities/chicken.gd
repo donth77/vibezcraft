@@ -142,7 +142,18 @@ const _WING_FLAP_RATE: float = 2.0
 const _AI_TICK_DT: float = 1.0 / 20.0
 const _AI_WANDER_X_RANGE: int = 6
 const _AI_WANDER_Y_RANGE: int = 3
-const _AI_NEW_TARGET_DENOM: int = 80
+# 1/20 per 20-Hz tick = ~1 attempt/sec. Was 80 (~4 s) which left packs
+# visibly frozen for long stretches when pathfinder couldn't find a target
+# (steep hills, water edges, freshly-spawned chunk borders). Faster retry
+# alone won't unstick truly stuck chickens — see the fallback random-walk
+# in `_tick_idle` below for that.
+const _AI_NEW_TARGET_DENOM: int = 20
+# Random-walk fallback duration in AI ticks (20 Hz → 40 = 2 s). When the
+# pathfinder fails for a wander attempt, the chicken walks in a random
+# direction for this many ticks. The voxel collider zeros velocity on wall
+# contact so it doesn't grind through terrain — they just stop and try
+# again. Without this, packs spawned on rough terrain stay frozen.
+const _AI_RANDOM_WALK_TICKS: int = 40
 const _AI_ABANDON_DENOM: int = 100
 const _AI_YAW_TWITCH_CHANCE: float = 0.05
 const _AI_YAW_TWITCH_RANGE: float = PI / 18.0
@@ -184,6 +195,13 @@ var _ai_tick_accum: float = 0.0
 var _ai_path: Array = []
 var _ai_flee_ticks_remaining: int = 0
 var _ai_flee_from: Vector3 = Vector3.ZERO
+# Random-walk fallback when pathfind fails. Set by _tick_idle when
+# _pick_wander_target() returns false; consumed by _ai_tick which keeps
+# applying the velocity each tick until the counter drains. Without this,
+# chickens spawned on terrain the pathfinder rejects (steep slopes, water-
+# adjacent, freshly-loaded chunk borders) stay frozen at their spawn cell.
+var _random_walk_ticks: int = 0
+var _random_walk_dir: Vector3 = Vector3.ZERO
 
 
 # MobBase environment overrides. Vanilla `ou.a(0.3f, 0.4f)` set BB to
@@ -492,6 +510,14 @@ func _ai_tick() -> void:
 		_ai_flee_ticks_remaining -= 1
 		_tick_flee()
 		return
+	# Random-walk fallback — drains each tick. Setting velocity every tick
+	# overrides MobBase ground friction so motion actually persists.
+	if _random_walk_ticks > 0:
+		_random_walk_ticks -= 1
+		velocity.x = _random_walk_dir.x * _AI_WALK_SPEED
+		velocity.z = _random_walk_dir.z * _AI_WALK_SPEED
+		_face_walk_direction()
+		return
 	if not _ai_path.is_empty():
 		_tick_walk_path()
 	else:
@@ -527,6 +553,13 @@ func _tick_idle() -> void:
 	if randi() % _AI_NEW_TARGET_DENOM == 0:
 		if _pick_wander_target():
 			return
+		# Pathfinder failed for every candidate cell — fall back to a short
+		# random-direction walk so the chicken doesn't freeze. Voxel collider
+		# stops them if they hit a wall, then idle resumes and we re-roll.
+		var angle: float = randf() * TAU
+		_random_walk_dir = Vector3(cos(angle), 0.0, -sin(angle))
+		_random_walk_ticks = _AI_RANDOM_WALK_TICKS
+		return
 	if randf() < _AI_YAW_TWITCH_CHANCE:
 		rotation.y += randf_range(-_AI_YAW_TWITCH_RANGE, _AI_YAW_TWITCH_RANGE)
 

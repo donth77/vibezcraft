@@ -55,7 +55,15 @@ const _CANE_MAX_HEIGHT: int = 3
 @export var render_distance: int = 8
 @export var chunk_scene: PackedScene
 @export var player_path: NodePath = ^"../Player"
-@export var max_concurrent_jobs: int = 8
+# 3 is the sweet spot on 8-core machines: enough to keep the chunk ring fed
+# while flying at normal speeds, but leaves 4+ cores free for the main
+# thread + render thread. Was 8 — caused FPS spikes down to 4-7 in new
+# biomes because cave-gen workers (60 ms+ each in GDScript) burned every
+# core, starving the main thread of scheduler time. Frame-time breakdown
+# in those spikes showed ~90 ms of "other" (render + scheduler waits) on
+# top of script-time ~50 ms. Dropping the cap lets workers finish in waves
+# instead of all at once; per-frame budget stabilizes.
+@export var max_concurrent_jobs: int = 3
 # Cap on _apply_mesh_data calls per frame. Each apply = up to 3 ArrayMesh
 # VBOs + trimesh; stacking them on one frame caused 120→70 fps spikes.
 @export var apply_budget_per_frame: int = 1

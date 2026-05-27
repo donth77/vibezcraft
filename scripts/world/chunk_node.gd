@@ -310,18 +310,12 @@ func set_collision_active(active: bool) -> void:
 	if active == _collision_active:
 		return
 	_collision_active = active
-	if active:
-		# Lazy collision-shape build — _apply_mesh_data now skips the
-		# expensive ConcavePolygonShape3D.set_faces() for chunks outside
-		# collision_radius. Build it here on demand, the first time the
-		# player walks within range. One-time ~5-10 ms cost per chunk
-		# entering the ring (instead of every chunk paying it at apply).
-		if _collision_shape_cache == null and not _collision_faces_cache.is_empty():
-			_collision_shape_cache = ConcavePolygonShape3D.new()
-			_collision_shape_cache.set_faces(_collision_faces_cache)
-		if _collision_shape_cache != null:
-			_collision_shape.shape = _collision_shape_cache
-	else:
+	if active and _collision_shape_cache != null:
+		# Re-attach the cached shape — same RID, no BVH rebuild. Built
+		# once on the worker (or in `_apply_mesh_data`'s fallback) and
+		# kept around until the next remesh swaps it out.
+		_collision_shape.shape = _collision_shape_cache
+	elif not active:
 		_collision_shape.shape = null
 
 
@@ -381,22 +375,19 @@ func _apply_mesh_data(data: Dictionary) -> void:
 			_collision_faces_cache = (
 				derived.get_faces() if derived != null else PackedVector3Array()
 			)
-		# Build the collision shape ONLY for chunks that need it RIGHT
-		# NOW (within collision_radius). Distant chunks defer the build
-		# to set_collision_active() when the player approaches. This
-		# saves ~5-10 ms per chunk-apply during fast movement (flying
-		# in creative), where 10+ chunks/sec materialize but only a
-		# small inner ring actually needs collision.
+		# Build the collision shape on the main thread.
 		# ConcavePolygonShape3D.set_faces() calls PhysicsServer3D
-		# internally and is the dominant cost in chunk_node.apply.
-		if _collision_active and not _collision_faces_cache.is_empty():
+		# internally, which is not thread-safe — shapes built on a
+		# worker thread may never reach the physics server, leaving
+		# stale collision in place (ghost-block bug).
+		if not _collision_faces_cache.is_empty():
 			_collision_shape_cache = ConcavePolygonShape3D.new()
 			_collision_shape_cache.set_faces(_collision_faces_cache)
+		else:
+			_collision_shape_cache = null
+		if _collision_active and _collision_shape_cache != null:
 			_collision_shape.shape = _collision_shape_cache
 		else:
-			# Cache the faces but don't build the shape yet — set_collision_active
-			# will build it on demand.
-			_collision_shape_cache = null
 			_collision_shape.shape = null
 	# Plant selection collision soup — only present when the GDScript
 	# mesher ran (native skips non-cube blocks today). Empty soup ⇒ clear

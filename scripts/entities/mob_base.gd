@@ -166,6 +166,19 @@ const _PHYSICS_GATE_RADIUS_SQ: float = _LOD_FAR_RADIUS_SQ
 # enough that the player rarely notices a stuck mob.
 const _STUCK_CHECK_INTERVAL: float = 2.0
 
+# Mob-vs-mob soft push — vanilla Entity.collideWithEntity. VoxelCollider
+# only checks block cells, so without this pass mobs would clip clean
+# through each other. Pushes are applied as a tiny velocity impulse
+# (1/dist scaled by _MOB_PUSH_STRENGTH) every frame; mobs ease apart
+# over a few ticks rather than hard-snapping. Vanilla uses 0.05 — we
+# match. Symmetric pairs (A pushes B, B pushes A) so the per-call cost
+# stays single-mob and the visible separation rate sums to 2x.
+const _MOB_PUSH_STRENGTH: float = 0.05
+# XZ early-out radius. No two mob species today have combined half-extents
+# > 0.7 m, so anything > 1.5 m apart trivially can't overlap. Cheap abs()
+# check skips ~95% of pair iterations before the sqrt.
+const _MOB_PUSH_QUICK_REJECT: float = 1.5
+
 # Seconds in GATED state before auto-despawn. Vanilla uses ~30s
 # after >128m delay.
 const _DESPAWN_GATED_SECONDS: float = 30.0
@@ -270,6 +283,13 @@ var _env_tick_accum: float = 0.0
 var _env_sample_accum: float = 0.0
 var _env_sampled_once: bool = false
 var _stuck_check_accum: float = 0.0
+# Stuck-mob diagnostic — sample XZ position every second; if velocity is
+# nonzero but position hasn't moved, log one line with cell context so we
+# can diagnose the chicken-pack-bunched bug. TEMPORARY: delete once root
+# cause is found.
+var _stuck_diag_accum: float = 0.0
+var _stuck_diag_last_xz: Vector2 = Vector2(NAN, NAN)
+var _stuck_diag_logged_at_ms: int = 0
 # Set by _physics_process when the distance gate fires. Subclasses
 # read this AFTER `super._physics_process()` and skip their own AI /
 # pathfinding work when true — without it, mob_base's early-return
@@ -690,6 +710,27 @@ func _physics_process(delta: float) -> void:
 	if _stuck_check_accum >= _STUCK_CHECK_INTERVAL:
 		_stuck_check_accum = 0.0
 		_unstick_if_buried()
+	# Mob-vs-mob soft push. Only fires for NEAR/MID mobs — FAR mobs are
+	# visually small enough that clipping isn't noticeable, and skipping
+	# them halves the per-frame work. Cost is bounded by the early-out
+	# `_MOB_PUSH_QUICK_REJECT` (~95% of pairs skip after 4 ops).
+	if _lod_tier <= LOD_MID:
+		_apply_mob_separation()
+	# TEMP DIAGNOSTIC — log mobs that are trying to move (velocity > 0.1
+	# m/s horizontal) but aren't actually progressing. Throttled to one
+	# log per mob per 5 s so a bug doesn't spam the console.
+	_stuck_diag_accum += delta
+	if _stuck_diag_accum >= 1.0:
+		_stuck_diag_accum = 0.0
+		var cur_xz := Vector2(global_position.x, global_position.z)
+		if not is_nan(_stuck_diag_last_xz.x):
+			var vel_xz: float = Vector2(velocity.x, velocity.z).length()
+			var moved_xz: float = (cur_xz - _stuck_diag_last_xz).length()
+			var now_ms: int = Time.get_ticks_msec()
+			if vel_xz > 0.1 and moved_xz < 0.05 and (now_ms - _stuck_diag_logged_at_ms) > 5000:
+				_stuck_diag_logged_at_ms = now_ms
+				_dump_stuck_diagnostic(vel_xz)
+		_stuck_diag_last_xz = cur_xz
 	# Environment tick at 20 Hz — swim impulse + drowning + fire/lava
 	# damage. Runs AFTER move_and_slide so the air-ticks check uses the
 	# mob's settled position. We re-sample head_in_water inside the tick
@@ -1271,6 +1312,112 @@ func restore_from_dict(d: Dictionary) -> void:
 # saved deep underground isn't teleported through 100 cells of stone.
 func _unstick_after_load() -> void:
 	_unstick_if_buried()
+
+
+# Vanilla Entity.collideWithEntity port — radial soft push away from any
+# overlapping mob. AABB-vs-AABB in XZ only (Y collision doesn't matter for
+# walking mobs). Mutates `velocity` rather than position so the push gets
+# rolled into the NEXT frame's voxel_move; lets terrain collision still
+# clip the push if it would shove into a wall.
+#
+# Loop is dirt-cheap thanks to the abs() early-out — for 46 active mobs
+# spread across a chunk, ~95% of pair iterations skip after 4 ops.
+# TEMP — diagnostic dump for "AI moving but mob not progressing" bugs.
+# Logs one line with mob species, position, velocity, on_floor state,
+# and the 3×3 block grid at feet level so we can see what's blocking.
+# DELETE once chicken bunch-up root cause is identified.
+func _dump_stuck_diagnostic(vel_xz: float) -> void:
+	var cm: Node = _chunk_manager
+	if cm == null:
+		cm = get_tree().root.get_node_or_null("Main/ChunkManager")
+	var species: String = "unknown"
+	if has_meta("mob_name"):
+		species = str(get_meta("mob_name"))
+	else:
+		species = get_script().resource_path.get_file().get_basename()
+	var pos: Vector3 = global_position
+	var half: Vector3 = _voxel_half_extents()
+	var fx: int = int(floor(pos.x))
+	var fy: int = int(floor(pos.y))
+	var fz: int = int(floor(pos.z))
+	# Sample 3×3 around feet at three Y levels (feet-1, feet, feet+1).
+	# Each line: "y=N: [id,id,id / id,id,id / id,id,id]"
+	var cells: PackedStringArray = PackedStringArray()
+	if cm != null and cm.has_method("get_world_block"):
+		for ly in [fy - 1, fy, fy + 1]:
+			var row: PackedStringArray = PackedStringArray()
+			for lz in [fz - 1, fz, fz + 1]:
+				var col: PackedStringArray = PackedStringArray()
+				for lx in [fx - 1, fx, fx + 1]:
+					col.append(str(cm.get_world_block(Vector3i(lx, ly, lz))))
+				row.append(",".join(col))
+			cells.append("y=%d:[%s]" % [ly, " / ".join(row)])
+	print(
+		(
+			"[STUCK] %s @(%.2f,%.2f,%.2f) vel_xz=%.2f on_floor=%s half=(%.2f,%.2f,%.2f) tier=%d cells=%s"
+			% [
+				species,
+				pos.x,
+				pos.y,
+				pos.z,
+				vel_xz,
+				str(_voxel_on_floor),
+				half.x,
+				half.y,
+				half.z,
+				_lod_tier,
+				" | ".join(cells),
+			]
+		)
+	)
+
+
+func _apply_mob_separation() -> void:
+	var self_id: int = get_instance_id()
+	var self_x: float = global_position.x
+	var self_z: float = global_position.z
+	var self_radius: float = _voxel_half_extents().x
+	for other_id: int in _active_mobs:
+		if other_id == self_id:
+			continue
+		var other = _active_mobs[other_id]
+		if other == null or not is_instance_valid(other):
+			continue
+		# Skip dead/gated mobs — they're not pushing anyone.
+		if other._dying or other._physics_gated:
+			continue
+		var dx: float = self_x - other.global_position.x
+		var dz: float = self_z - other.global_position.z
+		# Cheap early-out before sqrt: combined half-extents max ~0.7 m, so
+		# anything past _MOB_PUSH_QUICK_REJECT trivially can't overlap.
+		if absf(dx) > _MOB_PUSH_QUICK_REJECT or absf(dz) > _MOB_PUSH_QUICK_REJECT:
+			continue
+		var sum_radius: float = self_radius + (other as Node3D)._voxel_half_extents().x
+		var dist_sq: float = dx * dx + dz * dz
+		if dist_sq > sum_radius * sum_radius:
+			continue
+		var dist: float = sqrt(dist_sq)
+		# Two mobs at identical XZ: pick a STABLE direction from the
+		# instance-id delta so they always push opposite consistent
+		# directions and accumulate real motion. Earlier this branch
+		# used randf() — randomized direction per frame averaged to
+		# zero net push and packs stayed bunched forever, only
+		# escaping when a jump kicked them up by some chance margin.
+		# Sign of (self_id - other_id) is opposite for each side of
+		# the pair, so A pushes -X while B pushes +X (or whatever
+		# angle we derive). Each mob's net push is the sum of
+		# stable directions from every other mob it overlaps.
+		if dist < 0.01:
+			var sign_id: float = signf(float(self_id - other_id))
+			# Spread the angle by id so 3+ stacked mobs don't all line
+			# up on the same axis — fmod gives an angle in [0, TAU).
+			var ang: float = fmod(float(absi(self_id - other_id)) * 0.6180339, TAU)
+			dx = sign_id * cos(ang)
+			dz = sign_id * sin(ang)
+			dist = 1.0
+		var inv_dist: float = 1.0 / maxf(dist, 0.01)
+		velocity.x += dx * inv_dist * _MOB_PUSH_STRENGTH
+		velocity.z += dz * inv_dist * _MOB_PUSH_STRENGTH
 
 
 # Per-frame variant — same algorithm but cheap to call repeatedly

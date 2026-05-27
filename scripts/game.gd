@@ -282,6 +282,14 @@ func _ready() -> void:
 		print("[Game] using native LightingNative (GDExtension)")
 	else:
 		print("[Game] using GDScript Lighting")
+	if VoxelCollider.enable_native():
+		print("[Game] using native VoxelColliderNative (GDExtension)")
+	else:
+		print("[Game] using GDScript VoxelCollider")
+	if Pathfinder.enable_native():
+		print("[Game] using native PathfinderNative (GDExtension)")
+	else:
+		print("[Game] using GDScript Pathfinder")
 	# Load crafting recipes from disk once at boot.
 	Recipes.ensure_loaded()
 	# Bake 3D-isometric block icons for the inventory. Setup is sync; the

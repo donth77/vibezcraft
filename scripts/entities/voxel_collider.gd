@@ -18,6 +18,61 @@ extends RefCounted
 
 const _SOLID_LAYER: int = 0b01  # informational only; we ignore Godot layers
 
+# Set by Game._ready() after the GDExtension loads. When non-null, move()
+# dispatches to the C++ VoxelColliderNative.move() — ~10× faster than the
+# GDScript reference. Same lazy-instantiation pattern as Lighting.
+static var _native_collider: RefCounted
+# 256-entry solid-collision LUT handed to VoxelColliderNative.move on every
+# call. solid_lut[id] != 0 iff Blocks.is_solid_collision(id). Built lazily
+# so it stays in sync with any new block IDs.
+static var _native_solid_lut: PackedByteArray
+
+
+static func enable_native() -> bool:
+	if _native_collider != null:
+		return true
+	if not ClassDB.class_exists("VoxelColliderNative"):
+		push_warning("VoxelCollider.enable_native: VoxelColliderNative class not in ClassDB")
+		return false
+	_native_collider = ClassDB.instantiate("VoxelColliderNative")
+	return _native_collider != null
+
+
+static func _solid_lut_for_native() -> PackedByteArray:
+	if _native_solid_lut.is_empty():
+		_native_solid_lut = PackedByteArray()
+		_native_solid_lut.resize(256)
+		for i in range(256):
+			_native_solid_lut[i] = 1 if Blocks.is_solid_collision(i) else 0
+	return _native_solid_lut
+
+
+# Gather chunk-blocks tuples covering the swept AABB the entity might touch
+# this frame. Native move() iterates these instead of calling back into
+# GDScript for each cell — that round-trip cost is the whole reason we ported.
+static func _gather_chunks_for_native(
+	cm: Node, pos_in: Vector3, half_extents: Vector3, velocity: Vector3, delta: float
+) -> Array:
+	var step: Vector3 = velocity * delta
+	var min_world_x: float = pos_in.x - half_extents.x + minf(step.x, 0.0)
+	var max_world_x: float = pos_in.x + half_extents.x + maxf(step.x, 0.0)
+	var min_world_z: float = pos_in.z - half_extents.z + minf(step.z, 0.0)
+	var max_world_z: float = pos_in.z + half_extents.z + maxf(step.z, 0.0)
+	var min_cx: int = int(floor(min_world_x / float(Chunk.SIZE_X)))
+	var max_cx: int = int(floor(max_world_x / float(Chunk.SIZE_X)))
+	var min_cz: int = int(floor(min_world_z / float(Chunk.SIZE_Z)))
+	var max_cz: int = int(floor(max_world_z / float(Chunk.SIZE_Z)))
+	var out: Array = []
+	for cx in range(min_cx, max_cx + 1):
+		for cz in range(min_cz, max_cz + 1):
+			# Untyped so test stubs (FakeChunk) don't trip Chunk-type
+			# coercion. Production callers always hand back real Chunks.
+			var chunk = cm.get_chunk_at_coord(Vector2i(cx, cz))
+			if chunk == null:
+				continue
+			out.append([cx, cz, chunk.blocks])
+	return out
+
 
 # Move a mob with AABB collision against the voxel grid.
 #
@@ -36,6 +91,14 @@ static func move(
 ) -> Dictionary:
 	if chunk_manager == null:
 		return {"pos": pos_in + velocity * delta, "vel": velocity, "on_floor": false}
+	if _native_collider != null:
+		# Fast path: marshal swept-AABB chunks once, hand to C++.
+		var chunk_data: Array = _gather_chunks_for_native(
+			chunk_manager, pos_in, half_extents, velocity, delta
+		)
+		return _native_collider.move(
+			pos_in, half_extents, velocity, delta, chunk_data, _solid_lut_for_native()
+		)
 	var step: Vector3 = velocity * delta
 	var pos: Vector3 = pos_in
 	var vel: Vector3 = velocity
