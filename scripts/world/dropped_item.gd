@@ -106,6 +106,7 @@ func _process(delta: float) -> void:
 		_update_world_brightness()
 	else:
 		rotate_y(delta * SPIN_SPEED)
+		_update_world_brightness()
 
 	if _player == null:
 		_player = _find_player()
@@ -200,14 +201,15 @@ func _build_sprite_mesh(id: int) -> void:
 
 # Vanilla af.java RenderItem tints dropped items by world brightness via
 # the same lightmap path mobs/boats use. We mirror that with the shared
-# EntityLighting helper (0.25 floor — see EntityLighting._FLOOR), pushed
-# into the sprite material's `world_brightness` uniform.
-# Cube-block drops (id < 100, full-cube shape) use BlockAtlas.entity_material
-# which is shared across all entities; per-instance brightness for those
-# would need an instance_uniform on chunk.gdshader — deferred until any
-# cube drop reads as too dark in practice.
+# EntityLighting helper (0.25 floor — see EntityLighting._FLOOR).
+# Sprite items push into their per-instance `world_brightness` uniform on
+# the held-item shader (each gets its own material). Cube-block drops
+# share BlockAtlas.entity_material (chunk.gdshader), so we use
+# `set_instance_shader_parameter("entity_brightness", lit)` on the mesh
+# instance — Godot bakes that into the per-instance data without cloning
+# the material, keeping the single-material invariant.
 func _update_world_brightness() -> void:
-	if _mesh == null or _mesh.material_override == null:
+	if _mesh == null:
 		return
 	# Resolve via get_parent() optimistically — in gameplay we're added
 	# as a ChunkManager child. In tests our parent is a plain Node, so
@@ -227,9 +229,14 @@ func _update_world_brightness() -> void:
 	if absf(lit - _last_brightness) < 0.01:
 		return
 	_last_brightness = lit
-	var mat: ShaderMaterial = _mesh.material_override as ShaderMaterial
-	if mat != null:
-		mat.set_shader_parameter("world_brightness", lit)
+	if _is_sprite_item:
+		var mat: ShaderMaterial = _mesh.material_override as ShaderMaterial
+		if mat != null:
+			mat.set_shader_parameter("world_brightness", lit)
+	else:
+		# Cube branch — mesh uses the shared chunk material; push per-
+		# instance so we don't clone the material per dropped item.
+		_mesh.set_instance_shader_parameter("entity_brightness", lit)
 
 
 func _try_pickup(player: Node3D) -> void:

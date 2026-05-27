@@ -331,6 +331,13 @@ func _close() -> void:
 func _input(event: InputEvent) -> void:
 	if not visible or inventory == null:
 		return
+	if event.is_action_pressed("drop_selected") and not _drag_active:
+		# Vanilla GuiContainer.drop: Q while inventory is open drops from
+		# the cursor (if non-empty) OR the hovered slot. Ctrl modifier
+		# drops the whole stack, otherwise one item.
+		_handle_drop_action(_drop_stack_modifier_held())
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventMouseButton:
 		var slot: int = _slot_under_mouse()
 		# Vanilla Container.transferStackInSlot: shift+left-click sends
@@ -345,12 +352,73 @@ func _input(event: InputEvent) -> void:
 		):
 			_handle_shift_click(slot)
 			return
+		# Click outside any slot with a non-empty cursor → drop to world.
+		# Vanilla GuiContainer.mouseClicked path: LMB tosses the entire
+		# cursor stack, RMB tosses one item.
+		if event.pressed and slot < 0 and not _cursor.is_empty():
+			_drop_cursor_to_world(event.button_index == MOUSE_BUTTON_LEFT)
+			return
 		if event.pressed:
 			_on_mouse_down(event.button_index, slot)
 		else:
 			_on_mouse_up(event.button_index, slot)
 	elif event is InputEventMouseMotion and _drag_active:
 		_track_drag_motion()
+
+
+func _drop_stack_modifier_held() -> bool:
+	# Vanilla MC: Ctrl+Q (Cmd+Q on Mac) drops the entire stack.
+	return Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)
+
+
+func _handle_drop_action(drop_stack: bool) -> void:
+	# Priority: cursor first (vanilla — if you're holding a stack, Q
+	# tosses from it). Otherwise drop from the hovered slot.
+	if not _cursor.is_empty():
+		var n: int = _cursor.count if drop_stack else 1
+		_spawn_dropped(_cursor.item_id, n)
+		_cursor.count -= n
+		if _cursor.count <= 0:
+			_cursor.clear()
+		_refresh_cursor_overlay()
+		return
+	var slot: int = _slot_under_mouse()
+	if slot < 0:
+		return
+	# Craft result is special — taking from it consumes ingredients and
+	# the "one item" semantics aren't well-defined. Skip; users can
+	# shift-click to harvest then Q the resulting items normally.
+	if slot == Inventory.CRAFT_RESULT:
+		return
+	var src: ItemStack = inventory.slots[slot]
+	if src.is_empty():
+		return
+	var count: int = src.count if drop_stack else 1
+	_spawn_dropped(src.item_id, count)
+	src.count -= count
+	if src.count <= 0:
+		src.clear()
+	_after_slot_change(slot)
+
+
+func _drop_cursor_to_world(drop_full_stack: bool) -> void:
+	if _cursor.is_empty():
+		return
+	var n: int = _cursor.count if drop_full_stack else 1
+	_spawn_dropped(_cursor.item_id, n)
+	_cursor.count -= n
+	if _cursor.count <= 0:
+		_cursor.clear()
+	_refresh_cursor_overlay()
+
+
+func _spawn_dropped(item_id: int, count: int) -> void:
+	if item_id <= 0 or count <= 0:
+		return
+	var player: Node = get_tree().root.get_node_or_null("Main/Player")
+	if player == null or not player.has_method("drop_item_into_world"):
+		return
+	player.drop_item_into_world(item_id, count)
 
 
 func _slot_under_mouse() -> int:

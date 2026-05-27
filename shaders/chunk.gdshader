@@ -92,6 +92,17 @@ instance uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
 // (deferred).
 instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
 
+// Per-instance entity brightness override. Dropped cube-block items
+// reuse this shader (BlockAtlas.entity_material) but have no per-vertex
+// sky/block light packed into COLOR — they'd otherwise render fullbright
+// regardless of time of day. Vanilla af.java applies the lightmap to
+// EntityItem renders too, so we expose a 0..1 LUT-applied brightness
+// that the entity script samples each tick via EntityLighting.
+// Default -1.0 = "use vertex-color path" (world chunks). Anything >=0
+// replaces `lit` below. Costs nothing on chunks since instance uniforms
+// are baked per-MeshInstance3D, not per-fragment branch.
+instance uniform float entity_brightness = -1.0;
+
 varying vec3 v_normal;
 varying vec2 v_light;
 
@@ -141,6 +152,12 @@ void fragment() {
 	float f2 = 0.05;
 	float f3 = 1.0 - light;
 	float lit = (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - f2) + f2;
+	// Entity override: dropped cube items sample EntityLighting per-tick
+	// and push a LUT-applied 0..1 value here. The world-chunk path leaves
+	// it at -1, so the branch is a no-op for terrain rendering.
+	if (entity_brightness >= 0.0) {
+		lit = entity_brightness;
+	}
 	// Per-face Notch shading. Vanilla constants (vendor/alpha-1.2.6-src/bk.java:819-822):
 	//   f6 = 1.0  (top)      f5 = 0.5  (bottom)
 	//   f7 = 0.8  (east/west, X-axis)
