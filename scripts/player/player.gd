@@ -475,7 +475,16 @@ func _ready() -> void:
 	var spawn_y: float = 100.0
 	if Worldgen.surface_height(safe.x, safe.y) < Worldgen.SEA_LEVEL + 2:
 		spawn_y = float(Worldgen.SEA_LEVEL) + 2.0
-	global_position = Vector3(float(safe.x) + 0.5, spawn_y, float(safe.y) + 0.5)
+	# Route through safe_teleport so the 3×3 chunk neighborhood under
+	# the spawn point is sync-loaded BEFORE the capsule lands. Without
+	# this, ChunkManager's initial-chunk pass is `call_deferred` and
+	# hasn't fired yet when player._ready runs — gravity then drops the
+	# player through unloaded space (get_world_block returns AIR for
+	# missing chunks) past the bedrock layer into the void, where the
+	# y<-20 void-recovery teleport eventually catches them. Sync-load
+	# closes that window. ChunkManager appears before Player in
+	# main.tscn so it's always present here.
+	safe_teleport(Vector3(float(safe.x) + 0.5, spawn_y, float(safe.y) + 0.5))
 	inventory = Inventory.new()
 	inventory.changed.connect(_update_held_item)
 	inventory.changed.connect(_update_armor_overlay)
