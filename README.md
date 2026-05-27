@@ -14,24 +14,29 @@ Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base
 
 ## Features
 
-- **Infinite procedural world** — 2D Perlin heightmap, stratified terrain layers, oak trees, caves, ore veins (coal/iron/gold/diamond) via a deterministic port of vanilla `WorldGenMinable`
-- **36 block types** — full stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, ladders, flowing water & lava
-- **50 items** — tools (pickaxe/axe/shovel/sword/hoe) in wood/stone/iron/diamond/gold, armor sets, buckets, flint & steel, raw materials
-- **Crafting** — recipe registry (shaped + shapeless) from `data/recipes.json`, 2x2 inventory grid + 3x3 crafting table
-- **Smelting** — furnace with fuel/input/output slots, burn-time tracking, vanilla smelt times
-- **Day/night cycle** — vanilla 20-minute day, sky color gradient, sun direction, dynamic lighting
+- **Infinite procedural world** — 2D Perlin heightmap, stratified terrain layers, oak trees, caves, ore veins (coal/iron/gold/diamond)
+- **88 block types** — stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, ladders, flowing water & lava, fire, beds, bookshelves, jukeboxes, slabs, sugar cane, mushrooms, pumpkins / jack-o-lanterns, snow, ice, cactus, TNT, mob spawners, mossy cobblestone, slime block, rails, signs, wool (16 colors), iron / gold / diamond / sponge / clay blocks
+- **80+ items** — full tool tiers (pickaxe/axe/shovel/sword/hoe × wood/stone/iron/diamond/gold), armor sets (leather/iron/gold/diamond), bow + arrows, buckets, flint & steel, shears, fishing rod, food (apple/bread/porkchop/fish/mushroom stew/golden apple), raw materials (coal/iron/gold/diamond ingots, gunpowder, redstone, bone, slimeball, snowball, leather, feather, string, sugar, paper, book), 8 music discs, minecart family
+- **9 mob species** — passive: pig, cow, chicken, sheep (with shearing). Hostile: zombie (melee + daylight burn), skeleton (bow combat, kites at range), spider (light-gated, pounce), creeper (3 m fuse ignite + 1.5 s charge + power-3 explosion + flash anim + music disc drop on skeleton-arrow kill), slime (size 1/2/4, hop physics, splits on death, slime-chunk gated)
+- **Crafting & smelting** — recipe registry (shaped + shapeless) from `data/recipes.json`, 2×2 inventory grid + 3×3 crafting table. Furnace with fuel/input/output slots, burn-time tracking
+- **Day/night cycle** — 20-minute day, sky color gradient, sun direction, dynamic lighting
 - **Light propagation** — sky light + block light with BFS flood fill, per-face brightness LUT in shader
 - **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement/pickup
-- **Health & damage** — fall damage, drowning, fire/lava, health regeneration, death screen with respawn
-- **Chest & furnace storage** — per-block inventories with dedicated UI screens
-- **World save/load** — purpose-built binary format under `user://World{N}/` (chunks, player position + inventory, entities, world metadata) with crash-safe `.new`/`.old` recovery
+- **Combat** — melee + ranged (bow + arrows with charge mechanic + critical hits), knockback, armor damage reduction, fall damage, drowning, fire/lava, health regen, death screen with respawn
+- **Dungeons** — cobble/mossy cobble rooms with mob spawner cages + chest loot
+- **Beds** — Sleep mechanic, multi-cell place/break, set spawn point
+- **Jukeboxes + 8 music discs** — Ambient music auto-pauses during disc playback
+- **Farming + fishing** — wheat crops, hoe tilling, tall grass seed drops; cast/reel fishing with raw + cooked fish
+- **Minecart family** — rails (straight + curve), boost rails, standard + chest + furnace minecarts, chained ramps
+- **Chest, furnace, jukebox storage** — per-block inventories with dedicated UI screens
+- **World save/load** — purpose-built binary format under `user://World{N}/` (chunks, player position + inventory, entities, world metadata) with crash-safe `.new`/`.old` recovery; multi-world select screen
 - **Creative mode** — toggleable from Pause → Options or via the hotkey; flight, no fall damage, instant block break
 - **Rebindable controls** — every gameplay action mappable from Main Menu → Settings → Controls or in-game Pause → Options → Controls; persists to `user://settings.cfg`
-- **In-game item spawner** — grid of every block + item with quantity selector; available in Creative or Debug mode
-- **Audio** — footstep cadence, block break/place SFX, ambient sounds, music player ([Suno playlist](https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c))
+- **In-game item + mob spawners** — grid of every block + item with quantity selector (F4) + grid of every mob species (F6); available in Creative or Debug mode
+- **Audio** — footstep cadence, block break/place SFX, per-mob idle/hurt/death/step sounds, ambient sounds, music player ([Suno playlist](https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c))
 - **Player model** — first-person and third-person with arm/leg animation, held-item rendering
 - **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
-- **Native C++ fast paths** — chunk mesher and worldgen via GDExtension, with GDScript fallback
+- **Native C++ fast paths (6 GDExtensions)** — chunk mesher, worldgen base terrain, lighting BFS, water FX, pathfinder A*, voxel-AABB collider — all with GDScript fallback
 
 
 
