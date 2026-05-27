@@ -206,4 +206,4 @@ jobs:
             --draft \
             --title "VibezCraft ${{ steps.tag.outputs.tag }}" \
             --notes-file .github/RELEASE_NOTES.md \
-            dist/*.zip
+            dist/*.dmg dist/*.zip
