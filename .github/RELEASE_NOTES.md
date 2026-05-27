@@ -5,7 +5,8 @@ A single-player clone of MC Alpha, built in Godot 4, GDScript, and C++.
 ## Downloads
 
 - **macOS** (Apple Silicon + Intel, universal binary) — `VibezCraft-macOS-universal.dmg`
-- **Windows** (x86_64) — `VibezCraft-Windows-x86_64.zip`
+- **Windows installer** (x86_64) — `VibezCraft-Windows-Setup.exe` (recommended)
+- **Windows portable** (x86_64) — `VibezCraft-Windows-x86_64.zip` (no install, just unzip + run)
 
 ## Highlights
 
@@ -41,9 +42,16 @@ The app is ad-hoc signed but not notarized (no Apple Developer Program). On firs
 4. Double-click thereafter
 
 ### Windows
-1. Unzip `VibezCraft-Windows-x86_64.zip`
-2. Run `VibezCraft.exe`
-3. Windows SmartScreen may prompt — click **More info** → **Run anyway**
+
+**Installer (recommended):**
+1. Download `VibezCraft-Windows-Setup.exe`
+2. Run it — installs to `C:\Program Files\VibezCraft` with Start Menu + Desktop shortcuts and an Add/Remove Programs entry
+3. Windows SmartScreen may warn — click **More info** → **Run anyway** (binary isn't code-signed)
+
+**Portable (no install):**
+1. Download + unzip `VibezCraft-Windows-x86_64.zip`
+2. Run `VibezCraft.exe` from anywhere
+3. SmartScreen prompt as above on first launch
 
 ## Controls
 

@@ -151,7 +151,7 @@ jobs:
             --export-release "Windows Desktop" exports/windows/VibezCraft.exe
           ls -la exports/windows/
 
-      - name: Bundle Windows artifact
+      - name: Bundle portable ZIP
         shell: bash
         run: |
           cd exports/windows
@@ -159,11 +159,32 @@ jobs:
           7z a VibezCraft-Windows-x86_64.zip *
           ls -la
 
+      - name: Build NSIS installer
+        shell: bash
+        run: |
+          # Stage the exported files + icon next to the .nsi so File
+          # statements resolve with relative paths.
+          cp installer/windows.nsi exports/windows/
+          cp assets/icon/app_icon.ico exports/windows/
+          # Tag-driven version label; strip the leading "v" if present.
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="0.0.0"
+          fi
+          cd exports/windows
+          # makensis is preinstalled on windows-latest runners.
+          "/c/Program Files (x86)/NSIS/makensis.exe" \
+            -DAPP_VERSION="$VERSION" \
+            windows.nsi
+          ls -la VibezCraft-Windows-Setup.exe VibezCraft-Windows-x86_64.zip
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vibezcraft-windows
-          path: exports/windows/VibezCraft-Windows-x86_64.zip
+          path: |
+            exports/windows/VibezCraft-Windows-x86_64.zip
+            exports/windows/VibezCraft-Windows-Setup.exe
           if-no-files-found: error
 
   release:
@@ -206,4 +227,4 @@ jobs:
             --draft \
             --title "VibezCraft ${{ steps.tag.outputs.tag }}" \
             --notes-file .github/RELEASE_NOTES.md \
-            dist/*.dmg dist/*.zip
+            dist/*.dmg dist/*.zip dist/*.exe
