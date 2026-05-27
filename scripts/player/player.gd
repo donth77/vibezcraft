@@ -465,7 +465,17 @@ func _ready() -> void:
 	# infinite-fall regression. If the entire spawn chunk is ocean we
 	# accept the water spawn (rare with the new ELEVATION_LAND_BIAS).
 	var safe: Vector2i = _find_safe_spawn_in_chunk()
-	global_position = Vector3(float(safe.x) + 0.5, 100.0, float(safe.y) + 0.5)
+	# Y picker: a dry-land column gets the legacy Y=100 drop (long fall
+	# settles the capsule onto the surface without needing immediate
+	# chunk reads). An ocean fallback (no column above SEA_LEVEL+2 in
+	# the spawn chunk) spawns just above the water surface instead —
+	# Y=100 puts the head deep underwater, air drains, and the post-
+	# loading emergency-platform pass fires too late to save the player
+	# from drowning during the load window.
+	var spawn_y: float = 100.0
+	if Worldgen.surface_height(safe.x, safe.y) < Worldgen.SEA_LEVEL + 2:
+		spawn_y = float(Worldgen.SEA_LEVEL) + 2.0
+	global_position = Vector3(float(safe.x) + 0.5, spawn_y, float(safe.y) + 0.5)
 	inventory = Inventory.new()
 	inventory.changed.connect(_update_held_item)
 	inventory.changed.connect(_update_armor_overlay)
@@ -1563,9 +1573,19 @@ func _drop_selected_item(drop_stack: bool) -> void:
 		inventory.consume_selected_stack()
 	else:
 		inventory.consume_one_selected()
+	drop_item_into_world(dropped_id, count)
+
+
+# Public spawn-only helper. Inventory screens call this after they've
+# already mutated their cursor/slot to push the visible entity into the
+# world at the player's eye. Returns the number actually launched (today
+# always equals `count` since ChunkManager existence is the only failure).
+func drop_item_into_world(dropped_id: int, count: int) -> int:
+	if dropped_id <= 0 or count <= 0:
+		return 0
 	var chunk_manager: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if chunk_manager == null:
-		return
+		return 0
 	# Always spawn at the PLAYER's eye position — not the camera's. In third-
 	# person the camera sits behind/in front of the player, so using its
 	# position would launch items from empty space far from the avatar.
@@ -1578,6 +1598,7 @@ func _drop_selected_item(drop_stack: bool) -> void:
 		chunk_manager.add_child(item)
 		item.global_position = spawn_pos
 		item.setup(dropped_id, velocity, DroppedItem.PLAYER_DROP_DELAY_SEC)
+	return count
 
 
 # Player-facing direction with camera pitch folded in. Independent of which
@@ -2140,6 +2161,14 @@ func _update_fall_tracking() -> void:
 # bypasses armor (fall damage does per vanilla Alpha behavior). Emits
 # signals for UI + sound hooks; routes to respawn on 0 HP.
 func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
+	# Suppress all damage while the loading screen is up. Physics ticks
+	# (drown / lava / fire / cactus / fall) all keep firing during load,
+	# but the post-spawn relocate + emergency-platform passes are gated
+	# behind `not Game.is_loading` — so on an open-ocean fresh-world
+	# spawn the player can drown to death before regaining control. One
+	# gate here covers every damage source (ambient + mobs + explosions).
+	if Game.is_loading:
+		return
 	if amount <= 0 or health <= 0:
 		return
 	# Vanilla EntityLiving.damageEntity: `if (noDamageTicks > maxNoDamageTicks
