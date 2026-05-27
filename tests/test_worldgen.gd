@@ -283,9 +283,11 @@ func test_caves_deterministic() -> void:
 
 
 func test_caves_place_lava_below_y10() -> void:
-	# lx.java:115-116 — worm carves below y=10 write lava instead of air.
-	# Scan a large area and confirm (a) some lava shows up below y=10,
-	# and (b) no lava lands at y>=10 (only AIR carves there).
+	# lx.java:115-116 — worm carves below y=10 write lava instead of
+	# air, so the cave FLOOR has hazardous lava pools. Scan a large
+	# area and confirm a lot of lava lands at y<10 (cave-floor pass);
+	# springs (pj.java) can place additional lava at higher Y but the
+	# below-10 cave-floor pool should still dominate.
 	var lava_low: int = 0
 	var lava_high: int = 0
 	for cx in range(-5, 6):
@@ -301,7 +303,11 @@ func test_caves_place_lava_below_y10() -> void:
 							else:
 								lava_high += 1
 	assert_gt(lava_low, 50, "expected >50 lava cells under y=10, got %d" % lava_low)
-	assert_eq(lava_high, 0, "no lava should land at y>=10, got %d" % lava_high)
+	# Cave-floor lava should dominate the spring-placed lava by at
+	# least 10× — springs are rare (the 3-stone-walls + 1-air-opening
+	# pattern fires on <1 % of attempts) while the cave-floor write
+	# fires on every carved cell below y=10.
+	assert_gt(lava_low, lava_high * 10, "cave-floor lava should dominate spring lava by 10×")
 
 
 # --- Trees ---

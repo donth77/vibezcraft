@@ -99,6 +99,7 @@ const _ORE_CONFIGS: Array = [
 # (the caves module references Worldgen._hash4 / surface_height).
 const _CAVES_SCRIPT: GDScript = preload("res://scripts/world/worldgen_caves.gd")
 const _DUNGEONS_SCRIPT: GDScript = preload("res://scripts/world/worldgen_dungeons.gd")
+const _SPRINGS_SCRIPT: GDScript = preload("res://scripts/world/worldgen_springs.gd")
 
 # Base trees-per-chunk before biome scaling. Vanilla averages 150-300
 # LEAVES/chunk (5-world baseline), and one oak places ~33 LEAVES, so
@@ -362,6 +363,12 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		PerfProbe.end("worldgen.caves", caves_token)
 	else:
 		_CAVES_SCRIPT.scatter(chunk, chunk_x, chunk_z)
+	# 2c. Liquid springs — Alpha pj.java (WorldGenLiquids). Plants
+	# WATER_STILL / LAVA_STILL source blocks in stone walls (3 stone +
+	# 1 air neighbor pattern) so caves get the vanilla "small pools +
+	# wall drips" feel instead of being uniformly dry AIR. Runs AFTER
+	# caves so the wall checks see the carved AIR cells.
+	_SPRINGS_SCRIPT.scatter(chunk, chunk_x, chunk_z)
 	# 3. Beaches — replaces surface grass/dirt near sea level with sand.
 	#    SKIP in 3D mode: the vanilla-port _apply_surface_layer_3d already
 	#    handles the y in [60, 65] sand/gravel beach pass inline (vanilla
@@ -375,10 +382,16 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	if not terrain_3d_enabled:
 		_fill_ocean(chunk, chunk_x, chunk_z)
 	else:
-		# 3D mode: caves can carve through stone below sea level, leaving
-		# AIR pockets in the seabed. Convert any AIR cell at y < SEA_LEVEL
-		# back to WATER (cave-air becomes underwater).
-		_fill_underwater_air_3d(chunk)
+		# 3D mode: water is already in place from the base-terrain pass
+		# (worldgen_3d.fill_chunk writes WATER_STILL for any negative-
+		# density cell at y < SEA_LEVEL, matching vanilla px.java:78-86).
+		# Caves run AFTER base terrain and skip carving any AABB that
+		# touches water via `_aabb_touches_water` (worldgen_caves.gd), so
+		# below-sea caves only form in dry stone — they don't connect to
+		# ocean. No post-cave water fill is needed; doing one would
+		# blanket-flood every below-sea cave (the previous deviation
+		# from vanilla that made every cave system feel like a swimming
+		# pool).
 		# Remove floating terrain blocks (single cells AND small islands).
 		# BFS from bedrock + chunk boundary through solid neighbors; any
 		# unvisited terrain block is a noise artifact and gets stripped.
@@ -990,19 +1003,6 @@ static func _place_beaches(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 # the rest of the pipeline changes. Runs in GDScript on top of the native
 # base-terrain fill; at 16×16 columns × ~10 cells each that's ~2.5k writes
 # per chunk, cheap compared to the ore pass.
-# 3D-mode-only: fill AIR cells at y < SEA_LEVEL with WATER_STILL. Runs
-# AFTER caves to undo cave-carved underwater air pockets while leaving
-# above-water cave openings + below-y=10 lava intact.
-static func _fill_underwater_air_3d(chunk: Chunk) -> void:
-	var probe_token := PerfProbe.begin("worldgen.underwater_air_3d")
-	for x in range(Chunk.SIZE_X):
-		for z in range(Chunk.SIZE_Z):
-			for y in range(SEA_LEVEL):
-				if chunk.get_block_unchecked(x, y, z) == Blocks.AIR:
-					chunk.set_block_unchecked(x, y, z, Blocks.WATER_STILL)
-	PerfProbe.end("worldgen.underwater_air_3d", probe_token)
-
-
 static func _fill_ocean(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var probe_token := PerfProbe.begin("worldgen.ocean")
 	for x in range(Chunk.SIZE_X):
