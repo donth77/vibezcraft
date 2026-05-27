@@ -159,6 +159,10 @@ jobs:
           7z a VibezCraft-Windows-x86_64.zip *
           ls -la
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
       - name: Build NSIS installer
         shell: bash
         run: |
@@ -172,10 +176,13 @@ jobs:
             VERSION="0.0.0"
           fi
           cd exports/windows
-          # makensis is preinstalled on windows-latest runners.
-          "/c/Program Files (x86)/NSIS/makensis.exe" \
-            -DAPP_VERSION="$VERSION" \
-            windows.nsi
+          # NSIS installs under either Program Files or Program Files (x86)
+          # depending on host bitness; pick whichever exists.
+          MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -f "$MAKENSIS" ]; then
+            MAKENSIS="/c/Program Files/NSIS/makensis.exe"
+          fi
+          "$MAKENSIS" -DAPP_VERSION="$VERSION" windows.nsi
           ls -la VibezCraft-Windows-Setup.exe VibezCraft-Windows-x86_64.zip
 
       - name: Upload artifact
