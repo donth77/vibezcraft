@@ -24,18 +24,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          lfs: true
 
       - name: Install scons
         run: pip3 install --break-system-packages scons
 
-      - name: Build native (arm64)
+      - name: Build native (release + debug, universal)
         run: |
-          scons platform=macos target=template_release arch=arm64 -j$(sysctl -n hw.ncpu)
-          scons platform=macos target=template_release arch=x86_64 -j$(sysctl -n hw.ncpu)
-          lipo -create \
-            bin/libmesher_native.macos.template_release.arm64.dylib \
-            bin/libmesher_native.macos.template_release.x86_64.dylib \
-            -output bin/libmesher_native.macos.template_release.universal.dylib
+          for target in template_release template_debug; do
+            scons platform=macos target=$target arch=arm64 -j$(sysctl -n hw.ncpu)
+            scons platform=macos target=$target arch=x86_64 -j$(sysctl -n hw.ncpu)
+            lipo -create \
+              bin/libmesher_native.macos.$target.arm64.dylib \
+              bin/libmesher_native.macos.$target.x86_64.dylib \
+              -output bin/libmesher_native.macos.$target.universal.dylib
+          done
           ls -la bin/
 
       - name: Install Godot + export templates
@@ -83,6 +86,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          lfs: true
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -90,10 +94,11 @@ jobs:
       - name: Install scons
         run: python -m pip install scons
 
-      - name: Build native (x86_64)
+      - name: Build native (release + debug)
         shell: bash
         run: |
           scons platform=windows target=template_release arch=x86_64 -j$(nproc)
+          scons platform=windows target=template_debug arch=x86_64 -j$(nproc)
           ls bin/
 
       - name: Install Godot + export templates
