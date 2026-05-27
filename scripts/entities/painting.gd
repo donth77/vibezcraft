@@ -55,7 +55,7 @@ const VARIANTS: Array = [
 # Fallback path — the active-pack lookup in `_load_atlas` tries the
 # current pack first. Currently only alpha_vanilla ships a painting
 # atlas; other packs fall back to this canonical Mojang asset.
-const _ATLAS_DIR: String = "res://assets/textures/blocks/packs"
+const _ATLAS_DIR: String = "res://assets/textures/packs"
 const _ATLAS_FALLBACK_PATH: String = _ATLAS_DIR + "/alpha_vanilla/painting_atlas.png"
 # Vanilla EntityPainting hangs 1/16 block in front of its support
 # wall — matches the `BackWallOffsetPx = 1` (see vanilla

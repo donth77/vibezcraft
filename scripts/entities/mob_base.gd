@@ -408,7 +408,7 @@ static func get_shared_material(
 # Resolve a shared-mob texture path to its per-pack override when the
 # active pack ships one, else return the path unchanged. Shared mob
 # textures live under res://assets/textures/mob/; per-pack overrides
-# live at res://assets/textures/blocks/packs/{active}/mobs/. Anything
+# live at res://assets/textures/packs/{active}/mobs/. Anything
 # outside the shared mob dir (entity sprites, item icons) is passed
 # through untouched so this can be called from any texture load.
 static func _resolve_pack_mob_path(path: String) -> String:

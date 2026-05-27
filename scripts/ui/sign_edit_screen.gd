@@ -365,9 +365,7 @@ static func _flat_panel(fill: Color, border: Color) -> StyleBoxFlat:
 # well-lit cell. Editor dim overlay reduced to 0.2 so the resulting
 # 0.6 wood still reads brightly enough.
 func _wood_material() -> StandardMaterial3D:
-	var planks_path: String = (
-		"res://assets/textures/blocks/packs/%s/planks.png" % BlockAtlas.active_pack
-	)
+	var planks_path: String = "res://assets/textures/packs/%s/planks.png" % BlockAtlas.active_pack
 	var planks_tex: Texture2D = load(planks_path) as Texture2D
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Extract Minecraft Alpha 1.2.6 textures from the vendored client.jar contents
-# into a Godot-ready pack at assets/textures/blocks/packs/alpha_vanilla/, the
+# into a Godot-ready pack at assets/textures/packs/alpha_vanilla/, the
 # per-pack items dir, and the per-pack Steve skin path.
 #
 # Usage (from repo root):

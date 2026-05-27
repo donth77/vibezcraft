@@ -155,7 +155,7 @@ src/
   voxel_collider_native.cpp/.h # C++ AABB-vs-voxel sweep for mob movement
   register_types.cpp          # GDExtension class registration
 assets/
-  textures/blocks/packs/{pack}/   # active pack's PNGs (atlas slots + items/ subdir)
+  textures/packs/{pack}/          # active pack's PNGs (atlas slots + items/ + mobs/ + armor/ subdirs)
   textures/gui/                   # inventory, crafting_table, furnace, chest, widgets, logo
   textures/items/                 # default items (extruded at runtime)
   textures/mob/                   # mob species sheets (pig, cow, zombie, skeleton, …)

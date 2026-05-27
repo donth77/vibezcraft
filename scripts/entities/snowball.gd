@@ -74,9 +74,7 @@ func _build_sprite() -> void:
 	var tex: Texture2D = load("res://assets/textures/items/snowball.png") as Texture2D
 	if tex == null:
 		# Pack path fallback — alpha_vanilla extracted texture.
-		tex = (
-			load("res://assets/textures/blocks/packs/alpha_vanilla/items/snowball.png") as Texture2D
-		)
+		tex = (load("res://assets/textures/packs/alpha_vanilla/items/snowball.png") as Texture2D)
 	if tex == null:
 		return
 	_sprite = Sprite3D.new()

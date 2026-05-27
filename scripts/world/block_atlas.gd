@@ -1,8 +1,8 @@
 class_name BlockAtlas
 extends RefCounted
 
-# Packs the per-block textures from assets/textures/blocks/packs/{active}/
-# into a single atlas. Cell size is auto-detected from the first texture, so
+# Packs the per-block textures from assets/textures/packs/{active}/ into a
+# single atlas. Cell size is auto-detected from the first texture, so
 # 16×16 / 32×32 / any-square packs all work without code changes. Active
 # pack is configured in the Game autoload.
 
@@ -16,7 +16,7 @@ extends RefCounted
 # walk-through cobblestone X-crosses. Bumping to 16x16 puts all
 # existing slots well inside the valid range.
 const GRID_SIZE := 16
-const PACK_BASE := "res://assets/textures/blocks/packs/"
+const PACK_BASE := "res://assets/textures/packs/"
 const DEFAULT_PACK := "alpha_vanilla"
 
 # Face kinds for the precomputed UV lookup. Mapped from mesher's face_idx

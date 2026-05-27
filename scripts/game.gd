@@ -12,7 +12,7 @@ const CLOUD_QUALITY_FANCY: int = 2
 
 # Active texture pack. Covers blocks, per-pack item sprites (if any), and
 # Steve's skin. Value corresponds to a folder name under
-# `assets/textures/blocks/packs/` (items live in the `items/` subdir of each
+# `assets/textures/packs/` (items live in the `items/` subdir of each
 # pack, Steve in `assets/textures/entities/packs/{pack}/`). Available:
 #   • "pixel_perfection" — HD community vanilla style (default)
 #   • "alpha_vanilla"   — extracted from Mojang Alpha 1.2.6

@@ -84,13 +84,13 @@ All vars use precedence: **shell env > `.env` file > code default**. Copy `.env.
 
 | Var | Default | Effect |
 |---|---|---|
-| `MC_CLONE_TEXTURE_PACK` | `pixel_perfection` | Active block texture pack (folder under `assets/textures/blocks/packs/`) |
+| `MC_CLONE_TEXTURE_PACK` | `pixel_perfection` | Active block texture pack (folder under `assets/textures/packs/`) |
 | `MC_CLONE_DEBUG_MODE` | `false` | Start with debug mode enabled |
 | `MC_CLONE_RESOLUTION` | `1920x1080` | Window size override (e.g. `2560x1440` for HiDPI) |
 
 ### Texture packs
 
-Block textures live under `assets/textures/blocks/packs/{pack_name}/`. Cell size auto-detects from the first loaded PNG.
+Block textures live under `assets/textures/packs/{pack_name}/`. Cell size auto-detects from the first loaded PNG.
 
 ```sh
 MC_CLONE_TEXTURE_PACK=programmer_art godot --path . main.tscn

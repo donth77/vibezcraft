@@ -1729,7 +1729,7 @@ func _refresh_held_bow_texture(stage: int) -> void:
 	if stage >= 1 and stage <= 3:
 		basename = "bow_pulling_%d" % (stage - 1)
 	var pack_path: String = (
-		"res://assets/textures/blocks/packs/%s/items/%s.png" % [BlockAtlas.active_pack, basename]
+		"res://assets/textures/packs/%s/items/%s.png" % [BlockAtlas.active_pack, basename]
 	)
 	var tex: Texture2D = (
 		(
