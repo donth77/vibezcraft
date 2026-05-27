@@ -464,22 +464,22 @@ static func apply_config(cfg: ConfigFile) -> void:
 
 # Apply a resolution string ("WxH" or "fullscreen") to the live window.
 # Shared by Game._ready (boot-time cfg load) and _on_save_pressed (live
-# apply). Skipped in headless mode and when the game is running in the
-# editor's embedded play window — Godot prints "Embedded window can't
-# be resized." and the resize is rejected, so we no-op cleanly instead
-# of triggering the warning. Run from terminal (godot --path . main.tscn)
-# or unset Editor → Run → Window Placement → "Embed Subwindows" to use
-# Fullscreen / custom sizes.
+# apply). Skipped in headless mode. Fullscreen requests are skipped when
+# running embedded in the editor (DisplayServer rejects the mode change
+# and prints "Embedded window can't be resized" once per attempt — not
+# user-actionable). Plain WxH resizes are attempted regardless: in
+# exports and in editor-with-Embed-Subwindows-OFF they apply normally;
+# in the embedded play window the resize takes effect with a one-line
+# editor warning, which is preferable to silently dropping every
+# resolution change a dev makes in-editor.
 static func apply_resolution_value(value: String) -> void:
 	if DisplayServer.get_name() == "headless":
 		return
-	# Embedded play silently skips: DisplayServer rejects the call, the
-	# Fullscreen dropdown entry is already hidden in this mode, and the
-	# user can't meaningfully test the change without leaving embedded.
-	# A warning here just noisies the console on every Save / boot.
-	if _window_is_embedded():
-		return
 	if value.to_lower() == "fullscreen":
+		# Fullscreen is the only case the embedded play window genuinely
+		# can't honor — skip cleanly there so we don't spam warnings.
+		if _window_is_embedded():
+			return
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 		return
 	# Toggling fullscreen → windowed first; otherwise window_set_size is a

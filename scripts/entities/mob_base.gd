@@ -166,6 +166,12 @@ const _PHYSICS_GATE_RADIUS_SQ: float = _LOD_FAR_RADIUS_SQ
 # enough that the player rarely notices a stuck mob.
 const _STUCK_CHECK_INTERVAL: float = 2.0
 
+# Fall damage — vanilla `lw.java::e(distance, multiplier)` formula:
+# damage = max(0, floor(fall_distance - 3)) HP. Safe threshold matches
+# the player's; see `_fall_peak_y` / `_was_voxel_on_floor` state vars
+# below for the edge-triggered damage application path.
+const _FALL_DAMAGE_SAFE_BLOCKS: float = 3.0
+
 # Mob-vs-mob soft push — vanilla Entity.collideWithEntity. VoxelCollider
 # only checks block cells, so without this pass mobs would clip clean
 # through each other. Pushes are applied as a tiny velocity impulse
@@ -270,6 +276,16 @@ var _idle_sfx_timer: int = 0
 # AI/physics/damage all gated on `_dying` in subclasses.
 var _dying: bool = false
 var _death_time: float = 0.0
+# Fall damage — vanilla `lw.java::e(distance, multiplier)` formula:
+# damage = max(0, floor(fall_distance - 3)) HP. Track the highest Y
+# reached while airborne; on the airborne→grounded edge compute
+# `peak - current` and damage if it exceeds the safe threshold.
+# Skipped when landing in water/lava (vanilla water absorbs impact)
+# and for mobs that return false from `_takes_fall_damage()` (chicken
+# slow-fall). NAN sentinel on `_fall_peak_y` = "not currently tracking"
+# (just spawned, just landed, or never airborne).
+var _fall_peak_y: float = NAN
+var _was_voxel_on_floor: bool = true
 # Environment state — recomputed per physics_process. _in_water /
 # _in_lava are body checks (used for drag + swim); _check_head_in_water
 # is sampled separately inside the env tick for drowning.
@@ -283,13 +299,21 @@ var _env_tick_accum: float = 0.0
 var _env_sample_accum: float = 0.0
 var _env_sampled_once: bool = false
 var _stuck_check_accum: float = 0.0
-# Stuck-mob diagnostic — sample XZ position every second; if velocity is
-# nonzero but position hasn't moved, log one line with cell context so we
-# can diagnose the chicken-pack-bunched bug. TEMPORARY: delete once root
-# cause is found.
+# Stuck-mob diagnostic state. Only consumed when Game.debug_enabled is
+# true — fires when velocity > 0.1 m/s but XZ position hasn't moved over
+# 1 s. Kept around because the chicken-pack-bunching bug was partially
+# fixed by `_apply_mob_separation`'s position-nudge path, but we never
+# pinned down the root cause of voxel_move appearing to clip velocity
+# in flat AIR. If the symptom recurs (any species, any terrain), this
+# diagnostic surfaces the cell context without re-adding code.
 var _stuck_diag_accum: float = 0.0
 var _stuck_diag_last_xz: Vector2 = Vector2(NAN, NAN)
 var _stuck_diag_logged_at_ms: int = 0
+# Consecutive seconds the mob has been stuck (vel > 0.1 but no XZ
+# progress). Resets to 0 the moment the mob actually moves. After 2 s,
+# the stuck-handler in _physics_process applies a position kick in the
+# velocity direction and resets this back to 0. Re-arms if still stuck.
+var _stuck_seconds: float = 0.0
 # Set by _physics_process when the distance gate fires. Subclasses
 # read this AFTER `super._physics_process()` and skip their own AI /
 # pathfinding work when true — without it, mob_base's early-return
@@ -313,6 +337,11 @@ var _move_frame_skip: int = 0
 # Set by VoxelCollider.move each frame — replaces CharacterBody3D's
 # is_on_floor() since we no longer use move_and_slide.
 var _voxel_on_floor: bool = false
+# True when the last collision step zeroed a non-zero horizontal
+# velocity component (i.e., the mob hit a wall). Subclasses can read
+# this to drive vanilla "isCollidedHorizontally" behaviors — currently
+# only the spider's Beta wall-climb mechanic.
+var _was_collided_horizontally: bool = false
 
 var _air_ticks: int = _MAX_AIR_TICKS
 var _fire_dmg_accum_ticks: int = 0
@@ -395,6 +424,16 @@ func mob_is_on_floor() -> bool:
 	return _voxel_on_floor
 
 
+# Vanilla fall-damage opt-out. Returns true by default — every Alpha
+# EntityLiving subclass calls the damage formula on landing. Chicken
+# overrides to return false (vanilla `ou.java` clamps Y velocity AND
+# never calls fall damage even on huge drops, modeled in our impl
+# by suppressing the check entirely). Slime / passive / hostile mobs
+# all take fall damage like the player.
+func _takes_fall_damage() -> bool:
+	return true
+
+
 func _cached_player() -> Node3D:
 	if _cached_player_node != null and is_instance_valid(_cached_player_node):
 		return _cached_player_node
@@ -428,6 +467,22 @@ func pick_wander_target(delta: float) -> Vector3:
 	var theta: float = randf() * TAU
 	var dist: float = randf_range(WANDER_RADIUS_MIN, WANDER_RADIUS_MAX)
 	return global_position + Vector3(cos(theta) * dist, 0, sin(theta) * dist)
+
+
+# LOD-aware roll for the per-tick "pick new wander target" gate. Returns
+# true with 1/denom_at_near probability when at LOD_NEAR. AI tick rate
+# drops 4×/20× at LOD_MID/FAR, so we shrink the denom by the same
+# factor to keep the per-real-second pick rate constant — otherwise
+# far mobs sample the gate once per real second × 1/80 ≈ 1 attempt
+# per 80 s and read as frozen.
+func roll_wander_gate(denom_at_near: int) -> bool:
+	var scale: float = 1.0
+	if _lod_tier == LOD_MID:
+		scale = 4.0
+	elif _lod_tier == LOD_FAR:
+		scale = 20.0
+	var denom: int = maxi(1, int(round(float(denom_at_near) / scale)))
+	return randi() % denom == 0
 
 
 # Vanilla idle-SFX roll. Mirrors `hf.java::B()` lines:
@@ -686,8 +741,39 @@ func _physics_process(delta: float) -> void:
 	# hit walls/floors. Without this, mob's velocity stays at pre-clip
 	# value and AI thinks it's moving while position stays stuck. This
 	# was the root cause of the stuck-chickens bug in the first attempt.
+	var pre_clip_vx: float = velocity.x
+	var pre_clip_vz: float = velocity.z
 	velocity = collide_result.get("vel", velocity) as Vector3
 	_voxel_on_floor = bool(collide_result.get("on_floor", false))
+	# Fall damage — vanilla `lw.java::e(distance, mult)` → `hf.java`
+	# damage = max(0, floor(fall_distance - 3)) HP. Edge-triggered on
+	# the airborne→grounded transition. While airborne, track the
+	# highest Y reached so a mob that bumps upward mid-fall (e.g.,
+	# water column geyser, knockback, slime hop) doesn't underreport
+	# its actual fall depth. Skipped when landing in water/lava
+	# (vanilla water absorbs impact entirely) and for mobs that return
+	# false from `_takes_fall_damage()` (chicken slow-fall).
+	if _takes_fall_damage():
+		if _voxel_on_floor and not _was_voxel_on_floor and not is_nan(_fall_peak_y):
+			if not _in_water and not _in_lava:
+				var fall_dist: float = _fall_peak_y - global_position.y
+				if fall_dist > _FALL_DAMAGE_SAFE_BLOCKS:
+					var dmg: int = int(floor(fall_dist - _FALL_DAMAGE_SAFE_BLOCKS))
+					if dmg > 0:
+						take_damage(dmg, Vector3.ZERO, 0.0, null)
+			_fall_peak_y = NAN
+		elif not _voxel_on_floor:
+			# Track / extend the peak while airborne.
+			if is_nan(_fall_peak_y) or global_position.y > _fall_peak_y:
+				_fall_peak_y = global_position.y
+	_was_voxel_on_floor = _voxel_on_floor
+	# Horizontal collision = a non-zero pre-clip x/z component was zeroed
+	# by the wall scan. Threshold matches the collider's own 1e-4 motion
+	# epsilon. Used by spider for the Beta wall-climb mechanic.
+	_was_collided_horizontally = (
+		(absf(pre_clip_vx) > 0.0001 and absf(velocity.x) <= 0.0001)
+		or (absf(pre_clip_vz) > 0.0001 and absf(velocity.z) <= 0.0001)
+	)
 	# Penetration-recovery clamp. Compare the actual upward motion this
 	# frame against what `velocity.y` could have produced. Any excess is
 	# move_and_slide pushing the body out of a freshly-materialized
@@ -716,9 +802,15 @@ func _physics_process(delta: float) -> void:
 	# `_MOB_PUSH_QUICK_REJECT` (~95% of pairs skip after 4 ops).
 	if _lod_tier <= LOD_MID:
 		_apply_mob_separation()
-	# TEMP DIAGNOSTIC — log mobs that are trying to move (velocity > 0.1
-	# m/s horizontal) but aren't actually progressing. Throttled to one
-	# log per mob per 5 s so a bug doesn't spam the console.
+	# Stuck-mob handling — always runs (cheap), diagnostic print is the
+	# only Game.debug_enabled-gated piece. Detects mobs whose AI is
+	# trying to move (vel_xz > 0.1) but who haven't actually progressed
+	# (moved_xz < 0.05 in 1 s). After 2 consecutive stuck seconds,
+	# applies a small direct position kick in the velocity direction to
+	# dislodge from the voxel collider's "near-zero motion clip in flat
+	# AIR" edge case. Root cause was never traced; this is the
+	# belt-and-suspenders fallback. Chickens were the obvious symptom
+	# but the same code helps any species that ends up stuck.
 	_stuck_diag_accum += delta
 	if _stuck_diag_accum >= 1.0:
 		_stuck_diag_accum = 0.0
@@ -726,10 +818,18 @@ func _physics_process(delta: float) -> void:
 		if not is_nan(_stuck_diag_last_xz.x):
 			var vel_xz: float = Vector2(velocity.x, velocity.z).length()
 			var moved_xz: float = (cur_xz - _stuck_diag_last_xz).length()
-			var now_ms: int = Time.get_ticks_msec()
-			if vel_xz > 0.1 and moved_xz < 0.05 and (now_ms - _stuck_diag_logged_at_ms) > 5000:
-				_stuck_diag_logged_at_ms = now_ms
-				_dump_stuck_diagnostic(vel_xz)
+			if vel_xz > 0.1 and moved_xz < 0.05:
+				_stuck_seconds += 1.0
+				if Game.debug_enabled:
+					var now_ms: int = Time.get_ticks_msec()
+					if (now_ms - _stuck_diag_logged_at_ms) > 5000:
+						_stuck_diag_logged_at_ms = now_ms
+						_dump_stuck_diagnostic(vel_xz)
+				if _stuck_seconds >= 2.0:
+					_stuck_seconds = 0.0  # re-arm; fires again 2 s later if still stuck
+					_kick_stuck_mob()
+			else:
+				_stuck_seconds = 0.0
 		_stuck_diag_last_xz = cur_xz
 	# Environment tick at 20 Hz — swim impulse + drowning + fire/lava
 	# damage. Runs AFTER move_and_slide so the air-ticks check uses the
@@ -1249,11 +1349,27 @@ func _tick_world_brightness() -> void:
 	if absf(lit - _last_lit_brightness) < 0.005:
 		return  # imperceptible drift — skip the per-mesh material write
 	_last_lit_brightness = lit
-	var tint := Color(lit, lit, lit, 1.0)
 	for mi in _find_mesh_instances(self):
 		var mat := mi.material_override as StandardMaterial3D
-		if mat != null:
-			mat.albedo_color = tint
+		if mat == null:
+			continue
+		# Cache the original (pre-tint) albedo the first time we touch
+		# this material — otherwise we'd lose it after the first call
+		# replaces albedo_color with the tint. Stashed via set_meta on
+		# the material itself so each mob's materials stay independent.
+		# Without this, solid-color meshes (chicken legs, etc.) had
+		# their carefully-chosen color overwritten to grey every frame
+		# and rendered as washed-out white in daylight.
+		var original: Color
+		if mat.has_meta("original_albedo"):
+			original = mat.get_meta("original_albedo")
+		else:
+			original = mat.albedo_color
+			mat.set_meta("original_albedo", original)
+		# Multiply so textured mats (white texel * lit = lit grey, as
+		# before) and solid-color mats (orange-yellow * lit = dimmer
+		# orange-yellow) both dim correctly with time of day.
+		mat.albedo_color = Color(original.r * lit, original.g * lit, original.b * lit, original.a)
 
 
 # Recursive child walk — collects every MeshInstance3D under `node`.
@@ -1322,10 +1438,15 @@ func _unstick_after_load() -> void:
 #
 # Loop is dirt-cheap thanks to the abs() early-out — for 46 active mobs
 # spread across a chunk, ~95% of pair iterations skip after 4 ops.
-# TEMP — diagnostic dump for "AI moving but mob not progressing" bugs.
-# Logs one line with mob species, position, velocity, on_floor state,
-# and the 3×3 block grid at feet level so we can see what's blocking.
-# DELETE once chicken bunch-up root cause is identified.
+
+
+# Diagnostic dump for "AI moving but mob not progressing" bugs. Fires
+# only via the Game.debug_enabled gate in _physics_process; the call here
+# logs one line with mob species, position, velocity, on_floor state, LOD
+# tier, and the 3×3×3 block grid around feet so we can see what (if
+# anything) the voxel collider is clipping against. Kept around because
+# the chicken-bunched fix is empirical — if it regresses, this is what
+# we'd want back to diagnose.
 func _dump_stuck_diagnostic(vel_xz: float) -> void:
 	var cm: Node = _chunk_manager
 	if cm == null:
@@ -1340,8 +1461,8 @@ func _dump_stuck_diagnostic(vel_xz: float) -> void:
 	var fx: int = int(floor(pos.x))
 	var fy: int = int(floor(pos.y))
 	var fz: int = int(floor(pos.z))
-	# Sample 3×3 around feet at three Y levels (feet-1, feet, feet+1).
-	# Each line: "y=N: [id,id,id / id,id,id / id,id,id]"
+	# 3×3 grid at feet-1 / feet / feet+1 — surfaces a buried mob,
+	# a wall right beside it, or a stair/half-block clipping issue.
 	var cells: PackedStringArray = PackedStringArray()
 	if cm != null and cm.has_method("get_world_block"):
 		for ly in [fy - 1, fy, fy + 1]:
@@ -1372,6 +1493,23 @@ func _dump_stuck_diagnostic(vel_xz: float) -> void:
 	)
 
 
+# Direct position kick for mobs the voxel collider is silently clipping.
+# Triggered by the stuck-handler after 2 s of vel-but-no-progress. Moves
+# the mob ~5 cm in the direction it's TRYING to go, which is enough to
+# escape the "near-zero motion clip in flat AIR" edge case we never
+# fully traced. Capped small so we don't shove through nearby walls
+# (voxel_move will clip the next frame anyway if we land in a solid
+# cell). Safe for all species — only fires when AI has set velocity
+# and nothing happens for 2 s straight, which is always a bug.
+func _kick_stuck_mob() -> void:
+	var vel_xz := Vector2(velocity.x, velocity.z)
+	if vel_xz.length_squared() < 0.0001:
+		return
+	var dir: Vector2 = vel_xz.normalized()
+	global_position.x += dir.x * 0.05
+	global_position.z += dir.y * 0.05
+
+
 func _apply_mob_separation() -> void:
 	var self_id: int = get_instance_id()
 	var self_x: float = global_position.x
@@ -1397,27 +1535,31 @@ func _apply_mob_separation() -> void:
 		if dist_sq > sum_radius * sum_radius:
 			continue
 		var dist: float = sqrt(dist_sq)
-		# Two mobs at identical XZ: pick a STABLE direction from the
-		# instance-id delta so they always push opposite consistent
-		# directions and accumulate real motion. Earlier this branch
-		# used randf() — randomized direction per frame averaged to
-		# zero net push and packs stayed bunched forever, only
-		# escaping when a jump kicked them up by some chance margin.
-		# Sign of (self_id - other_id) is opposite for each side of
-		# the pair, so A pushes -X while B pushes +X (or whatever
-		# angle we derive). Each mob's net push is the sum of
-		# stable directions from every other mob it overlaps.
+		# Position-direct nudge for ALL overlapping pairs (not just
+		# exact-stacked). Velocity-only push was unreliable: friction
+		# (~0.89/frame) plus voxel_move clipping small near-zero motion
+		# in flat AIR (root cause never traced) consumed the push faster
+		# than it accumulated. Chickens specifically stayed locked at
+		# 0.06 m separation indefinitely — confirmed in [STUCK] logs.
+		# Direct position offset bypasses both. Direction: real positional
+		# delta when separated, instance-id hash when exactly stacked
+		# (prevents oscillation across multi-mob stacks). Magnitude
+		# scales with overlap depth and is capped at 2 cm/frame so we
+		# never shove a mob into a nearby wall.
+		var dir_x: float
+		var dir_z: float
 		if dist < 0.01:
 			var sign_id: float = signf(float(self_id - other_id))
-			# Spread the angle by id so 3+ stacked mobs don't all line
-			# up on the same axis — fmod gives an angle in [0, TAU).
 			var ang: float = fmod(float(absi(self_id - other_id)) * 0.6180339, TAU)
-			dx = sign_id * cos(ang)
-			dz = sign_id * sin(ang)
-			dist = 1.0
-		var inv_dist: float = 1.0 / maxf(dist, 0.01)
-		velocity.x += dx * inv_dist * _MOB_PUSH_STRENGTH
-		velocity.z += dz * inv_dist * _MOB_PUSH_STRENGTH
+			dir_x = sign_id * cos(ang)
+			dir_z = sign_id * sin(ang)
+		else:
+			dir_x = dx / dist
+			dir_z = dz / dist
+		var overlap: float = sum_radius - dist
+		var sep: float = minf(overlap * 0.1, 0.02)
+		global_position.x += dir_x * sep
+		global_position.z += dir_z * sep
 
 
 # Per-frame variant — same algorithm but cheap to call repeatedly

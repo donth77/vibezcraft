@@ -518,20 +518,6 @@ func _repath_toward(player: Node3D) -> void:
 	)
 
 
-func _repath_toward_position(target_pos: Vector3) -> void:
-	if _chunk_manager == null:
-		return
-	var origin: Vector3i = Vector3i(
-		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
-	)
-	var goal: Vector3i = Vector3i(
-		int(floor(target_pos.x)), int(floor(target_pos.y)), int(floor(target_pos.z))
-	)
-	_ai_path = Pathfinder.find_path(
-		_chunk_manager, origin, goal, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
-	)
-
-
 func _tick_walk_path() -> void:
 	var next_node: Vector3i = _ai_path[0]
 	var node_center: Vector3 = (
@@ -562,11 +548,44 @@ func _wander_tick() -> void:
 		velocity.x *= 0.5
 		velocity.z *= 0.5
 		return
-	var target: Vector3 = pick_wander_target(_AI_TICK_DT)
-	if target != Vector3.ZERO:
-		_repath_toward_position(target)
-	else:
-		_velocity_brake()
+	if roll_wander_gate(80):
+		if _pick_wander_target():
+			return
+	_velocity_brake()
+
+
+# Vanilla `fc.b_()` lines 40-54 — 10 random samples within (±6, ±3, ±6),
+# pathfind to the brightest walkable cell. Replaces the earlier
+# single-candidate Y-locked pick (mob_base.pick_wander_target) which
+# left creepers frozen on any uneven terrain when no player was in
+# detect range.
+func _pick_wander_target() -> bool:
+	if _chunk_manager == null:
+		return false
+	var best_score: float = -99999.0
+	var best_cell: Vector3i = Vector3i.ZERO
+	var found: bool = false
+	var origin: Vector3i = Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	for _i in range(10):
+		var x: int = origin.x + (randi() % 13) - 6
+		var y: int = origin.y + (randi() % 7) - 3
+		var z: int = origin.z + (randi() % 13) - 6
+		var cell: Vector3i = Vector3i(x, y, z)
+		if not Pathfinder.is_walkable(_chunk_manager, cell):
+			continue
+		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		if score > best_score:
+			best_score = score
+			best_cell = cell
+			found = true
+	if not found:
+		return false
+	_ai_path = Pathfinder.find_path(
+		_chunk_manager, origin, best_cell, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
+	)
+	return not _ai_path.is_empty()
 
 
 func _velocity_brake() -> void:

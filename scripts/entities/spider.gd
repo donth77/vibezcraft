@@ -174,6 +174,22 @@ const _AI_PATHFIND_RADIUS: float = 24.0
 const _AI_PATHFIND_MAX_ITERS: int = 300
 const _AI_ARRIVE_DIST: float = 0.7
 
+# Beta wall-climb. Vanilla `EntitySpider.onUpdate()` from Beta 1.5+ sets
+# the spider's `isOnLadder` flag to `isCollidedHorizontally`, and
+# `EntityLiving.moveEntityWithHeading` then writes `motY = 0.2/tick`
+# (= 4 m/sec) while on a ladder + horizontally collided. The effect is
+# a steady vertical climb up any wall the spider runs into. The slow
+# falling cap (motY clamped at -0.15/tick = -3 m/s) is the "sticky to
+# wall" portion. Alpha 1.2.6's `be.java` doesn't have wall climb yet —
+# this is one of the Beta physics behaviors our `feedback_alpha_clone
+# _scope` carve-out explicitly pulls in.
+const _AI_WALL_CLIMB_VELOCITY: float = 4.0
+const _AI_WALL_FALL_CAP: float = -3.0
+# Phys ticks at 60 Hz to keep applying the climb after the last
+# horizontal collision — covers ~2 AI ticks (50 ms × 2 = 100 ms) so
+# the spider keeps moving up while the AI re-pushes into the wall.
+const _WALL_CLIMB_PERSIST_TICKS: int = 6
+
 # Walk-anim params — leg pairs sway around their pivot in opposing
 # phase pairs. Driven by walk distance; amplitude scales with speed.
 # Vanilla `lm.java::a` lines 93-100 use `f2 * 0.6662 * 2` (yaw cos
@@ -208,6 +224,10 @@ var _ai_player_cache: Node3D = null
 # Spider goes hostile FOR THIS DURATION regardless of light level. 5 s
 # matches vanilla EntityLiving's revenge persistence (~100 ticks).
 var _ai_revenge_remaining_sec: float = 0.0
+# Phys-frame counter for wall climb. Reset to _WALL_CLIMB_PERSIST_TICKS
+# each time mob_base flags a horizontal collision; decrements per
+# physics tick. While > 0 we override velocity.y with the climb speed.
+var _wall_climb_persist_ticks: int = 0
 
 # --- Walk-anim state ---
 var _walk_dist: float = 0.0
@@ -378,6 +398,26 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 
 func _physics_process(delta: float) -> void:
+	# Beta wall-climb. Vanilla `EntitySpider.onUpdate()` writes
+	# `motY = 0.2/tick` after moveEntity whenever the spider is
+	# collidedHorizontally. Two wrinkles port awkwardly to our
+	# decoupled tick rates:
+	#   1. mob_base zeros the horizontal velocity component the
+	#      collider clipped (so AI knows it's stuck). Between AI
+	#      ticks (20 Hz vs physics 60 Hz), velocity.x is 0 — no push
+	#      into the wall, no further collision flag, no climb. Result:
+	#      spider hops 1 frame then stops. We hold the climb intent
+	#      for _WALL_CLIMB_PERSIST_TICKS phys frames after the last
+	#      horizontal collision so the climb bridges the gap.
+	#   2. Velocity is written BEFORE super so the upcoming move
+	#      receives it — same prev-tick/next-tick coupling vanilla
+	#      uses between onUpdate and moveEntityWithHeading.
+	if _was_collided_horizontally and not _dying and not _physics_gated:
+		_wall_climb_persist_ticks = _WALL_CLIMB_PERSIST_TICKS
+	if _wall_climb_persist_ticks > 0 and not _dying and not _physics_gated:
+		velocity.y = maxf(velocity.y, _AI_WALL_CLIMB_VELOCITY)
+		velocity.y = maxf(velocity.y, _AI_WALL_FALL_CAP)
+		_wall_climb_persist_ticks -= 1
 	super._physics_process(delta)
 	if _dying or _physics_gated:
 		return
@@ -519,7 +559,7 @@ func _tick_idle() -> void:
 	if not _ai_path.is_empty():
 		_tick_walk_path()
 		return
-	if randi() % _AI_NEW_TARGET_DENOM == 0:
+	if roll_wander_gate(_AI_NEW_TARGET_DENOM):
 		if _pick_wander_target():
 			return
 	if randf() < _AI_YAW_TWITCH_CHANCE:

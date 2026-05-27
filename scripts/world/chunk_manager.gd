@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 # gdlint: disable=max-file-lines
 extends Node3D
 
@@ -16,7 +17,8 @@ const _SAVE_LOAD: GDScript = preload("res://scripts/persistence/save_load.gd")
 # workaround as `_TICK_SCHEDULER` above).
 const _PASSIVE_SPAWNER_SCRIPT: GDScript = preload("res://scripts/world/passive_spawner.gd")
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
-const _AUTOSAVE_INDICATOR_VISIBLE_SEC: float = 1.0
+const _AUTOSAVE_INDICATOR_VISIBLE_SEC: float = 3.0
+const _AUTOSAVE_INDICATOR_FONT_SIZE: int = 22
 
 # Leaf-decay + sapling-growth delays. Exponential-distributed to
 # approximate Alpha random-tick pacing. MIN clamps avoid same-frame
@@ -819,19 +821,25 @@ func _setup_autosave() -> void:
 	add_child(layer)
 	_autosave_label = Label.new()
 	_autosave_label.text = "Auto-saving..."
-	_autosave_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
+	# Vanilla MC's "Saving chunks..." message — yellow with black drop
+	# shadow. Bigger font + drop shadow to read clearly over any terrain.
+	_autosave_label.add_theme_color_override("font_color", Color(1, 1, 0.4, 1.0))
 	_autosave_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 1))
-	_autosave_label.add_theme_constant_override("shadow_offset_x", 1)
-	_autosave_label.add_theme_constant_override("shadow_offset_y", 1)
-	# Anchor bottom-left, 16 px in / 32 px up so it sits clear of the hotbar.
-	_autosave_label.anchor_left = 0.0
-	_autosave_label.anchor_right = 0.0
-	_autosave_label.anchor_top = 1.0
-	_autosave_label.anchor_bottom = 1.0
-	_autosave_label.offset_left = 16
-	_autosave_label.offset_top = -32
-	_autosave_label.offset_right = 200
-	_autosave_label.offset_bottom = -8
+	_autosave_label.add_theme_constant_override("shadow_offset_x", 2)
+	_autosave_label.add_theme_constant_override("shadow_offset_y", 2)
+	_autosave_label.add_theme_font_size_override("font_size", _AUTOSAVE_INDICATOR_FONT_SIZE)
+	# Anchor top-right — away from the hotbar at the bottom and the F3
+	# debug overlay at the top-left. Hovering 24 px in from each edge so
+	# it's clearly inside the frame.
+	_autosave_label.anchor_left = 1.0
+	_autosave_label.anchor_right = 1.0
+	_autosave_label.anchor_top = 0.0
+	_autosave_label.anchor_bottom = 0.0
+	_autosave_label.offset_left = -260
+	_autosave_label.offset_top = 24
+	_autosave_label.offset_right = -16
+	_autosave_label.offset_bottom = 60
+	_autosave_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_autosave_label.visible = false
 	layer.add_child(_autosave_label)
 
@@ -846,6 +854,7 @@ func _on_autosave_tick() -> void:
 		_autosave_label.visible = true
 	# Persist dirty live chunks before flushing the region cache —
 	# otherwise edits to chunks that haven't evicted yet are missed.
+	var t_start_msec: int = Time.get_ticks_msec()
 	flush_dirty_loaded()
 	SaveLoad.flush_all_regions()
 	if _player != null:
@@ -862,6 +871,12 @@ func _on_autosave_tick() -> void:
 	meta["play_time_seconds"] = int(meta.get("play_time_seconds", 0)) + session_seconds
 	_session_start_msec = Time.get_ticks_msec()  # avoid double-counting on the next tick
 	WorldMeta.save_meta(meta)
+	# Terminal log — visible in the Godot output panel even if the
+	# player blinked through the on-screen indicator. Reports the
+	# end-to-end autosave duration so frame-hitch regressions are
+	# obvious if they appear.
+	var elapsed_ms: int = Time.get_ticks_msec() - t_start_msec
+	print("[Autosave] saved in %d ms" % elapsed_ms)
 	if _autosave_label != null:
 		# Hide the indicator after a short visibility window. SceneTreeTimer
 		# is fire-and-forget; if the label was freed before timeout (shutdown
@@ -1835,6 +1850,15 @@ func get_chunk_at_coord(coord: Vector2i) -> Chunk:
 	if not _chunks.has(coord):
 		return null
 	return _chunks[coord].chunk
+
+
+# Public read-only view of the loaded-chunk dict. Returns the live
+# Dictionary (Vector2i → ChunkNode), NOT a copy — callers must NOT
+# mutate. Used by `Blocks.run_random_tick_pass` to iterate every
+# loaded chunk without depending on the private `_chunks` member.
+# Cheap (no allocation); the dict is owned by ChunkManager.
+func iter_loaded_chunks() -> Dictionary:
+	return _chunks
 
 
 # Called by Lighting after the C++ BFS has written modified sky_light back

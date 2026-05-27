@@ -173,6 +173,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		mat.set_shader_parameter("debug_view", _light_view)
 		var label: String = ["normal", "sky_light", "block_light", "combined"][_light_view]
 		print("[debug] chunk light heatmap = %d (%s)" % [_light_view, label])
+		# Probe the cell the player is looking at + 6 neighbors and
+		# log block_id / sky_light / block_light for each. Lets users
+		# SHARE a precise numeric snapshot of suspicious lighting bugs
+		# (the F8 heatmap is visual-only — useful in the moment but
+		# doesn't show up in screenshots sent off-device for help).
+		# Falls back to player feet position when the raycast misses.
+		_log_light_probe()
 		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("debug_biome_scan"):
 		_dump_biome_scan()
@@ -459,6 +466,83 @@ func _scout_chunks_around_player() -> Dictionary:
 
 
 # B-key handler — dump diagnostic info for the area around the player to
+# F8 lighting probe — log the cell the player is looking at + its 6
+# cardinal neighbors with block_id, sky_light, block_light. Pairs
+# with the F8 heatmap so users can SHARE numeric snapshots of
+# suspicious lighting (heatmap is visual-only; this output is copy-
+# pasteable into a bug report).
+#
+# Cell sampled via a self-contained camera raycast (same algorithm as
+# `interaction._raycast`, replicated to avoid cross-module wiring).
+# Falls back to the cell at the player's feet when the raycast misses
+# (looking at open sky).
+func _log_light_probe() -> void:
+	if _player == null or _chunk_manager == null:
+		print("[light-probe] no player / chunk_manager ref")
+		return
+	var center: Vector3i = _raycast_target_cell()
+	var lines: PackedStringArray = []
+	lines.append("[light-probe] center @ %s" % str(center))
+	var labels: PackedStringArray = [
+		"CENTER", "+X    ", "-X    ", "+Y    ", "-Y    ", "+Z    ", "-Z    "
+	]
+	var offsets: Array = [
+		Vector3i.ZERO,
+		Vector3i(1, 0, 0),
+		Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0),
+		Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1),
+		Vector3i(0, 0, -1),
+	]
+	for i in range(offsets.size()):
+		var pos: Vector3i = center + offsets[i] as Vector3i
+		var id: int = _chunk_manager.get_world_block(pos)
+		var sky: int = _chunk_manager.get_world_sky_light(pos)
+		var blk: int = _chunk_manager.get_world_block_light(pos)
+		var name: String = Blocks.name_of(id)
+		lines.append("  %s %-22s id=%-3d sky=%-3d block=%-3d" % [labels[i], str(pos), id, sky, blk])
+		# Suffix name on a continuation indent to keep columns aligned.
+		lines.append("                                   (%s)" % name)
+	for line in lines:
+		print(line)
+
+
+# Raycast from camera forward; return the world cell the ray ends in.
+# Identical PhysicsRayQueryParameters3D pattern as
+# `interaction._raycast`; replicated here so debug_stats doesn't need
+# a cross-module reference. Falls back to the cell at the player's
+# feet on miss (e.g., looking at open sky).
+func _raycast_target_cell() -> Vector3i:
+	const _REACH: float = 8.0
+	var camera: Camera3D = _player.find_child("Camera3D", true, false) as Camera3D
+	if camera == null:
+		return Vector3i(
+			int(floor(_player.global_position.x)),
+			int(floor(_player.global_position.y)),
+			int(floor(_player.global_position.z))
+		)
+	var space: PhysicsDirectSpaceState3D = camera.get_world_3d().direct_space_state
+	var origin: Vector3 = camera.global_position
+	var direction: Vector3 = -camera.global_transform.basis.z
+	var query := PhysicsRayQueryParameters3D.create(origin, origin + direction * _REACH)
+	query.collision_mask = 0b001  # solid world only — skip mob/selection layers
+	var player_collider: CollisionObject3D = _player as CollisionObject3D
+	if player_collider != null:
+		query.exclude = [player_collider.get_rid()]
+	var result: Dictionary = space.intersect_ray(query)
+	if result.is_empty():
+		return Vector3i(
+			int(floor(_player.global_position.x)),
+			int(floor(_player.global_position.y)),
+			int(floor(_player.global_position.z))
+		)
+	var hit_pos: Vector3 = result.position
+	var hit_normal: Vector3 = result.normal
+	var inside: Vector3 = hit_pos - hit_normal * 0.01
+	return Vector3i(int(floor(inside.x)), int(floor(inside.y)), int(floor(inside.z)))
+
+
 # stdout. Three sections: an ASCII biome map (32×32 around player),
 # surface-block composition for the player's chunk, and current biome
 # climate readings. Console output (not panel) so the F3 readout stays

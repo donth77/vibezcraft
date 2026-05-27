@@ -386,9 +386,25 @@ func _stick_at(p: Vector3) -> void:
 	_velocity = Vector3.ZERO
 	_stuck = true
 	SFX.play_arrow_hit()
+	# DEVIATION from vanilla — skeleton-shot arrows that miss the player
+	# despawn the instant they embed. Vanilla keeps them stuck for 60 s
+	# (just not pickup-able by the player), but visually they'd pile up
+	# everywhere a skeleton's aim was off. The hit SFX still plays so
+	# the player gets the audio cue; only the visible+collidable arrow
+	# entity goes away. Player-shot arrows (`_shooter` not a MobBase)
+	# stay stuck through the normal 60-s lifetime so the player can
+	# walk over and pick them up.
+	if _shooter is MobBase:
+		queue_free()
 
 
 func _check_pickup() -> void:
+	# Vanilla `da.java` (EntityArrow) sets `canBePickedUp = 1` only when
+	# the shooter is an EntityPlayer; mob-fired arrows have it at 0 and
+	# linger until despawn. Without this gate, a skeleton missing a
+	# shot would be a free arrow supply for the player.
+	if _shooter is MobBase:
+		return
 	if _player == null:
 		_player = get_tree().root.get_node_or_null("Main/Player")
 	if _player == null:

@@ -58,10 +58,16 @@ const _FOOT_CUBE_PX: Vector3i = Vector3i(3, 1, 3)
 # leg column's back position — without this, that 1×1×1 cell is empty
 # and the leg appears to "float" over a missing corner.
 const _LEG_Z_OFFSET: float = 0.0625
-# Vanilla chicken leg color (light orange-yellow) per pixel sample
-# at chicken.png (33, 1): RGB (224, 204, 105). Used for both the
-# thin leg and wide foot cube — solid material, no texture lookup.
-const _LEG_COLOR: Color = Color(224.0 / 255.0, 204.0 / 255.0, 105.0 / 255.0, 1.0)
+# Vanilla chicken leg color. Sampled at runtime from chicken.png so it
+# matches whatever texture pack is loaded (and so a future re-skin of
+# the asset doesn't leave us with a stale hardcoded RGB). The sample is
+# taken from inside the leg UV rect (26, 0 + a few px offset to land on
+# an opaque pixel, since the leg UV uses alpha=0 for the carved-out
+# silhouette). Fallback to vanilla Alpha's painted leg colour if the
+# texture can't be read or the sampled pixel is transparent — matches
+# the pre-runtime-sample constant value, so legs never go missing.
+const _LEG_COLOR_FALLBACK: Color = Color(224.0 / 255.0, 204.0 / 255.0, 105.0 / 255.0, 1.0)
+const _LEG_COLOR_SAMPLE_PX: Vector2i = Vector2i(26, 4)
 const _HEAD_TEX_ORIGIN: Vector2i = Vector2i(0, 0)
 const _BEAK_TEX_ORIGIN: Vector2i = Vector2i(14, 0)
 const _WATTLE_TEX_ORIGIN: Vector2i = Vector2i(14, 4)
@@ -224,6 +230,16 @@ func _get_body_width() -> float:
 	return 0.5
 
 
+# Vanilla `ou.java::b_()` clamps motionY to -0.6 m/tick when falling,
+# AND `EntityFlying` (chicken's parent in some versions) overrides
+# `fall(distance)` to a no-op. Net effect: chickens never take fall
+# damage from any height in vanilla. Slow-fall + fall-damage immunity.
+# We model both: the slow-fall velocity clamp is in `chicken.gd`'s
+# physics override, and this method opts out of MobBase's fall damage.
+func _takes_fall_damage() -> bool:
+	return false
+
+
 func _ready() -> void:
 	max_health = 4  # vanilla `ou.J = 4`
 	# Vanilla `ou.g_() = dx.J.aW = FEATHER`, 0-2 per kill (matches
@@ -341,7 +357,7 @@ func _build_model() -> void:
 	# anim). Solid-color material (no texture lookup) — vanilla
 	# chicken leg UV is a near-uniform yellow with alpha=0 carving
 	# that we replace with two opaque cubes for stable rendering.
-	var leg_mat: StandardMaterial3D = _make_solid_material(_LEG_COLOR)
+	var leg_mat: StandardMaterial3D = _make_solid_material(_sample_leg_color(tex))
 	_leg_r = _add_leg(_LEG_RIGHT_HIP, leg_mat)
 	_leg_l = _add_leg(_LEG_LEFT_HIP, leg_mat)
 	# Wings — built with a pivot Node3D at the SHOULDER so vanilla's
@@ -464,6 +480,28 @@ func _make_solid_material(color: Color) -> StandardMaterial3D:
 	return mat
 
 
+# Read a pixel from chicken.png inside the leg UV rect. Texture pack
+# swaps (alpha_vanilla, programmer_art, etc.) ship different leg
+# palettes — sampling at runtime keeps the solid-color leg cube in
+# sync with whatever the body texture uses. Falls back to the vanilla
+# Alpha colour if the pixel is transparent (the leg UV has alpha=0
+# carving) or the texture can't be locked.
+func _sample_leg_color(tex: Texture2D) -> Color:
+	if tex == null:
+		return _LEG_COLOR_FALLBACK
+	var img: Image = tex.get_image()
+	if img == null:
+		return _LEG_COLOR_FALLBACK
+	var px: Vector2i = _LEG_COLOR_SAMPLE_PX
+	if px.x < 0 or px.y < 0 or px.x >= img.get_width() or px.y >= img.get_height():
+		return _LEG_COLOR_FALLBACK
+	var c: Color = img.get_pixel(px.x, px.y)
+	if c.a < 0.5:
+		return _LEG_COLOR_FALLBACK
+	c.a = 1.0
+	return c
+
+
 # Build a simple BoxMesh of the given size — no UV mapping needed
 # since the leg/foot use a solid-color material rather than the
 # chicken sheet.
@@ -550,7 +588,7 @@ func _tick_walk_path() -> void:
 
 
 func _tick_idle() -> void:
-	if randi() % _AI_NEW_TARGET_DENOM == 0:
+	if roll_wander_gate(_AI_NEW_TARGET_DENOM):
 		if _pick_wander_target():
 			return
 		# Pathfinder failed for every candidate cell — fall back to a short

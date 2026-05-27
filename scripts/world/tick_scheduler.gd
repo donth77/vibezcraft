@@ -104,6 +104,11 @@ static func advance(delta: float, manager) -> void:
 	for _i in range(ticks_to_fire):
 		_current_tick += 1
 		_tick_all(manager)
+		# Vanilla random tick pass — every game tick picks N random
+		# cells per loaded chunk and fires per-block updateTick on the
+		# `is_random_tickable` subset (grass spread/decay, etc.). Lives
+		# on `Blocks` to keep the per-block logic colocated.
+		Blocks.run_random_tick_pass(manager)
 
 
 # Drain every pending entry whose fire_tick is now due. Mirrors vanilla's

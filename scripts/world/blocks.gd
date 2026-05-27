@@ -6,6 +6,12 @@ extends RefCounted
 # can race on first run (headless tests skip the editor scan that
 # populates the class cache), so we resolve the script statically here.
 const _MOB_SPAWNER_MGR: GDScript = preload("res://scripts/world/mob_spawner_manager.gd")
+# Random-tick density per loaded chunk per game tick. Vanilla picks 3
+# random cells per 16×16×16 chunk section per tick; our 16×128×16
+# chunks have 8 vertical sections → 24 cells/chunk/tick at 20 Hz.
+# Most cells fast-path bail in `is_random_tickable` so the actual
+# handler fires <100 times/sec across all loaded chunks.
+const _RANDOM_TICKS_PER_CHUNK: int = 24
 
 # Block IDs (Uint8 0-255). IDs are stable — append to the end, never renumber.
 # File length cap is intentionally lifted: this is the canonical block
@@ -498,6 +504,143 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		# new files aren't in the cache until the editor scans them,
 		# and headless test runs skip that scan.
 		_MOB_SPAWNER_MGR.on_tick(manager, pos)
+
+
+# --- Random-tick subsystem (vanilla `cy.java::a(...)` per-tick sweep) ---
+#
+# Vanilla picks 3 random cells per 16³ chunk section per game tick and
+# fires `updateTick` on whatever block is at each cell. Most blocks
+# don't override updateTick — for those, the lookup is a cheap branch
+# that exits immediately. Random-tickable blocks (grass spread/decay,
+# leaf decay, crop growth, ice melt, fire spread, etc.) drive most of
+# the world's "passive ambient change" mechanics.
+#
+# Our chunks are 16×128×16 (no section split — 8 vertical 16-cube
+# sections worth). To match vanilla density we fire 24 random ticks
+# per chunk per game tick (8 sections × 3). Driver runs from
+# `TickScheduler.advance` so it stays on the 20 Hz vanilla cadence
+# and pauses correctly on frame hitches.
+#
+# Perf budget (typical 5×5 = 25 loaded chunks × 24 random ticks × 20
+# Hz): 12,000 cell lookups/sec. ~99% hit the `is_random_tickable`
+# fast-path bail (non-grass = non-tickable), so the actual handler
+# fires <100 times/sec. Set_world_block writes dominate when grass
+# IS spreading; batch via `manager.begin_batch` / `end_batch` is a
+# future optimization if profiling shows it.
+
+
+# Quick-gate for the random-tick pass. Most cells aren't random-
+# tickable so this check is the dominant cost — keep it a single
+# branch on the block id. Add new entries here as blocks gain random-
+# tick behavior (leaves decay, crops, ice melt, fire spread, …).
+static func is_random_tickable(id: int) -> bool:
+	return id == GRASS
+
+
+# Driver — iterate every loaded chunk and fire N random cells. Called
+# once per game tick from `TickScheduler.advance`. `manager` is the
+# ChunkManager (autoload-free typed Node).
+static func run_random_tick_pass(manager) -> void:
+	# Defensive: TickScheduler tests pass a minimal fake manager that
+	# doesn't implement `iter_loaded_chunks`. Skip the random-tick pass
+	# in that case so scheduled-tick tests can drive `advance()` without
+	# needing to mock the full ChunkManager surface.
+	if not manager.has_method("iter_loaded_chunks"):
+		return
+	var probe_token := PerfProbe.begin("random_tick")
+	# Iterate the loaded-chunks dict directly. Chunks are keyed by
+	# Vector2i(cx, cz); the Chunk's `blocks` PackedByteArray lets us
+	# skip the manager.get_world_block dict-lookup overhead for the
+	# hot fast-path branch (most cells are non-tickable).
+	var chunks: Dictionary = manager.iter_loaded_chunks()
+	for coord: Vector2i in chunks:
+		var chunk: Chunk = manager.get_chunk_at_coord(coord)
+		if chunk == null:
+			continue
+		var base_x: int = coord.x * Chunk.SIZE_X
+		var base_z: int = coord.y * Chunk.SIZE_Z
+		for _i in range(_RANDOM_TICKS_PER_CHUNK):
+			var lx: int = randi() % Chunk.SIZE_X
+			var ly: int = randi() % Chunk.SIZE_Y
+			var lz: int = randi() % Chunk.SIZE_Z
+			var id: int = chunk.get_block(lx, ly, lz)
+			if not is_random_tickable(id):
+				continue
+			on_random_tick(manager, Vector3i(base_x + lx, ly, base_z + lz), id)
+	PerfProbe.end("random_tick", probe_token)
+
+
+# Per-block random-tick dispatch. Mirrors `on_scheduled_tick` —
+# branch on id, call species-specific handler. Empty fallthrough for
+# unknown ids is a no-op (defensive against id mismatch between the
+# `is_random_tickable` filter and this dispatch).
+static func on_random_tick(manager, pos: Vector3i, block_id: int) -> void:
+	if block_id == GRASS:
+		_tick_grass(manager, pos)
+
+
+# Vanilla `os.java::a()` (BlockGrass.updateTick) port:
+#
+#   if (world.getLightValue(x, y+1, z) < 4
+#       && world.getBlock(x, y+1, z).material.blocksMovement()) {
+#       if (random.nextInt(4) != 0) return;   // 1/4 chance per tick
+#       world.setBlock(x, y, z, DIRT);
+#   } else if (world.getLightValue(x, y+1, z) >= 9) {
+#       int n7 = x + random.nextInt(3) - 1;        // -1..+1
+#       int n6 = y + random.nextInt(5) - 3;        // -3..+1
+#       int n5 = z + random.nextInt(3) - 1;
+#       if (world.getBlock(n7, n6, n5) == DIRT
+#           && world.getLightValue(n7, n6+1, n5) >= 4
+#           && !world.getBlock(n7, n6+1, n5).material.blocksMovement()) {
+#           world.setBlock(n7, n6, n5, GRASS);
+#       }
+#   }
+#
+# Two key vanilla quirks:
+#   * Decay only fires when light above < 4 AND the block above is
+#     opaque (`material.blocksMovement()` — equiv to our `is_opaque`).
+#     Open grass under air with dim sky DOESN'T decay; only covered
+#     grass does.
+#   * Spread requires SOURCE light ≥ 9 (the grass itself must be well-
+#     lit) AND target light ≥ 4 (the dirt's above-cell). The 9 vs 4
+#     asymmetry is intentional — grass only "actively" spreads from
+#     well-lit cells, but accepts low-light neighbors.
+static func _tick_grass(manager, pos: Vector3i) -> void:
+	var above: Vector3i = pos + Vector3i(0, 1, 0)
+	# `manager.get_world_block_light` returns the COMBINED max of sky
+	# + block light at the cell — same as vanilla `cy.j(...)`.
+	var above_light: int = maxi(
+		manager.get_world_sky_light(above), manager.get_world_block_light(above)
+	)
+	var above_id: int = manager.get_world_block(above)
+	# Decay path — dim AND covered.
+	if above_light < 4 and is_opaque(above_id):
+		if randi() % 4 != 0:
+			return
+		manager.set_world_block(pos, DIRT)
+		return
+	# Spread path — well-lit source. Vanilla compares >= 9 on the source's
+	# above-cell. Skip the spread sample if grass is under-lit (saves the
+	# random + 4 block-lookups per call).
+	if above_light < 9:
+		return
+	var n_x: int = pos.x + (randi() % 3 - 1)
+	var n_y: int = pos.y + (randi() % 5 - 3)
+	var n_z: int = pos.z + (randi() % 3 - 1)
+	var target := Vector3i(n_x, n_y, n_z)
+	if target == pos:
+		return
+	if manager.get_world_block(target) != DIRT:
+		return
+	var target_above: Vector3i = target + Vector3i(0, 1, 0)
+	var target_above_light: int = maxi(
+		manager.get_world_sky_light(target_above), manager.get_world_block_light(target_above)
+	)
+	if target_above_light < 4:
+		return
+	if is_opaque(manager.get_world_block(target_above)):
+		return
+	manager.set_world_block(target, GRASS)
 
 
 # Crops growth tick. Advances meta by 1 each fire if conditions hold,

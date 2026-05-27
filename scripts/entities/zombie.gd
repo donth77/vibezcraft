@@ -472,37 +472,70 @@ func _attack_player(player: Node3D) -> void:
 
 # Slow the zombie to a near-stop on in-melee frames so it doesn't push
 # the player around while attacking.
-# Vanilla EntityCreature wander — picks a random nearby target every
-# few seconds and pathfinds there at half walk speed. Uses the shared
-# `MobBase.pick_wander_target` cooldown so other hostile mobs match.
-# Without this the zombie freezes when no player is in detect range.
+# Vanilla `fc.b_()` lines 34-54 — EntityCreature's wander, inherited by
+# EntityZombie. Without this the zombie freezes wherever it spawned and
+# only moves once a player is in detect range. Per AI tick (20 Hz at
+# LOD_NEAR), roll `nextInt(80) == 0`; on hit, sample 10 candidate cells
+# within (±6 X, ±3 Y, ±6 Z) and pathfind to the brightest walkable one.
+#
+# The earlier implementation used `MobBase.pick_wander_target` which:
+#   1. holds Y fixed at the mob's current Y, so on a slope the chosen
+#      goal cell lands inside terrain or above it → pathfinder returns
+#      [] every time, and the mob brakes for 4 s before retrying;
+#   2. picks ONE candidate per 4 s cooldown, so a single unreachable
+#      pick costs 4 s of standing still.
+# Sampling 10 candidates with Y variation matches vanilla and reliably
+# finds a reachable target on uneven ground.
+#
+# Roll denominator scales by LOD tick_scale so MID (5 Hz) and FAR (1 Hz)
+# zombies get the same per-real-second wander rate as NEAR (otherwise
+# FAR mobs only roll 1×/sec × 1/80 ≈ 1 attempt per 80 real seconds).
 func _wander_tick() -> void:
 	if not _ai_path.is_empty():
 		_tick_walk_path()
 		velocity.x *= 0.5
 		velocity.z *= 0.5
 		return
-	var target: Vector3 = pick_wander_target(_AI_TICK_DT)
-	if target != Vector3.ZERO:
-		_repath_toward_position(target)
-	else:
-		_velocity_brake()
+	if roll_wander_gate(80):
+		if _pick_wander_target():
+			return
+	_velocity_brake()
 
 
-# Same as `_repath_toward(player)` but takes a raw world position so
-# the wander tick can ask the pathfinder for an arbitrary point.
-func _repath_toward_position(target_pos: Vector3) -> void:
+# Vanilla `fc.b_()` lines 40-54 — best of 10 random samples within
+# (±6, ±3, ±6) cells. Prefilter unreachable cells via `is_walkable`
+# (vanilla's pathfinder is lenient and partial-paths somewhere close;
+# ours returns [] on unreachable goals). Score by sky_light so the
+# pick mildly prefers open ground when the sample range straddles a
+# wall, but the actual chase target — the player — is the dominant
+# attractor in the rest of the AI loop, so neutral scoring is fine.
+func _pick_wander_target() -> bool:
 	if _chunk_manager == null:
-		return
+		return false
+	var best_score: float = -99999.0
+	var best_cell: Vector3i = Vector3i.ZERO
+	var found: bool = false
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
 	)
-	var goal: Vector3i = Vector3i(
-		int(floor(target_pos.x)), int(floor(target_pos.y)), int(floor(target_pos.z))
-	)
+	for _i in range(10):
+		var x: int = origin.x + (randi() % 13) - 6
+		var y: int = origin.y + (randi() % 7) - 3
+		var z: int = origin.z + (randi() % 13) - 6
+		var cell: Vector3i = Vector3i(x, y, z)
+		if not Pathfinder.is_walkable(_chunk_manager, cell):
+			continue
+		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		if score > best_score:
+			best_score = score
+			best_cell = cell
+			found = true
+	if not found:
+		return false
 	_ai_path = Pathfinder.find_path(
-		_chunk_manager, origin, goal, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
+		_chunk_manager, origin, best_cell, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
 	)
+	return not _ai_path.is_empty()
 
 
 func _velocity_brake() -> void:

@@ -372,7 +372,7 @@ func _tick_walk_path() -> void:
 
 
 func _tick_idle() -> void:
-	if randi() % _AI_NEW_TARGET_DENOM == 0:
+	if roll_wander_gate(_AI_NEW_TARGET_DENOM):
 		if _pick_wander_target():
 			return
 	if randf() < _AI_YAW_TWITCH_CHANCE:

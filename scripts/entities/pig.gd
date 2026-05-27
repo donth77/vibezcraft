@@ -399,8 +399,9 @@ func _tick_walk_path() -> void:
 
 
 func _tick_idle() -> void:
-	# Vanilla `bd.nextInt(80) == 0` per-tick new-target roll.
-	if randi() % _AI_NEW_TARGET_DENOM == 0:
+	# Vanilla `bd.nextInt(80) == 0` per-tick new-target roll, LOD-scaled
+	# so MID/FAR mobs keep the same per-real-second rate.
+	if roll_wander_gate(_AI_NEW_TARGET_DENOM):
 		if _pick_wander_target():
 			return
 	# Vanilla hf.b_() yaw twitch fallback (5%/tick).

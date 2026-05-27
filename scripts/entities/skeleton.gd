@@ -520,11 +520,45 @@ func _wander_tick() -> void:
 		velocity.x *= 0.5
 		velocity.z *= 0.5
 		return
-	var target: Vector3 = pick_wander_target(_AI_TICK_DT)
-	if target != Vector3.ZERO:
-		_repath_to(target)
-	else:
-		_velocity_brake()
+	if roll_wander_gate(80):
+		if _pick_wander_target():
+			return
+	_velocity_brake()
+
+
+# Vanilla `fc.b_()` lines 40-54 — 10 random samples within (±6, ±3, ±6),
+# pathfind to the brightest walkable cell. Same shape as zombie /
+# spider; see those for the rationale on Y variation + walkability
+# prefilter. Without this, holding Y fixed at the mob's current Y
+# (mob_base.pick_wander_target) leaves the skeleton frozen on any
+# uneven terrain because the chosen XZ cell is unreachable.
+func _pick_wander_target() -> bool:
+	if _chunk_manager == null:
+		return false
+	var best_score: float = -99999.0
+	var best_cell: Vector3i = Vector3i.ZERO
+	var found: bool = false
+	var origin: Vector3i = Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	for _i in range(10):
+		var x: int = origin.x + (randi() % 13) - 6
+		var y: int = origin.y + (randi() % 7) - 3
+		var z: int = origin.z + (randi() % 13) - 6
+		var cell: Vector3i = Vector3i(x, y, z)
+		if not Pathfinder.is_walkable(_chunk_manager, cell):
+			continue
+		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		if score > best_score:
+			best_score = score
+			best_cell = cell
+			found = true
+	if not found:
+		return false
+	_ai_path = Pathfinder.find_path(
+		_chunk_manager, origin, best_cell, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
+	)
+	return not _ai_path.is_empty()
 
 
 # Vanilla `EntityCreature.findRandomTargetBlock` retreats by picking
@@ -756,11 +790,18 @@ func _advance_walk_animation(delta: float) -> void:
 # the bow visual.
 func _apply_skeleton_arm_pose(phase: float) -> void:
 	var arm_swing: float = cos(phase + PI) * _ARM_AMPLITUDE * _walk_anim_amount
-	# Right arm always raised — keeps the bow visible + oriented
-	# consistently regardless of walk vs aim state. Only the LEFT arm
-	# swings naturally during walk (no bow there).
+	# Right arm raises ONLY while drawing the bow. Outside of aim it
+	# swings anti-phase to the left arm like a normal biped — matches
+	# Beta+ ModelSkeleton, which only raises the right arm when the
+	# `aimedBow` flag is on. Earlier we left it pinned up at all times
+	# so the bow stayed visible, but the always-pointing pose reads as
+	# "ready to shoot" 24/7 and obscures the threat cue of an actual
+	# draw.
 	if _arm_r_pivot != null:
-		_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
+		if _ai_aiming:
+			_arm_r_pivot.rotation = Vector3(_AIM_ARM_PITCH, 0.0, 0.0)
+		else:
+			_arm_r_pivot.rotation = Vector3(arm_swing, 0.0, 0.0)
 	if _arm_l_pivot != null:
 		_arm_l_pivot.rotation = Vector3(-arm_swing, 0.0, 0.0)
 
