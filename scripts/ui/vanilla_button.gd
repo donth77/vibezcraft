@@ -230,15 +230,18 @@ func _apply_state() -> void:
 		mouse_filter = Control.MOUSE_FILTER_STOP
 
 
-# Nearest-neighbor-upscales the active pack's dirt sprite so STRETCH_TILE
+# Nearest-neighbor-upscales the menu-chrome dirt sprite so STRETCH_TILE
 # produces a tile every ~64 screen px instead of every 16 — matches
-# vanilla's `f2 = 32.0f` tile-size math. Returns null if the active pack
-# doesn't ship a dirt texture yet. (Unrelated to the button itself, but
-# main_menu / loading_screen / select_world_screen all reach for it
-# through VanillaButton.make_scaled_dirt_texture(...).)
+# vanilla's `f2 = 32.0f` tile-size math. Always sources from
+# alpha_vanilla, matching vanilla MC's behavior where the title-screen
+# / world-select / loading-screen chrome uses the JAR-bundled dirt
+# regardless of the active in-game pack. The active pack's dirt only
+# enters the world atlas. Without this, packs whose dirt averages to
+# a desaturated brown (pixel_perfection) read as flat gray after the
+# 0x404040 (25 %) `_BG_TINT` multiplier collapses R/G/B together.
 static func make_scaled_dirt_texture(scale: int = 4) -> Texture2D:
 	var src: Texture2D = (
-		load("%s%s/dirt.png" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack]) as Texture2D
+		load("%s%s/dirt.png" % [BlockAtlas.PACK_BASE, BlockAtlas.DEFAULT_PACK]) as Texture2D
 	)
 	if src == null:
 		return null
