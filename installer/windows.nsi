@@ -43,7 +43,9 @@ Section "VibezCraft (required)" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "VibezCraft.exe"
-  File "VibezCraft.console.exe"
+  ; Console wrapper is debug-only; release exports omit it. /nonfatal
+  ; lets makensis continue when it isn't present.
+  File /nonfatal "VibezCraft.console.exe"
   File "VibezCraft.pck"
 
   CreateDirectory "$SMPROGRAMS\VibezCraft"
@@ -74,6 +76,9 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\VibezCraft.exe"
+  ; Best-effort cleanup of the console wrapper if it was installed
+  ; (release builds don't ship it, debug builds do — Delete is a no-op
+  ; on missing files).
   Delete "$INSTDIR\VibezCraft.console.exe"
   Delete "$INSTDIR\VibezCraft.pck"
   Delete "$INSTDIR\Uninstall.exe"
