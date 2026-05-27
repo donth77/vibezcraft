@@ -61,21 +61,41 @@ jobs:
           /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --import || true
           /Applications/Godot.app/Contents/MacOS/Godot --headless --path . --import
 
-      - name: Export macOS
+      - name: Export macOS (.app bundle)
         run: |
           mkdir -p exports/macos
           /Applications/Godot.app/Contents/MacOS/Godot --headless --path . \
-            --export-release "macOS" exports/macos/VibezCraft.zip
+            --export-release "macOS" exports/macos/VibezCraft.app
           ls -la exports/macos/
 
-      - name: Rename artifact
-        run: mv exports/macos/VibezCraft.zip exports/macos/VibezCraft-macOS-universal.zip
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build DMG (drag-to-Applications)
+        run: |
+          cd exports/macos
+          # Stage the .app into a dedicated source folder so create-dmg
+          # only sees what we want shown in the DMG window.
+          mkdir -p dmg_src
+          cp -R VibezCraft.app dmg_src/
+          create-dmg \
+            --volname "Install VibezCraft" \
+            --volicon "../../assets/icon/app_icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "VibezCraft.app" 150 200 \
+            --hide-extension "VibezCraft.app" \
+            --app-drop-link 450 200 \
+            "VibezCraft-macOS-universal.dmg" \
+            "dmg_src/"
+          ls -la
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: vibezcraft-macos
-          path: exports/macos/VibezCraft-macOS-universal.zip
+          path: exports/macos/VibezCraft-macOS-universal.dmg
           if-no-files-found: error
 
   build-windows:

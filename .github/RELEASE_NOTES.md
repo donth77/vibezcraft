@@ -4,7 +4,7 @@ A single-player clone of MC Alpha, built in Godot 4, GDScript, and C++.
 
 ## Downloads
 
-- **macOS** (Apple Silicon + Intel, universal binary) — `VibezCraft-macOS-universal.zip`
+- **macOS** (Apple Silicon + Intel, universal binary) — `VibezCraft-macOS-universal.dmg`
 - **Windows** (x86_64) — `VibezCraft-Windows-x86_64.zip`
 
 ## Highlights
@@ -31,10 +31,14 @@ A single-player clone of MC Alpha, built in Godot 4, GDScript, and C++.
 
 The app is ad-hoc signed but not notarized (no Apple Developer Program). On first launch macOS will refuse to open it.
 
-1. Unzip `VibezCraft-macOS-universal.zip`
-2. **Remove quarantine** (one-time, in Terminal): `xattr -dr com.apple.quarantine /path/to/VibezCraft.app`
-   - Or: right-click `VibezCraft.app` → **Open** → click **Open** in the warning dialog
-3. Double-click thereafter
+1. Open `VibezCraft-macOS-universal.dmg`
+2. Drag **VibezCraft.app** onto the **Applications** shortcut
+3. **Remove quarantine** (one-time, in Terminal):
+   ```
+   xattr -dr com.apple.quarantine /Applications/VibezCraft.app
+   ```
+   Or: try launching the app, click **Done** on the warning, then go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**.
+4. Double-click thereafter
 
 ### Windows
 1. Unzip `VibezCraft-Windows-x86_64.zip`

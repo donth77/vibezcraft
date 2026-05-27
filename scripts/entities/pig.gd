@@ -551,8 +551,7 @@ func _build_collision_shape() -> void:
 # layout per ModelQuadruped (dc.java); MobCube.build_textured_cube
 # emits the matching UV coords for each part.
 func _build_model() -> void:
-	var tex: Texture2D = load(_PIG_TEXTURE_PATH) as Texture2D
-	var pig_mat: StandardMaterial3D = _make_textured_material(tex)
+	var pig_mat: StandardMaterial3D = MobBase.get_shared_material(_PIG_TEXTURE_PATH)
 	# Body — build with VANILLA pixel dims (0.5×0.75×0.25 m, vertical
 	# column) so the cube-unfold UV layout in MobCube matches the
 	# texture's pixel rectangles 1:1. Then apply -PI/2 X rotation to
@@ -635,7 +634,7 @@ func _build_model() -> void:
 	# appears on the body's back. Built as a body-shaped cube inflated
 	# by _SADDLE_INFLATE, sharing pig.png's body UV layout (the saddle
 	# texture intentionally maps to the same body region as pig.png).
-	var saddle_tex: Texture2D = load(_SADDLE_TEXTURE_PATH) as Texture2D
+	var saddle_tex: Texture2D = MobBase.load_mob_texture(_SADDLE_TEXTURE_PATH)
 	var saddle_mat: StandardMaterial3D = _make_textured_material(saddle_tex)
 	saddle_mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
 	var saddle_size: Vector3 = body_mesh_size + Vector3.ONE * (_SADDLE_INFLATE * 2.0)

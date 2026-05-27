@@ -308,7 +308,16 @@ static func build() -> void:
 		var idx: int = _LAYOUT[tex_name]
 		var col: int = idx % GRID_SIZE
 		var row: int = idx / GRID_SIZE
-		var path := "%s%s/%s.png" % [PACK_BASE, active_pack, _tile_filename(tex_name)]
+		var tile_name := _tile_filename(tex_name)
+		# Pack-incomplete fallback: third-party packs (programmer_art,
+		# pixel_perfection) only ship the textures they have authored
+		# art for. Fall back to alpha_vanilla so missing tiles render
+		# instead of vanishing. ResourceLoader.exists() check avoids the
+		# noisy ERROR-level log that bare load() emits on miss (would
+		# otherwise trip GUT's "unexpected errors" assertion).
+		var path := "%s%s/%s.png" % [PACK_BASE, active_pack, tile_name]
+		if active_pack != DEFAULT_PACK and not ResourceLoader.exists(path):
+			path = "%s%s/%s.png" % [PACK_BASE, DEFAULT_PACK, tile_name]
 		var tex := load(path) as Texture2D
 		if tex == null:
 			push_error("BlockAtlas: failed to load %s" % path)

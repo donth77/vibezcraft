@@ -14,10 +14,13 @@ const CLOUD_QUALITY_FANCY: int = 2
 # Steve's skin. Value corresponds to a folder name under
 # `assets/textures/blocks/packs/` (items live in the `items/` subdir of each
 # pack, Steve in `assets/textures/entities/packs/{pack}/`). Available:
-#   • "alpha_vanilla"   — extracted from Mojang Alpha 1.2.6 (default)
-#   • "pixel_perfection" — HD community vanilla style
+#   • "pixel_perfection" — HD community vanilla style (default)
+#   • "alpha_vanilla"   — extracted from Mojang Alpha 1.2.6
 #   • "programmer_art"   — CC-BY 4.0 from github.com/deathcap/ProgrammerArt
-@export var texture_pack: String = "alpha_vanilla"
+# Non-vanilla packs only ship a subset of textures; BlockAtlas falls back
+# to alpha_vanilla per-tile for anything they're missing (chests + beds
+# use entity models in modern MC, so PP won't have them).
+@export var texture_pack: String = "pixel_perfection"
 @export_enum("Off", "Fast", "Fancy") var cloud_quality: int = CLOUD_QUALITY_FANCY
 @export var fog_enabled: bool = true
 @export var sfx_enabled: bool = true

@@ -326,8 +326,7 @@ func _build_collision_shape() -> void:
 
 
 func _build_model() -> void:
-	var tex: Texture2D = load(_CHICKEN_TEXTURE_PATH) as Texture2D
-	var chicken_mat: StandardMaterial3D = _make_textured_material(tex)
+	var chicken_mat: StandardMaterial3D = MobBase.get_shared_material(_CHICKEN_TEXTURE_PATH)
 	# Head — vanilla 4×6×3 cube, eyes on -Z face per the standard
 	# vanilla convention (head front = MODEL -Z direction, matches
 	# Godot forward = -Z; no rotation needed).

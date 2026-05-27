@@ -243,7 +243,7 @@ func _build_collision_shape() -> void:
 # All parented under `_visual_root` so the squash-stretch animation
 # can scale them as a unit.
 func _build_model() -> void:
-	var tex: Texture2D = load(_SLIME_TEXTURE_PATH) as Texture2D
+	var tex: Texture2D = MobBase.load_mob_texture(_SLIME_TEXTURE_PATH)
 	var outer_size_m: float = float(_OUTER_CUBE_PX.x) * _PIXEL_TO_METER * float(_size)
 	var inner_size_m: float = float(_INNER_CUBE_PX.x) * _PIXEL_TO_METER * float(_size)
 	var pixel_m: float = _PIXEL_TO_METER * float(_size)

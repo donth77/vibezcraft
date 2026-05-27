@@ -184,11 +184,21 @@ static func render_all(host: Node) -> void:
 	if _viewport == null:
 		push_error("[BlockIconRenderer] setup_renderer must be called first")
 		return
+	# Re-enable the viewport in case a previous render_all disabled it
+	# (this re-runs on texture-pack swap).
+	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	for block_id: int in _ICONIFIED_BLOCKS:
 		await _render_one(host, block_id)
 	# Bakes are captured as static ImageTextures; the live viewport has no
 	# more work to do, so disable per-frame rendering to save GPU cycles.
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+
+
+# Drop all baked icon textures so the next render_all rebuilds against
+# the currently-active texture pack. Used when the player switches packs
+# at runtime — without this the inventory keeps showing stale icons.
+static func clear_cache() -> void:
+	_cache.clear()
 
 
 static func get_icon(block_id: int) -> Texture2D:

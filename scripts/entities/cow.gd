@@ -212,8 +212,7 @@ func _build_collision_shape() -> void:
 
 # Vanilla `el.java` model build — body + head + 4 legs + 2 horns + udder.
 func _build_model() -> void:
-	var tex: Texture2D = load(_COW_TEXTURE_PATH) as Texture2D
-	var cow_mat: StandardMaterial3D = _make_textured_material(tex)
+	var cow_mat: StandardMaterial3D = MobBase.get_shared_material(_COW_TEXTURE_PATH)
 	# Body (overrides ij.java's base body): cube 12×18×10 at tex (18, 4),
 	# rotated -PI/2 X to lay horizontal.
 	var body_mesh_size := Vector3(

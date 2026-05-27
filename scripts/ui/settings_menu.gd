@@ -443,6 +443,22 @@ static func apply_config(cfg: ConfigFile) -> void:
 		BlockAtlas.active_pack = pack
 		BlockAtlas.reset()
 		BlockAtlas.build()
+		# Pack-swap cascade: invalidate every cache that holds
+		# pack-specific textures so the inventory + spawned mobs +
+		# subsequent UI refreshes pick up the new pack's art. Without
+		# this the atlas itself updates but the icon caches keep
+		# serving stale textures until the next world reload.
+		ItemIcons.clear_cache()
+		BlockIconRenderer.clear_cache()
+		# Mutate cached mob materials in place so every active mob in
+		# the world picks up the new pack art immediately (no respawn
+		# needed). Slime's custom material isn't shared; it'll refresh
+		# on next respawn.
+		MobBase.refresh_for_pack()
+		# Re-bake block icons against the new pack. Game is the host
+		# for the renderer's SubViewport; the await yields between
+		# blocks so this doesn't stall the settings UI.
+		BlockIconRenderer.render_all(Game)
 	# cloud_quality + render_distance take effect on next scene load.
 	Game.cloud_quality = int(cfg.get_value("graphics", "cloud_quality", Game.cloud_quality))
 	Engine.max_fps = int(cfg.get_value("graphics", "fps_cap", 90))

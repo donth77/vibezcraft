@@ -53,3 +53,4 @@ godot-cpp/gen/
 .sconsign.dblite
 .sconf_temp/
 config.log
+assets/icon/app_icon.iconset/

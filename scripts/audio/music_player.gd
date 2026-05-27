@@ -63,14 +63,24 @@ func stop_music() -> void:
 		_player.stream = null
 
 
-# Pause / resume in-place — used by the death screen so a death-time
-# gap-timeout doesn't start a fresh track over the dying-player UI.
-# Different from stop_music() which fully tears down for menu return.
+# Stop in-flight playback and freeze the gap timer (paused=true), or
+# resume by scheduling a fresh long gap (paused=false). Used by:
+#   - jukebox audio: pause while a disc is audible so two tracks don't
+#     overlap on the same Master bus
+#   - death screen: stop the dying-player music so it doesn't bleed
+#     into the death overlay
+# Tighter than the previous stream_paused-based pause: it stops the
+# current track and clears the timer entirely so there's no chance of
+# a paused-but-loaded track resuming mid-disc, or of the timer firing
+# the moment it's unpaused.
 func set_paused(paused: bool) -> void:
-	if _player != null:
-		_player.stream_paused = paused
-	if _gap_timer != null:
-		_gap_timer.paused = paused
+	if paused:
+		if _player != null:
+			_player.stop()
+		if _gap_timer != null:
+			_gap_timer.stop()
+	elif _active and _gap_timer != null:
+		_gap_timer.start(randf_range(_MIN_GAP_SECS, _MAX_GAP_SECS))
 
 
 func set_volume(linear: float) -> void:

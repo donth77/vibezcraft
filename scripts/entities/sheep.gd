@@ -258,10 +258,8 @@ func _build_collision_shape() -> void:
 # (visible when not sheared). The wool meshes are kept in `_wool_meshes`
 # so `_set_sheared(true)` can hide them in one pass.
 func _build_model() -> void:
-	var body_tex: Texture2D = load(_SHEEP_TEXTURE_PATH) as Texture2D
-	var wool_tex: Texture2D = load(_WOOL_TEXTURE_PATH) as Texture2D
-	var body_mat: StandardMaterial3D = _make_textured_material(body_tex)
-	var wool_mat: StandardMaterial3D = _make_textured_material(wool_tex)
+	var body_mat: StandardMaterial3D = MobBase.get_shared_material(_SHEEP_TEXTURE_PATH)
+	var wool_mat: StandardMaterial3D = MobBase.get_shared_material(_WOOL_TEXTURE_PATH)
 	# Body (overrides ij.java's base body): cube 8×16×6 at tex (28, 8),
 	# rotated -PI/2 X to lay horizontal.
 	var body_mesh_size := Vector3(

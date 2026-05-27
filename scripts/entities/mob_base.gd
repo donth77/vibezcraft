@@ -380,6 +380,11 @@ static func active_mobs() -> Dictionary:
 # Returns a cached StandardMaterial3D for the given texture path.
 # Configures it as unshaded + nearest-filter (mob standard) and with
 # optional alpha-scissor for skeleton-style transparent textures.
+#
+# Cache key uses the UNRESOLVED original path so live pack swaps reuse
+# the same material instance (refresh_for_pack mutates albedo_texture
+# in place — every mob holding a material_override ref picks up the
+# new pack art instantly).
 static func get_shared_material(
 	texture_path: String, alpha_scissor: bool = false
 ) -> StandardMaterial3D:
@@ -387,7 +392,8 @@ static func get_shared_material(
 	var cached: StandardMaterial3D = _shared_materials.get(key) as StandardMaterial3D
 	if cached != null:
 		return cached
-	var tex: Texture2D = load(texture_path) as Texture2D
+	var resolved: String = _resolve_pack_mob_path(texture_path)
+	var tex: Texture2D = load(resolved) as Texture2D
 	var mat := StandardMaterial3D.new()
 	mat.albedo_texture = tex
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -397,6 +403,55 @@ static func get_shared_material(
 		mat.alpha_scissor_threshold = 0.5
 	_shared_materials[key] = mat
 	return mat
+
+
+# Resolve a shared-mob texture path to its per-pack override when the
+# active pack ships one, else return the path unchanged. Shared mob
+# textures live under res://assets/textures/mob/; per-pack overrides
+# live at res://assets/textures/blocks/packs/{active}/mobs/. Anything
+# outside the shared mob dir (entity sprites, item icons) is passed
+# through untouched so this can be called from any texture load.
+static func _resolve_pack_mob_path(path: String) -> String:
+	var prefix: String = "res://assets/textures/mob/"
+	if not path.begins_with(prefix):
+		return path
+	var pack: String = BlockAtlas.active_pack
+	if pack == BlockAtlas.DEFAULT_PACK:
+		return path
+	var fname: String = path.substr(prefix.length())
+	var pack_path: String = "%s%s/mobs/%s" % [BlockAtlas.PACK_BASE, pack, fname]
+	if ResourceLoader.exists(pack_path):
+		return pack_path
+	return path
+
+
+# Pack-aware texture loader for mobs that don't go through
+# get_shared_material (pig/cow/chicken/sheep/slime build their own
+# materials). Mirrors the resolution rules above so per-pack mob art
+# kicks in regardless of how the mob script wires its material.
+static func load_mob_texture(path: String) -> Texture2D:
+	return load(_resolve_pack_mob_path(path)) as Texture2D
+
+
+# Re-resolve every cached material's albedo_texture against the active
+# pack. Because mobs hold the StandardMaterial3D by reference (via
+# material_override), mutating albedo_texture in place propagates to
+# every existing instance — no need to iterate _active_mobs or rebuild
+# meshes. Called from settings_menu on texture-pack swap.
+static func refresh_for_pack() -> void:
+	for key: String in _shared_materials.keys():
+		var mat: StandardMaterial3D = _shared_materials[key] as StandardMaterial3D
+		if mat == null:
+			continue
+		# Key format: "<original_path>|<alpha_scissor_int>". Recover the
+		# path so we can re-run the pack resolver against the new active
+		# pack.
+		var sep: int = key.rfind("|")
+		if sep < 0:
+			continue
+		var original_path: String = key.substr(0, sep)
+		var resolved: String = _resolve_pack_mob_path(original_path)
+		mat.albedo_texture = load(resolved) as Texture2D
 
 
 func _on_gated_despawn_check() -> void:

@@ -175,6 +175,15 @@ func play_disc(parent: Node, cell_pos: Vector3i, disc_id: int) -> void:
 	player.finished.connect(func() -> void: stop_disc(cell_pos))
 	player.play()
 	_players[cell_pos] = player
+	# Inline audibility check so the ambient MusicPlayer is paused the
+	# instant a disc starts (instead of waiting up to 0.5 s for the next
+	# _audibility_tick). Without this, the gap timer could fire and
+	# overlay a random ambient track on top of the freshly-started disc.
+	var listener: Node3D = _get_player()
+	if listener != null:
+		var d_sq: float = player.global_position.distance_squared_to(listener.global_position)
+		if d_sq <= _MAX_DISTANCE * _MAX_DISTANCE and not _music_paused_for_jukebox:
+			_pause_music()
 
 
 # Stop + free the player at `cell_pos`. Safe to call on an empty cell.

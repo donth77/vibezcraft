@@ -548,12 +548,23 @@ func _armor_material_for(item_id: int) -> StandardMaterial3D:
 
 func _armor_texture_path_for(item_id: int) -> String:
 	# Helmet / chestplate / boots use layer_1; leggings use layer_2.
-	# Tier determined by item-id range.
+	# Tier determined by item-id range. Pack-aware: prefer per-pack
+	# overlay if the active pack ships one under packs/{pack}/armor/,
+	# else fall back to the shared canonical Alpha layer. Without this
+	# the worn armor would mismatch the inventory icon for PP-style
+	# packs (icon is PP, worn was vanilla).
 	var layer: int = 2 if _is_leggings(item_id) else 1
 	var tier: String = _armor_tier_name(item_id)
 	if tier == "":
 		return ""
-	return "%s%s_layer_%d.png" % [ARMOR_BASE_PATH, tier, layer]
+	var fname: String = "%s_layer_%d.png" % [tier, layer]
+	if BlockAtlas.active_pack != BlockAtlas.DEFAULT_PACK:
+		var pack_path: String = (
+			"%s%s/armor/%s" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, fname]
+		)
+		if ResourceLoader.exists(pack_path):
+			return pack_path
+	return "%s%s" % [ARMOR_BASE_PATH, fname]
 
 
 func _armor_tier_name(item_id: int) -> String:

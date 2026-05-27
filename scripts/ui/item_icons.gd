@@ -355,10 +355,13 @@ static func icon_for(item_id: int) -> Texture2D:
 		return _cache[item_id]
 	var tex: Texture2D = null
 	if _BLOCK_ICON_NAMES.has(item_id):
-		var path := (
-			"%s%s/%s.png"
-			% [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, _BLOCK_ICON_NAMES[item_id]]
-		)
+		var tile: String = _BLOCK_ICON_NAMES[item_id]
+		var path: String = "%s%s/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, tile]
+		# Fall back to alpha_vanilla when the active pack doesn't ship
+		# this tile (PP/PA only have a subset). Mirrors the block_atlas
+		# fallback so inventory icons match what's rendered in-world.
+		if BlockAtlas.active_pack != BlockAtlas.DEFAULT_PACK and not ResourceLoader.exists(path):
+			path = "%s%s/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.DEFAULT_PACK, tile]
 		tex = load(path) as Texture2D
 	elif _ITEM_TEXTURE_NAMES.has(item_id):
 		tex = _load_item_sprite(_ITEM_TEXTURE_NAMES[item_id])
@@ -388,14 +391,26 @@ static func clear_cache() -> void:
 	_cache.clear()
 
 
-# Resolves an item sprite to a Texture2D, preferring the active pack's
-# `items/` subdirectory and falling back to the shared `assets/textures/items/`
-# directory when the pack doesn't override.
+# Resolves an item sprite to a Texture2D. Lookup order:
+#   1. Active pack's `items/` (per-pack override)
+#   2. DEFAULT_PACK's `items/` (alpha_vanilla, our most complete set)
+#   3. Shared `assets/textures/items/` (catch-all)
+# Without step 2, packs that don't ship every item sprite would silently
+# drop ~22 icons in the debug spawner / inventory.
 static func _load_item_sprite(basename: String) -> Texture2D:
 	var pack_path := "%s%s/items/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, basename]
 	if ResourceLoader.exists(pack_path):
 		return load(pack_path) as Texture2D
-	return load("res://assets/textures/items/%s.png" % basename) as Texture2D
+	if BlockAtlas.active_pack != BlockAtlas.DEFAULT_PACK:
+		var fb_path := (
+			"%s%s/items/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.DEFAULT_PACK, basename]
+		)
+		if ResourceLoader.exists(fb_path):
+			return load(fb_path) as Texture2D
+	var shared_path := "res://assets/textures/items/%s.png" % basename
+	if ResourceLoader.exists(shared_path):
+		return load(shared_path) as Texture2D
+	return null
 
 
 # Procedural 16×16 pile-of-powder sprite — visually matches vanilla's
