@@ -356,7 +356,9 @@ func _build_model() -> void:
 	# anim). Solid-color material (no texture lookup) — vanilla
 	# chicken leg UV is a near-uniform yellow with alpha=0 carving
 	# that we replace with two opaque cubes for stable rendering.
-	var leg_mat: StandardMaterial3D = _make_solid_material(_sample_leg_color(tex))
+	var leg_mat: StandardMaterial3D = _make_solid_material(
+		_sample_leg_color(MobBase.load_mob_texture(_CHICKEN_TEXTURE_PATH))
+	)
 	_leg_r = _add_leg(_LEG_RIGHT_HIP, leg_mat)
 	_leg_l = _add_leg(_LEG_LEFT_HIP, leg_mat)
 	# Wings — built with a pivot Node3D at the SHOULDER so vanilla's
