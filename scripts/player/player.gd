@@ -459,32 +459,19 @@ var _pre_mount_collision_disabled: bool = false
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-	# Search ONLY within the spawn chunk (0..15 on X/Z) for a column
-	# above sea level. Bounded scope means the chunk loader still has
-	# the spawn chunk in its initial-load set — no chunk-load lag, no
-	# infinite-fall regression. If the entire spawn chunk is ocean we
-	# accept the water spawn (rare with the new ELEVATION_LAND_BIAS).
-	var safe: Vector2i = _find_safe_spawn_in_chunk()
-	# Y picker: a dry-land column gets the legacy Y=100 drop (long fall
-	# settles the capsule onto the surface without needing immediate
-	# chunk reads). An ocean fallback (no column above SEA_LEVEL+2 in
-	# the spawn chunk) spawns just above the water surface instead —
-	# Y=100 puts the head deep underwater, air drains, and the post-
-	# loading emergency-platform pass fires too late to save the player
-	# from drowning during the load window.
-	var spawn_y: float = 100.0
-	if Worldgen.surface_height(safe.x, safe.y) < Worldgen.SEA_LEVEL + 2:
-		spawn_y = float(Worldgen.SEA_LEVEL) + 2.0
-	# Route through safe_teleport so the 3×3 chunk neighborhood under
-	# the spawn point is sync-loaded BEFORE the capsule lands. Without
-	# this, ChunkManager's initial-chunk pass is `call_deferred` and
-	# hasn't fired yet when player._ready runs — gravity then drops the
-	# player through unloaded space (get_world_block returns AIR for
-	# missing chunks) past the bedrock layer into the void, where the
-	# y<-20 void-recovery teleport eventually catches them. Sync-load
-	# closes that window. ChunkManager appears before Player in
-	# main.tscn so it's always present here.
-	safe_teleport(Vector3(float(safe.x) + 0.5, spawn_y, float(safe.y) + 0.5))
+	# Resolve the spawn point from the REAL generated terrain of chunk
+	# (0,0) — the 3D-density worldgen surface diverges from the 2D
+	# `Worldgen.surface_height` heightmap, so the heightmap can't be
+	# trusted to decide land-vs-ocean or the drop altitude. Then route
+	# through safe_teleport so the 3×3 chunk neighborhood under the
+	# destination is sync-loaded BEFORE the capsule settles. The sync-load
+	# also closes the old fall-through-the-void window: ChunkManager's
+	# initial-chunk pass is `call_deferred` and hasn't fired when
+	# player._ready runs, so without it gravity would drop the capsule
+	# through unloaded (AIR) space past bedrock into the y<-20 void
+	# recovery. ChunkManager appears before Player in main.tscn so it's
+	# always reachable here.
+	safe_teleport(_resolve_spawn_position())
 	inventory = Inventory.new()
 	inventory.changed.connect(_update_held_item)
 	inventory.changed.connect(_update_armor_overlay)
@@ -1821,6 +1808,19 @@ func _apply_perspective() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Freeze completely while the world is still loading. Gravity +
+	# move_and_slide must NOT run yet: a chunk's collision is a lazily-
+	# built, face-culled trimesh (chunk_node.set_collision_active), so it
+	# may not exist on the first physics tick AND it has no INTERIOR
+	# collision faces. An un-pinned capsule therefore falls straight
+	# through the spawn terrain into the bottom of the world during the
+	# multi-second initial chunk stream — even though _ready placed it on
+	# the surface. LoadingScreen.finalize_spawn() settles the player and
+	# THEN clears Game.is_loading, by which point every initial chunk
+	# (collision included) is materialized, so the release lands cleanly.
+	if Game.is_loading:
+		velocity = Vector3.ZERO
+		return
 	# F2 dungeon-teleport hold — pin player at destination until the
 	# target chunk lands in ChunkManager._chunks. Without this, gravity
 	# drops them through the missing-chunk void faster than streaming
@@ -2716,7 +2716,12 @@ func _settle_out_of_solid_block() -> bool:
 	var x: int = int(floor(global_position.x))
 	var z: int = int(floor(global_position.z))
 	var sample_dys: Array = [-0.85, 0.0, 0.7]
-	for _step in range(16):
+	# Climb the whole column if needed (was 16 m, then 64 m). A deep embed
+	# — a respawn into a filled-in area, or a capsule that ended up under a
+	# tall 3D-density peak — can need to rise nearly the full world height
+	# to reach open air; a short cap left the player marked "settled" while
+	# still inside solid rock, which then fell through the face-culled mesh.
+	for _step in range(Chunk.SIZE_Y):
 		var stuck := false
 		for dy: float in sample_dys:
 			var y: int = int(floor(global_position.y + dy))
@@ -2730,7 +2735,7 @@ func _settle_out_of_solid_block() -> bool:
 			return true
 		global_position.y += 1.0
 	push_warning(
-		"[Player] _settle_out_of_solid_block: gave up after 16 m at y=%.1f" % global_position.y
+		"[Player] _settle_out_of_solid_block: gave up at top of column, y=%.1f" % global_position.y
 	)
 	return true  # gave up — mark settled so we don't keep trying forever
 
@@ -2925,12 +2930,25 @@ func _update_sneak() -> void:
 # column we saw (best of bad options — might still be water but
 # shallowest spot). Bounded to chunk (0,0) so we never move the player
 # beyond the chunk loader's initial-load radius.
-# Post-load spawn safety net. Walk a spiral outward from the player's
-# current (x, z) and look at the actual loaded-chunk blocks for a column
-# whose surface is dry land at or above sea level. Teleports the player
-# to that column. Returns true on success (relocated OR already safe),
-# false if no safe column found in the loaded radius (so the caller
-# can keep retrying as more chunks stream in).
+# Sparse-sampling stride (in blocks) for the relocate land search. We
+# probe one column every Nth cell per chunk rather than all 256 — enough
+# to detect a coastline within a chunk without paying for a full per-cell
+# scan across the whole render-distance ring. 4 → a 4×4 grid (16 columns)
+# per chunk.
+const _RELOCATE_SAMPLE_STRIDE: int = 4
+
+
+# Post-load spawn safety net. If the spawn is unsafe — submerged OR
+# hovering over open ocean (the load-time freeze holds the capsule above
+# the water, so _is_floating_in_air, not _is_in_water, is what fires here)
+# — search the ALREADY-LOADED chunks outward from the player for a dry-land
+# column and teleport there. Reads only: it never generates a chunk just
+# to search, so the cost is bounded to the render-distance ring the
+# loading pass already materialized (and it stops at the first landfall,
+# so a nearby coast is found almost immediately). Returns true if the
+# spawn was already safe OR a relocate landed; false only when the whole
+# loaded area is ocean, in which case the caller drops the emergency
+# platform.
 func _relocate_if_unsafe_spawn() -> bool:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):
@@ -2938,43 +2956,60 @@ func _relocate_if_unsafe_spawn() -> bool:
 	# Already safe? Spawn in water or floating in air = unsafe.
 	if not _is_in_water() and not _is_floating_in_air(cm):
 		return true  # nothing to do, stop retrying
-	var px: int = int(floor(global_position.x))
-	var pz: int = int(floor(global_position.z))
-	# Spiral search outward.
-	for r in range(1, 33):
-		for dx in range(-r, r + 1):
-			for dz in range(-r, r + 1):
-				if abs(dx) != r and abs(dz) != r:
-					continue  # only ring at radius r
-				var x: int = px + dx
-				var z: int = pz + dz
-				# Find topmost solid (non-AIR, non-WATER) cell in this column.
-				var sy: int = -1
-				for y in range(127, 0, -1):
-					var b: int = cm.get_world_block(Vector3i(x, y, z))
-					if b != Blocks.AIR and not Blocks.is_water(b):
-						sy = y
-						break
-				if sy < Worldgen.SEA_LEVEL:
-					continue  # underwater seabed
-				# Player capsule is ~1.8 tall. Need 2 cells of AIR clearance
-				# directly above the surface. Without this we can teleport
-				# into a tight column (leaves overhang, narrow cave mouth)
-				# and the player ends up stuck inside a block.
-				var above1: int = cm.get_world_block(Vector3i(x, sy + 1, z))
-				var above2: int = cm.get_world_block(Vector3i(x, sy + 2, z))
-				if above1 != Blocks.AIR or above2 != Blocks.AIR:
-					continue
-				# Found a dry land column — teleport here. Player capsule
-				# centre needs to sit at sy+2.0 so feet (centre - 0.9) land
-				# at sy+1.1, just above the solid surface block at sy. The
-				# old `sy + 1.5` put feet at sy+0.5 — INSIDE the surface
-				# block — and the CharacterBody3D got wedged.
-				global_position = Vector3(float(x) + 0.5, float(sy) + 2.0, float(z) + 0.5)
-				velocity = Vector3.ZERO
-				_fall_immune_next_landing = true
-				return true
-	return false  # no safe column found, caller should retry
+	var has_loaded: bool = cm.has_method("is_chunk_loaded")
+	var player_cx: int = int(floor(global_position.x / float(Chunk.SIZE_X)))
+	var player_cz: int = int(floor(global_position.z / float(Chunk.SIZE_Z)))
+	# Bound the chunk-space spiral to the loaded ring. render_distance is
+	# the radius the initial-chunk pass materialized; beyond it chunks are
+	# unloaded and reads return AIR, so there's nothing to find out there.
+	var max_cr: int = 8
+	var rd: Variant = cm.get("render_distance")
+	if rd is int or rd is float:
+		max_cr = int(rd)
+	# Spiral outward by CHUNK (cheap: ~(2·rd+1)² iterations total) and
+	# skip unloaded chunks so we never trigger worldgen.
+	for cr in range(0, max_cr + 1):
+		for cdx in range(-cr, cr + 1):
+			for cdz in range(-cr, cr + 1):
+				if absi(cdx) != cr and absi(cdz) != cr:
+					continue  # ring perimeter only
+				var ccoord := Vector2i(player_cx + cdx, player_cz + cdz)
+				if has_loaded and not cm.is_chunk_loaded(ccoord):
+					continue  # never generate just to search
+				var hit: Vector3i = _scan_chunk_for_land(cm, ccoord)
+				if hit.x != -1:
+					# Centre at surface+2 → feet (centre-0.9) at surface+1.1,
+					# just above the surface block. (sy+1.5 wedges the capsule
+					# inside it.)
+					global_position = Vector3(
+						float(hit.x) + 0.5, float(hit.y) + 2.0, float(hit.z) + 0.5
+					)
+					velocity = Vector3.ZERO
+					_fall_immune_next_landing = true
+					return true
+	return false  # whole loaded area is ocean — caller should platform
+
+
+# Sparse-sample one loaded chunk for a dry-land column: topmost solid at
+# or above sea level with 2 air cells of head clearance. Returns the world
+# (x, surface_y, z) of the first hit, or x = -1 when the sampled grid has
+# no dry land. Reads only.
+func _scan_chunk_for_land(cm: Node, ccoord: Vector2i) -> Vector3i:
+	var base_x: int = ccoord.x * Chunk.SIZE_X
+	var base_z: int = ccoord.y * Chunk.SIZE_Z
+	for lx in range(1, Chunk.SIZE_X, _RELOCATE_SAMPLE_STRIDE):
+		for lz in range(1, Chunk.SIZE_Z, _RELOCATE_SAMPLE_STRIDE):
+			var wx: int = base_x + lx
+			var wz: int = base_z + lz
+			var sy: int = _real_surface_y(cm, wx, wz)
+			if sy < Worldgen.SEA_LEVEL:
+				continue  # ocean / underwater seabed
+			if (
+				cm.get_world_block(Vector3i(wx, sy + 1, wz)) == Blocks.AIR
+				and cm.get_world_block(Vector3i(wx, sy + 2, wz)) == Blocks.AIR
+			):
+				return Vector3i(wx, sy, wz)
+	return Vector3i(-1, 0, -1)
 
 
 # Last-resort spawn fallback when the spiral search fails to find dry
@@ -3040,19 +3075,109 @@ func _is_floating_in_air(cm: Node) -> bool:
 	return true
 
 
-func _find_safe_spawn_in_chunk() -> Vector2i:
+# Decide the fresh-world spawn position by scanning the MATERIALIZED
+# columns of chunk (0,0). Sync-loads that chunk's neighborhood first so
+# get_world_block reads real terrain instead of the AIR/OOB default. The
+# world is generated by the 3D-density pipeline (Worldgen.terrain_3d_
+# enabled), whose surface diverges from the 2D heightmap — picking the
+# spawn from the heightmap could drop the player into water it called
+# "land" or embed them in a 3D peak that rose above the old fixed Y=100.
+func _resolve_spawn_position() -> Vector3:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm != null and cm.has_method("_spawn_chunk_sync_neighborhood"):
+		cm.call("_spawn_chunk_sync_neighborhood", Vector2i(0, 0))
+	var cell: Vector3i = _find_safe_spawn_in_chunk(cm)
+	var spawn_y: float
+	if cell.y >= Worldgen.SEA_LEVEL:
+		# Dry land: centre at surface+2 so feet (centre-0.9) land at
+		# surface+1.1, just clear of the surface block. Matches the
+		# relocate-spiral convention so the capsule settles cleanly.
+		spawn_y = float(cell.y) + 2.0
+	else:
+		# All-ocean spawn chunk: float just above the water surface so the
+		# head stays out of the water through the load window (a deep drop
+		# would start the air/drown drain before the player has control).
+		# The post-load relocate / emergency-platform pass takes over once
+		# Game.is_loading clears.
+		spawn_y = float(Worldgen.SEA_LEVEL) + 2.0
+	return Vector3(float(cell.x) + 0.5, spawn_y, float(cell.z) + 0.5)
+
+
+# Scan the spawn chunk (local 0..15 on X/Z, == world coords for chunk
+# (0,0)) for a dry-land column using the REAL generated blocks. Chunk
+# (0,0) must be loaded first (see _resolve_spawn_position). Returns
+# (x, surface_y, z): the chosen column plus the y of its topmost solid
+# cell. Prefers the first column whose surface sits at/above SEA_LEVEL+2
+# with 2 air cells of head clearance; falls back to the highest column
+# found if the whole chunk is ocean.
+func _find_safe_spawn_in_chunk(cm: Node) -> Vector3i:
+	if cm == null or not cm.has_method("get_world_block"):
+		# ChunkManager unreachable (shouldn't happen — wired before Player
+		# in main.tscn). Last resort: fall back to the 2D heightmap so we
+		# still hand back a plausible column instead of crashing.
+		return Vector3i(8, Worldgen.surface_height(8, 8), 8)
 	var min_land_y: int = Worldgen.SEA_LEVEL + 2
-	var fallback: Vector2i = Vector2i(8, 8)
-	var best_y: int = 0
+	var best := Vector3i(8, 0, 8)
 	for x in range(0, 16):
 		for z in range(0, 16):
-			var surface_y: int = Worldgen.surface_height(x, z)
-			if surface_y >= min_land_y:
-				return Vector2i(x, z)
-			if surface_y > best_y:
-				best_y = surface_y
-				fallback = Vector2i(x, z)
-	return fallback
+			var sy: int = _real_surface_y(cm, x, z)
+			if sy >= min_land_y:
+				var above1: int = cm.get_world_block(Vector3i(x, sy + 1, z))
+				var above2: int = cm.get_world_block(Vector3i(x, sy + 2, z))
+				if above1 == Blocks.AIR and above2 == Blocks.AIR:
+					return Vector3i(x, sy, z)
+			if sy > best.y:
+				best = Vector3i(x, sy, z)
+	return best
+
+
+# Topmost non-air, non-water cell in the given chunk-(0,0)-local column,
+# read from the live chunk. Returns 0 if the column has no solid block
+# (entirely AIR/water) — the caller's sea-level test then treats it as
+# ocean.
+func _real_surface_y(cm: Node, x: int, z: int) -> int:
+	for y in range(Chunk.SIZE_Y - 1, -1, -1):
+		var b: int = cm.get_world_block(Vector3i(x, y, z))
+		if b != Blocks.AIR and not Blocks.is_water(b):
+			return y
+	return 0
+
+
+# Run the spawn safety passes synchronously, off-screen, while the loading
+# screen is still up. LoadingScreen calls this after the saved player
+# position is restored but BEFORE it clears Game.is_loading — so a player
+# who would otherwise be visibly un-embedded / lifted out of water / set
+# onto an emergency platform during the first second of gameplay instead
+# starts already at the intended spawn, with no on-camera teleport.
+#
+# Mirrors the passes _physics_process runs once Game.is_loading clears
+# (the `not Game.is_loading` gates), then disarms them so the same work
+# doesn't repeat on the first visible frame. Returns true once finalized.
+func finalize_spawn() -> bool:
+	# Un-embed from any solid block (a saved position overlapping terrain,
+	# or a residual overlap after the real-terrain spawn pick). If the
+	# spawn chunk somehow isn't materialized yet, leave the on-screen
+	# retry budget armed and bail — shouldn't happen from the loading
+	# screen, which only fires this after every initial chunk has loaded.
+	if not _settle_out_of_solid_block():
+		return false
+	_settled = true
+	# Relocate if the spawn is unsafe, then platform as a last resort.
+	# We must NOT gate this on _is_in_water(): the load-time freeze holds
+	# the capsule at the picked spawn altitude (SEA_LEVEL+2 for an ocean
+	# chunk), so over open water the player is hovering ABOVE the surface
+	# and isn't "in water" yet — they'd only fall in once released. Call
+	# _relocate_if_unsafe_spawn unconditionally; its own check covers both
+	# the submerged case AND the floating-over-ocean case
+	# (_is_floating_in_air), spiraling for dry land. When the whole region
+	# is open ocean it returns false and we drop the grass platform.
+	if not _relocate_if_unsafe_spawn():
+		_create_emergency_spawn_platform()
+	# Disarm the on-screen retry budget so the gated passes don't redo this.
+	_spawn_check_ticks_remaining = 0
+	velocity = Vector3.ZERO
+	_fall_immune_next_landing = true
+	return true
 
 
 # Called by a mob (currently Pig) when the player mounts/dismounts.

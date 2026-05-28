@@ -140,7 +140,9 @@ func _on_chunk_progress(loaded: int, total: int) -> void:
 	if _bar_fill_rect != null:
 		_bar_fill_rect.offset_right = pct * _BAR_WIDTH
 	if loaded >= total:
-		_restore_world_state()
+		# Coroutine: paints a "Spawning player" beat + finalizes the spawn
+		# off-screen before the flag clears, so we must await it.
+		await _restore_world_state()
 		# Clear the loading-screen flag so in-game SFX (footsteps, block
 		# break/place, ambience) start playing only after world is ready.
 		Game.is_loading = false
@@ -184,6 +186,19 @@ func _restore_world_state() -> void:
 	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
 	if chunk_manager != null:
 		EntitySave.load_all(chunk_manager)
+	# Finalize the spawn while the screen is still up so any un-embed /
+	# water-relocate / emergency-platform happens off-camera — the player
+	# starts at the intended spawn instead of visibly teleporting during
+	# the first second of gameplay. Runs BEFORE the world-spawn anchor is
+	# published below so the compass + saved spawn capture the FINAL
+	# settled position, not the pre-relocate one. The "Spawning player"
+	# beat is painted for one frame so the step is visible, mirroring
+	# vanilla's spawn step.
+	if player != null and player.has_method("finalize_spawn"):
+		if _status_label != null:
+			_status_label.text = "Spawning player..."
+			await get_tree().process_frame
+		player.finalize_spawn()
 	# Wire the compass to the actual world spawn. PlayerSave.load_player
 	# only runs for existing worlds; for fresh worlds the player is still
 	# at the safe-column XZ that player._ready picked. Decide spawn AFTER
