@@ -20,6 +20,12 @@ constexpr int SIZE_X = VoxelColliderNative::SIZE_X;
 constexpr int SIZE_Y = VoxelColliderNative::SIZE_Y;
 constexpr int SIZE_Z = VoxelColliderNative::SIZE_Z;
 constexpr double EPSILON = 0.0001;
+// Skin inset for the PERPENDICULAR axes of each sweep — see the _SKIN
+// comment in voxel_collider.gd. Excludes flush-contact cells (the floor a
+// mob rests on, whose top is at the mob's exact feet Y) so they don't clip
+// horizontal motion to zero. Root cause of the "stuck chickens on flat
+// ground" bug. Must stay identical to voxel_collider.gd's _SKIN.
+constexpr double SKIN = 0.001;
 
 inline int floor_div(int a, int b) {
 	// Matches GDScript int(floor(float(a) / float(b))) for b > 0.
@@ -74,10 +80,10 @@ double clip_x(
 		const ChunkEntry *chunks, int n_chunks,
 		const uint8_t *solid_lut) {
 	double sign_motion = sign_of(motion);
-	int lo_y = floord(pos_y - half_y);
-	int hi_y = floord(pos_y + half_y);
-	int lo_z = floord(pos_z - half_z);
-	int hi_z = floord(pos_z + half_z);
+	int lo_y = floord(pos_y - half_y + SKIN);
+	int hi_y = floord(pos_y + half_y - SKIN);
+	int lo_z = floord(pos_z - half_z + SKIN);
+	int hi_z = floord(pos_z + half_z - SKIN);
 	double clipped = motion;
 	double lead_x = pos_x + half_x * sign_motion + motion;
 	double trail_x = pos_x + half_x * sign_motion;
@@ -108,10 +114,10 @@ double clip_y(
 		const ChunkEntry *chunks, int n_chunks,
 		const uint8_t *solid_lut) {
 	double sign_motion = sign_of(motion);
-	int lo_x = floord(pos_x - half_x);
-	int hi_x = floord(pos_x + half_x);
-	int lo_z = floord(pos_z - half_z);
-	int hi_z = floord(pos_z + half_z);
+	int lo_x = floord(pos_x - half_x + SKIN);
+	int hi_x = floord(pos_x + half_x - SKIN);
+	int lo_z = floord(pos_z - half_z + SKIN);
+	int hi_z = floord(pos_z + half_z - SKIN);
 	double clipped = motion;
 	double lead_y = pos_y + half_y * sign_motion + motion;
 	double trail_y = pos_y + half_y * sign_motion;
@@ -142,10 +148,10 @@ double clip_z(
 		const ChunkEntry *chunks, int n_chunks,
 		const uint8_t *solid_lut) {
 	double sign_motion = sign_of(motion);
-	int lo_x = floord(pos_x - half_x);
-	int hi_x = floord(pos_x + half_x);
-	int lo_y = floord(pos_y - half_y);
-	int hi_y = floord(pos_y + half_y);
+	int lo_x = floord(pos_x - half_x + SKIN);
+	int hi_x = floord(pos_x + half_x - SKIN);
+	int lo_y = floord(pos_y - half_y + SKIN);
+	int hi_y = floord(pos_y + half_y - SKIN);
 	double clipped = motion;
 	double lead_z = pos_z + half_z * sign_motion + motion;
 	double trail_z = pos_z + half_z * sign_motion;

@@ -201,6 +201,33 @@ func test_no_chunks_treated_as_air() -> void:
 	)
 
 
+func test_flush_floor_walk_does_not_freeze() -> void:
+	# Regression — the "stuck chickens on flat ground" bug. When a mob's
+	# feet settle a hair BELOW an integer Y (float32 round-trip through the
+	# AABB-center offset leaves e.g. 63.9999924 instead of 64.0), the
+	# horizontal sweep's perpendicular Y-range used to floor down to the
+	# solid floor row and clip ALL horizontal motion to zero. The mob then
+	# froze in place on flat ground with AIR in front of it. A small skin
+	# inset on the perpendicular axes excludes that flush floor cell so the
+	# mob walks freely. Assert the mob actually advances AND parity holds.
+	var cm := FakeChunkManager.new()
+	cm.set_chunk(0, 0, _make_floor_chunk())
+	var native = ClassDB.instantiate("VoxelColliderNative")
+	# Feet at 63.9999 (just below the floor-top integer 64); half_y=0.95 →
+	# center.y = 64.9499. Walk +X across the open floor.
+	var pos := Vector3(4.5, 64.9499, 8.0)
+	var half := Vector3(0.3, 0.95, 0.3)
+	var vel := Vector3(4.0, 0.0, 0.0)
+	var delta: float = 1.0 / 60.0
+	var gd_result: Dictionary = VoxelCollider.move(cm, pos, half, vel, delta)
+	# Must NOT be frozen — pos.x advances by ~vel.x*delta and vel.x survives.
+	var moved_x: float = (gd_result["pos"] as Vector3).x - pos.x
+	assert_almost_eq(moved_x, vel.x * delta, 0.0005, "flush-floor walk should advance pos.x")
+	assert_almost_eq((gd_result["vel"] as Vector3).x, 4.0, 0.0001, "flush-floor walk keeps vel.x")
+	assert_true(bool(gd_result["on_floor"]), "flush-floor walk stays grounded")
+	_run_parity(cm, native, pos, half, vel, delta, "flush-floor walk")
+
+
 func test_cross_chunk_walk_match() -> void:
 	# Mob straddling the chunk boundary at x=16. Both chunks loaded; floor
 	# in both. Walk +X and ensure both paths handle the cross-chunk lookup.

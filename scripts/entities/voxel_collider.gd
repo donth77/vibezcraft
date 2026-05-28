@@ -18,6 +18,19 @@ extends RefCounted
 
 const _SOLID_LAYER: int = 0b01  # informational only; we ignore Godot layers
 
+# Skin inset for the PERPENDICULAR axes when sweeping one axis. A block face
+# that sits flush with the AABB's perpendicular face (e.g. the floor the mob
+# stands on, whose top is at the mob's exact feet Y) must NOT count as an
+# overlapping cell for that sweep — otherwise the cell the mob already rests
+# in clips its motion to zero. This was the root cause of the "stuck chickens
+# on flat ground" bug: a mob whose feet round-tripped to a hair below an
+# integer Y (float32 (feet + half.y) - half.y drift, ≈1e-5 at world heights)
+# made `floor(feet)` drop to the floor row, pulling the solid floor cell into
+# the horizontal sweep and freezing all XZ motion. The inset (0.001 ≫ that
+# drift, ≪ any real overlap) excludes flush-contact cells so only genuinely
+# overlapping cells block. Must stay identical in voxel_collider_native.cpp.
+const _SKIN: float = 0.001
+
 # Set by Game._ready() after the GDExtension loads. When non-null, move()
 # dispatches to the C++ VoxelColliderNative.move() — ~10× faster than the
 # GDScript reference. Same lazy-instantiation pattern as Lighting.
@@ -135,10 +148,10 @@ static func move(
 # distance (≤ |motion|, same sign).
 static func _clip_x(cm: Node, pos: Vector3, half: Vector3, motion: float) -> float:
 	var sign_motion: float = signf(motion)
-	var lo_y: int = int(floor(pos.y - half.y))
-	var hi_y: int = int(floor(pos.y + half.y))
-	var lo_z: int = int(floor(pos.z - half.z))
-	var hi_z: int = int(floor(pos.z + half.z))
+	var lo_y: int = int(floor(pos.y - half.y + _SKIN))
+	var hi_y: int = int(floor(pos.y + half.y - _SKIN))
+	var lo_z: int = int(floor(pos.z - half.z + _SKIN))
+	var hi_z: int = int(floor(pos.z + half.z - _SKIN))
 	var clipped: float = motion
 	# Leading edge of the AABB AFTER motion (where we'd land).
 	var lead_x: float = pos.x + half.x * sign_motion + motion
@@ -164,10 +177,10 @@ static func _clip_x(cm: Node, pos: Vector3, half: Vector3, motion: float) -> flo
 
 static func _clip_y(cm: Node, pos: Vector3, half: Vector3, motion: float) -> float:
 	var sign_motion: float = signf(motion)
-	var lo_x: int = int(floor(pos.x - half.x))
-	var hi_x: int = int(floor(pos.x + half.x))
-	var lo_z: int = int(floor(pos.z - half.z))
-	var hi_z: int = int(floor(pos.z + half.z))
+	var lo_x: int = int(floor(pos.x - half.x + _SKIN))
+	var hi_x: int = int(floor(pos.x + half.x - _SKIN))
+	var lo_z: int = int(floor(pos.z - half.z + _SKIN))
+	var hi_z: int = int(floor(pos.z + half.z - _SKIN))
 	var clipped: float = motion
 	var lead_y: float = pos.y + half.y * sign_motion + motion
 	var trail_y: float = pos.y + half.y * sign_motion
@@ -188,10 +201,10 @@ static func _clip_y(cm: Node, pos: Vector3, half: Vector3, motion: float) -> flo
 
 static func _clip_z(cm: Node, pos: Vector3, half: Vector3, motion: float) -> float:
 	var sign_motion: float = signf(motion)
-	var lo_x: int = int(floor(pos.x - half.x))
-	var hi_x: int = int(floor(pos.x + half.x))
-	var lo_y: int = int(floor(pos.y - half.y))
-	var hi_y: int = int(floor(pos.y + half.y))
+	var lo_x: int = int(floor(pos.x - half.x + _SKIN))
+	var hi_x: int = int(floor(pos.x + half.x - _SKIN))
+	var lo_y: int = int(floor(pos.y - half.y + _SKIN))
+	var hi_y: int = int(floor(pos.y + half.y - _SKIN))
 	var clipped: float = motion
 	var lead_z: float = pos.z + half.z * sign_motion + motion
 	var trail_z: float = pos.z + half.z * sign_motion
