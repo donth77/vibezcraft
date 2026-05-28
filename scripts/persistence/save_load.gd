@@ -154,9 +154,17 @@ static func clear_cache() -> void:
 # (we never overwrite real data). Called from Game._ready early in boot
 # so the rest of the persistence stack works against the new path.
 # Returns true if a migration actually happened, false otherwise.
-static func migrate_legacy_world() -> bool:
-	var legacy_path: String = world_dir(_LEGACY_WORLD)
-	var target_path: String = world_dir(DEFAULT_WORLD)
+#
+# `legacy_name` / `target_name` default to the real pre-7.5 + slot-1 dirs;
+# they're parameters ONLY so tests can exercise the rename/no-op logic
+# against throwaway world dirs instead of the player's real `World1`.
+# (A test once hard-deleted a real save by hardcoding "World1" here.)
+# Production always calls this with no args.
+static func migrate_legacy_world(
+	legacy_name: String = _LEGACY_WORLD, target_name: String = DEFAULT_WORLD
+) -> bool:
+	var legacy_path: String = world_dir(legacy_name)
+	var target_path: String = world_dir(target_name)
 	if not DirAccess.dir_exists_absolute(legacy_path):
 		return false
 	if DirAccess.dir_exists_absolute(target_path):

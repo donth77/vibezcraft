@@ -9,6 +9,12 @@ extends GutTest
 # a unique name from the calling test method, which keeps parallel test
 # runs safe and makes leftover dirs easy to spot if cleanup fails.
 
+# Migration tests use THROWAWAY world dirs (never the real "world"/"World1"
+# slots) so a test run can't hard-delete a player's save. migrate_legacy_world
+# takes the legacy + target names as params precisely for this.
+const _MIG_LEGACY: String = "test_migrate_legacy_src"
+const _MIG_TARGET: String = "test_migrate_legacy_dst"
+
 var _current_world: String = ""
 
 
@@ -283,41 +289,50 @@ func test_explicit_world_name_overrides_active() -> void:
 # --- Legacy world migration (step 7.5) ---
 
 
-func test_migrate_legacy_world_renames_old_dir_to_world1() -> void:
-	# Set up a fresh state by deleting whatever Game._ready may have done
-	# on the running session, then plant a fake legacy dir.
-	SaveLoad.delete_world("world")
-	SaveLoad.delete_world("World1")
-	DirAccess.make_dir_recursive_absolute("user://world/region")
-	var f: FileAccess = FileAccess.open("user://world/marker.txt", FileAccess.WRITE)
+func test_migrate_legacy_world_renames_old_dir_to_target() -> void:
+	SaveLoad.delete_world(_MIG_LEGACY)
+	SaveLoad.delete_world(_MIG_TARGET)
+	var legacy_dir: String = SaveLoad.world_dir(_MIG_LEGACY)
+	var target_dir: String = SaveLoad.world_dir(_MIG_TARGET)
+	DirAccess.make_dir_recursive_absolute("%s/region" % legacy_dir)
+	var f: FileAccess = FileAccess.open("%s/marker.txt" % legacy_dir, FileAccess.WRITE)
 	f.store_string("hello from pre-7.5 layout")
 	f.close()
-	assert_true(SaveLoad.migrate_legacy_world(), "migration should report success")
-	assert_false(DirAccess.dir_exists_absolute("user://world"), "legacy dir gone after migration")
 	assert_true(
-		FileAccess.file_exists("user://World1/marker.txt"), "marker file preserved in new location"
+		SaveLoad.migrate_legacy_world(_MIG_LEGACY, _MIG_TARGET), "migration should report success"
+	)
+	assert_false(DirAccess.dir_exists_absolute(legacy_dir), "legacy dir gone after migration")
+	assert_true(
+		FileAccess.file_exists("%s/marker.txt" % target_dir),
+		"marker file preserved in new location"
 	)
 	# Cleanup
-	SaveLoad.delete_world("World1")
+	SaveLoad.delete_world(_MIG_TARGET)
 
 
 func test_migrate_legacy_world_noop_when_target_exists() -> void:
-	SaveLoad.delete_world("world")
-	SaveLoad.delete_world("World1")
+	SaveLoad.delete_world(_MIG_LEGACY)
+	SaveLoad.delete_world(_MIG_TARGET)
 	# Both dirs present → don't touch either.
-	DirAccess.make_dir_recursive_absolute("user://world")
-	DirAccess.make_dir_recursive_absolute("user://World1")
-	assert_false(SaveLoad.migrate_legacy_world(), "migration skipped when target exists")
-	assert_true(DirAccess.dir_exists_absolute("user://world"))
-	assert_true(DirAccess.dir_exists_absolute("user://World1"))
-	SaveLoad.delete_world("world")
-	SaveLoad.delete_world("World1")
+	DirAccess.make_dir_recursive_absolute(SaveLoad.world_dir(_MIG_LEGACY))
+	DirAccess.make_dir_recursive_absolute(SaveLoad.world_dir(_MIG_TARGET))
+	assert_false(
+		SaveLoad.migrate_legacy_world(_MIG_LEGACY, _MIG_TARGET),
+		"migration skipped when target exists"
+	)
+	assert_true(DirAccess.dir_exists_absolute(SaveLoad.world_dir(_MIG_LEGACY)))
+	assert_true(DirAccess.dir_exists_absolute(SaveLoad.world_dir(_MIG_TARGET)))
+	SaveLoad.delete_world(_MIG_LEGACY)
+	SaveLoad.delete_world(_MIG_TARGET)
 
 
 func test_migrate_legacy_world_noop_when_neither_exists() -> void:
-	SaveLoad.delete_world("world")
-	SaveLoad.delete_world("World1")
-	assert_false(SaveLoad.migrate_legacy_world(), "migration skipped when nothing to migrate")
+	SaveLoad.delete_world(_MIG_LEGACY)
+	SaveLoad.delete_world(_MIG_TARGET)
+	assert_false(
+		SaveLoad.migrate_legacy_world(_MIG_LEGACY, _MIG_TARGET),
+		"migration skipped when nothing to migrate"
+	)
 
 
 func test_load_after_save_hits_cache_without_disk() -> void:
