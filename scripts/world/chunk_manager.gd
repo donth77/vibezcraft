@@ -1861,6 +1861,14 @@ func iter_loaded_chunks() -> Dictionary:
 	return _chunks
 
 
+# Player's current chunk coordinate, refreshed once per tick in _process.
+# Used by `Blocks.run_random_tick_pass` to cap the random-tick simulation
+# to a radius around the player (vanilla-style simulation distance) rather
+# than ticking every loaded chunk.
+func get_player_chunk_coord() -> Vector2i:
+	return _cached_player_chunk
+
+
 # Called by Lighting after the C++ BFS has written modified sky_light back
 # into a chunk. Mirrors what set_world_sky_light does for the per-cell
 # GDScript path: mark dirty for re-mesh + persistence. Single notification

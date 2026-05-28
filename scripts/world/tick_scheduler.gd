@@ -23,10 +23,17 @@ extends RefCounted
 # which dispatches worker remeshes as usual.
 
 const SECONDS_PER_TICK: float = 0.05  # vanilla 20 Hz
-# Cap how many ticks we catch up in a single advance() call. A 10 s frame
-# hitch shouldn't fire 200 queued ticks — clamp to prevent a main-thread
-# spiral when the scheduler queue is large.
-const _MAX_TICKS_PER_ADVANCE: int = 20
+# Cap how many ticks we catch up in a single advance() call. Each tick
+# runs _tick_all + the random-tick pass (~3-9 ms main-thread combined),
+# so a frame that ran long must NOT fire its whole accumulated backlog
+# the next frame — that compounds into a visible spiral (one slow frame
+# → multi-tick catch-up → slower frame → …). Capping at 2 means a long
+# frame causes a momentary slow-mo (excess ticks are dropped, see the
+# `_accum_seconds = 0.0` branch) instead of a stutter. Vanilla MC
+# effectively fires 1 tick/frame and drops the rest; 2 gives a little
+# slack without the spiral. Was 20 — large enough that a single 100 ms
+# hitch fired ~4 ticks in one frame (~36 ms → the 50 fps dips).
+const _MAX_TICKS_PER_ADVANCE: int = 2
 
 # Monotonic tick counter. Starts at 0, increments once per game tick.
 # Wraps at int64 max but that's centuries of play time — never an issue.

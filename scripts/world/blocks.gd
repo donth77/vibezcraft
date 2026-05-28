@@ -13,6 +13,18 @@ const _MOB_SPAWNER_MGR: GDScript = preload("res://scripts/world/mob_spawner_mana
 # handler fires <100 times/sec across all loaded chunks.
 const _RANDOM_TICKS_PER_CHUNK: int = 24
 
+# Simulation radius (in chunks, Chebyshev/square) around the player for
+# the random-tick pass. Vanilla MC ticks growth/decay only within a
+# simulation distance smaller than the render distance; chunks rendered
+# but beyond this radius don't random-tick (grass spread, crop/sapling/
+# cane growth, leaf decay, farmland dry-out, ice/snow melt all pause out
+# there, resuming when the player approaches). At radius 5 that's an
+# 11×11 = 121-chunk square — vs the ~465 loaded at render distance 8,
+# roughly a 4× cut in per-tick work, which is the dominant main-thread
+# cost (see PerfProbe "random_tick"). Scheduled ticks (fluids, falling
+# blocks, redstone) are NOT gated by this — they stay global.
+const _SIMULATION_RADIUS_CHUNKS: int = 5
+
 # Block IDs (Uint8 0-255). IDs are stable — append to the end, never renumber.
 # File length cap is intentionally lifted: this is the canonical block
 # registry — IDs, hardness, drops, light opacity, atlas-face mapping, and
@@ -553,7 +565,22 @@ static func run_random_tick_pass(manager) -> void:
 	# skip the manager.get_world_block dict-lookup overhead for the
 	# hot fast-path branch (most cells are non-tickable).
 	var chunks: Dictionary = manager.iter_loaded_chunks()
+	# Simulation-distance gate. Skip chunks outside _SIMULATION_RADIUS_CHUNKS
+	# of the player (Chebyshev distance, matching the square chunk ring).
+	# Guarded by has_method so the TickScheduler test's minimal fake manager
+	# — which reaches here only if it stubs iter_loaded_chunks — still ticks
+	# every chunk it provides instead of crashing on a missing accessor.
+	var has_center: bool = manager.has_method("get_player_chunk_coord")
+	var center: Vector2i = manager.get_player_chunk_coord() if has_center else Vector2i.ZERO
 	for coord: Vector2i in chunks:
+		if (
+			has_center
+			and (
+				absi(coord.x - center.x) > _SIMULATION_RADIUS_CHUNKS
+				or absi(coord.y - center.y) > _SIMULATION_RADIUS_CHUNKS
+			)
+		):
+			continue
 		var chunk: Chunk = manager.get_chunk_at_coord(coord)
 		if chunk == null:
 			continue

@@ -45,8 +45,12 @@ func test_advance_drains_at_20hz() -> void:
 	TickScheduler.advance(0.05, _manager)
 	assert_eq(TickScheduler.pending_count(), 1, "one tick: entry still pending")
 	assert_eq(TickScheduler.current_tick(), 1)
-	# 4 more ticks (200 ms): total 5 ticks, entry fires.
-	TickScheduler.advance(0.2, _manager)
+	# 4 more ticks (200 ms): total 5 ticks, entry fires. Stepped one tick
+	# per advance() because the catch-up cap (_MAX_TICKS_PER_ADVANCE = 2)
+	# would clamp a single 0.2 s / 4-tick advance to 2 ticks. Per-tick
+	# stepping mirrors real per-frame deltas (a frame rarely buys >1 tick).
+	for _i in range(4):
+		TickScheduler.advance(0.05, _manager)
 	assert_eq(TickScheduler.pending_count(), 0, "after 5 ticks: entry drained")
 	assert_eq(TickScheduler.current_tick(), 5)
 
@@ -71,14 +75,15 @@ func test_delay_zero_is_clamped_to_one() -> void:
 # --- Catch-up clamp ---
 
 
-func test_catch_up_clamps_at_20_ticks() -> void:
-	# Long frame hitch (say 5 seconds = 100 ticks worth) must cap at 20
-	# to prevent a main-thread spiral. Anything over the cap is discarded
-	# from the accumulator.
+func test_catch_up_clamps_at_max_ticks_per_advance() -> void:
+	# Long frame hitch (say 5 seconds = 100 ticks worth) must cap at
+	# _MAX_TICKS_PER_ADVANCE = 2 to prevent a main-thread spiral. Anything
+	# over the cap is discarded from the accumulator (not deferred), so the
+	# next frame starts clean rather than draining a backlog.
 	TickScheduler.schedule(Vector3i(0, 64, 0), Blocks.WATER_STILL, 30)
 	TickScheduler.advance(5.0, _manager)
-	# current_tick advances at most 20, so delay=30 entry is still pending.
-	assert_lt(TickScheduler.current_tick(), 30)
+	# 100 ticks of accumulated time clamps to exactly 2; delay=30 still pending.
+	assert_eq(TickScheduler.current_tick(), 2, "catch-up clamped to 2 ticks")
 	assert_eq(TickScheduler.pending_count(), 1)
 
 
@@ -151,10 +156,12 @@ func test_mixed_delays_fire_in_chronological_order() -> void:
 	TickScheduler.schedule(Vector3i(0, 64, 0), Blocks.WATER_STILL, 3)
 	TickScheduler.schedule(Vector3i(1, 64, 0), Blocks.WATER_STILL, 1)
 	TickScheduler.schedule(Vector3i(2, 64, 0), Blocks.WATER_STILL, 2)
-	# 0.16 instead of 0.15 because 0.15 / 0.05 = 2.9999… in IEEE float and
-	# floors to 2 ticks, missing the third entry by one epsilon. In real
-	# gameplay this slop self-corrects on the next frame.
-	TickScheduler.advance(0.16, _manager)  # 3 ticks
+	# Step one tick per advance() — the catch-up cap
+	# (_MAX_TICKS_PER_ADVANCE = 2) would clamp a single 3-tick advance to
+	# 2, leaving the delay=3 entry pending. Per-tick stepping matches real
+	# per-frame deltas anyway.
+	for _i in range(3):
+		TickScheduler.advance(0.05, _manager)
 	assert_eq(TickScheduler.pending_count(), 0, "all three drained")
 
 
