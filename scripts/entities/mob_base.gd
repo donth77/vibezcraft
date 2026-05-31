@@ -1159,11 +1159,17 @@ func take_damage(
 	# AI revenge targeting (which we don't use yet).
 	if attacker != null:
 		_last_attacker = attacker
-	# Vanilla EntityLiving.damageEntity — during iframe, a NEW hit lands
-	# with `amount - _last_damage_amount` if it's strictly larger,
-	# otherwise it's dropped. Keeps fire-tick from blocking arrows.
+	# Vanilla EntityLiving.damageEntity (hf.java:281-294) — gates the
+	# "larger damage only" rule on the FIRST HALF of the iframe
+	# (`bj > o/2`). Once past half (0.5 s into the 1.0 s window), ANY hit
+	# lands fresh and the iframe resets, which is what gives vanilla its
+	# ~2 hits/s combat cadence. Gating the entire iframe (which is what we
+	# did before) throws away vanilla's second-half hit window — spam
+	# clicks register at 1/s instead of 2/s, and players read it as "I'm
+	# hitting but nothing's happening" (issue #2). The strict-during-
+	# first-half rule still keeps fire-tick damage from gating arrows.
 	var applied: int = amount
-	if _damage_cooldown_remaining > 0.0:
+	if _damage_cooldown_remaining > _DAMAGE_COOLDOWN_SEC * 0.5:
 		if amount <= _last_damage_amount:
 			return false
 		applied = amount - _last_damage_amount

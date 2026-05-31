@@ -215,12 +215,17 @@ func _try_attack_mob() -> bool:
 		if stack != null and not stack.is_empty():
 			held_id = stack.item_id
 	var damage: int = Items.melee_damage(held_id)
-	mob.call("take_damage", damage, attacker_xz)
+	var landed: bool = bool(mob.call("take_damage", damage, attacker_xz))
 	_trigger_player_use_swing()
 	SFX.play_player_hit()
-	# Tool durability — vanilla swords + tools take 1 durability per
-	# attack (ItemSword.hitEntity). Other items (hand, food, etc.) don't.
-	if inv != null and held_id != 0 and Items.is_tool_item(held_id):
+	# Vanilla EntityPlayer.attackTargetEntityWithCurrentItem runs
+	# ItemStack.hitEntity (the durability decrement) ONLY inside the
+	# `if (attackEntityFrom(...))` branch — i.e. iframe-absorbed clicks
+	# don't cost tool durability. Without this gate, spam-clicking an
+	# animal during its hurtResistantTime burns 3-4 pickaxe uses per
+	# landed hit, which the user reads as "drains the usage of my tool
+	# but not hurt the animal" (issue #2).
+	if landed and inv != null and held_id != 0 and Items.is_tool_item(held_id):
 		if inv.damage_selected_tool():
 			SFX.play_tool_break()
 	return true
@@ -783,7 +788,14 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 func _start_mining(target: Vector3i) -> void:
 	_mining_target = target
 	_mining_progress = 0.0
-	_last_dig_sound_ms = 0
+	# Seed to NOW (not 0) so the first dig sound of this block waits a full
+	# DIG_SOUND_INTERVAL_MS rather than firing the next frame. Without this,
+	# _complete_break's `SFX.play_break(...)` on the just-finished block
+	# overlaps with the next block's start-frame dig sound — stacking that
+	# the user reads as "sounds multiply when continuously breaking blocks"
+	# (issue #2). Particles still seed to 0 because their cadence is fast
+	# enough (50 ms) that the visual overlap is intentional, not noise.
+	_last_dig_sound_ms = Time.get_ticks_msec()
 	_last_mining_particle_ms = 0
 	var id: int = _chunk_manager.get_world_block(target)
 	var tool_id: int = _held_tool_id()
