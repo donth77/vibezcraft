@@ -687,6 +687,16 @@ func _spawn_chunk_sync_neighborhood(center: Vector2i) -> void:
 
 func _spawn_chunk_sync(coord: Vector2i) -> void:
 	if _chunks.has(coord):
+		# Already materialized — but chunk_node defers the first
+		# mesh+collision apply through _pending_apply (drained 1/frame via
+		# try_consume_apply_budget). The whole point of "sync" is to
+		# guarantee the chunk is fully usable BEFORE the caller places an
+		# entity on it; if we leave pending_apply queued, safe_teleport
+		# drops the player onto a StaticBody3D with a null shape and they
+		# fall through. Force-flush so the contract holds.
+		var existing: Node3D = _chunks[coord]
+		if existing != null and existing.has_method("force_apply_pending"):
+			existing.call("force_apply_pending")
 		return
 	var saved_entry: Dictionary = {}
 	if _saved_chunks.has(coord):
@@ -1881,6 +1891,20 @@ func try_consume_apply_budget() -> bool:
 		return false
 	_applies_this_frame += 1
 	return true
+
+
+# Drain every queued chunk_node._pending_apply NOW, ignoring the per-frame
+# budget. Called by LoadingScreen right before clearing Game.is_loading so
+# the entire initial-load ring has collision attached before physics
+# resumes. Without this, the apply budget (1/frame) leaves ~render_distance²
+# chunks with null collision shapes the moment the player drops out of
+# safe_teleport — they fall through, hit y<-20, void-recovery, and re-emerge
+# at world spawn ("fell through the world" on reload).
+func flush_all_pending_applies() -> void:
+	for coord: Vector2i in _chunks:
+		var node: Node3D = _chunks[coord]
+		if node != null and node.has_method("force_apply_pending"):
+			node.call("force_apply_pending")
 
 
 func notify_chunk_lighting_updated(coord: Vector2i) -> void:

@@ -191,6 +191,21 @@ func _process(_delta: float) -> void:
 		_dispatch_remesh()
 
 
+# Force-apply any queued mesh+collision NOW, bypassing the per-frame apply
+# budget. Used by ChunkManager when a caller needs the chunk to be fully
+# usable immediately — e.g. before teleporting the player onto it. Without
+# this, _spawn_chunk_sync would early-exit on an already-in-_chunks coord
+# whose StaticBody3D still has a null shape, and the player would fall
+# through the chunk on the first physics frame after Game.is_loading clears.
+func force_apply_pending() -> void:
+	if _pending_apply.is_empty():
+		return
+	var data: Dictionary = _pending_apply
+	_pending_apply = {}
+	_priority_apply = false
+	_apply_mesh_data(data)
+
+
 func _dispatch_remesh() -> void:
 	# Snapshot the chunk's mutable state so the worker reads stable data.
 	# PackedByteArray.duplicate() is ~µs for 32 KB; a 3× 32 KB snapshot at

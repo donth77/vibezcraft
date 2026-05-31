@@ -180,10 +180,22 @@ func _restore_world_state() -> void:
 	var meta: Dictionary = WorldMeta.load_meta()
 	if not meta.is_empty():
 		WorldTime.set_time_ticks(int(meta.get("time_ticks", WorldTime.current_tick())))
+	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
+	# Drain every chunk's deferred mesh+collision apply BEFORE we restore
+	# the saved player position. The initial-spawn pass only guarantees
+	# block data is in place — collision shapes are queued through
+	# chunk_node._pending_apply and drained 1/frame, so by the time the
+	# last chunk lands ~render_distance² chunks still have null
+	# StaticBody3D shapes. Without this flush, PlayerSave.load_player
+	# teleports onto a collision-less chunk and the player falls through
+	# the moment Game.is_loading clears below. Also covers the
+	# _relocate_if_unsafe_spawn pass — it scans is_chunk_loaded chunks for
+	# dry land, and those chunks now have collision attached too.
+	if chunk_manager != null and chunk_manager.has_method("flush_all_pending_applies"):
+		chunk_manager.call("flush_all_pending_applies")
 	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D
 	if player != null:
 		PlayerSave.load_player(player)
-	var chunk_manager: Node = get_tree().get_root().find_child("ChunkManager", true, false)
 	if chunk_manager != null:
 		EntitySave.load_all(chunk_manager)
 	# Finalize the spawn while the screen is still up so any un-embed /
