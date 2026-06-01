@@ -532,8 +532,10 @@ static func overlay_material() -> ShaderMaterial:
 static func entity_material() -> ShaderMaterial:
 	if _entity_material == null:
 		_entity_material = ShaderMaterial.new()
-		# gdlint: disable=duplicated-load
-		_entity_material.shader = load("res://shaders/chunk.gdshader") as Shader
+		# cull_disabled variant of chunk.gdshader — falling blocks pass
+		# through the player, which would otherwise expose see-through faces
+		# when the camera enters the cube. See shaders/chunk_entity.gdshader.
+		_entity_material.shader = load("res://shaders/chunk_entity.gdshader") as Shader
 		_entity_material.set_shader_parameter("atlas_texture", texture())
 		# UV gates + foliage tints. Entity material is plain `uniform` here
 		# (we set it on the material, not per-instance) — same shader as the
