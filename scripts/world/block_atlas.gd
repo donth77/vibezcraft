@@ -592,11 +592,44 @@ static func apply_foliage_tints() -> void:
 # Shared translucent water ShaderMaterial, used by every chunk's water
 # MeshInstance3D. Stateless — the shader animates from TIME so a single
 # material works for every chunk without per-instance uniforms.
+# Two uniforms get pushed in here:
+#   * `water_still_tex` — the pack's static water_still.png. Multiplied
+#     against the WaterFX automaton at fragment time to give vanilla-pack
+#     texture detail on top of the runtime cellular animation. Null on a
+#     pack with no water_still.png (the shader falls through to a uniform
+#     white = "no static modulation").
+#   * `water_fx_tex` — written every frame by the WaterFX autoload from
+#     WaterFXNative's cellular automaton. Provides the animated wave
+#     intensity field that drives deep/shallow color mix. Set here too so
+#     the shader has a valid starting value if WaterFX hasn't ticked yet.
 static func water_material() -> ShaderMaterial:
 	if _water_material == null:
 		_water_material = ShaderMaterial.new()
 		_water_material.shader = load("res://shaders/water.gdshader") as Shader
+		var still: Texture2D = _load_pack_water_still()
+		if still != null:
+			_water_material.set_shader_parameter("water_still_tex", still)
+			# Tell the shader to take the pack-texture path. Without this
+			# the shader keeps the default `has_still_tex = false` and
+			# never reads the texture we just bound (falls through to the
+			# deep/shallow procedural gradient instead).
+			_water_material.set_shader_parameter("has_still_tex", true)
 	return _water_material
+
+
+# Load the active pack's water_still.png, with the same DEFAULT_PACK
+# fallback the atlas builder uses for missing tiles (so pixel_perfection /
+# programmer_art automatically get alpha_vanilla's water if they don't
+# ship their own). Returns null if neither pack has the file — the shader
+# then falls through to the procedural ripple path. ResourceLoader.exists
+# avoids the noisy load() ERROR for missing-by-design tiles.
+static func _load_pack_water_still() -> Texture2D:
+	var path := "%s%s/water_still.png" % [PACK_BASE, active_pack]
+	if not ResourceLoader.exists(path):
+		path = "%s%s/water_still.png" % [PACK_BASE, DEFAULT_PACK]
+	if not ResourceLoader.exists(path):
+		return null
+	return load(path) as Texture2D
 
 
 # Shared opaque lava ShaderMaterial. Procedural animation like water but

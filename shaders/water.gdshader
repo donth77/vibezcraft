@@ -14,6 +14,21 @@ render_mode cull_disabled, blend_mix, depth_draw_opaque;
 // ripple that approximates the same look at zero CPU cost.
 
 uniform sampler2D water_fx_tex : filter_nearest, repeat_enable;
+// Pack-provided static water texture (e.g. PixelPerfectionCE's noisy
+// blue tile, vanilla Alpha's misc/water.png). Sampled at the same UV
+// the automaton uses, then multiplied into the final albedo so the
+// pack's patchwork detail rides on top of the cellular animation.
+// Defaults to opaque white via the literal hint — when no texture is
+// bound the multiply becomes a no-op and the surface looks identical to
+// the pre-static-texture days. BlockAtlas.water_material() pushes the
+// active pack's texture in on material creation; SettingsMenu pack swap
+// nulls the material so the next access rebuilds with the new pack.
+uniform sampler2D water_still_tex : filter_nearest, repeat_enable, source_color, hint_default_white;
+// BlockAtlas.water_material() sets this to true when it binds a real
+// pack texture above, false (default) otherwise. Avoids the per-pixel
+// "is this sample near-white?" heuristic that would mis-trigger on a
+// real pack pixel that happens to be ~(1,1,1).
+uniform bool has_still_tex = false;
 // 1.0 if the WaterFX driver has pushed a real texture, 0.0 otherwise.
 // Set automatically via texture_query() at fragment time — the hash
 // fallback path activates when no real texture is bound.
@@ -107,7 +122,20 @@ void fragment() {
     // and across the time-scrolled offset.
     vec4 fx = texture(water_fx_tex, uv);
     float r = (fx.a > 0.01) ? fx.r : ripple(uv, t);
-    vec3 col = mix(deep_color, shallow_color, r);
+    // Architecture mirrors vanilla pre-1.13: pack water_still.png is the
+    // BASE color (provides the pack-specific patchwork detail), the
+    // automaton's intensity field modulates BRIGHTNESS. This matches
+    // vanilla MC's `terrain_tile * biome_tint * light` chain — without
+    // pulling biome tint per-vertex through the mesher we let the pack
+    // texture itself carry the blue hue. Range 0.6..1.0 so even
+    // low-intensity pixels stay legibly bright at midnight.
+    vec3 still = texture(water_still_tex, uv).rgb;
+    // has_still_tex is a uniform bool flipped by BlockAtlas when a real
+    // pack texture is bound. Pack path: use the pack as base color, let
+    // the automaton modulate brightness 0.6..1.0. Fallback path (no
+    // water_still in pack): preserve the original procedural deep/shallow
+    // gradient so third-party packs missing the file still render.
+    vec3 col = has_still_tex ? still * (0.6 + 0.4 * r) : mix(deep_color, shallow_color, r);
     // Notch-style face shading, toned down so sides don't go near-black —
     // underwater is already dim enough with translucent alpha.
     float b = 0.85;
