@@ -203,8 +203,68 @@ public:
 			const PackedByteArray &p_edge_meta_north,
 			const PackedByteArray &p_edge_meta_south) const;
 
+	// lit + native non-cube pass. Wraps mesh_chunk_data_lit (kept bound
+	// and byte-identical so stale platform binaries keep working via the
+	// legacy GDScript appendix), then runs a second scan that emits the
+	// worldgen-hot non-cube shapes natively:
+	//   - CROSS plants (sapling / flowers / mushrooms / sugar cane) —
+	//     two double-sided inset quads + a plant_faces selection box
+	//     from `p_selection_aabbs` (Blocks.selection_aabb_flat(): 6
+	//     floats per id, posXYZ + sizeXYZ).
+	//   - SNOW_LAYER — the 2/16-tall slab box + selection box.
+	// CROPS stays GDScript (its UV swaps per growth-stage meta through a
+	// NAMED atlas lookup the flat per-id table can't serve). Every other
+	// non-cube cell (torch / fire / fence / stairs / door / gate /
+	// ladder / slab / sign / rail / bed / chest / crops) is returned in
+	// `special_cells` (linear y-major cell indices, scan order) for
+	// Mesher._append_special_cells — GDScript cost becomes proportional
+	// to actual special blocks instead of the 32k-cell grid walk, which
+	// is what made snowy/flowered chunks cost ~25 ms per mesh on wasm.
+	// Geometry order contract (mirrored by the GDScript reference):
+	// [cubes] then [cross+snow in scan order] then [specials in scan
+	// order] — tests/test_mesher_native.gd enforces byte equality.
+	Dictionary mesh_chunk_data_lit2(
+			const PackedByteArray &p_blocks,
+			const PackedByteArray &p_block_meta,
+			const PackedByteArray &p_sky_light,
+			const PackedByteArray &p_block_light,
+			int p_max_y,
+			const PackedFloat32Array &p_uv_table,
+			const PackedByteArray &p_edge_blocks_west,
+			const PackedByteArray &p_edge_blocks_east,
+			const PackedByteArray &p_edge_blocks_north,
+			const PackedByteArray &p_edge_blocks_south,
+			const PackedByteArray &p_edge_meta_west,
+			const PackedByteArray &p_edge_meta_east,
+			const PackedByteArray &p_edge_meta_north,
+			const PackedByteArray &p_edge_meta_south,
+			const PackedFloat32Array &p_selection_aabbs) const;
+
 protected:
 	static void _bind_methods();
+
+private:
+	static void emit_cross_cell(int x, int y, int z, int id,
+			const float *uv_ptr, int uv_size,
+			const float *aabb_ptr, int aabb_size,
+			int sky, int blk, double light_scale,
+			PackedVector3Array &verts, PackedVector3Array &norms,
+			PackedVector2Array &uvs, PackedColorArray &colors,
+			PackedInt32Array &indices, PackedVector3Array &plant_faces);
+	static void emit_snow_cell(int x, int y, int z,
+			const float *uv_ptr, int uv_size,
+			int sky, int blk,
+			PackedVector3Array &verts, PackedVector3Array &norms,
+			PackedVector2Array &uvs, PackedColorArray &colors,
+			PackedInt32Array &indices, PackedVector3Array &plant_faces);
+	static void emit_box_faces(const Vector3 &mn, const Vector3 &mx,
+			float uv_x, float uv_y, float uv_w, float uv_h,
+			const Color &face_light,
+			PackedVector3Array &verts, PackedVector3Array &norms,
+			PackedVector2Array &uvs, PackedColorArray &colors,
+			PackedInt32Array &indices);
+	static void emit_collision_box(PackedVector3Array &faces,
+			const Vector3 &mn, const Vector3 &mx);
 };
 
 } // namespace godot

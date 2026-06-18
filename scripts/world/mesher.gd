@@ -90,6 +90,10 @@ const _CROSS_QUADS: Array = [
 # worker threads — MesherNative.mesh_chunk_data is stateless so concurrent
 # calls are safe.
 static var _native_mesher: RefCounted
+# True when the loaded extension exposes mesh_chunk_data_lit2 (native
+# non-cube pass). Stale platform binaries built before lit2 keep working
+# through the legacy lit + full-scan GDScript appendix.
+static var _native_has_lit2: bool = false
 
 
 # Main-thread init. No-op if the native extension isn't available; callers
@@ -106,6 +110,11 @@ static func enable_native() -> bool:
 	if _native_mesher == null:
 		push_warning("Mesher.enable_native: failed to instantiate MesherNative")
 		return false
+	_native_has_lit2 = _native_mesher.has_method("mesh_chunk_data_lit2")
+	if _native_has_lit2:
+		# The lit2 pass needs the selection-AABB table on workers; build
+		# it now on the main thread (same warm rule as uv_table_flat).
+		Blocks.selection_aabb_flat()
 	return true
 
 
@@ -127,120 +136,132 @@ static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
 		var result: Dictionary = mesh_chunk(chunk)
 		return result
 	var probe_token := PerfProbe.begin("mesher.mesh_chunk")
-	var result: Dictionary = (
-		_native_mesher
-		. mesh_chunk_data_lit(
-			chunk.blocks,
-			chunk.block_meta,
-			chunk.sky_light,
-			chunk.block_light,
-			chunk.max_y,
-			BlockAtlas.uv_table_flat(),
-			chunk.edge_blocks_west,
-			chunk.edge_blocks_east,
-			chunk.edge_blocks_north,
-			chunk.edge_blocks_south,
-			chunk.edge_meta_west,
-			chunk.edge_meta_east,
-			chunk.edge_meta_north,
-			chunk.edge_meta_south,
+	var result: Dictionary
+	if _native_has_lit2:
+		# Native owns the full-grid scan AND the worldgen-hot non-cube
+		# shapes (cross plants, snow layers); only the sparse player-built
+		# cells it returns in `special_cells` go through GDScript. This is
+		# what keeps snowy/flowered chunks off the ~25 ms-per-mesh GDScript
+		# grid walk on wasm.
+		result = (
+			_native_mesher
+			. mesh_chunk_data_lit2(
+				chunk.blocks,
+				chunk.block_meta,
+				chunk.sky_light,
+				chunk.block_light,
+				chunk.max_y,
+				BlockAtlas.uv_table_flat(),
+				chunk.edge_blocks_west,
+				chunk.edge_blocks_east,
+				chunk.edge_blocks_north,
+				chunk.edge_blocks_south,
+				chunk.edge_meta_west,
+				chunk.edge_meta_east,
+				chunk.edge_meta_north,
+				chunk.edge_meta_south,
+				Blocks.selection_aabb_flat(),
+			)
 		)
-	)
-	if chunk.has_non_cube_blocks:
-		_append_non_cube_geometry(chunk, result)
+		if chunk.has_non_cube_blocks:
+			_append_special_cells(chunk, result)
+	else:
+		# Stale extension binary without lit2 — legacy combo: native cubes
+		# + the full-scan GDScript appendix. Slower but byte-correct.
+		result = (
+			_native_mesher
+			. mesh_chunk_data_lit(
+				chunk.blocks,
+				chunk.block_meta,
+				chunk.sky_light,
+				chunk.block_light,
+				chunk.max_y,
+				BlockAtlas.uv_table_flat(),
+				chunk.edge_blocks_west,
+				chunk.edge_blocks_east,
+				chunk.edge_blocks_north,
+				chunk.edge_blocks_south,
+				chunk.edge_meta_west,
+				chunk.edge_meta_east,
+				chunk.edge_meta_north,
+				chunk.edge_meta_south,
+			)
+		)
+		if chunk.has_non_cube_blocks:
+			_append_non_cube_geometry(chunk, result)
 	PerfProbe.end("mesher.mesh_chunk", probe_token)
 	return result
 
 
-# GDScript pass for non-cube blocks only (CROSS, TORCH, EXTERNAL).
-# Appends their geometry into the native mesher's result dict so the
-# native path handles 99% of the chunk while GDScript covers the few
-# special-shape blocks.
-static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
-	var verts := PackedVector3Array()
-	var norms := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var colors := PackedColorArray()
-	var indices := PackedInt32Array()
-	var collision_faces := PackedVector3Array()
-	var plant_faces := PackedVector3Array()
-	var top: int = mini(chunk.max_y + 1, Chunk.SIZE_Y - 1)
-	for y in range(top + 1):
-		for z in range(Chunk.SIZE_Z):
-			for x in range(Chunk.SIZE_X):
-				var id := chunk.get_block(x, y, z)
-				if id == Blocks.AIR:
-					continue
-				var ms: int = Blocks.mesh_shape(id)
-				if ms == Blocks.MESH_SHAPE_CROSS:
-					_emit_cross_quads(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_FIRE:
-					_emit_fire_quads(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_TORCH:
-					_emit_torch_quads(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_EXTERNAL:
-					_emit_external_collision(x, y, z, collision_faces)
-				elif ms == Blocks.MESH_SHAPE_FENCE:
-					_emit_fence_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_STAIRS:
-					_emit_stair_geometry(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_DOOR:
-					_emit_door_geometry(
-						chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_FENCE_GATE:
-					_emit_fence_gate_geometry(
-						chunk,
-						x,
-						y,
-						z,
-						verts,
-						norms,
-						uvs,
-						colors,
-						indices,
-						collision_faces,
-						plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_LADDER:
-					_emit_ladder_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_SNOW_LAYER:
-					_emit_snow_layer_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_SLAB:
-					_emit_slab_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_SIGN:
-					_emit_sign_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_RAIL:
-					_emit_rail_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
-					)
-				elif ms == Blocks.MESH_SHAPE_BED:
-					_emit_bed_geometry(
-						chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces
-					)
+# Per-cell non-cube dispatch shared by every appendix below. The chain
+# mirrors Blocks.mesh_shape's taxonomy; CROSS here also covers CROPS
+# (its growth-stage UV resolves inside _emit_cross_quads).
+# gdlint: disable=function-arguments-number
+static func _emit_special_cell(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	id: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array
+) -> void:
+	var ms: int = Blocks.mesh_shape(id)
+	if ms == Blocks.MESH_SHAPE_CROSS:
+		_emit_cross_quads(chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_FIRE:
+		_emit_fire_quads(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_TORCH:
+		_emit_torch_quads(chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_EXTERNAL:
+		_emit_external_collision(x, y, z, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_FENCE:
+		_emit_fence_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_STAIRS:
+		_emit_stair_geometry(
+			chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+		)
+	elif ms == Blocks.MESH_SHAPE_DOOR:
+		_emit_door_geometry(chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_FENCE_GATE:
+		_emit_fence_gate_geometry(
+			chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces, plant_faces
+		)
+	elif ms == Blocks.MESH_SHAPE_LADDER:
+		_emit_ladder_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_SNOW_LAYER:
+		_emit_snow_layer_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_SLAB:
+		_emit_slab_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_SIGN:
+		_emit_sign_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_RAIL:
+		_emit_rail_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_BED:
+		_emit_bed_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
+
+
+# Merge locally-emitted non-cube arrays into a mesh result dict, shifting
+# indices past the existing vertex count. Packed*Array types use CoW —
+# `result["key"].append_array()` would mutate a temporary copy, leaving
+# the dict unchanged. Extract, append, reassign instead.
+static func _merge_nc_arrays(
+	result: Dictionary,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array
+) -> void:
 	if verts.is_empty() and collision_faces.is_empty() and plant_faces.is_empty():
 		return
-	# Packed*Array types use CoW — `result["key"].append_array()` would
-	# mutate a temporary copy, leaving the dict unchanged. Extract, append,
-	# reassign instead.
 	var rv: PackedVector3Array = result["vertices"]
 	var base_vert: int = rv.size()
 	if base_vert > 0 and not verts.is_empty():
@@ -271,6 +292,113 @@ static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
 		var pf: PackedVector3Array = result.get("plant_faces", PackedVector3Array())
 		pf.append_array(plant_faces)
 		result["plant_faces"] = pf
+
+
+# Production appendix for the native lit2 path. The native pass already
+# emitted CROSS plants + snow layers and returns every OTHER non-cube
+# cell in `special_cells` (linear y-major indices, scan order) — so
+# GDScript cost is proportional to actual player-built blocks, never the
+# 32k-cell grid walk that made snowy/flowered chunks cost ~25 ms per
+# mesh on wasm.
+static func _append_special_cells(chunk: Chunk, result: Dictionary) -> void:
+	var cells: PackedInt32Array = result.get("special_cells", PackedInt32Array())
+	if cells.is_empty():
+		return
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var collision_faces := PackedVector3Array()
+	var plant_faces := PackedVector3Array()
+	for ci in range(cells.size()):
+		var idx: int = cells[ci]
+		var x: int = idx % Chunk.SIZE_X
+		var z: int = (idx / Chunk.SIZE_X) % Chunk.SIZE_Z
+		var y: int = idx / (Chunk.SIZE_X * Chunk.SIZE_Z)
+		var id := chunk.get_block(x, y, z)
+		_emit_special_cell(
+			chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces, plant_faces
+		)
+	_merge_nc_arrays(result, verts, norms, uvs, colors, indices, collision_faces, plant_faces)
+
+
+# Reference twin of the production path (native lit2 + special-cells
+# appendix), used by mesh_chunk: phase 1 emits CROSS plants (minus
+# meta-UV CROPS) + snow layers in scan order, phase 2 replays every
+# other non-cube cell through the shared special-cell dispatch. The
+# two-phase order is what makes the reference's vertex stream byte-equal
+# to native+appendix on chunks that mix worldgen plants/snow with
+# player-built shapes.
+static func _append_non_cube_reference(chunk: Chunk, result: Dictionary) -> void:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var collision_faces := PackedVector3Array()
+	var plant_faces := PackedVector3Array()
+	var specials := PackedInt32Array()
+	var top: int = mini(chunk.max_y + 1, Chunk.SIZE_Y - 1)
+	for y in range(top + 1):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var id := chunk.get_block(x, y, z)
+				if id == Blocks.AIR:
+					continue
+				var ms: int = Blocks.mesh_shape(id)
+				if ms == Blocks.MESH_SHAPE_CROSS and id != Blocks.CROPS:
+					_emit_cross_quads(
+						chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces
+					)
+				elif ms == Blocks.MESH_SHAPE_SNOW_LAYER:
+					_emit_snow_layer_geometry(
+						chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces
+					)
+				elif ms != Blocks.MESH_SHAPE_CUBE:
+					specials.append(y * Chunk.SIZE_X * Chunk.SIZE_Z + z * Chunk.SIZE_X + x)
+	_merge_nc_arrays(result, verts, norms, uvs, colors, indices, collision_faces, plant_faces)
+	result["special_cells"] = specials
+	_append_special_cells(chunk, result)
+
+
+# LEGACY appendix — single interleaved scan emitting every non-cube shape
+# in cell order. Kept only for extension binaries that predate
+# mesh_chunk_data_lit2 (e.g. a stale Windows DLL): mesh_chunk_fast pairs
+# it with the old lit entry point so those platforms keep working
+# unchanged. New code should not call this.
+static func _append_non_cube_geometry(chunk: Chunk, result: Dictionary) -> void:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var collision_faces := PackedVector3Array()
+	var plant_faces := PackedVector3Array()
+	var top: int = mini(chunk.max_y + 1, Chunk.SIZE_Y - 1)
+	for y in range(top + 1):
+		for z in range(Chunk.SIZE_Z):
+			for x in range(Chunk.SIZE_X):
+				var id := chunk.get_block(x, y, z)
+				if id == Blocks.AIR:
+					continue
+				if Blocks.mesh_shape(id) == Blocks.MESH_SHAPE_CUBE:
+					continue
+				_emit_special_cell(
+					chunk,
+					x,
+					y,
+					z,
+					id,
+					verts,
+					norms,
+					uvs,
+					colors,
+					indices,
+					collision_faces,
+					plant_faces
+				)
+	_merge_nc_arrays(result, verts, norms, uvs, colors, indices, collision_faces, plant_faces)
 
 
 static func mesh_chunk(chunk: Chunk) -> Dictionary:
@@ -390,11 +518,11 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 		"lava_colors": lava_colors,
 		"lava_indices": lava_indices,
 	}
-	# Append non-cube geometry (cross-quads, torches, doors, fence, stairs,
-	# ladders) after all cubes — same order as `mesh_chunk_fast` does in
-	# production via `_append_non_cube_geometry`.
+	# Append non-cube geometry after all cubes, in the production order:
+	# [cross plants + snow in scan order] then [special cells in scan
+	# order] — the byte-order twin of native lit2 + _append_special_cells.
 	if chunk.has_non_cube_blocks:
-		_append_non_cube_geometry(chunk, result)
+		_append_non_cube_reference(chunk, result)
 	PerfProbe.end("mesher.mesh_chunk", probe_token)
 	return result
 

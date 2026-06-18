@@ -116,7 +116,10 @@ func _build_ui() -> void:
 	vbox.add_child(_make_button("Back to Game", false, _on_resume))
 	vbox.add_child(_make_button("Options...", false, _on_open_options))
 	vbox.add_child(_make_button("Save and quit to title", false, _on_quit_to_title))
-	vbox.add_child(_make_button("Quit to Desktop", false, _on_quit_to_desktop))
+	# No desktop to quit to in a browser — get_tree().quit() would just
+	# freeze the canvas. Closing the tab is the real quit on web.
+	if not OS.has_feature("web"):
+		vbox.add_child(_make_button("Quit to Desktop", false, _on_quit_to_desktop))
 
 
 func _make_button(label_text: String, disabled: bool, on_click: Callable) -> Control:

@@ -45,6 +45,7 @@ bin/*.dll
 bin/*.exp
 bin/*.lib
 bin/*.pdb
+bin/*.wasm
 godot-cpp/bin/
 godot-cpp/gen/
 *.o

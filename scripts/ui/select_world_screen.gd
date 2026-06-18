@@ -158,8 +158,78 @@ func _on_slot_pressed(slot_index: int) -> void:
 	# and confuse the LoadingScreen's "fresh vs loaded" message picker.
 	Game.world_is_fresh = not SaveLoad.world_exists(world_name)
 	Game.active_world = world_name
+	# Paint a loading cover BEFORE the scene swap. change_scene_to_file
+	# tears this scene down and runs main.tscn's entire _ready chain
+	# synchronously — noticeable dead time in wasm — and without the cover
+	# the world list just sits frozen for that stretch. The cover mirrors
+	# the in-world LoadingScreen's look so the real loading UI reads as
+	# the same screen updating. Two frame waits: the first schedules the
+	# redraw, the second guarantees it actually presented.
+	_show_loading_cover(slot_index)
+	await get_tree().process_frame
+	await get_tree().process_frame
 	_prepare_world_seed(world_name)
 	get_tree().change_scene_to_file(_MAIN_SCENE_PATH)
+
+
+# Full-screen cover painted the frame a slot is clicked — dirt backdrop +
+# title + status, matching LoadingScreen's layout so the handoff to the
+# real loading UI is seamless. Swallows input so a second click can't
+# re-trigger a slot mid-swap.
+func _show_loading_cover(slot_index: int) -> void:
+	# Hide the world list before the deferred swap. This flushes hover /
+	# focus state while the buttons are still alive — otherwise a hovered
+	# slot's exit-lambda can fire mid-teardown and log "Lambda capture
+	# was freed" during change_scene_to_file.
+	for child: Node in get_children():
+		if child is CanvasItem:
+			(child as CanvasItem).visible = false
+	var cover := Control.new()
+	cover.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cover.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(cover)
+	var base := ColorRect.new()
+	base.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	base.color = Color(0.1, 0.075, 0.05)
+	base.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cover.add_child(base)
+	var dirt: Texture2D = VanillaButton.make_scaled_dirt_texture(4)
+	if dirt != null:
+		var bg := TextureRect.new()
+		bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		bg.stretch_mode = TextureRect.STRETCH_TILE
+		bg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		bg.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+		bg.modulate = Color(0x40 / 255.0, 0x40 / 255.0, 0x40 / 255.0, 1.0)
+		bg.texture = dirt
+		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cover.add_child(bg)
+	var title := Label.new()
+	title.text = "VibezCraft"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.anchor_left = 0.0
+	title.anchor_right = 1.0
+	title.anchor_top = 0.42
+	title.anchor_bottom = 0.42
+	title.add_theme_font_size_override("font_size", 48)
+	title.add_theme_color_override("font_shadow_color", Color.BLACK)
+	title.add_theme_constant_override("shadow_offset_x", 2)
+	title.add_theme_constant_override("shadow_offset_y", 2)
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cover.add_child(title)
+	var status := Label.new()
+	status.text = "Loading World %d" % slot_index
+	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	status.anchor_left = 0.0
+	status.anchor_right = 1.0
+	status.anchor_top = 0.50
+	status.anchor_bottom = 0.50
+	status.add_theme_font_size_override("font_size", 28)
+	status.add_theme_color_override("font_shadow_color", Color.BLACK)
+	status.add_theme_constant_override("shadow_offset_x", 2)
+	status.add_theme_constant_override("shadow_offset_y", 2)
+	status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	cover.add_child(status)
 
 
 # Ensure the worldgen seed matches this slot's saved seed BEFORE main.tscn

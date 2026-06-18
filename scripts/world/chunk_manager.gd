@@ -1294,6 +1294,9 @@ func _flush_immediate_rebuild(coord: Vector2i) -> void:
 		return
 	var chunk_node: Node3D = _chunks[coord]
 	chunk_node._apply_mesh_data(Mesher.mesh_chunk_fast(chunk_node.chunk))
+	# Same-frame collision is this path's contract (falling-block landings
+	# swap entity → block mid-frame), so flush the deferred cook now.
+	chunk_node._cook_pending_collision()
 	chunk_node.chunk.dirty = false
 
 
@@ -1964,15 +1967,12 @@ func _notify_fluid_neighbors(pos: Vector3i) -> void:
 		_deferred_fizz.clear()
 
 
-# Settings → Alpha 1.1.2 foliage toggled. Push the new tints to every
-# loaded chunk's MeshInstance3D (instance uniform — can't be set on the
-# shared material) plus the overlay + entity materials. No re-mesh; the
-# shader's UV gates already isolate the affected fragments.
+# Settings → Alpha 1.1.2 foliage toggled. Tints are material-level
+# (shared chunk + overlay + entity materials), so one BlockAtlas push
+# covers every loaded chunk. No re-mesh; the shader's UV gates already
+# isolate the affected fragments.
 func _on_alpha_vintage_foliage_changed(_enabled: bool) -> void:
 	BlockAtlas.apply_foliage_tints()
-	for chunk_node: Node in _chunks.values():
-		if chunk_node != null and chunk_node.has_method("apply_foliage_tints"):
-			chunk_node.apply_foliage_tints()
 
 
 # Called when a fluid is freshly placed at `pos`. Ensures a first tick

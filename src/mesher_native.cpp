@@ -947,6 +947,334 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 	return result;
 }
 
+// ---- non-cube pass (mesh_chunk_data_lit2) --------------------------------
+// The helpers below are line-for-line ports of Mesher.gd's
+// _emit_collision_box / _emit_box / _emit_cross_quads /
+// _emit_snow_layer_geometry. Byte parity with the GDScript reference is
+// enforced by tests/test_mesher_native.gd — any change here needs the
+// matching reference change (and vice versa). Light math follows the
+// established rule: replicate the exact GDScript operation in DOUBLE,
+// narrow to float only at the Color() store.
+
+void MesherNative::emit_collision_box(PackedVector3Array &faces,
+		const Vector3 &mn, const Vector3 &mx) {
+	const Vector3 c000(mn.x, mn.y, mn.z);
+	const Vector3 c100(mx.x, mn.y, mn.z);
+	const Vector3 c010(mn.x, mx.y, mn.z);
+	const Vector3 c110(mx.x, mx.y, mn.z);
+	const Vector3 c001(mn.x, mn.y, mx.z);
+	const Vector3 c101(mx.x, mn.y, mx.z);
+	const Vector3 c011(mn.x, mx.y, mx.z);
+	const Vector3 c111(mx.x, mx.y, mx.z);
+	const Vector3 box_faces[6][4] = {
+		{ c010, c011, c111, c110 },
+		{ c001, c000, c100, c101 },
+		{ c100, c110, c111, c101 },
+		{ c001, c011, c010, c000 },
+		{ c101, c111, c011, c001 },
+		{ c000, c010, c110, c100 },
+	};
+	for (int f = 0; f < 6; f++) {
+		faces.append(box_faces[f][0]);
+		faces.append(box_faces[f][2]);
+		faces.append(box_faces[f][1]);
+		faces.append(box_faces[f][0]);
+		faces.append(box_faces[f][3]);
+		faces.append(box_faces[f][2]);
+	}
+}
+
+void MesherNative::emit_box_faces(const Vector3 &mn, const Vector3 &mx,
+		float uv_x, float uv_y, float uv_w, float uv_h,
+		const Color &face_light,
+		PackedVector3Array &verts, PackedVector3Array &norms,
+		PackedVector2Array &uvs, PackedColorArray &colors,
+		PackedInt32Array &indices) {
+	const Vector3 c000(mn.x, mn.y, mn.z);
+	const Vector3 c100(mx.x, mn.y, mn.z);
+	const Vector3 c010(mn.x, mx.y, mn.z);
+	const Vector3 c110(mx.x, mx.y, mn.z);
+	const Vector3 c001(mn.x, mn.y, mx.z);
+	const Vector3 c101(mx.x, mn.y, mx.z);
+	const Vector3 c011(mn.x, mx.y, mx.z);
+	const Vector3 c111(mx.x, mx.y, mx.z);
+	// Face-vert order matches Mesher._emit_box (which mirrors the cube
+	// path's _FACE_VERTS) so winding + UV mapping stay consistent. All 6
+	// faces emit unconditionally — the GDScript box helper does no
+	// neighbor culling and no side-face U-swap.
+	const Vector3 face_verts[6][4] = {
+		{ c010, c011, c111, c110 },
+		{ c001, c000, c100, c101 },
+		{ c100, c110, c111, c101 },
+		{ c001, c011, c010, c000 },
+		{ c101, c111, c011, c001 },
+		{ c000, c010, c110, c100 },
+	};
+	const Vector3 face_normals[6] = {
+		Vector3(0, 1, 0),
+		Vector3(0, -1, 0),
+		Vector3(1, 0, 0),
+		Vector3(-1, 0, 0),
+		Vector3(0, 0, 1),
+		Vector3(0, 0, -1),
+	};
+	for (int f = 0; f < 6; f++) {
+		const int base = verts.size();
+		for (int i = 0; i < 4; i++) {
+			verts.append(face_verts[f][i]);
+			norms.append(face_normals[f]);
+		}
+		uvs.append(Vector2(uv_x, uv_y + uv_h));
+		uvs.append(Vector2(uv_x, uv_y));
+		uvs.append(Vector2(uv_x + uv_w, uv_y));
+		uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+		colors.append(face_light);
+		colors.append(face_light);
+		colors.append(face_light);
+		colors.append(face_light);
+		indices.append(base);
+		indices.append(base + 2);
+		indices.append(base + 1);
+		indices.append(base);
+		indices.append(base + 3);
+		indices.append(base + 2);
+	}
+}
+
+void MesherNative::emit_cross_cell(int x, int y, int z, int id,
+		const float *uv_ptr, int uv_size,
+		const float *aabb_ptr, int aabb_size,
+		int sky, int blk, double light_scale,
+		PackedVector3Array &verts, PackedVector3Array &norms,
+		PackedVector2Array &uvs, PackedColorArray &colors,
+		PackedInt32Array &indices, PackedVector3Array &plant_faces) {
+	// Side-face rect — FACE_SIDE == 2 in BlockAtlas's [top, bottom, side]
+	// table order (uv_rect_for(id, FACE_SIDE) in the GDScript emitter).
+	const int uv_idx = (id * 3 + 2) * 4;
+	float uv_x = 0.0f, uv_y = 0.0f, uv_w = 0.0f, uv_h = 0.0f;
+	if (uv_idx + 3 < uv_size) {
+		uv_x = uv_ptr[uv_idx + 0];
+		uv_y = uv_ptr[uv_idx + 1];
+		uv_w = uv_ptr[uv_idx + 2];
+		uv_h = uv_ptr[uv_idx + 3];
+	}
+	// Cross-quad samples its OWN cell light — the quad floats inside the
+	// cell, there's no "neighbor adjacent to face" concept.
+	const float sky_n = float(double(sky) * light_scale);
+	const float blk_n = float(double(blk) * light_scale);
+	const Color face_light(sky_n, blk_n, 0.0f, 1.0f);
+	const Vector3 normal(0, 1, 0);
+	const float ox = float(x);
+	const float oy = float(y);
+	const float oz = float(z);
+	const Vector3 origin(ox, oy, oz);
+	// Two inset diagonals (0.05 / 0.95 — vanilla renderCrossedSquares),
+	// matching Mesher._CROSS_QUADS exactly.
+	const float lo = 0.05f;
+	const float hi = 0.95f;
+	const Vector3 quads[2][4] = {
+		{ Vector3(lo, 0, lo), Vector3(lo, 1, lo), Vector3(hi, 1, hi), Vector3(hi, 0, hi) },
+		{ Vector3(lo, 0, hi), Vector3(lo, 1, hi), Vector3(hi, 1, lo), Vector3(hi, 0, lo) },
+	};
+	for (int q = 0; q < 2; q++) {
+		const int base = verts.size();
+		for (int i = 0; i < 4; i++) {
+			verts.append(origin + quads[q][i]);
+			norms.append(normal);
+		}
+		uvs.append(Vector2(uv_x, uv_y + uv_h));
+		uvs.append(Vector2(uv_x, uv_y));
+		uvs.append(Vector2(uv_x + uv_w, uv_y));
+		uvs.append(Vector2(uv_x + uv_w, uv_y + uv_h));
+		colors.append(face_light);
+		colors.append(face_light);
+		colors.append(face_light);
+		colors.append(face_light);
+		// Front winding (cull_back keeps this side), then back winding so
+		// the reverse side draws too — same double-sided trick as the
+		// GDScript emitter.
+		indices.append(base);
+		indices.append(base + 2);
+		indices.append(base + 1);
+		indices.append(base);
+		indices.append(base + 3);
+		indices.append(base + 2);
+		indices.append(base);
+		indices.append(base + 1);
+		indices.append(base + 2);
+		indices.append(base);
+		indices.append(base + 2);
+		indices.append(base + 3);
+	}
+	// Selection box (cursor targeting) — vanilla uses the block's
+	// selection AABB, not the cross sheets. Table layout: 6 floats per id
+	// (posXYZ + sizeXYZ), from Blocks.selection_aabb_flat().
+	const int ab = id * 6;
+	if (ab + 5 < aabb_size) {
+		const Vector3 bmin(float(x) + aabb_ptr[ab + 0],
+				float(y) + aabb_ptr[ab + 1],
+				float(z) + aabb_ptr[ab + 2]);
+		const Vector3 bmax(bmin.x + aabb_ptr[ab + 3],
+				bmin.y + aabb_ptr[ab + 4],
+				bmin.z + aabb_ptr[ab + 5]);
+		emit_collision_box(plant_faces, bmin, bmax);
+	}
+}
+
+void MesherNative::emit_snow_cell(int x, int y, int z,
+		const float *uv_ptr, int uv_size,
+		int sky, int blk,
+		PackedVector3Array &verts, PackedVector3Array &norms,
+		PackedVector2Array &uvs, PackedColorArray &colors,
+		PackedInt32Array &indices, PackedVector3Array &plant_faces) {
+	const float fx = float(x);
+	const float fy = float(y);
+	const float fz = float(z);
+	const float slab_height = 0.125f; // 2/16
+	const Vector3 mn(fx, fy, fz);
+	const Vector3 mx(fx + 1.0f, fy + slab_height, fz + 1.0f);
+	// Every snow-layer face resolves to the same "snow" tile, so FACE_TOP
+	// (index 0) of the per-id table equals the named uv_rect("snow") the
+	// GDScript emitter reads.
+	const int uv_idx = (SNOW_LAYER * 3 + 0) * 4;
+	float uv_x = 0.0f, uv_y = 0.0f, uv_w = 0.0f, uv_h = 0.0f;
+	if (uv_idx + 3 < uv_size) {
+		uv_x = uv_ptr[uv_idx + 0];
+		uv_y = uv_ptr[uv_idx + 1];
+		uv_w = uv_ptr[uv_idx + 2];
+		uv_h = uv_ptr[uv_idx + 3];
+	}
+	// The GDScript emitter DIVIDES (float(sky) / 15.0) here instead of
+	// multiplying by the precomputed scale like the cross path —
+	// replicate the exact operation or parity drifts a ULP.
+	const float sky_n = float(double(sky) / 15.0);
+	const float blk_n = float(double(blk) / 15.0);
+	const Color face_light(sky_n, blk_n, 0.0f, 1.0f);
+	emit_box_faces(mn, mx, uv_x, uv_y, uv_w, uv_h, face_light,
+			verts, norms, uvs, colors, indices);
+	// Selection collision so the raycast can target the slab — without
+	// it the ray falls through to the support block below.
+	emit_collision_box(plant_faces, mn, mx);
+}
+
+Dictionary MesherNative::mesh_chunk_data_lit2(
+		const PackedByteArray &p_blocks,
+		const PackedByteArray &p_block_meta,
+		const PackedByteArray &p_sky_light,
+		const PackedByteArray &p_block_light,
+		int p_max_y,
+		const PackedFloat32Array &p_uv_table,
+		const PackedByteArray &p_edge_blocks_west,
+		const PackedByteArray &p_edge_blocks_east,
+		const PackedByteArray &p_edge_blocks_north,
+		const PackedByteArray &p_edge_blocks_south,
+		const PackedByteArray &p_edge_meta_west,
+		const PackedByteArray &p_edge_meta_east,
+		const PackedByteArray &p_edge_meta_north,
+		const PackedByteArray &p_edge_meta_south,
+		const PackedFloat32Array &p_selection_aabbs) const {
+	// Cube + fluid pass — delegate to the UNCHANGED lit mesher so the
+	// legacy entry point stays byte-identical for stale platform binaries.
+	Dictionary result = mesh_chunk_data_lit(p_blocks, p_block_meta,
+			p_sky_light, p_block_light, p_max_y, p_uv_table,
+			p_edge_blocks_west, p_edge_blocks_east,
+			p_edge_blocks_north, p_edge_blocks_south,
+			p_edge_meta_west, p_edge_meta_east,
+			p_edge_meta_north, p_edge_meta_south);
+
+	PackedInt32Array special_cells;
+	PackedVector3Array nc_verts;
+	PackedVector3Array nc_norms;
+	PackedVector2Array nc_uvs;
+	PackedColorArray nc_colors;
+	PackedInt32Array nc_indices;
+	PackedVector3Array nc_plant_faces;
+
+	const int block_count = SIZE_X * SIZE_Y * SIZE_Z;
+	if (p_blocks.size() >= block_count && p_sky_light.size() >= block_count
+			&& p_block_light.size() >= block_count) {
+		const uint8_t *blocks_ptr = p_blocks.ptr();
+		const uint8_t *sky_ptr = p_sky_light.ptr();
+		const uint8_t *block_light_ptr = p_block_light.ptr();
+		const float *uv_ptr = p_uv_table.ptr();
+		const int uv_size = p_uv_table.size();
+		const float *aabb_ptr = p_selection_aabbs.ptr();
+		const int aabb_size = p_selection_aabbs.size();
+		const double light_scale = 1.0 / 15.0;
+		const int top = std::min(p_max_y + 1, SIZE_Y - 1);
+		for (int y = 0; y <= top; y++) {
+			for (int z = 0; z < SIZE_Z; z++) {
+				for (int x = 0; x < SIZE_X; x++) {
+					const int idx = y * SIZE_X * SIZE_Z + z * SIZE_X + x;
+					const int id = blocks_ptr[idx];
+					if (id == AIR) {
+						continue;
+					}
+					// CROPS deliberately excluded from the native cross set —
+					// its UV swaps per growth-stage meta through a NAMED atlas
+					// lookup the flat per-id table can't serve.
+					if (id == SAPLING || id == FLOWER_RED || id == FLOWER_YELLOW
+							|| id == MUSHROOM_BROWN || id == MUSHROOM_RED
+							|| id == SUGAR_CANE) {
+						emit_cross_cell(x, y, z, id, uv_ptr, uv_size,
+								aabb_ptr, aabb_size,
+								sky_ptr[idx], block_light_ptr[idx], light_scale,
+								nc_verts, nc_norms, nc_uvs, nc_colors,
+								nc_indices, nc_plant_faces);
+					} else if (id == SNOW_LAYER) {
+						emit_snow_cell(x, y, z, uv_ptr, uv_size,
+								sky_ptr[idx], block_light_ptr[idx],
+								nc_verts, nc_norms, nc_uvs, nc_colors,
+								nc_indices, nc_plant_faces);
+					} else if (id == FIRE || id == TORCH || id == CHEST
+							|| id == FENCE || id == WOOD_STAIRS
+							|| id == COBBLESTONE_STAIRS || id == WOODEN_DOOR
+							|| id == IRON_DOOR || id == LADDER || id == CROPS
+							|| id == HALF_SLAB || id == WOOD_HALF_SLAB
+							|| id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING
+							|| id == SIGN_WALL || id == FENCE_GATE || id == RAIL
+							|| id == BED_FOOT || id == BED_HEAD) {
+						// Player-built shapes stay GDScript — returned in scan
+						// order for Mesher._append_special_cells.
+						special_cells.append(idx);
+					}
+				}
+			}
+		}
+	}
+
+	// Merge — same extract / shift / append the GDScript appendix does.
+	if (nc_verts.size() > 0) {
+		PackedVector3Array rv = result["vertices"];
+		const int base_vert = rv.size();
+		if (base_vert > 0) {
+			int32_t *iw = nc_indices.ptrw();
+			for (int i = 0; i < nc_indices.size(); i++) {
+				iw[i] += base_vert;
+			}
+		}
+		rv.append_array(nc_verts);
+		result["vertices"] = rv;
+		PackedVector3Array rn = result["normals"];
+		rn.append_array(nc_norms);
+		result["normals"] = rn;
+		PackedVector2Array ru = result["uvs"];
+		ru.append_array(nc_uvs);
+		result["uvs"] = ru;
+		PackedColorArray rc = result["colors"];
+		rc.append_array(nc_colors);
+		result["colors"] = rc;
+		PackedInt32Array ri = result["indices"];
+		ri.append_array(nc_indices);
+		result["indices"] = ri;
+	}
+	// The GDScript reference dict always carries plant_faces (possibly
+	// empty) — match its shape. special_cells always present on lit2.
+	result["plant_faces"] = nc_plant_faces;
+	result["special_cells"] = special_cells;
+	return result;
+}
+
 void MesherNative::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("ping"), &MesherNative::ping);
 	ClassDB::bind_method(
@@ -981,4 +1309,22 @@ void MesherNative::_bind_methods() {
 					"edge_meta_north",
 					"edge_meta_south"),
 			&MesherNative::mesh_chunk_data_lit);
+	ClassDB::bind_method(
+			D_METHOD("mesh_chunk_data_lit2",
+					"blocks",
+					"block_meta",
+					"sky_light",
+					"block_light",
+					"max_y",
+					"uv_table",
+					"edge_blocks_west",
+					"edge_blocks_east",
+					"edge_blocks_north",
+					"edge_blocks_south",
+					"edge_meta_west",
+					"edge_meta_east",
+					"edge_meta_north",
+					"edge_meta_south",
+					"selection_aabbs"),
+			&MesherNative::mesh_chunk_data_lit2);
 }

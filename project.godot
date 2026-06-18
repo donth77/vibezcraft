@@ -12,6 +12,7 @@ config_version=5
 
 config/name="VibezCraft"
 config/description="A clone of MC Alpha"
+config/version="1.0.2"
 run/main_scene="res://scenes/ui/boot_splash.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 boot_splash/bg_color=Color(0, 0, 0, 1)
@@ -48,5 +49,9 @@ enabled=PackedStringArray("res://addons/gut/plugin.cfg")
 textures/canvas_textures/default_texture_filter=0
 textures/vram_compression/import_etc2_astc=true
 anti_aliasing/quality/msaa_3d=2
+; Web override: no MSAA. Vanilla Alpha had no AA, and 4× MSAA at Retina
+; devicePixelRatio on WebGL2 is the worst-case fill cost exactly where it
+; hurts most (full-screen double-sided transparent water).
+anti_aliasing/quality/msaa_3d.web=0
 2d/snap/snap_2d_transforms_to_pixel=true
 2d/snap/snap_2d_vertices_to_pixel=true

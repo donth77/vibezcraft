@@ -482,6 +482,16 @@ static func material() -> ShaderMaterial:
 		var fire_strip: Texture2D = load("res://assets/textures/particles/fire_layer_0.png")
 		if fire_strip != null:
 			_material.set_shader_parameter("fire_strip", fire_strip)
+		# Initial pack-aware foliage tint. Material-level rather than
+		# per-instance: the value is chunk-invariant, and WebGL2 caps
+		# instance-uniform users at ~64 instances scene-wide.
+		# apply_foliage_tints() re-pushes these on a live toggle change.
+		_material.set_shader_parameter("grass_tint", grass_tint())
+		_material.set_shader_parameter("leaves_tint", leaves_tint())
+		# Terrain meshes carry the savanna factor in COLOR.b (see
+		# chunk_common.gdshaderinc). Entity/overlay materials leave this
+		# at 0.0 — their meshes have no COLOR array, so b reads 1.0.
+		_material.set_shader_parameter("savanna_from_vertex", 1.0)
 	return _material
 
 
@@ -564,14 +574,13 @@ static func entity_material() -> ShaderMaterial:
 	return _entity_material
 
 
-# Push the current `grass_tint()` / `leaves_tint()` to the overlay +
-# entity materials, and re-blit the atlas so the leaves slot swaps
-# between the transparent (4,3) and opaque (5,3) Alpha variants. Called
-# by ChunkManager when Game emits `alpha_vintage_foliage_changed` so
-# toggling the setting takes effect without requiring a relog.
-# ChunkNode handles the per-instance grass/leaves tint update for the
-# live chunk material separately (instance uniforms can't be set on the
-# material — they live on the MeshInstance3D).
+# Push the current `grass_tint()` / `leaves_tint()` to the chunk,
+# overlay, and entity materials, and re-blit the atlas so the leaves
+# slot swaps between the transparent (4,3) and opaque (5,3) Alpha
+# variants. Called by ChunkManager when Game emits
+# `alpha_vintage_foliage_changed` so toggling the setting takes effect
+# without requiring a relog. One material push covers every chunk —
+# the tints are material uniforms, not per-instance.
 static func apply_foliage_tints() -> void:
 	# Rebuild the atlas in-place. _texture.update() reuses the same
 	# ImageTexture handle so every material that already binds
@@ -581,6 +590,9 @@ static func apply_foliage_tints() -> void:
 		build()
 	var g: Vector3 = grass_tint()
 	var l: Vector3 = leaves_tint()
+	if _material != null:
+		_material.set_shader_parameter("grass_tint", g)
+		_material.set_shader_parameter("leaves_tint", l)
 	if _overlay_material != null:
 		_overlay_material.set_shader_parameter("grass_tint", g)
 		_overlay_material.set_shader_parameter("leaves_tint", l)

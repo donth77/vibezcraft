@@ -62,10 +62,12 @@ uniform vec4 leaves_uv = vec4(0.0);
 // grass_top pixels (linear 0.566) × 1.38 = 0.781 linear → sRGB ~228,
 // which is the vivid sunlit grass in the screenshot's bright spots.
 // 8-bit framebuffer clamps gracefully at sRGB encode time.
-// ChunkNode can still override per-chunk via
-//   set_instance_shader_parameter("grass_tint", Color8(...).srgb_to_linear())
-// once biome variation lands.
-instance uniform vec3 grass_tint = vec3(0.52, 1.38, 0.19);
+// Material-level on purpose: the value is identical for every chunk
+// (pack + vintage-toggle derived), and WebGL2's whole-scene instance-
+// uniform pool only fits ~64 instances — per-chunk instance params
+// black out everything past that. Per-chunk biome variation rides
+// vertex data instead (COLOR.b, see savanna_from_vertex below).
+uniform vec3 grass_tint = vec3(0.52, 1.38, 0.19);
 
 // Per-instance leaves tint. leaves.png ships GRAYSCALE w/ alpha gaps —
 // same shader-tinting pattern as grass_top, calibrated against the same
@@ -77,15 +79,20 @@ instance uniform vec3 grass_tint = vec3(0.52, 1.38, 0.19);
 //   tint_R = 0.020 / 0.125 = 0.16
 //   tint_G = 0.196 / 0.125 = 1.57
 //   tint_B = 0.013 / 0.125 = 0.10
-instance uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
+uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
 
-// Per-instance Savanna tint factor (0.0 = no tint, 1.0 = full yellow).
-// ChunkNode sets this based on the chunk-center biome. Stacks ON TOP of
-// grass_tint above — the base plains green still applies, then savanna
-// pulls toward warm yellow. Beta-style mostly-per-chunk biome tinting;
-// per-cell precision would need a chunk biome_map + mesher changes
-// (deferred).
-instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
+// Savanna tint factor (0.0 = no tint, 1.0 = full yellow) rides COLOR.b:
+// the mesher emits b=0 on every solid vertex and ChunkNode rewrites b=1
+// across savanna chunks at mesh-apply time (chunk-center biome sample —
+// Beta-style per-chunk granularity). Not an instance uniform: WebGL2's
+// whole-scene instance-uniform pool fits ~64 instances, and overflow
+// zeroes every instance value on the spilled chunks (black terrain).
+// `savanna_from_vertex` is enabled ONLY on the terrain chunk material —
+// entity meshes carry no COLOR array, so their COLOR.b defaults to 1.0
+// and would spuriously tint dropped/falling grass blocks without the
+// gate. Stacks ON TOP of grass_tint — base plains green first, then the
+// warm-yellow pull.
+uniform float savanna_from_vertex = 0.0;
 
 // Per-instance entity brightness override. Dropped cube-block items
 // reuse this shader (BlockAtlas.entity_material) but have no per-vertex
@@ -94,20 +101,35 @@ instance uniform float savanna_tint : hint_range(0.0, 1.0) = 0.0;
 // EntityItem renders too, so we expose a 0..1 LUT-applied brightness
 // that the entity script samples each tick via EntityLighting.
 // Default -1.0 = "use vertex-color path" (world chunks). Anything >=0
-// replaces `lit` below. Costs nothing on chunks since instance uniforms
-// are baked per-MeshInstance3D, not per-fragment branch.
+// replaces `lit` below.
+//
+// Declaration-gated to the entity shader: Godot reserves a slot in the
+// global instance-uniform pool for EVERY instance whose shader merely
+// DECLARES an instance uniform — values never set still allocate. The
+// pool holds ~64 instances on WebGL2, so the terrain variant (hundreds
+// of chunk meshes) must compile with zero instance uniforms or spilled
+// chunks lose all instance values and render black. chunk_entity.gdshader
+// defines ENTITY_BRIGHTNESS_INSTANCED before including this file; the
+// terrain path gets a const that the compiler folds away.
+#ifdef ENTITY_BRIGHTNESS_INSTANCED
 instance uniform float entity_brightness = -1.0;
+#else
+const float entity_brightness = -1.0;
+#endif
 
 varying vec3 v_normal;
 varying vec2 v_light;
+varying float v_savanna;
 
 
 void vertex() {
 	v_normal = NORMAL;
 	// COLOR.r = sky_light/15, COLOR.g = block_light/15. Mesher emits these
 	// per face; flat across all 4 vertices (Alpha 1.2.6 had no smooth
-	// lighting — added Beta 1.6 with the AO mod).
+	// lighting — added Beta 1.6 with the AO mod). COLOR.b carries the
+	// savanna tint factor (see savanna_from_vertex above).
 	v_light = COLOR.rg;
+	v_savanna = COLOR.b;
 }
 
 
@@ -195,9 +217,10 @@ void fragment() {
 	// chunks get the yellow shift; dirt / stone tops render normally.
 	// Vanilla Beta savanna grass color (BiomeBase.l() default ~ #BFB755 →
 	// ~vec3(0.75, 0.72, 0.33)).
-	if (savanna_tint > 0.0 && in_grass_top) {
+	float savanna = v_savanna * savanna_from_vertex;
+	if (savanna > 0.0 && in_grass_top) {
 		vec3 tint = vec3(1.0, 0.95, 0.55);
-		albedo_rgb = mix(albedo_rgb, albedo_rgb * tint, savanna_tint);
+		albedo_rgb = mix(albedo_rgb, albedo_rgb * tint, savanna);
 	}
 	vec3 normal_color = albedo_rgb * b * lit;
 	// Heatmap: 0 → red, 15 → green, linear lerp in between. Lets us

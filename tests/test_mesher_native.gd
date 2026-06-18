@@ -43,7 +43,7 @@ func _mesh_both(chunk: Chunk) -> Array:
 	# Edge slices empty — fixtures don't populate neighbors. Matches how
 	# a freshly-loaded chunk with no adjacent chunks meshes.
 	var empty := PackedByteArray()
-	var nat: Dictionary = native.mesh_chunk_data_lit(
+	var nat: Dictionary = native.mesh_chunk_data_lit2(
 		chunk.blocks,
 		chunk.block_meta,
 		chunk.sky_light,
@@ -57,16 +57,16 @@ func _mesh_both(chunk: Chunk) -> Array:
 		empty,
 		empty,
 		empty,
-		empty
+		empty,
+		Blocks.selection_aabb_flat()
 	)
-	# Append non-cube geometry (cross-quads, torches, doors, fence, stairs)
-	# the same way `mesh_chunk_fast` does in production. The native path
-	# only emits cubes; non-cube shapes (saplings, flowers, mushrooms,
-	# torches, …) come from `_append_non_cube_geometry` running on top.
-	# Without this, any chunk containing a non-cube block diverges from
-	# the GDScript reference simply because the appendix wasn't called.
+	# Mirror the production combo exactly: native lit2 emits cubes +
+	# fluids + CROSS plants + snow layers, and returns the remaining
+	# non-cube cells (torches, fences, crops, …) in `special_cells` for
+	# the GDScript appendix. Without the appendix, any chunk containing
+	# a player-built shape diverges from the reference.
 	if chunk.has_non_cube_blocks:
-		Mesher._append_non_cube_geometry(chunk, nat)
+		Mesher._append_special_cells(chunk, nat)
 	return [gds, nat]
 
 
@@ -314,3 +314,26 @@ func test_parity_collision_faces_worldgen_chunk() -> void:
 	var expected := _collision_faces_via_old_path(chunk)
 	assert_eq(native_faces.size(), expected.size(), "worldgen: collision face count")
 	assert_eq(native_faces, expected, "worldgen: collision faces byte-equal")
+
+
+func test_parity_native_noncube_pass_mixed_shapes() -> void:
+	# Exercises the lit2 native non-cube pass + special-cells appendix
+	# ordering contract: cross plants + snow layers (native) interleaved
+	# in scan position with torch / fence / crops (GDScript appendix).
+	# Any phase-ordering mistake reorders the vertex stream and fails
+	# byte equality against the reference's two-phase appendix.
+	var chunk := Chunk.new()
+	for x in range(8):
+		chunk.set_block(x, 10, 4, Blocks.STONE)
+	chunk.set_block(0, 11, 4, Blocks.TORCH)
+	chunk.set_block(1, 11, 4, Blocks.FLOWER_RED)
+	chunk.set_block(2, 11, 4, Blocks.SNOW_LAYER)
+	chunk.set_block(3, 11, 4, Blocks.FENCE)
+	chunk.set_block(4, 11, 4, Blocks.SAPLING)
+	chunk.set_block(5, 11, 4, Blocks.CROPS)
+	chunk.set_block(6, 11, 4, Blocks.MUSHROOM_BROWN)
+	chunk.set_block(7, 11, 4, Blocks.SUGAR_CANE)
+	var both := _mesh_both(chunk)
+	_assert_parity(both[0], both[1], "mixed non-cube shapes")
+	assert_gt(int(both[1].vertices.size()), 0, "mixed chunk emits geometry")
+	assert_gt(int(both[1].plant_faces.size()), 0, "plants emit selection soup")

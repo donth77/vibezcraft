@@ -101,14 +101,23 @@ func _load_tracks() -> void:
 	var dir := DirAccess.open(_MUSIC_DIR)
 	if dir == null:
 		return
+	# Exported builds don't ship the source audio files — the pck lists them
+	# as "<name>.mp3.remap" / ".import" stubs. Strip the marker and load()
+	# the logical path so ResourceLoader resolves the remap. `seen` dedupes
+	# editor runs, where both the source and its .import stub are listed.
+	var seen: Dictionary = {}
 	dir.list_dir_begin()
 	var file_name: String = dir.get_next()
 	while file_name != "":
 		if not dir.current_is_dir():
-			var lower: String = file_name.to_lower()
+			var logical: String = file_name
+			if logical.ends_with(".remap") or logical.ends_with(".import"):
+				logical = logical.get_basename()
+			var lower: String = logical.to_lower()
 			for ext in _EXTENSIONS:
-				if lower.ends_with(ext):
-					var stream: AudioStream = load(_MUSIC_DIR + file_name)
+				if lower.ends_with(ext) and not seen.has(lower):
+					seen[lower] = true
+					var stream: AudioStream = load(_MUSIC_DIR + logical)
 					if stream != null:
 						_tracks.append(stream)
 					break

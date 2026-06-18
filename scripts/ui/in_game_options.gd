@@ -103,10 +103,13 @@ func _build_panel() -> void:
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
-	var controls_btn := VanillaButton.new()
-	controls_btn.text = "Controls..."
-	controls_btn.pressed.connect(_on_controls_pressed)
-	button_col.add_child(controls_btn)
+	# Hidden in touch mode (mobile web) — same reasoning as
+	# settings_menu.gd: there's no keyboard to rebind.
+	if not Game.touch_controls_enabled():
+		var controls_btn := VanillaButton.new()
+		controls_btn.text = "Controls..."
+		controls_btn.pressed.connect(_on_controls_pressed)
+		button_col.add_child(controls_btn)
 	var save_btn := VanillaButton.new()
 	save_btn.text = "Save"
 	save_btn.pressed.connect(_on_save_pressed)

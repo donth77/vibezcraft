@@ -10,6 +10,12 @@ const CLOUD_QUALITY_OFF: int = 0
 const CLOUD_QUALITY_FAST: int = 1
 const CLOUD_QUALITY_FANCY: int = 2
 
+# Cached result of touch_controls_enabled() — feature tags and the env
+# override can't change mid-session, and the helper is polled from input
+# paths (player capture branch, interaction gate) where a per-call
+# OS.has_feature would be waste. -1 = not yet computed.
+static var _touch_controls_cached: int = -1
+
 # Active texture pack. Covers blocks, per-pack item sprites (if any), and
 # Steve's skin. Value corresponds to a folder name under
 # `assets/textures/packs/` (items live in the `items/` subdir of each
@@ -66,6 +72,28 @@ var debug_mining: bool = false
 var debug_lighting: bool = false
 var debug_worldgen: bool = false
 var debug_clouds: bool = false
+
+
+# True when running as a web export on a phone/tablet browser. Drives the
+# rotate-to-landscape overlay and the fullscreen+orientation-lock request
+# (both meaningless on desktop web, where the window just is what it is).
+static func is_mobile_web() -> bool:
+	return OS.has_feature("web_android") or OS.has_feature("web_ios")
+
+
+# True when the on-screen touch HUD should exist. Deliberately DEVICE
+# gated, not size or capability gated: only phone/tablet browsers
+# (web_android / web_ios feature tags, which Godot derives from the OS,
+# never from window dimensions) plus the MC_CLONE_FORCE_TOUCH=1 dev
+# override for desktop preview. A desktop browser resized to phone
+# proportions — or a touchscreen laptop — keeps the desktop experience.
+# Also the gate for hiding keyboard-only UI (the Controls rebind menu).
+static func touch_controls_enabled() -> bool:
+	if _touch_controls_cached >= 0:
+		return _touch_controls_cached == 1
+	var enabled: bool = is_mobile_web() or OS.get_environment("MC_CLONE_FORCE_TOUCH") == "1"
+	_touch_controls_cached = 1 if enabled else 0
+	return enabled
 
 
 # Same precedence rule used by every config var below: OS env > .env > default.
@@ -305,6 +333,14 @@ func _ready() -> void:
 	# binds directly to this viewport's render texture — any change to
 	# CharacterPreview.get_model() (armor, head rotation, etc.) auto-updates.
 	CharacterPreview.setup_renderer(self)
+	# Mobile web: portrait phones get a full-screen "rotate your device"
+	# prompt (iOS Safari has no orientation-lock API, so asking the player
+	# is the only option there; Android additionally gets a real lock from
+	# TouchControls' first-touch fullscreen request). Lives on the Game
+	# autoload so it covers the main menu too, not just gameplay.
+	if is_mobile_web():
+		var overlay_script: GDScript = load("res://scripts/ui/rotate_overlay.gd")
+		add_child(overlay_script.new())
 	print("[Game] autoload ready — Minecraft Alpha Clone")
 
 

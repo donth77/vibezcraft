@@ -138,11 +138,17 @@ const _FLOWER_SALT_RED_MUSHROOM: int = 0xF104
 # occurring sugarcane than vanilla' 2026-05-12.
 const _SUGAR_CANE_ATTEMPTS: int = 4
 const _SUGAR_CANE_SALT: int = 0xC4ED
-# Cactus scatter — Desert biome only. Vanilla rate is roughly 1-2 cacti
-# per desert chunk. Earlier value of 8 attempts produced visible
-# carpet-density cactus in deserts; reduced to 3 to match perceived
-# vanilla density.
-const _CACTUS_ATTEMPTS: int = 3
+# Cactus scatter — Desert biome only. Vanilla calls dn.java
+# (WorldGenCactus) 10×/chunk with y uniform in [0,128); each call makes
+# 10 jittered tries that only succeed when one lands exactly at
+# surface+1 on SAND, so the marginal hit rate is 1/128 per try →
+# ~0.6-0.8 columns per desert chunk. Our attempts target the surface
+# directly and succeed ~32% (measured over 200 desert chunks; losses
+# are non-sand patches, slope side-rejects, border-column skip), so
+# 2 attempts ≈ 0.64 columns/chunk. The previous 3 attempts measured
+# 0.97/chunk which, combined with a too-tall height roll, read as
+# carpet density next to vanilla's sparse clumps.
+const _CACTUS_ATTEMPTS: int = 2
 const _CACTUS_SALT: int = 0xCAC7
 # Clay scatter — vanilla hy.java (WorldGenClay) is called 10×/chunk in
 # px.java:300 with `new hy(4).a(world, rand, x, randInt(127), z)`.
@@ -1600,9 +1606,11 @@ static func _scatter_sugar_cane(chunk: Chunk, chunk_x: int, chunk_z: int) -> voi
 	PerfProbe.end("worldgen.sugar_cane", probe_token)
 
 
-# Cactus scatter — only fires in Desert biomes. Per chunk: 8 attempts at
-# random (x, z). Each attempt looks for a SAND surface with no solid
-# blocks adjacent to the side, then stacks 1-3 CACTUS above.
+# Cactus scatter — only fires in Desert biomes (vanilla px.java gates
+# the cactus loop on gg.h == Desert; ice desert gets none despite its
+# sand surface). Each attempt looks for a SAND surface with no solid
+# blocks adjacent to the side, then stacks CACTUS above using vanilla's
+# short-biased height roll.
 static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	if not terrain_3d_enabled:
 		return
@@ -1611,7 +1619,7 @@ static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	var center_x: float = float(chunk_x * Chunk.SIZE_X + 8)
 	var center_z: float = float(chunk_z * Chunk.SIZE_Z + 8)
 	var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
-	if biome_id != Worldgen3D.Biome.DESERT and biome_id != Worldgen3D.Biome.ICE_DESERT:
+	if biome_id != Worldgen3D.Biome.DESERT:
 		PerfProbe.end("worldgen.cactus", probe_token)
 		return
 	for attempt in range(_CACTUS_ATTEMPTS):
@@ -1646,8 +1654,13 @@ static func _scatter_cactus(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 				break
 		if has_side_block:
 			continue
-		# Place 1-3 stacked cactus blocks above
-		var stack_height: int = 1 + ((seed_h >> 8) % 3)
+		# Place 1-3 stacked cactus blocks above. Vanilla's height roll is
+		# 1 + nextInt(nextInt(3) + 1) — biased short (P(1)=11/18,
+		# P(2)=5/18, P(3)=2/18), NOT uniform. The uniform roll this
+		# replaces made 35% of cacti 3-tall vs vanilla's 11%, which is
+		# what made deserts read as cactus carpets from a distance.
+		var height_cap: int = ((seed_h >> 8) % 3) + 1
+		var stack_height: int = 1 + ((seed_h >> 16) % height_cap)
 		for dy in range(stack_height):
 			var py: int = sy + 1 + dy
 			if py >= Chunk.SIZE_Y - 1:

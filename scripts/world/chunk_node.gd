@@ -62,6 +62,10 @@ var _collision_faces_cache: PackedVector3Array = PackedVector3Array()
 # sweep. Null when the chunk has no opaque cells (empty face soup).
 var _collision_shape_cache: ConcavePolygonShape3D = null
 var _collision_active: bool = true
+# Set by _apply_mesh_data; consumed by _cook_pending_collision one frame
+# later so the ArrayMesh upload and the physics-BVH cook never share a
+# frame. See the note at the _apply_mesh_data collision block.
+var _collision_cook_pending: bool = false
 # Held completed worker result waiting for a frame where ChunkManager's
 # per-frame apply budget has room. Without this latch, multiple chunks
 # whose workers finish the same frame all apply on the same frame — a
@@ -150,10 +154,14 @@ func _ready() -> void:
 		# keeps the node usable if anyone constructs it without one
 		# (tests, debug tools).
 		_apply_mesh_data(Mesher.mesh_chunk_fast(chunk))
+		_cook_pending_collision()
 		chunk.dirty = false
 
 
 func _process(_delta: float) -> void:
+	# 0) Finish last frame's apply: cook its collision shape. Runs first
+	#    so a cook and the next mesh apply never land on the same frame.
+	var cooked_this_frame: bool = _cook_pending_collision()
 	# 1) Drain any completed worker re-mesh result onto the scene.
 	if _remesh_task_id != -1 and WorkerThreadPool.is_task_completed(_remesh_task_id):
 		WorkerThreadPool.wait_for_task_completion(_remesh_task_id)
@@ -172,7 +180,7 @@ func _process(_delta: float) -> void:
 	#    waiting behind background relight churn.
 	if chunk.dirty and not _pending_apply.is_empty():
 		_pending_apply = {}
-	if not _pending_apply.is_empty():
+	if not _pending_apply.is_empty() and not cooked_this_frame:
 		var manager: Node = get_parent()
 		var has_budget: bool = _priority_apply
 		if not has_budget:
@@ -199,11 +207,15 @@ func _process(_delta: float) -> void:
 # through the chunk on the first physics frame after Game.is_loading clears.
 func force_apply_pending() -> void:
 	if _pending_apply.is_empty():
+		# No queued mesh, but a deferred physics cook may still be
+		# outstanding — callers of this method need collision NOW.
+		_cook_pending_collision()
 		return
 	var data: Dictionary = _pending_apply
 	_pending_apply = {}
 	_priority_apply = false
 	_apply_mesh_data(data)
+	_cook_pending_collision()
 
 
 func _dispatch_remesh() -> void:
@@ -321,10 +333,33 @@ func rebuild_mesh_immediate() -> void:
 # FAR. Rebuild is cheap (set_faces copies the cached PackedVector3Array
 # into a fresh shape) so toggling is safe to call every chunk-boundary
 # crossing.
+# Deferred physics cook — see the note in _apply_mesh_data. Returns true
+# when a cook actually ran, so _process can skip taking a new mesh apply
+# on the same frame (keeps upload and cook on separate frames during
+# chunk-streaming bursts too, not just for single edits).
+func _cook_pending_collision() -> bool:
+	if not _collision_cook_pending:
+		return false
+	_collision_cook_pending = false
+	if not _collision_faces_cache.is_empty():
+		_collision_shape_cache = ConcavePolygonShape3D.new()
+		_collision_shape_cache.set_faces(_collision_faces_cache)
+	else:
+		_collision_shape_cache = null
+	if _collision_active and _collision_shape_cache != null:
+		_collision_shape.shape = _collision_shape_cache
+	else:
+		_collision_shape.shape = null
+	return true
+
+
 func set_collision_active(active: bool) -> void:
 	if active == _collision_active:
 		return
 	_collision_active = active
+	# A deferred cook may be outstanding — finish it so the cache below
+	# reflects the newest faces before the live shape toggles.
+	_cook_pending_collision()
 	if active and _collision_shape_cache != null:
 		# Re-attach the cached shape — same RID, no BVH rebuild. Built
 		# once on the worker (or in `_apply_mesh_data`'s fallback) and
@@ -351,6 +386,26 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		# from the cell adjacent to the face). Older mesh paths that
 		# pre-date lighting won't include the key — chunk shader treats a
 		# missing COLOR as full daylight via its default of vec4(1).
+		# Savanna biome tint rides COLOR.b — the mesher emits b=0 on every
+		# solid vertex; the shader reads b as the yellow-shift factor
+		# (UV-gated to grass tops, enabled by `savanna_from_vertex` on the
+		# terrain material only). Baked per-vertex instead of an instance
+		# uniform because WebGL2's whole-scene instance-uniform pool fits
+		# ~64 instances — per-chunk params exhaust it and the spilled
+		# chunks lose ALL instance values and render black. Same per-chunk
+		# granularity as before (chunk-center biome sample); only savanna
+		# chunks pay the rewrite loop.
+		if Worldgen.terrain_3d_enabled and data.has("colors"):
+			var coord_now: Vector2i = _compute_chunk_coord()
+			var center_x: float = float(coord_now.x * Chunk.SIZE_X + 8)
+			var center_z: float = float(coord_now.y * Chunk.SIZE_Z + 8)
+			if Worldgen3D.biome_at(center_x, center_z) == Worldgen3D.Biome.SAVANNA:
+				var tinted: PackedColorArray = data.colors
+				for i: int in tinted.size():
+					var col: Color = tinted[i]
+					col.b = 1.0
+					tinted[i] = col
+				data.colors = tinted
 		if data.has("colors"):
 			arrays[Mesh.ARRAY_COLOR] = data.colors
 		arrays[Mesh.ARRAY_INDEX] = data.indices
@@ -358,25 +413,6 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		array_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		array_mesh.surface_set_material(0, BlockAtlas.material())
 		_mesh_instance.mesh = array_mesh
-		# Per-instance foliage tints. The chunk shader declares
-		# grass_tint / leaves_tint as `instance uniform`, so the shader-
-		# code defaults only apply if no per-instance value is set; we
-		# always push explicitly to keep behavior identical regardless of
-		# whether the user toggles the alpha-vintage setting. ChunkManager
-		# re-runs apply_foliage_tints_to_all() on toggle changes.
-		_apply_foliage_tints()
-		# Per-instance Savanna tint — sample the climate biome at chunk
-		# center; the chunk shader gates the yellow shift behind UV ∈
-		# grass_top so non-grass faces stay normal. Per-chunk granularity
-		# (not per-cell) is the trade-off for not plumbing a biome map
-		# through the mesher.
-		if Worldgen.terrain_3d_enabled:
-			var coord_now: Vector2i = _compute_chunk_coord()
-			var center_x: float = float(coord_now.x * Chunk.SIZE_X + 8)
-			var center_z: float = float(coord_now.y * Chunk.SIZE_Z + 8)
-			var biome_id: int = Worldgen3D.biome_at(center_x, center_z)
-			var tint: float = 1.0 if biome_id == Worldgen3D.Biome.SAVANNA else 0.0
-			_mesh_instance.set_instance_shader_parameter("savanna_tint", tint)
 		# Prefer the worker-built collision faces (native mesher path).
 		# When the GDScript fallback ran (e.g. chunk has water cells),
 		# collision_faces isn't in the dict and we re-derive on the main
@@ -390,20 +426,18 @@ func _apply_mesh_data(data: Dictionary) -> void:
 			_collision_faces_cache = (
 				derived.get_faces() if derived != null else PackedVector3Array()
 			)
-		# Build the collision shape on the main thread.
-		# ConcavePolygonShape3D.set_faces() calls PhysicsServer3D
-		# internally, which is not thread-safe — shapes built on a
-		# worker thread may never reach the physics server, leaving
-		# stale collision in place (ghost-block bug).
-		if not _collision_faces_cache.is_empty():
-			_collision_shape_cache = ConcavePolygonShape3D.new()
-			_collision_shape_cache.set_faces(_collision_faces_cache)
-		else:
-			_collision_shape_cache = null
-		if _collision_active and _collision_shape_cache != null:
-			_collision_shape.shape = _collision_shape_cache
-		else:
-			_collision_shape.shape = null
+		# Defer the physics cook to the NEXT frame instead of paying it
+		# alongside the ArrayMesh upload. set_faces() rebuilds the shape
+		# BVH inside PhysicsServer3D (3-8 ms native, noticeably worse in
+		# wasm) and must stay on the main thread (worker-built shapes may
+		# never reach the physics server — ghost-block bug), but nothing
+		# requires it to share a frame with the mesh: the previous shape
+		# stays live for the ≤1-frame gap, and vanilla block edits lagged
+		# collision by a tick anyway. Callers that need same-frame
+		# collision (teleports via force_apply_pending, falling-block
+		# landings via _flush_immediate_rebuild) flush explicitly with
+		# _cook_pending_collision().
+		_collision_cook_pending = true
 	# Plant selection collision soup — only present when the GDScript
 	# mesher ran (native skips non-cube blocks today). Empty soup ⇒ clear
 	# the shape so the chunk doesn't keep stale plant hitboxes after the
@@ -465,21 +499,6 @@ func _apply_mesh_data(data: Dictionary) -> void:
 
 
 # Walk the chunk for CHEST cells and ensure a ChestNode exists at each.
-# Push the active grass / leaves tints to this chunk's mesh instance.
-# Called at mesh-build time and by ChunkManager when the user toggles the
-# vintage-foliage setting at runtime. Safe to call even if the chunk has
-# no grass/leaves faces — the shader's UV gates skip non-foliage frags.
-func apply_foliage_tints() -> void:
-	if _mesh_instance == null:
-		return
-	_apply_foliage_tints()
-
-
-func _apply_foliage_tints() -> void:
-	_mesh_instance.set_instance_shader_parameter("grass_tint", BlockAtlas.grass_tint())
-	_mesh_instance.set_instance_shader_parameter("leaves_tint", BlockAtlas.leaves_tint())
-
-
 # Removes orphan entities for cells whose block is no longer a chest.
 # Cheap because chest count per chunk is low (0..few) — we do a single
 # linear scan over `chunk.blocks` keyed on the CHEST byte.

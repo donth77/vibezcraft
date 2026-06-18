@@ -210,6 +210,15 @@ MC_CLONE_TEXTURE_PACK=programmer_art godot --path . main.tscn
 # Rebuild native extension (needed after any change under src/)
 scons platform=macos target=template_debug -j8    # or linux / windows
 
+# Web (browser) build. Extension wasm MUST be built with emsdk 4.0.20 —
+# the exact Emscripten the Godot 4.6 official templates use; other
+# versions break the GDExtension side-module ABI (brew's emscripten is
+# too new). emsdk lives at ~/emsdk.
+source ~/emsdk/emsdk_env.sh
+scons platform=web target=template_release threads=yes -j8
+godot --headless --export-release "Web" build/web/index.html
+python3 scripts/dev/serve_web.py 8060   # COOP/COEP headers (SharedArrayBuffer)
+
 # Tests (GUT)
 godot --headless --path . -s addons/gut/gut_cmdln.gd -gdir=res://tests -ginclude_subdirs -gexit
 

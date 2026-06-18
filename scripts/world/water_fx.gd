@@ -17,11 +17,14 @@ extends Node
 
 const _GRID: int = 16
 const _BYTES_PER_CELL: int = 4
+# Vanilla TextureWaterFX cadence — one automaton step per 20 Hz game tick.
+const _TICK_INTERVAL: float = 1.0 / 20.0
 
 var _fx: Object  # WaterFXNative — typed as Object so the script loads
 # even without the GDExtension built.
 var _texture: ImageTexture
 var _image: Image
+var _tick_accum: float = 0.0
 
 
 func _ready() -> void:
@@ -44,9 +47,18 @@ func _ready() -> void:
 	_apply_to_water_material()
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _fx == null:
 		return
+	# Vanilla ran the automaton once per GAME TICK (20 Hz), not per render
+	# frame — ticking at render rate animated the surface up to ~4.5×
+	# too fast on a 90 fps host. Matching the 20 Hz cadence is both the
+	# faithful speed and keeps the per-frame set_data + texture upload
+	# off the wasm→GL bridge on high-refresh web hosts.
+	_tick_accum += delta
+	if _tick_accum < _TICK_INTERVAL:
+		return
+	_tick_accum = fmod(_tick_accum, _TICK_INTERVAL)
 	var bytes: PackedByteArray = _fx.tick()
 	# Image.set_data wants a tightly-packed RGBA8 buffer of width*height*4
 	# bytes — exactly what WaterFXNative.tick() returns.

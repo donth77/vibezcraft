@@ -197,10 +197,15 @@ func _build_panel() -> void:
 	_button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(_button_col)
 	var button_col: VBoxContainer = _button_col
-	var controls_btn := VanillaButton.new()
-	controls_btn.text = "Controls..."
-	controls_btn.pressed.connect(_on_controls_pressed)
-	button_col.add_child(controls_btn)
+	# Keyboard rebinding is meaningless on a phone — touch mode (mobile
+	# web) drives everything through the on-screen HUD, so the rebind
+	# screen is hidden rather than shown broken. The VBox collapses the
+	# gap on its own.
+	if not Game.touch_controls_enabled():
+		var controls_btn := VanillaButton.new()
+		controls_btn.text = "Controls..."
+		controls_btn.pressed.connect(_on_controls_pressed)
+		button_col.add_child(controls_btn)
 	var save_btn := VanillaButton.new()
 	save_btn.text = "Save"
 	save_btn.pressed.connect(_on_save_pressed)
@@ -427,14 +432,63 @@ static func load_config() -> ConfigFile:
 	var cfg := ConfigFile.new()
 	var err := cfg.load(_SETTINGS_PATH)
 	if err != OK:
-		cfg.set_value("graphics", "render_distance", 8)
-		cfg.set_value("graphics", "texture_pack", BlockAtlas.active_pack)
+		cfg.set_value("graphics", "render_distance", _default_render_distance())
+		# Seed from the Game autoload's @export default, NOT
+		# BlockAtlas.active_pack — at first-boot seeding time the atlas
+		# static still holds its placeholder ("alpha_vanilla"), which
+		# would shadow the configured default. Matters most on web, where
+		# no env var / .env override exists to mask it.
+		cfg.set_value("graphics", "texture_pack", Game.texture_pack)
 		cfg.set_value("graphics", "cloud_quality", Game.CLOUD_QUALITY_FANCY)
 		cfg.set_value("graphics", "fps_cap", 90)
 		cfg.set_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED)
 		cfg.set_value("graphics", "fog_enabled", true)
 		cfg.set_value("audio", "sfx_enabled", true)
+		cfg.set_value("meta", "defaults_version", 1)
+	else:
+		_migrate_web_defaults(cfg)
 	return cfg
+
+
+# Web gets "Short" (4): wasm + WebGL2 leave less headroom than native
+# desktop, and frontier streaming cost scales with the chunk ring.
+# Mobile web drops further to "Tiny" (2): phone GPUs + thermal limits
+# turn the 4-ring into a stutter generator, and on a 6" screen the
+# horizon matters less than the frame rate. Desktop keeps vanilla
+# "Normal" (8). All of these are first-boot seeds only — a saved user
+# pick always wins.
+static func _default_render_distance() -> int:
+	if Game.is_mobile_web():
+		return 2
+	return 4 if OS.has_feature("web") else 8
+
+
+# One-time repair for web profiles whose settings.cfg was seeded by an
+# older build: the first-boot seed used to snapshot BlockAtlas' placeholder
+# pack ("alpha_vanilla") instead of the Game default, and pre-dated the
+# Short-on-web render distance. game.gd persists that seeded cfg on first
+# launch (world-seed randomize), so existing browser profiles carry the
+# old values forever without this. Only values still matching the OLD
+# seeds are rewritten — anything else was a deliberate user pick and is
+# left alone. `meta/defaults_version` stamps the migration so it never
+# re-runs (and never overrides a later user choice).
+static func _migrate_web_defaults(cfg: ConfigFile) -> void:
+	if not OS.has_feature("web"):
+		return
+	var version: int = int(cfg.get_value("meta", "defaults_version", 0))
+	if version >= 2:
+		return
+	if version < 1:
+		if str(cfg.get_value("graphics", "texture_pack", "")) == "alpha_vanilla":
+			cfg.set_value("graphics", "texture_pack", Game.texture_pack)
+		if int(cfg.get_value("graphics", "render_distance", 0)) == 8:
+			cfg.set_value("graphics", "render_distance", 4)
+	# v2: mobile web default dropped to Tiny (2). Only rewrite the old
+	# web seed (4) — any other value was a deliberate user pick.
+	if Game.is_mobile_web() and int(cfg.get_value("graphics", "render_distance", 0)) == 4:
+		cfg.set_value("graphics", "render_distance", 2)
+	cfg.set_value("meta", "defaults_version", 2)
+	cfg.save(_SETTINGS_PATH)
 
 
 static func apply_config(cfg: ConfigFile) -> void:

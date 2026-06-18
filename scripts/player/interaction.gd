@@ -147,7 +147,16 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if not _world_input_active():
+	# Second clause: in touch mode, gameplay input arrives exclusively as
+	# InputEventAction parsed by TouchControls. The first finger ALSO
+	# produces an emulated mouse click (kept on so GUI screens stay
+	# tappable), and since LMB/RMB are the interact_break/interact_place
+	# bindings, that click would swing the arm on every look-drag here
+	# without the guard.
+	if (
+		not _world_input_active()
+		or (event is InputEventMouseButton and Game.touch_controls_enabled())
+	):
 		return
 	# Bow charge flow runs before the normal place handler so right-
 	# click on a bow draws instead of trying to place a "bow block".
@@ -628,9 +637,20 @@ func _world_input_active() -> bool:
 	# Sleep state ALSO disables world input — vanilla bd.java locks the
 	# player in bed until the time skip + auto-wake fire, so mining /
 	# placing / raycast highlight all freeze for the ~5 s sleep window.
-	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-		return false
+	#
+	# Touch mode has no pointer lock (browsers don't grant it to touch
+	# input), so "playing" is instead "no UI screen open" — same question
+	# the capture state answers on desktop.
 	var player: Node = get_parent()
+	if Game.touch_controls_enabled():
+		if (
+			player != null
+			and player.has_method("is_any_screen_open")
+			and bool(player.call("is_any_screen_open"))
+		):
+			return false
+	elif Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return false
 	if player != null and "is_sleeping" in player and bool(player.get("is_sleeping")):
 		return false
 	return true

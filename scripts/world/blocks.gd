@@ -475,6 +475,16 @@ const MESH_SHAPE_BED: int = 14
 # Direct PackedByteArray index is significantly faster than a multi-arm
 # match in GDScript — called ~30K times per worldgen chunk + ~30K times
 # per lighting BFS pass.
+# Flat [id*6 .. id*6+5] = selection_aabb(id) as (pos.x, pos.y, pos.z,
+# size.x, size.y, size.z) for every id in the uint8 table range — the
+# shape MesherNative's lit2 cross-plant pass needs for plant_faces
+# selection boxes (mirrors BlockAtlas.uv_table_flat()'s pattern).
+# Meta-aware shapes (torch, gates) are NOT served by this table; the
+# native pass only reads it for CROSS plants + SNOW_LAYER, whose boxes
+# are meta-independent. Built once on the main thread (Mesher
+# .enable_native warms it) so mesher workers can pass it to the
+# GDExtension without touching lazy GDScript state.
+static var _selection_aabb_flat: PackedFloat32Array = PackedFloat32Array()
 static var _light_opacity_lut: PackedByteArray
 # Lazy-init explosion-resistance LUT (PackedFloat32Array of 256 entries).
 # explosion_resistance() is called once per non-AIR cell per ray step in
@@ -1283,11 +1293,28 @@ static func mesh_shape(id: int) -> int:
 
 
 # True if the mesher should hand this block to the GDScript path even
-# when the native MesherNative GDExtension is loaded. Native handles only
-# CUBE today; non-cube shapes are sparse enough that doing them in
-# GDScript per chunk has negligible cost.
+# when the native MesherNative GDExtension is loaded. Native handles
+# CUBE, fluids, CROSS plants and snow layers; the remaining non-cube
+# shapes are sparse (player-built) so GDScript per cell stays cheap.
 static func needs_gdscript_mesher(id: int) -> bool:
 	return mesh_shape(id) != MESH_SHAPE_CUBE
+
+
+static func selection_aabb_flat() -> PackedFloat32Array:
+	if _selection_aabb_flat.is_empty():
+		var table := PackedFloat32Array()
+		table.resize(256 * 6)
+		for id in range(256):
+			var aabb: AABB = selection_aabb(id)
+			var base: int = id * 6
+			table[base + 0] = aabb.position.x
+			table[base + 1] = aabb.position.y
+			table[base + 2] = aabb.position.z
+			table[base + 3] = aabb.size.x
+			table[base + 4] = aabb.size.y
+			table[base + 5] = aabb.size.z
+		_selection_aabb_flat = table
+	return _selection_aabb_flat
 
 
 # True if `id` is one of the 16 contiguous wool color block ids

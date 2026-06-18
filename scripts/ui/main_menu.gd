@@ -86,8 +86,8 @@ func _ready() -> void:
 	_build_wordmark()
 	_build_splash()
 	_build_buttons()
-	#_build_version_label()
-	#_build_footer_label()
+	_build_version_label()
+	_build_footer_label()
 
 
 func _force_cursor_visible() -> void:
@@ -195,7 +195,10 @@ func _build_buttons() -> void:
 	add_child(vbox)
 	var play_btn := _add_button(vbox, "Select World", _on_select_world_pressed)
 	_add_button(vbox, "Settings...", _on_settings_pressed)
-	_add_button(vbox, "Quit", _on_quit_pressed)
+	# No process to quit in a browser tab — same reasoning as the pause
+	# menu's "Quit to Desktop" gate. Closing the tab is the real quit.
+	if not OS.has_feature("web"):
+		_add_button(vbox, "Quit", _on_quit_pressed)
 	# Pre-focus the first button so the menu is usable via Tab / arrow keys +
 	# Enter without a mouse — covers cases where the OS cursor isn't being
 	# rendered (e.g. macOS editor embedded play).
@@ -215,11 +218,14 @@ func _add_button(parent: VBoxContainer, text: String, handler: Callable) -> Vani
 # string.
 func _build_version_label() -> void:
 	var label := Label.new()
-	label.text = "VibezCraft v0.1"
+	label.text = (
+		"VibezCraft v%s" % ProjectSettings.get_setting("application/config/version", "dev")
+	)
 	label.anchor_left = 0.0
 	label.anchor_top = 0.0
 	label.offset_left = 10
 	label.offset_top = 10
+	label.add_theme_font_override("font", MinecraftFont.get_font())
 	label.add_theme_font_size_override("font_size", 28)
 	label.add_theme_color_override("font_color", _VERSION_COLOR)
 	label.add_theme_color_override("font_shadow_color", Color.BLACK)
@@ -235,6 +241,7 @@ func _build_version_label() -> void:
 func _build_footer_label() -> void:
 	var label := Label.new()
 	label.text = "Unofficial MC Alpha-era clone."
+	label.add_theme_font_override("font", MinecraftFont.get_font())
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.anchor_left = 1.0

@@ -15,3 +15,6 @@ linux.release.arm64 = "res://bin/libmesher_native.linux.template_release.arm64.s
 
 windows.debug.x86_64 = "res://bin/libmesher_native.windows.template_debug.x86_64.dll"
 windows.release.x86_64 = "res://bin/libmesher_native.windows.template_release.x86_64.dll"
+
+web.debug.threads.wasm32 = "res://bin/libmesher_native.web.template_debug.wasm32.wasm"
+web.release.threads.wasm32 = "res://bin/libmesher_native.web.template_release.wasm32.wasm"

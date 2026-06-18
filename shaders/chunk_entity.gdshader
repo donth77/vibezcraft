@@ -15,4 +15,8 @@ shader_type spatial;
 // using the shared entity_material.
 render_mode cull_disabled, unshaded;
 
+// Entities are the only instances allowed to carry the per-instance
+// brightness override — see the ENTITY_BRIGHTNESS_INSTANCED block in the
+// include for why terrain must declare zero instance uniforms.
+#define ENTITY_BRIGHTNESS_INSTANCED
 #include "res://shaders/chunk_common.gdshaderinc"

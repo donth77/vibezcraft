@@ -458,7 +458,11 @@ var _pre_mount_collision_disabled: bool = false
 
 
 func _ready() -> void:
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Touch mode never captures: pointer lock doesn't exist on touch
+	# browsers, and a stray grant (Android Chrome) would route emulated
+	# mouse motion into the look path on top of TouchControls' deltas.
+	if not Game.touch_controls_enabled():
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	# Resolve the spawn point from the REAL generated terrain of chunk
 	# (0,0) — the 3D-density worldgen surface diverges from the 2D
 	# `Worldgen.surface_height` heightmap, so the heightmap can't be
@@ -478,6 +482,47 @@ func _ready() -> void:
 	var hotbar: Control = get_node_or_null("Crosshair/Hotbar")
 	if hotbar != null:
 		hotbar.bind(inventory)
+	# Vanilla Alpha draws the version string top-left on the HUD every
+	# frame (nl.java:156 — "Minecraft Alpha v1.2.6" at (2,2), white with
+	# a 1px shadow; the F3 screen swaps in an extended header). Numbers
+	# are that layout at the HUD's 4× scale. Inserted at the hotbar's
+	# index: above the damage/water tint rects, below the UI screens and
+	# pause menu, so the pause dim darkens it like vanilla's overlay.
+	var crosshair_layer: CanvasLayer = get_node_or_null("Crosshair") as CanvasLayer
+	if crosshair_layer != null and hotbar != null:
+		var version_label := Label.new()
+		version_label.name = "VersionLabel"
+		version_label.text = (
+			"VibezCraft v%s" % ProjectSettings.get_setting("application/config/version", "dev")
+		)
+		version_label.add_theme_font_override("font", MinecraftFont.get_font())
+		version_label.add_theme_font_size_override("font_size", 32)
+		version_label.add_theme_color_override("font_color", Color.WHITE)
+		version_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0))
+		version_label.add_theme_constant_override("shadow_offset_x", 4)
+		version_label.add_theme_constant_override("shadow_offset_y", 4)
+		version_label.position = Vector2(8, 8)
+		version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		crosshair_layer.add_child(version_label)
+		crosshair_layer.move_child(version_label, hotbar.get_index())
+	# On-screen touch HUD (mobile web / forced preview). Inserted at the
+	# InventoryScreen's index so every UI screen and the pause menu draw
+	# over it; the HUD additionally disables itself while one is open.
+	if Game.touch_controls_enabled() and crosshair_layer != null:
+		var touch_script: GDScript = load("res://scripts/ui/touch_controls.gd")
+		var touch_hud: Control = touch_script.new()
+		touch_hud.name = "TouchControls"
+		touch_hud.setup(self)
+		crosshair_layer.add_child(touch_hud)
+		var first_screen: Control = get_node_or_null("Crosshair/InventoryScreen")
+		if first_screen != null:
+			crosshair_layer.move_child(touch_hud, first_screen.get_index())
+	# Warm lazily-compiled shaders while the loading screen still covers
+	# the viewport — kills the first-block-break / first-item compile
+	# stalls (50-300 ms each on WebGL2). Hangs off the camera so the warm
+	# quads sit inside the frustum. Self-frees after a few frames.
+	if _camera != null:
+		_camera.add_child(ShaderWarmup.new())
 	var inv_screen: Control = get_node_or_null("Crosshair/InventoryScreen")
 	if inv_screen != null:
 		inv_screen.bind(inventory)
@@ -1257,6 +1302,40 @@ func _apply_held_visibility() -> void:
 		_held_tool_tp_pivot.visible = not first_person
 
 
+# Public face of _any_ui_screen_open for the touch HUD — it suspends
+# its joystick/look handling while a screen owns input.
+func is_any_screen_open() -> bool:
+	return _any_ui_screen_open()
+
+
+# Whether the hold-still touch gesture should map to interact_place
+# (bow charge, eating) instead of interact_break. Mirrors Pocket
+# Edition: holding with a bow draws it, holding with food eats it,
+# holding with anything else mines.
+func touch_hold_prefers_use() -> bool:
+	if inventory == null:
+		return false
+	var stack: ItemStack = inventory.selected()
+	if stack == null or stack.is_empty():
+		return false
+	return stack.item_id == Items.BOW or Items.is_food(stack.item_id)
+
+
+func _any_ui_screen_open() -> bool:
+	for path: String in [
+		"Crosshair/InventoryScreen",
+		"Crosshair/CraftingTableScreen",
+		"Crosshair/FurnaceScreen",
+		"Crosshair/ChestScreen",
+		"Crosshair/SignEditScreen",
+		"Crosshair/PauseMenu",
+	]:
+		var screen: Control = get_node_or_null(path)
+		if screen != null and screen.has_method("is_open") and screen.is_open():
+			return true
+	return false
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# Sleeping — vanilla bd.java::a holds the player in bed until the
 	# time-skip + auto-wake fire. Block ALL input (camera + actions + UI
@@ -1288,6 +1367,24 @@ func _unhandled_input(event: InputEvent) -> void:
 	# GuiGameOver: input is locked except for the on-screen widget.
 	# `_physics_process` already gates movement on `health <= 0` (line 1064).
 	if health <= 0:
+		return
+	if (
+		event is InputEventMouseButton
+		and event.pressed
+		and event.button_index in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]
+		and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED
+		# Touch mode plays uncaptured by design (no pointer lock on touch
+		# browsers); recapture attempts would eat every emulated-mouse tap.
+		and not Game.touch_controls_enabled()
+	):
+		# Recapture on click. Required for the web export: browsers only
+		# grant pointer lock inside a user-gesture input handler, so the
+		# _ready() capture is denied, and Esc releases the lock at the
+		# browser level without opening the pause menu. Skipped while a
+		# screen owns the cursor — closing it restores capture itself.
+		if not _any_ui_screen_open():
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("toggle_inventory"):
 		_cancel_bow_if_charging()
@@ -2440,11 +2537,23 @@ func _damage_armor(absorbed: int) -> void:
 
 
 func _apply_mouse_motion(event: InputEventMouseMotion) -> void:
-	rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
+	apply_look_delta(event.relative * MOUSE_SENSITIVITY)
+
+
+# Shared look rotation for mouse AND touch, in radians (yaw, pitch).
+# TouchControls accumulates drag deltas and calls this exactly once per
+# rendered frame — keep this allocation-free and side-effect-free so the
+# per-frame call stays cheap. Guards live here (not just at the mouse
+# call site) because the touch path bypasses _unhandled_input's
+# sleeping/death gating.
+func apply_look_delta(angles: Vector2) -> void:
+	if health <= 0 or is_sleeping:
+		return
+	rotate_y(-angles.x)
 	# Front-mode camera sits at Y=PI; without inverting pitch, mouse-down would
 	# tilt the view up. Flip the sign so up/down feels consistent across modes.
 	var pitch_sign: float = -1.0 if perspective == PERSPECTIVE_THIRD_FRONT else 1.0
-	_camera.rotate_x(pitch_sign * -event.relative.y * MOUSE_SENSITIVITY)
+	_camera.rotate_x(pitch_sign * -angles.y)
 	var pitch_limit: float = deg_to_rad(PITCH_LIMIT_DEG)
 	_camera.rotation.x = clamp(_camera.rotation.x, -pitch_limit, pitch_limit)
 
