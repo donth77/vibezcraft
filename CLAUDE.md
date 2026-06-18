@@ -43,7 +43,7 @@ Canonical planning docs:
 - **Jukeboxes + 8 music discs:** Beta 1.4 mechanic. Right-click jukebox with disc → insert + start playback. Ambient music auto-pauses; resumes when disc ejects.
 - **Farming:** wheat crops (`crops.gd`), hoe tilling (`farmland.gd`), tall grass seed drops. Bonemeal accelerates growth.
 - **Fishing:** cast/reel mechanic via `fishing_bobber.gd`, raw + cooked fish drops (smelt raw_fish for cooked).
-- **Minecarts + rails:** straight + curve rails, boost rails, 3 cart variants (passenger, chest, furnace). Furnace cart self-propels with coal fuel. Chained ramps work.
+- **Minecarts + rails:** one RAIL block with straight + curve + ascending(slope) orientations — no powered/boost/detector rails. 3 cart variants (normal, chest, furnace). Furnace cart self-propels with coal fuel (the only velocity "boost").
 - **Storage:** per-block chest, furnace, jukebox inventories. Dedicated UI screens (`chest_screen.gd`, `furnace_screen.gd`, `jukebox_screen.gd`).
 - **Held-item rendering:** `sprite_extruder.gd` voxelizes 2D item sprites into 3D meshes for FP/TP held tools (matches vanilla ItemModelGenerator). Proper handle-tip pivot for grip rotation.
 - **Audio:** footstep cadence tied to horizontal movement (grass/cloth/stone/sand/gravel/slime variants), block break/place SFX by material, per-mob idle/hurt/death/step pools (zombie, skeleton, spider, creeper, slime, pig, cow, chicken, sheep), ambient sounds (`ambient_fx.gd`), music player (`music_player.gd`).

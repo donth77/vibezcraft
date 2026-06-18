@@ -27,7 +27,7 @@ Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base
 - **Beds** — Sleep mechanic, multi-cell place/break, set spawn point
 - **Jukeboxes + 8 music discs** — Ambient music auto-pauses during disc playback
 - **Farming + fishing** — wheat crops, hoe tilling, tall grass seed drops; cast/reel fishing with raw + cooked fish
-- **Minecart family** — rails (straight + curve), boost rails, standard + chest + furnace minecarts, chained ramps
+- **Minecart family** — rails (straight + curve), standard + chest + furnace minecarts
 - **Chest, furnace, jukebox storage** — per-block inventories with dedicated UI screens
 - **World save/load** — purpose-built binary format under `user://World{N}/` (chunks, player position + inventory, entities, world metadata) with crash-safe `.new`/`.old` recovery; multi-world select screen
 - **Creative mode** — toggleable from Pause → Options or via the hotkey; flight, no fall damage, instant block break
