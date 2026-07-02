@@ -157,6 +157,11 @@ var _bow_mesh: MeshInstance3D
 var _ai_tick_accum: float = 0.0
 var _ai_path: Array = []
 var _ai_repath_counter: int = 0
+# True when the last find_path returned empty. A failed search exhausts
+# the full A* iteration budget — the most expensive call shape — so
+# empty-path retries back off to half the repath interval instead of
+# re-running a doomed search every 50 ms AI tick. Cleared on success.
+var _ai_path_failed: bool = false
 var _ai_burn_check_accum: float = 0.0
 var _ai_player_cache: Node3D = null
 # Bow charge. Counts UP to _AI_BOW_CHARGE_SEC while a target is in
@@ -503,7 +508,11 @@ func _find_player() -> Node3D:
 
 
 func _pursue_player(player: Node3D) -> void:
-	if _ai_path.is_empty() or _ai_repath_counter >= _AI_REPATH_TICKS:
+	# FAILED searches back off to the half interval (see _ai_path_failed).
+	var repath_due: bool = _ai_repath_counter >= _AI_REPATH_TICKS
+	if _ai_path.is_empty():
+		repath_due = not _ai_path_failed or _ai_repath_counter >= _AI_REPATH_TICKS / 2
+	if repath_due:
 		_ai_repath_counter = 0
 		_repath_to(player.global_position)
 	if not _ai_path.is_empty():
@@ -565,7 +574,11 @@ func _pick_wander_target() -> bool:
 # a random AIR cell in the opposite hemisphere from the player; we
 # project the player→self vector outward and pathfind there.
 func _kite_away_from_player(player: Node3D) -> void:
-	if _ai_path.is_empty() or _ai_repath_counter >= _AI_REPATH_TICKS:
+	# Same failed-search backoff as _pursue_player.
+	var repath_due: bool = _ai_repath_counter >= _AI_REPATH_TICKS
+	if _ai_path.is_empty():
+		repath_due = not _ai_path_failed or _ai_repath_counter >= _AI_REPATH_TICKS / 2
+	if repath_due:
 		_ai_repath_counter = 0
 		var away: Vector3 = global_position - player.global_position
 		away.y = 0.0
@@ -587,6 +600,7 @@ func _repath_to(target: Vector3) -> void:
 	# into walls until the player approaches; acceptable trade.
 	if _lod_tier != LOD_NEAR:
 		_ai_path = [Vector3i(int(floor(target.x)), int(floor(target.y)), int(floor(target.z)))]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
@@ -595,6 +609,7 @@ func _repath_to(target: Vector3) -> void:
 	_ai_path = Pathfinder.find_path(
 		_chunk_manager, origin, goal, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
 	)
+	_ai_path_failed = _ai_path.is_empty()
 
 
 func _tick_walk_path() -> void:

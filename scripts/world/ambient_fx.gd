@@ -16,6 +16,12 @@ extends RefCounted
 # when a small lava pour sits next to the player.
 
 const _CELLS_PER_SCAN: int = 1000
+# Mobile-web budget. The 1000-cell interpreted loop measured 12.5 ms per
+# 10 Hz scan on a mid-tier phone proxy (~12% of wall clock), usually
+# hunting for zero lava/fire/torch cells. 250 keeps every effect — sparks
+# just take a few seconds to ramp near a lava pour instead of ~1 s, which
+# a phone screen hides. Desktop keeps vanilla density.
+const _CELLS_PER_SCAN_MOBILE_WEB: int = 250
 # Matches vanilla's nextInt(16) - nextInt(16): triangular distribution
 # over [-15, 15] with peak at 0, concentrating rolls near the player.
 const _SCAN_RADIUS: int = 15
@@ -50,7 +56,11 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 			if chunks.has(cc):
 				c = (chunks[cc] as Node3D).chunk
 			nine_chunks[(dcz + 1) * 3 + (dcx + 1)] = c
-	for _i in range(_CELLS_PER_SCAN):
+	# Static context — check OS directly rather than Game.is_mobile_web().
+	# Two has_feature lookups per 10 Hz scan is noise.
+	var mobile_web: bool = OS.has_feature("web_android") or OS.has_feature("web_ios")
+	var cells: int = _CELLS_PER_SCAN_MOBILE_WEB if mobile_web else _CELLS_PER_SCAN
+	for _i in range(cells):
 		var dx: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var dy: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)
 		var dz: int = randi_range(0, _SCAN_RADIUS) - randi_range(0, _SCAN_RADIUS)

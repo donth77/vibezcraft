@@ -68,6 +68,6 @@ func _on_respawn_pressed() -> void:
 	if _player == null:
 		return
 	visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Game.recapture_mouse()
 	if _player.has_method("_respawn"):
 		_player._respawn()

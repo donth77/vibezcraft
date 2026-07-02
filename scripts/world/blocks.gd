@@ -12,6 +12,11 @@ const _MOB_SPAWNER_MGR: GDScript = preload("res://scripts/world/mob_spawner_mana
 # Most cells fast-path bail in `is_random_tickable` so the actual
 # handler fires <100 times/sec across all loaded chunks.
 const _RANDOM_TICKS_PER_CHUNK: int = 24
+# Mobile-web density: half vanilla. The pass measured 5.1 ms per 20 Hz
+# tick on a mid-tier phone proxy (~10% of wall clock) and GRASS is the
+# only tickable id today, so halving just slows grass spread/decay —
+# imperceptible at phone render distances. Desktop keeps vanilla density.
+const _RANDOM_TICKS_PER_CHUNK_MOBILE_WEB: int = 12
 
 # Simulation radius (in chunks, Chebyshev/square) around the player for
 # the random-tick pass. Vanilla MC ticks growth/decay only within a
@@ -570,6 +575,10 @@ static func run_random_tick_pass(manager) -> void:
 	if not manager.has_method("iter_loaded_chunks"):
 		return
 	var probe_token := PerfProbe.begin("random_tick")
+	# Static context — check OS directly rather than Game.is_mobile_web().
+	# Two has_feature lookups per 20 Hz pass is noise.
+	var mobile_web: bool = OS.has_feature("web_android") or OS.has_feature("web_ios")
+	var rolls: int = _RANDOM_TICKS_PER_CHUNK_MOBILE_WEB if mobile_web else _RANDOM_TICKS_PER_CHUNK
 	# Iterate the loaded-chunks dict directly. Chunks are keyed by
 	# Vector2i(cx, cz); the Chunk's `blocks` PackedByteArray lets us
 	# skip the manager.get_world_block dict-lookup overhead for the
@@ -596,7 +605,7 @@ static func run_random_tick_pass(manager) -> void:
 			continue
 		var base_x: int = coord.x * Chunk.SIZE_X
 		var base_z: int = coord.y * Chunk.SIZE_Z
-		for _i in range(_RANDOM_TICKS_PER_CHUNK):
+		for _i in range(rolls):
 			var lx: int = randi() % Chunk.SIZE_X
 			var ly: int = randi() % Chunk.SIZE_Y
 			var lz: int = randi() % Chunk.SIZE_Z

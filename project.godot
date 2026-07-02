@@ -44,6 +44,16 @@ window/stretch/aspect="expand"
 
 enabled=PackedStringArray("res://addons/gut/plugin.cfg")
 
+[physics]
+
+; Web override: cap physics catch-up at 3 steps/frame (default 8). On a
+; slow wasm frame the default queues up to 8 physics steps — every mob's
+; sweep runs 8× in one frame — which turns a dip into a death spiral
+; (measured 4-6 fps nights on a mid-tier phone proxy). 3 keeps the sim
+; honest down to 20 fps; below that game-time dilates instead of
+; compounding. Native desktop keeps the engine default.
+common/max_physics_steps_per_frame.web=3
+
 [rendering]
 
 textures/canvas_textures/default_texture_filter=0

@@ -153,6 +153,11 @@ var _leg_r_pivot: Node3D
 var _ai_tick_accum: float = 0.0
 var _ai_path: Array = []
 var _ai_repath_counter: int = 0
+# True when the last find_path returned empty. A failed search exhausts
+# the full A* iteration budget — the most expensive call shape — so
+# empty-path retries back off to half the repath interval instead of
+# re-running a doomed search every 50 ms AI tick. Cleared on success.
+var _ai_path_failed: bool = false
 var _ai_melee_cooldown_sec: float = 0.0
 var _ai_burn_check_accum: float = 0.0
 # Cached player ref (resolved lazily each AI tick — see _find_player).
@@ -389,8 +394,13 @@ func _ai_tick() -> void:
 		return
 	# Re-pathfind to the player's current cell every _AI_REPATH_TICKS or
 	# whenever we run out of path mid-chase. Vanilla rebuilds via
-	# `f` field on `ay.java::a` (PathNavigate).
-	if _ai_path.is_empty() or _ai_repath_counter >= _AI_REPATH_TICKS:
+	# `f` field on `ay.java::a` (PathNavigate). FAILED searches back off
+	# to the half interval (see _ai_path_failed) — retrying a doomed A*
+	# every tick was the measured night hot spot on throttled web.
+	var repath_due: bool = _ai_repath_counter >= _AI_REPATH_TICKS
+	if _ai_path.is_empty():
+		repath_due = not _ai_path_failed or _ai_repath_counter >= _AI_REPATH_TICKS / 2
+	if repath_due:
 		_ai_repath_counter = 0
 		_repath_toward(player)
 	if not _ai_path.is_empty():
@@ -424,6 +434,7 @@ func _repath_toward(player: Node3D) -> void:
 	_ai_path = Pathfinder.find_path(
 		_chunk_manager, origin, goal, _AI_PATHFIND_RADIUS, _AI_PATHFIND_MAX_ITERS
 	)
+	_ai_path_failed = _ai_path.is_empty()
 
 
 # Same walk-path routine as the passive mobs (pig/cow/sheep) — pops

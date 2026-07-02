@@ -51,6 +51,23 @@ scons platform=macos target=template_debug -j8       # or platform=linux / windo
 
 Without the native library the game still runs — it falls through to pure-GDScript implementations and logs `[Game] using GDScript Mesher` / `[Game] using GDScript Worldgen` at startup.
 
+## Web build
+
+The browser build needs the GDExtension compiled to wasm with **emsdk 4.0.20** (the exact Emscripten the Godot 4.6 official templates use — other versions break the side-module ABI):
+
+```sh
+source ~/emsdk/emsdk_env.sh
+scons platform=web target=template_release threads=yes -j8
+godot --headless --export-release "Web" build/web/index.html
+python3 scripts/dev/serve_web.py 8060      # local test server (COOP/COEP headers)
+```
+
+Hosting notes — the threaded build requires `SharedArrayBuffer`, so production hosting must:
+
+- send `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` on every response (itch.io supports this; GitHub Pages doesn't set headers — use a [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) shim there);
+- serve **brotli or gzip** (`.wasm` is ~40 MB raw, ~10 MB brotli) with normal long-lived cache headers — each worker thread re-fetches `index.js` if caching is disabled;
+- phone browsers get tuned defaults automatically (Tiny render distance, Fast clouds, reduced 3D resolution, touch controls).
+
 ## Run
 
 ```sh

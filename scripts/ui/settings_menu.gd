@@ -439,12 +439,14 @@ static func load_config() -> ConfigFile:
 		# would shadow the configured default. Matters most on web, where
 		# no env var / .env override exists to mask it.
 		cfg.set_value("graphics", "texture_pack", Game.texture_pack)
-		cfg.set_value("graphics", "cloud_quality", Game.CLOUD_QUALITY_FANCY)
+		cfg.set_value("graphics", "cloud_quality", _default_cloud_quality())
 		cfg.set_value("graphics", "fps_cap", 90)
 		cfg.set_value("graphics", "vsync", DisplayServer.VSYNC_DISABLED)
 		cfg.set_value("graphics", "fog_enabled", true)
 		cfg.set_value("audio", "sfx_enabled", true)
-		cfg.set_value("meta", "defaults_version", 1)
+		# Fresh profiles are seeded with current defaults — stamp the
+		# latest version so _migrate_web_defaults has nothing to repair.
+		cfg.set_value("meta", "defaults_version", 3)
 	else:
 		_migrate_web_defaults(cfg)
 	return cfg
@@ -463,6 +465,17 @@ static func _default_render_distance() -> int:
 	return 4 if OS.has_feature("web") else 8
 
 
+# Mobile web seeds "Fast" clouds (single flat plane): the Fancy 3D box
+# layer is pure fill-rate spend on a GPU that's already the thermal
+# bottleneck, and at phone render distances the flat plane reads nearly
+# identically. Desktop (native and web) keeps the iconic Fancy default.
+# First-boot seed only — a saved user pick always wins.
+static func _default_cloud_quality() -> int:
+	if Game.is_mobile_web():
+		return Game.CLOUD_QUALITY_FAST
+	return Game.CLOUD_QUALITY_FANCY
+
+
 # One-time repair for web profiles whose settings.cfg was seeded by an
 # older build: the first-boot seed used to snapshot BlockAtlas' placeholder
 # pack ("alpha_vanilla") instead of the Game default, and pre-dated the
@@ -476,18 +489,26 @@ static func _migrate_web_defaults(cfg: ConfigFile) -> void:
 	if not OS.has_feature("web"):
 		return
 	var version: int = int(cfg.get_value("meta", "defaults_version", 0))
-	if version >= 2:
+	if version >= 3:
 		return
 	if version < 1:
 		if str(cfg.get_value("graphics", "texture_pack", "")) == "alpha_vanilla":
 			cfg.set_value("graphics", "texture_pack", Game.texture_pack)
 		if int(cfg.get_value("graphics", "render_distance", 0)) == 8:
 			cfg.set_value("graphics", "render_distance", 4)
-	# v2: mobile web default dropped to Tiny (2). Only rewrite the old
-	# web seed (4) — any other value was a deliberate user pick.
-	if Game.is_mobile_web() and int(cfg.get_value("graphics", "render_distance", 0)) == 4:
-		cfg.set_value("graphics", "render_distance", 2)
-	cfg.set_value("meta", "defaults_version", 2)
+	if version < 2:
+		# v2: mobile web default dropped to Tiny (2). Only rewrite the old
+		# web seed (4) — any other value was a deliberate user pick.
+		if Game.is_mobile_web() and int(cfg.get_value("graphics", "render_distance", 0)) == 4:
+			cfg.set_value("graphics", "render_distance", 2)
+	# v3: mobile web cloud default dropped to Fast. Only rewrite the old
+	# seed (Fancy) — any other value was a deliberate user pick.
+	if (
+		Game.is_mobile_web()
+		and int(cfg.get_value("graphics", "cloud_quality", -1)) == Game.CLOUD_QUALITY_FANCY
+	):
+		cfg.set_value("graphics", "cloud_quality", Game.CLOUD_QUALITY_FAST)
+	cfg.set_value("meta", "defaults_version", 3)
 	cfg.save(_SETTINGS_PATH)
 
 

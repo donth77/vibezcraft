@@ -150,7 +150,20 @@ func _run_spawn_pass() -> void:
 			continue
 		if pool.has(mob.get_script()):
 			hostile_count += 1
-	if hostile_count >= _HOSTILE_CAP:
+	# Vanilla scales the per-type cap by the loaded-chunk count —
+	# bg.java:34 `count > maxPerType * eligibleChunks.size() / 256`.
+	# At Alpha's SP ring (17×17 = 289) that allows 79; we clamp to the
+	# shipped 70 so Normal/Far render distances behave exactly as
+	# before. The scaling matters at Short/Tiny (81 chunks → 22,
+	# 25 → 6): a flat 70 packed small worlds wall-to-wall — every mob
+	# inside the NEAR/MID LOD rings — which measured as the 31 → 4 fps
+	# night collapse on mobile web. has_method guards minimal fake
+	# managers in unit tests (missing accessor → flat cap, old behavior).
+	var loaded_chunks: int = 256
+	if manager.has_method("iter_loaded_chunks"):
+		loaded_chunks = manager.iter_loaded_chunks().size()
+	var hostile_cap: int = mini(_HOSTILE_CAP, _HOSTILE_CAP * loaded_chunks / 256)
+	if hostile_count >= hostile_cap:
 		return
 	# Slime pass runs every tick regardless of time-of-day. Vanilla
 	# `ns.java::a()` doesn't check sky_factor — slimes spawn 24/7

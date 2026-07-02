@@ -10,6 +10,24 @@ const CLOUD_QUALITY_OFF: int = 0
 const CLOUD_QUALITY_FAST: int = 1
 const CLOUD_QUALITY_FANCY: int = 2
 
+# Browsers only honor fullscreen + orientation lock from inside a user
+# gesture (a Godot input callback or button press qualifies). iOS
+# Safari has neither API on iPhone — the promise rejects and the
+# RotateOverlay carries the UX instead; web_fullscreen_available()
+# returns false there so settings can hide the toggle.
+const _JS_FULLSCREEN_ENTER: String = """
+(function () {
+	if (document.fullscreenElement) { return; }
+	var el = document.documentElement;
+	if (!el.requestFullscreen) { return; }
+	el.requestFullscreen({ navigationUI: "hide" }).then(function () {
+		if (screen.orientation && screen.orientation.lock) {
+			screen.orientation.lock("landscape").catch(function () {});
+		}
+	}).catch(function () {});
+})();
+"""
+
 # Cached result of touch_controls_enabled() — feature tags and the env
 # override can't change mid-session, and the helper is polled from input
 # paths (player capture branch, interaction gate) where a per-call
@@ -39,6 +57,14 @@ static var _touch_controls_cached: int = -1
 # BlockAtlas + ChunkNode read this flag at material build / chunk creation
 # and listen on `alpha_vintage_foliage_changed` to re-push tints live.
 var alpha_vintage_foliage: bool = false
+
+# Mobile-web auto-fullscreen. Browsers only grant requestFullscreen
+# inside a user gesture, and the title screen has no TouchControls to
+# hook — so the autoload watches every touch press (see _input) from
+# the first menu tap onward. Set true when the player explicitly exits
+# fullscreen via the HUD button or the options checkbox, so the auto
+# path never fights a deliberate choice. Session-scoped on purpose.
+var fullscreen_user_opt_out: bool = false
 
 # Active world slot for this session. Set by the Select World screen
 # (step 7.6) when the player clicks a slot; persistence modules
@@ -73,6 +99,10 @@ var debug_lighting: bool = false
 var debug_worldgen: bool = false
 var debug_clouds: bool = false
 
+# Auto-fullscreen internals (see fullscreen_user_opt_out above).
+var _fs_auto_watch: bool = false
+var _fs_last_attempt_ms: int = -10000
+
 
 # True when running as a web export on a phone/tablet browser. Drives the
 # rotate-to-landscape overlay and the fullscreen+orientation-lock request
@@ -94,6 +124,45 @@ static func touch_controls_enabled() -> bool:
 	var enabled: bool = is_mobile_web() or OS.get_environment("MC_CLONE_FORCE_TOUCH") == "1"
 	_touch_controls_cached = 1 if enabled else 0
 	return enabled
+
+
+static func web_fullscreen_available() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	var result: Variant = JavaScriptBridge.eval(
+		"!!(document.fullscreenEnabled && document.documentElement.requestFullscreen)", true
+	)
+	return bool(result)
+
+
+static func web_is_fullscreen() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	return bool(JavaScriptBridge.eval("!!document.fullscreenElement", true))
+
+
+static func web_set_fullscreen(enable: bool) -> void:
+	if not OS.has_feature("web"):
+		return
+	if enable:
+		JavaScriptBridge.eval(_JS_FULLSCREEN_ENTER, true)
+	else:
+		JavaScriptBridge.eval("if (document.exitFullscreen) { document.exitFullscreen(); }", true)
+
+
+# Re-capture the mouse after a UI screen closes — the ONLY sanctioned
+# way for gameplay code to enter MOUSE_MODE_CAPTURED. Touch mode must
+# never capture: Android Chrome will happily grant pointer lock inside
+# the closing tap's gesture window, and from then on Godot's emulated-
+# mouse-from-touch feeds the player's mouse-look path — when the look
+# finger lifts and another finger lands, the synthesized mouse jump
+# between the two positions yaws the camera by the inverse of the drag
+# ("my view snaps back when I start walking"). Screens saw this because
+# each close path called Input.mouse_mode = CAPTURED directly.
+static func recapture_mouse() -> void:
+	if touch_controls_enabled():
+		return
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 # Same precedence rule used by every config var below: OS env > .env > default.
@@ -223,6 +292,20 @@ func _ready() -> void:
 	if cfg_resolution != "":
 		SettingsMenu.apply_resolution_value(cfg_resolution)
 	_apply_resolution_override()
+	# Mobile web: render 3D below the device's native pixel density. Godot
+	# sizes the canvas at CSS-size × devicePixelRatio (2.6-3 on phones →
+	# 2.5+ Mpx on a 6" screen), and fragment cost is the first thing a
+	# phone GPU thermal-throttles on. Target ~1.5× CSS resolution: DPR 3
+	# → 0.5 scale, DPR 2 → 0.75, DPR 1 → untouched. 2D UI (HUD, menus,
+	# text) is unaffected — only the 3D buffer scales, then bilinear-
+	# upscales, which this blocky art style hides well. Desktop (native
+	# and web) keeps full resolution.
+	if is_mobile_web():
+		var dpr: float = DisplayServer.screen_get_scale()
+		if dpr > 1.0:
+			var scale_3d: float = clampf(1.5 / dpr, 0.5, 1.0)
+			get_viewport().scaling_3d_scale = scale_3d
+			print("[Game] mobile-web 3D scale=%.2f (devicePixelRatio=%.2f)" % [scale_3d, dpr])
 	var settings_pack: String = cfg.get_value("graphics", "texture_pack", texture_pack)
 	var resolved_pack: String = _resolve_str("MC_CLONE_TEXTURE_PACK", settings_pack)
 	BlockAtlas.active_pack = resolved_pack
@@ -336,11 +419,14 @@ func _ready() -> void:
 	# Mobile web: portrait phones get a full-screen "rotate your device"
 	# prompt (iOS Safari has no orientation-lock API, so asking the player
 	# is the only option there; Android additionally gets a real lock from
-	# TouchControls' first-touch fullscreen request). Lives on the Game
+	# the first-touch fullscreen request below). Lives on the Game
 	# autoload so it covers the main menu too, not just gameplay.
 	if is_mobile_web():
 		var overlay_script: GDScript = load("res://scripts/ui/rotate_overlay.gd")
 		add_child(overlay_script.new())
+	# Arm first-gesture auto-fullscreen from the title screen onward —
+	# phones with the API only (Android Chrome; iPhone Safari has none).
+	_fs_auto_watch = is_mobile_web() and web_fullscreen_available()
 	print("[Game] autoload ready — Minecraft Alpha Clone")
 
 
@@ -352,3 +438,22 @@ func _ready() -> void:
 # until compass / clock has actually been rendered once.
 func _process(_delta: float) -> void:
 	ItemIcons.tick_dynamic_icons()
+
+
+# First-gesture auto-fullscreen (mobile web). Any touch press — title
+# screen buttons included — carries the gesture grant the Fullscreen API
+# needs. Throttled so a denied request doesn't re-fire every tap frame,
+# and disarmed entirely once the player opts out via the HUD/settings
+# toggle. Zero-cost elsewhere: _fs_auto_watch is false off mobile web.
+func _input(event: InputEvent) -> void:
+	if not _fs_auto_watch or fullscreen_user_opt_out:
+		return
+	if not (event is InputEventScreenTouch and (event as InputEventScreenTouch).pressed):
+		return
+	var now: int = Time.get_ticks_msec()
+	if now - _fs_last_attempt_ms < 3000:
+		return
+	_fs_last_attempt_ms = now
+	if web_is_fullscreen():
+		return
+	web_set_fullscreen(true)

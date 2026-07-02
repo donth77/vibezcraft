@@ -43,6 +43,14 @@ var _last_sky_top: Color = Color(-1, -1, -1, -1)
 func _ready() -> void:
 	if _sun != null:
 		_noon_sun_energy = _sun.light_energy
+		# Web: drop the sun's shadow map. The shadow pass re-renders every
+		# chunk mesh into the atlas each frame — a large share of draw
+		# calls and the single biggest GPU line item on phone GPUs — and
+		# the game's look doesn't come from it (per-face Notch shading +
+		# BFS sky/block light do the shading; vanilla Alpha had no dynamic
+		# shadows at all). Native desktop keeps the shipped look.
+		if OS.has_feature("web"):
+			_sun.shadow_enabled = false
 
 
 # N flips WorldTime.day_length_seconds between vanilla (1200 s) and

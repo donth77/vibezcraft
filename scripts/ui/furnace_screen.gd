@@ -63,6 +63,17 @@ var _flame_atlas: AtlasTexture
 var _tooltip: Label
 var _root: Control
 
+# Unified pointer position — the last mouse OR touch location. Phones
+# only move the DOM-level mouse at tap moments, so anything reading
+# get_global_mouse_position() continuously (cursor icon, hover) froze
+# between taps ("icons get stuck floating"). Updated from every mouse
+# and touch event in _input; seeded on open so desktop first-click
+# behavior is unchanged.
+var _pointer_pos := Vector2.ZERO
+# Bedrock-style touch slot gestures — null on desktop (see
+# TouchSlotGestures for the model).
+var _touch_gestures: TouchSlotGestures = null
+
 
 func _ready() -> void:
 	visible = false
@@ -74,6 +85,18 @@ func _ready() -> void:
 	_build_panel()
 	_build_cursor_overlay()
 	_build_tooltip()
+
+	# Bedrock-style touch slot gestures (see TouchSlotGestures).
+	if Game.touch_controls_enabled():
+		_touch_gestures = TouchSlotGestures.new()
+		_touch_gestures.tree = get_tree()
+		_touch_gestures.panel = _root
+		_touch_gestures.none_id = -100
+		_touch_gestures.slot_under = _slot_under_mouse
+		_touch_gestures.on_left = func(s: int) -> void: _handle_left_click(s)
+		_touch_gestures.on_right = func(s: int) -> void: _handle_right_click(s)
+		_touch_gestures.cursor_empty = func() -> bool: return _cursor.is_empty()
+		_touch_gestures.on_close = close
 
 
 func bind(inv: Inventory) -> void:
@@ -95,7 +118,7 @@ func open_at(pos: Vector3i) -> void:
 
 func close() -> void:
 	visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Game.recapture_mouse()
 	# Cursor stack returns to inventory if it has anything (vanilla MC drops
 	# it on the floor; we'll route through inventory here for now).
 	if not _cursor.is_empty():
@@ -136,6 +159,10 @@ func _build_panel() -> void:
 	_root.custom_minimum_size = Vector2(PANEL_W, PANEL_H)
 	_root.mouse_filter = Control.MOUSE_FILTER_PASS
 	center.add_child(_root)
+	# Mobile: explicit ✕ in the panel corner — E/Esc don't exist on
+	# phones and the touch HUD's buttons draw underneath this screen.
+	if Game.touch_controls_enabled():
+		_root.add_child(TouchCloseButton.build(close, SCALE))
 
 	# Background — crop the 176×166 panel out of the 256² atlas.
 	var bg := TextureRect.new()
@@ -313,6 +340,8 @@ func _build_cursor_overlay() -> void:
 func _process(_delta: float) -> void:
 	if not visible:
 		return
+	if _touch_gestures != null:
+		_touch_gestures.poll()
 	# Furnace state mutates from the ticker autoload independently of our
 	# `changed` signal; refresh every frame so progress bars + slot icons
 	# stay current.
@@ -324,16 +353,26 @@ func _process(_delta: float) -> void:
 func _update_tooltip() -> void:
 	if _tooltip == null:
 		return
+	# Touch: hover doesn't exist — only show tooltips while a finger is
+	# down, never after release (the frozen pointer otherwise pins the
+	# tooltip onto the last-tapped slot).
+	if _touch_gestures != null and not _touch_gestures.is_touch_down():
+		_tooltip.visible = false
+		return
 	var slot: int = _slot_under_mouse()
 	var stack: ItemStack = _slot_at(slot) if slot != -100 else null
 	if stack == null or stack.is_empty():
 		_tooltip.visible = false
 		return
 	_tooltip.text = Items.display_name(stack.item_id)
+	# Shrink to the new text — Controls keep their manual size, so a
+	# short name ("Stick") otherwise inherits the widest previous
+	# tooltip's box with blank space trailing the label.
+	_tooltip.reset_size()
 	_tooltip.visible = true
 	# Position just below + right of the cursor; nudge left/up if it would
 	# spill off-screen.
-	var mouse: Vector2 = get_global_mouse_position()
+	var mouse: Vector2 = _pointer_pos
 	var pos: Vector2 = mouse + Vector2(12, 12)
 	var ts: Vector2 = _tooltip.get_minimum_size()
 	var vp_size: Vector2 = get_viewport_rect().size
@@ -419,7 +458,7 @@ func _refresh_cursor_overlay() -> void:
 func _track_cursor_with_mouse() -> void:
 	if not _cursor_icon.visible:
 		return
-	var mouse: Vector2 = get_global_mouse_position()
+	var mouse: Vector2 = _pointer_pos
 	_cursor_icon.position = mouse - Vector2(8 * SCALE, 8 * SCALE)
 	_cursor_count_label.position = _cursor_icon.position
 
@@ -430,6 +469,20 @@ func _track_cursor_with_mouse() -> void:
 func _input(event: InputEvent) -> void:
 	if not visible or inventory == null:
 		return
+	if event is InputEventMouseMotion or event is InputEventMouseButton:
+		_pointer_pos = event.position
+	elif event is InputEventScreenDrag or event is InputEventScreenTouch:
+		_pointer_pos = event.position
+	if _touch_gestures != null:
+		if event is InputEventScreenTouch or event is InputEventScreenDrag:
+			_touch_gestures.handle_event(event)
+			get_viewport().set_input_as_handled()
+			return
+		if event is InputEventMouseButton or event is InputEventMouseMotion:
+			# Touch mode drives slots via the gesture layer; the emulated
+			# mouse still reaches real Controls (the close button) through
+			# the GUI layer, but must not double-drive the slot handlers.
+			return
 	if event is InputEventMouseButton and event.pressed:
 		var slot: int = _slot_under_mouse()
 		if slot == -100:
@@ -445,7 +498,7 @@ func _input(event: InputEvent) -> void:
 func _slot_under_mouse() -> int:
 	if not is_inside_tree():
 		return -100
-	var mouse: Vector2 = get_global_mouse_position()
+	var mouse: Vector2 = _pointer_pos
 	for li in _local_node_for.keys():
 		var p: Panel = _local_node_for[li]
 		if p != null and Rect2(p.global_position, p.size).has_point(mouse):

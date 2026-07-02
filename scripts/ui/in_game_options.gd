@@ -21,6 +21,9 @@ const _FPS_CAP_LABELS: Array[String] = ["Uncapped", "60", "90", "120", "144"]
 # left out of the UI to keep it friendly. Advanced users can set
 # graphics.vsync directly in user://settings.cfg.
 var _music_slider: HSlider
+var _sensitivity_slider: HSlider
+var _sensitivity_label: Label
+var _fullscreen_checkbox: CheckBox
 var _music_label: Label
 var _fps_option: OptionButton
 var _vsync_checkbox: CheckBox
@@ -86,6 +89,22 @@ func _build_panel() -> void:
 	_fps_option = _add_option_row(vbox, "Frame rate cap", _FPS_CAP_LABELS)
 	_vsync_checkbox = _add_checkbox_row(vbox, "VSync")
 	_fog_checkbox = _add_checkbox_row(vbox, "Fog")
+	# Web-only: browsers gate the Fullscreen API on a user gesture, so
+	# the toggle acts immediately (the checkbox press IS the gesture)
+	# rather than waiting for Save. Hidden where the API doesn't exist
+	# (native desktop, iPhone Safari).
+	var extra_rows: int = 0
+	if Game.web_fullscreen_available():
+		_fullscreen_checkbox = _add_checkbox_row(vbox, "Fullscreen")
+		_fullscreen_checkbox.set_pressed_no_signal(Game.web_is_fullscreen())
+		_fullscreen_checkbox.text = "On" if _fullscreen_checkbox.button_pressed else "Off"
+		_fullscreen_checkbox.toggled.connect(_on_fullscreen_toggled)
+		extra_rows += 1
+	# Touch-only: look sensitivity for the drag-look gesture. Applied on
+	# Save like the rest of the column.
+	if Game.touch_controls_enabled():
+		_add_sensitivity_row(vbox)
+		extra_rows += 1
 
 	# Controls / Save / Cancel stacked vertically below the options. Three
 	# VanillaButtons (800×80 each) + 2 × 16 px separation = 272 px tall.
@@ -94,8 +113,11 @@ func _build_panel() -> void:
 	button_col.anchor_right = 0.5
 	# 0.65 keeps the column above the bottom edge at 1080p (ends y≈974)
 	# while leaving ~25 px of breathing room below vbox (which ends y≈643).
-	button_col.anchor_top = 0.65
-	button_col.anchor_bottom = 0.65
+	# One optional row still fits; each row beyond that shifts the column
+	# down a row-height (0.075 of viewport) so rows never hide behind it.
+	var button_shift: float = 0.075 * maxi(0, extra_rows - 1)
+	button_col.anchor_top = 0.65 + button_shift
+	button_col.anchor_bottom = 0.65 + button_shift
 	button_col.offset_left = -400
 	button_col.offset_right = 400
 	button_col.offset_top = 0
@@ -249,6 +271,58 @@ func _on_music_slider_changed(value: float) -> void:
 		_music_label.text = "%d%%" % int(value * 100.0)
 
 
+# Touch look sensitivity — same row layout as the music slider. Range
+# 40%..200% of the default 130°-per-screen-height drag rate.
+func _add_sensitivity_row(parent: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+
+	var lbl := Label.new()
+	lbl.text = "Touch look sensitivity"
+	lbl.add_theme_font_size_override("font_size", 32)
+	lbl.add_theme_color_override("font_color", Color.WHITE)
+	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
+	lbl.add_theme_constant_override("shadow_offset_x", 4)
+	lbl.add_theme_constant_override("shadow_offset_y", 4)
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lbl.custom_minimum_size = Vector2(0, 64)
+	row.add_child(lbl)
+
+	_sensitivity_label = Label.new()
+	_sensitivity_label.text = "100%"
+	_sensitivity_label.add_theme_font_size_override("font_size", 24)
+	_sensitivity_label.add_theme_color_override("font_color", Color.WHITE)
+	_sensitivity_label.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_sensitivity_label.add_theme_constant_override("shadow_offset_x", 3)
+	_sensitivity_label.add_theme_constant_override("shadow_offset_y", 3)
+	_sensitivity_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_sensitivity_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_sensitivity_label.custom_minimum_size = Vector2(80, 64)
+	row.add_child(_sensitivity_label)
+
+	_sensitivity_slider = HSlider.new()
+	_sensitivity_slider.min_value = 0.4
+	_sensitivity_slider.max_value = 2.0
+	_sensitivity_slider.step = 0.05
+	_sensitivity_slider.value = 1.0
+	_sensitivity_slider.custom_minimum_size = Vector2(260, 64)
+	_sensitivity_slider.value_changed.connect(_on_sensitivity_changed)
+	row.add_child(_sensitivity_slider)
+
+
+func _on_sensitivity_changed(value: float) -> void:
+	_sensitivity_label.text = "%d%%" % int(round(value * 100.0))
+
+
+func _on_fullscreen_toggled(enable: bool) -> void:
+	Game.web_set_fullscreen(enable)
+	# Turning it off latches the opt-out so Game's first-gesture
+	# auto-fullscreen (mobile) stops re-entering on the next tap.
+	Game.fullscreen_user_opt_out = not enable
+
+
 static func _style_popup(popup: PopupMenu) -> void:
 	popup.add_theme_font_size_override("font_size", 24)
 	popup.add_theme_color_override("font_color", Color.WHITE)
@@ -298,6 +372,10 @@ func _load_settings() -> void:
 	var sfx_on: bool = bool(cfg.get_value("audio", "sfx_enabled", true))
 	_sfx_checkbox.button_pressed = sfx_on
 	_sfx_checkbox.text = "On" if sfx_on else "Off"
+	if _sensitivity_slider != null:
+		var sens: float = float(cfg.get_value("controls", "touch_look_sensitivity", 1.0))
+		_sensitivity_slider.value = sens
+		_on_sensitivity_changed(sens)
 
 
 func _on_save_pressed() -> void:
@@ -314,6 +392,9 @@ func _on_save_pressed() -> void:
 	cfg.set_value("graphics", "fog_enabled", _fog_checkbox.button_pressed)
 	cfg.set_value("audio", "sfx_enabled", _sfx_checkbox.button_pressed)
 	cfg.set_value("audio", "music_volume", _music_slider.value)
+	if _sensitivity_slider != null:
+		cfg.set_value("controls", "touch_look_sensitivity", _sensitivity_slider.value)
+		TouchControls.look_sensitivity = _sensitivity_slider.value
 	cfg.save(_SETTINGS_PATH)
 	Engine.max_fps = cap
 	DisplayServer.window_set_vsync_mode(vmode)

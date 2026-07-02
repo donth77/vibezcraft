@@ -53,6 +53,8 @@ var inventory: Inventory
 var _cursor: ItemStack
 var _slot_nodes: Array = []  # Array[Panel], indexed by inventory slot id
 var _cursor_icon: TextureRect
+# Panel root rect — tap-outside-close hit test (mobile).
+var _panel_root: Control
 var _cursor_count_label: Label
 var _font: FontFile
 var _tooltip: Label
@@ -64,6 +66,21 @@ var _drag_slots: Array = []
 var _drag_starting_count: int = 0
 var _drag_starting_id: int = 0
 
+# Unified pointer position — the last mouse OR touch location. Phones
+# only move the DOM-level mouse at tap moments, so anything reading
+# get_global_mouse_position() continuously (cursor icon, hover) froze
+# between taps ("icons get stuck floating"). Updated from every mouse
+# and touch event in _input; seeded on open so desktop first-click
+# behavior is unchanged.
+var _pointer_pos := Vector2.ZERO
+# Bedrock-style touch slot gestures — null on desktop (see
+# TouchSlotGestures for the model).
+var _touch_gestures: TouchSlotGestures = null
+# Visible drop target (mobile): appears left of the panel whenever the
+# cursor holds a stack. Purely an affordance — releasing/tapping
+# ANYWHERE outside the panel drops, this just makes that discoverable.
+var _drop_zone: Control = null
+
 
 func _ready() -> void:
 	visible = false
@@ -73,7 +90,29 @@ func _ready() -> void:
 	_font = MinecraftFont.get_font()
 	_build_dim_background()
 	_build_panel()
+	if Game.touch_controls_enabled():
+		_build_drop_zone()
 	_build_cursor_overlay()
+
+	# Bedrock-style touch slot gestures (see TouchSlotGestures).
+	if Game.touch_controls_enabled():
+		_touch_gestures = TouchSlotGestures.new()
+		_touch_gestures.tree = get_tree()
+		_touch_gestures.panel = _panel_root
+		_touch_gestures.none_id = -1
+		_touch_gestures.slot_under = _slot_under_mouse
+		# Full click PAIR — placement/split fire in _on_mouse_up; down
+		# alone just arms the desktop drag state machine and left the
+		# cursor stack unplaceable until the screen was reopened.
+		_touch_gestures.on_left = func(s: int) -> void:
+			_on_mouse_down(MOUSE_BUTTON_LEFT, s)
+			_on_mouse_up(MOUSE_BUTTON_LEFT, s)
+		_touch_gestures.on_right = func(s: int) -> void:
+			_on_mouse_down(MOUSE_BUTTON_RIGHT, s)
+			_on_mouse_up(MOUSE_BUTTON_RIGHT, s)
+		_touch_gestures.cursor_empty = func() -> bool: return _cursor.is_empty()
+		_touch_gestures.on_drop = func() -> void: _handle_drop_action(true)
+		_touch_gestures.on_close = _close
 
 
 func bind(inv: Inventory) -> void:
@@ -117,6 +156,11 @@ func _build_panel() -> void:
 	root.custom_minimum_size = Vector2(PANEL_W, PANEL_H)
 	root.mouse_filter = Control.MOUSE_FILTER_PASS
 	center.add_child(root)
+	_panel_root = root
+	# Mobile: explicit ✕ in the panel corner — E/Esc don't exist on
+	# phones and the touch HUD's buttons draw underneath this screen.
+	if Game.touch_controls_enabled():
+		root.add_child(TouchCloseButton.build(_close, SCALE))
 
 	# The actual inventory.png drawn behind everything else. The texture is
 	# 256×256 but only the upper-left 176×166 is the panel — clip to that.
@@ -309,6 +353,7 @@ func _build_cursor_overlay() -> void:
 
 func _open() -> void:
 	visible = true
+	_pointer_pos = get_global_mouse_position()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if inventory != null:
 		inventory.recompute_craft_result()
@@ -317,7 +362,7 @@ func _open() -> void:
 
 func _close() -> void:
 	visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Game.recapture_mouse()
 	if not _cursor.is_empty() and inventory != null:
 		var leftover: int = inventory.add_item(_cursor.item_id, _cursor.count)
 		_cursor.item_id = Blocks.AIR
@@ -331,6 +376,20 @@ func _close() -> void:
 func _input(event: InputEvent) -> void:
 	if not visible or inventory == null:
 		return
+	if event is InputEventMouseMotion or event is InputEventMouseButton:
+		_pointer_pos = event.position
+	elif event is InputEventScreenDrag or event is InputEventScreenTouch:
+		_pointer_pos = event.position
+	if _touch_gestures != null:
+		if event is InputEventScreenTouch or event is InputEventScreenDrag:
+			_touch_gestures.handle_event(event)
+			get_viewport().set_input_as_handled()
+			return
+		if event is InputEventMouseButton or event is InputEventMouseMotion:
+			# Touch mode drives slots via the gesture layer; the emulated
+			# mouse still reaches real Controls (the close button) through
+			# the GUI layer, but must not double-drive the slot handlers.
+			return
 	if event.is_action_pressed("drop_selected") and not _drag_active:
 		# Vanilla GuiContainer.drop: Q while inventory is open drops from
 		# the cursor (if non-empty) OR the hovered slot. Ctrl modifier
@@ -424,7 +483,7 @@ func _spawn_dropped(item_id: int, count: int) -> void:
 func _slot_under_mouse() -> int:
 	if not is_inside_tree():
 		return -1
-	var mouse: Vector2 = get_global_mouse_position()
+	var mouse: Vector2 = _pointer_pos
 	for i in range(_slot_nodes.size()):
 		var panel: Panel = _slot_nodes[i]
 		if panel == null:
@@ -749,7 +808,9 @@ func _after_slot_change(slot_index: int) -> void:
 func _process(_delta: float) -> void:
 	if not visible:
 		return
-	var mouse: Vector2 = get_global_mouse_position()
+	if _touch_gestures != null:
+		_touch_gestures.poll()
+	var mouse: Vector2 = _pointer_pos
 	if _cursor_icon.visible:
 		_cursor_icon.position = mouse - _cursor_icon.size * 0.5
 		# A slot's count label sits in an SLOT_PX (18×SCALE) box positioned
@@ -759,7 +820,22 @@ func _process(_delta: float) -> void:
 		# offset here: shift the cursor's count rect 1×SCALE up-left of the
 		# icon and pad it by 2×SCALE in both dimensions.
 		_cursor_count_label.position = _cursor_icon.position - Vector2(SCALE, SCALE)
-	_update_tooltip(mouse)
+	# Touch: hover doesn't exist — only show tooltips while a finger
+	# is down (live names while drag-hovering), never after release,
+	# or the frozen pointer pins a tooltip onto the last-tapped slot.
+	if _touch_gestures != null and not _touch_gestures.is_touch_down():
+		_update_tooltip(Vector2(-4096, -4096))
+	else:
+		_update_tooltip(mouse)
+	# DROP zone hover feedback — light it up while a held stack is over
+	# it so the gesture reads as "release here to drop".
+	if _drop_zone != null and _drop_zone.visible:
+		var hot: bool = _drop_zone.get_global_rect().has_point(mouse)
+		var want: StyleBox = (
+			_drop_zone.get_meta("sb_hot") if hot else _drop_zone.get_meta("sb_idle")
+		)
+		if _drop_zone.get_theme_stylebox("panel") != want:
+			_drop_zone.add_theme_stylebox_override("panel", want)
 
 
 func _update_tooltip(mouse: Vector2) -> void:
@@ -777,6 +853,10 @@ func _update_tooltip(mouse: Vector2) -> void:
 		_tooltip.visible = false
 		return
 	_tooltip.text = Items.display_name(stack.item_id)
+	# Shrink to the new text — Controls keep their manual size, so a
+	# short name ("Stick") otherwise inherits the widest previous
+	# tooltip's box with blank space trailing the label.
+	_tooltip.reset_size()
 	_tooltip.visible = true
 	# Position to the lower-right of the cursor, MC-style. Auto-clamp to
 	# screen so tooltips on right-edge slots don't get cut off.
@@ -825,6 +905,8 @@ func _placeholder_for_empty_slot(slot_index: int) -> Texture2D:
 
 
 func _refresh_cursor_overlay() -> void:
+	if _drop_zone != null:
+		_drop_zone.visible = not _cursor.is_empty()
 	if _cursor.is_empty():
 		_cursor_icon.visible = false
 		_cursor_count_label.visible = false
@@ -833,3 +915,44 @@ func _refresh_cursor_overlay() -> void:
 	_cursor_icon.visible = true
 	_cursor_count_label.text = str(_cursor.count) if _cursor.count > 1 else ""
 	_cursor_count_label.visible = _cursor.count > 1
+
+
+# Bordered "DROP" target left of the panel — see _drop_zone.
+func _build_drop_zone() -> void:
+	_drop_zone = Panel.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0, 0, 0, 0.35)
+	sb.border_color = Color(1.0, 1.0, 1.0, 0.65)
+	sb.set_border_width_all(3)
+	var sb_hot := StyleBoxFlat.new()
+	sb_hot.bg_color = Color(0.55, 0.1, 0.08, 0.55)
+	sb_hot.border_color = Color(1.0, 0.45, 0.35, 1.0)
+	sb_hot.set_border_width_all(4)
+	_drop_zone.set_meta("sb_idle", sb)
+	_drop_zone.set_meta("sb_hot", sb_hot)
+	_drop_zone.add_theme_stylebox_override("panel", sb)
+	_drop_zone.anchor_left = 0.5
+	_drop_zone.anchor_right = 0.5
+	_drop_zone.anchor_top = 0.5
+	_drop_zone.anchor_bottom = 0.5
+	_drop_zone.offset_left = -PANEL_W * 0.5 - 280
+	_drop_zone.offset_right = -PANEL_W * 0.5 - 60
+	_drop_zone.offset_top = -110
+	_drop_zone.offset_bottom = 110
+	_drop_zone.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drop_zone.visible = false
+	var lbl := Label.new()
+	lbl.text = "DROP"
+	if _font != null:
+		lbl.add_theme_font_override("font", _font)
+	lbl.add_theme_font_size_override("font_size", 40)
+	lbl.add_theme_color_override("font_color", Color(1, 1, 1, 0.9))
+	lbl.add_theme_color_override("font_shadow_color", Color.BLACK)
+	lbl.add_theme_constant_override("shadow_offset_x", 3)
+	lbl.add_theme_constant_override("shadow_offset_y", 3)
+	lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drop_zone.add_child(lbl)
+	add_child(_drop_zone)

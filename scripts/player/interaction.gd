@@ -938,7 +938,7 @@ func _complete_break(target: Vector3i) -> void:
 	# player's edit got stuck behind background relight churn). Worker
 	# still does the heavy mesh build off-main, so no frame-spike from
 	# the GDScript mesher path on chunks with non-cube blocks.
-	_chunk_manager.set_world_block(target, Blocks.AIR)
+	_chunk_manager.set_world_block(target, _break_replacement(target, broken_id))
 	SFX.play_break(broken_id)
 	# Vanilla bz.java:95-112 → ki.java (EntityDiggingFX). 24-particle
 	# burst sampled from the block's atlas region, tinted to 60% so it
@@ -1114,7 +1114,7 @@ func _creative_break(target: Vector3i) -> void:
 			if disc_id != 0:
 				inv2.add_item(disc_id, 1)
 		return
-	_chunk_manager.set_world_block(target, Blocks.AIR)
+	_chunk_manager.set_world_block(target, _break_replacement(target, broken_id))
 	SFX.play_break(broken_id)
 	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
 	# Creative: skip the dropped-item dance, go straight to inventory
@@ -3633,3 +3633,19 @@ func _build_uv_cube_mesh(size: float) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
+
+
+# What a broken block leaves behind. Almost everything breaks to air;
+# ICE reverts to water when it sat on a solid or liquid block — vanilla
+# ih.java (BlockIce.b): material below `.c() || .d()` -> setBlock(water),
+# over air it just vanishes, and it drops no item either way (a() -> 0).
+# We place WATER_STILL (vanilla uses the moving-water id, which settles
+# to the same source-like cell) so the classic shoreline-flood mechanic
+# and ice-farming behavior hold under our finite fluid sim.
+func _break_replacement(target: Vector3i, broken_id: int) -> int:
+	if broken_id != Blocks.ICE:
+		return Blocks.AIR
+	var below: int = _chunk_manager.get_world_block(target + Vector3i(0, -1, 0))
+	if Blocks.is_solid_collision(below) or Blocks.is_fluid(below):
+		return Blocks.WATER_STILL
+	return Blocks.AIR

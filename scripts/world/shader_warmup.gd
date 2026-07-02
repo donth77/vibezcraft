@@ -31,6 +31,19 @@ func _ready() -> void:
 	# first-person held block would otherwise compile these mid-gameplay.
 	_add_warm_quad(BlockAtlas.entity_material())
 	_add_warm_quad(BlockAtlas.overlay_material())
+	# Water + lava surface shaders — an inland spawn compiles these the
+	# first time a lake/lava pool scrolls into view (a one-off 50-300 ms
+	# WebGL2 stall mid-walk). Warm quads use the same shared materials.
+	_add_warm_quad(BlockAtlas.water_material())
+	_add_warm_quad(BlockAtlas.lava_material())
+	# Mob materials — both StandardMaterial3D program variants mobs use
+	# (opaque unshaded + alpha-scissor). These are the SHARED cached
+	# instances, so the warm draw compiles the exact programs the first
+	# on-screen pig / skeleton would otherwise stall on. The spatial
+	# feature bits (not the texture) select the GL program, so two
+	# variants cover every species.
+	_add_warm_quad(MobBase.get_shared_material("res://assets/textures/mob/pig.png"))
+	_add_warm_quad(MobBase.get_shared_material("res://assets/textures/mob/pig.png", true))
 
 
 func _process(_delta: float) -> void:

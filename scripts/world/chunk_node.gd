@@ -311,6 +311,14 @@ static func _static_remesh_worker(snap: Chunk, mtx: Mutex, holder: Array) -> voi
 	mtx.unlock()
 
 
+# True once this chunk can physically support entities: the trimesh is
+# attached AND no first-apply is still queued. The player's ground-
+# readiness guard polls this so gravity never runs over a chunk whose
+# collision hasn't landed (spawn/teleport/streaming races).
+func has_live_collision() -> bool:
+	return _collision_shape != null and _collision_shape.shape != null
+
+
 func cancel_remesh_task() -> void:
 	if _remesh_task_id != -1:
 		WorkerThreadPool.wait_for_task_completion(_remesh_task_id)

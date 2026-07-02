@@ -184,6 +184,10 @@ const _MOB_PUSH_STRENGTH: float = 0.05
 # > 0.7 m, so anything > 1.5 m apart trivially can't overlap. Cheap abs()
 # check skips ~95% of pair iterations before the sqrt.
 const _MOB_PUSH_QUICK_REJECT: float = 1.5
+# Grid cell edge for the separation spatial hash (see _sep_grid). Must
+# stay > _MOB_PUSH_QUICK_REJECT so the 3×3 cell neighborhood covers
+# every pair inside the reject radius.
+const _SEP_CELL: float = 2.0
 
 # Seconds in GATED state before auto-despawn. Vanilla uses ~30s
 # after >128m delay.
@@ -223,6 +227,21 @@ const _IDLE_SFX_TALK_INTERVAL: int = 80
 # drops, falling blocks, etc.) in favor of O(active_mobs) which is
 # bounded by the spawn cap. Keyed by instance_id for cheap erase.
 static var _active_mobs: Dictionary = {}
+# Separation spatial grid — rebuilt once per PHYSICS FRAME by the first
+# mob whose _apply_mob_separation runs (stamped via get_physics_frames).
+# The old per-pair loop over _active_mobs was O(n²) with 2-3 engine
+# property reads per pair (other.global_position, _dying, _physics_gated
+# — interpreted cross-instance access); at ~20 mobs that measured as the
+# dominant frame cost on a 6×-throttled phone proxy. Cells are 2.0 m
+# (> _MOB_PUSH_QUICK_REJECT 1.5 m), so scanning the 3×3 neighborhood
+# provably visits every pair the old loop would have pushed — identical
+# pairs, identical impulse math. Positions snapshot at grid build (start
+# of the physics step) instead of live per-pair reads; same-frame nudges
+# by earlier mobs are no longer visible to later ones, a sub-2 cm
+# transient difference that converges identically across frames.
+# Entry: [instance_id, x, z, half_extent_x].
+static var _sep_grid: Dictionary = {}
+static var _sep_grid_frame: int = -1
 # Shared cached player ref — every mob's distance gate would otherwise
 # do its own tree walk. One static cache, re-resolved when stale.
 static var _cached_player_node: Node3D = null
@@ -1571,56 +1590,92 @@ func _kick_stuck_mob() -> void:
 	global_position.z += dir.y * 0.05
 
 
+# Rebuild the separation grid when a new physics step begins. Runs once
+# per step regardless of mob count (first caller pays the O(n) build);
+# every _apply_mob_separation that follows reads the same snapshot.
+static func _rebuild_sep_grid_if_stale() -> void:
+	var frame: int = Engine.get_physics_frames()
+	if _sep_grid_frame == frame:
+		return
+	_sep_grid_frame = frame
+	_sep_grid.clear()
+	for id: int in _active_mobs:
+		var mob = _active_mobs[id]
+		if mob == null or not is_instance_valid(mob):
+			continue
+		# Dead/gated mobs aren't pushing anyone — same skip as the old
+		# per-pair loop, evaluated once per mob instead of per pair.
+		if mob._dying or mob._physics_gated:
+			continue
+		var pos: Vector3 = (mob as Node3D).global_position
+		var entry: Array = [id, pos.x, pos.z, (mob as MobBase)._voxel_half_extents().x]
+		var cell := Vector2i(int(floor(pos.x / _SEP_CELL)), int(floor(pos.z / _SEP_CELL)))
+		if not _sep_grid.has(cell):
+			_sep_grid[cell] = []
+		(_sep_grid[cell] as Array).append(entry)
+
+
 func _apply_mob_separation() -> void:
+	_rebuild_sep_grid_if_stale()
 	var self_id: int = get_instance_id()
 	var self_x: float = global_position.x
 	var self_z: float = global_position.z
 	var self_radius: float = _voxel_half_extents().x
-	for other_id: int in _active_mobs:
-		if other_id == self_id:
-			continue
-		var other = _active_mobs[other_id]
-		if other == null or not is_instance_valid(other):
-			continue
-		# Skip dead/gated mobs — they're not pushing anyone.
-		if other._dying or other._physics_gated:
-			continue
-		var dx: float = self_x - other.global_position.x
-		var dz: float = self_z - other.global_position.z
-		# Cheap early-out before sqrt: combined half-extents max ~0.7 m, so
-		# anything past _MOB_PUSH_QUICK_REJECT trivially can't overlap.
-		if absf(dx) > _MOB_PUSH_QUICK_REJECT or absf(dz) > _MOB_PUSH_QUICK_REJECT:
-			continue
-		var sum_radius: float = self_radius + (other as Node3D)._voxel_half_extents().x
-		var dist_sq: float = dx * dx + dz * dz
-		if dist_sq > sum_radius * sum_radius:
-			continue
-		var dist: float = sqrt(dist_sq)
-		# Position-direct nudge for ALL overlapping pairs (not just
-		# exact-stacked). Velocity-only push was unreliable: friction
-		# (~0.89/frame) plus voxel_move clipping small near-zero motion
-		# in flat AIR (root cause never traced) consumed the push faster
-		# than it accumulated. Chickens specifically stayed locked at
-		# 0.06 m separation indefinitely — confirmed in [STUCK] logs.
-		# Direct position offset bypasses both. Direction: real positional
-		# delta when separated, instance-id hash when exactly stacked
-		# (prevents oscillation across multi-mob stacks). Magnitude
-		# scales with overlap depth and is capped at 2 cm/frame so we
-		# never shove a mob into a nearby wall.
-		var dir_x: float
-		var dir_z: float
-		if dist < 0.01:
-			var sign_id: float = signf(float(self_id - other_id))
-			var ang: float = fmod(float(absi(self_id - other_id)) * 0.6180339, TAU)
-			dir_x = sign_id * cos(ang)
-			dir_z = sign_id * sin(ang)
-		else:
-			dir_x = dx / dist
-			dir_z = dz / dist
-		var overlap: float = sum_radius - dist
-		var sep: float = minf(overlap * 0.1, 0.02)
-		global_position.x += dir_x * sep
-		global_position.z += dir_z * sep
+	var self_cell_x: int = int(floor(self_x / _SEP_CELL))
+	var self_cell_z: int = int(floor(self_z / _SEP_CELL))
+	for cell_dx: int in [-1, 0, 1]:
+		for cell_dz: int in [-1, 0, 1]:
+			var cell := Vector2i(self_cell_x + cell_dx, self_cell_z + cell_dz)
+			if not _sep_grid.has(cell):
+				continue
+			for entry: Array in _sep_grid[cell]:
+				_push_from_entry(entry, self_id, self_x, self_z, self_radius)
+
+
+# One pair check + nudge against a grid entry ([id, x, z, half_extent]).
+# The math below is byte-identical to the old O(n²) loop body.
+func _push_from_entry(
+	entry: Array, self_id: int, self_x: float, self_z: float, self_radius: float
+) -> void:
+	var other_id: int = entry[0]
+	if other_id == self_id:
+		return
+	var dx: float = self_x - (entry[1] as float)
+	var dz: float = self_z - (entry[2] as float)
+	# Cheap early-out before sqrt: combined half-extents max ~0.7 m, so
+	# anything past _MOB_PUSH_QUICK_REJECT trivially can't overlap.
+	if absf(dx) > _MOB_PUSH_QUICK_REJECT or absf(dz) > _MOB_PUSH_QUICK_REJECT:
+		return
+	var sum_radius: float = self_radius + (entry[3] as float)
+	var dist_sq: float = dx * dx + dz * dz
+	if dist_sq > sum_radius * sum_radius:
+		return
+	var dist: float = sqrt(dist_sq)
+	# Position-direct nudge for ALL overlapping pairs (not just
+	# exact-stacked). Velocity-only push was unreliable: friction
+	# (~0.89/frame) plus voxel_move clipping small near-zero motion
+	# in flat AIR (root cause never traced) consumed the push faster
+	# than it accumulated. Chickens specifically stayed locked at
+	# 0.06 m separation indefinitely — confirmed in [STUCK] logs.
+	# Direct position offset bypasses both. Direction: real positional
+	# delta when separated, instance-id hash when exactly stacked
+	# (prevents oscillation across multi-mob stacks). Magnitude
+	# scales with overlap depth and is capped at 2 cm/frame so we
+	# never shove a mob into a nearby wall.
+	var dir_x: float
+	var dir_z: float
+	if dist < 0.01:
+		var sign_id: float = signf(float(self_id - other_id))
+		var ang: float = fmod(float(absi(self_id - other_id)) * 0.6180339, TAU)
+		dir_x = sign_id * cos(ang)
+		dir_z = sign_id * sin(ang)
+	else:
+		dir_x = dx / dist
+		dir_z = dz / dist
+	var overlap: float = sum_radius - dist
+	var sep: float = minf(overlap * 0.1, 0.02)
+	global_position.x += dir_x * sep
+	global_position.z += dir_z * sep
 
 
 # Per-frame variant — same algorithm but cheap to call repeatedly

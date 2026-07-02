@@ -17,6 +17,8 @@ const _SAVE_LOAD: GDScript = preload("res://scripts/persistence/save_load.gd")
 # workaround as `_TICK_SCHEDULER` above).
 const _PASSIVE_SPAWNER_SCRIPT: GDScript = preload("res://scripts/world/passive_spawner.gd")
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
+# World-entry drain-boost window (see _entry_boost_until_msec).
+const _ENTRY_BOOST_WINDOW_MSEC: int = 12000
 const _AUTOSAVE_INDICATOR_VISIBLE_SEC: float = 3.0
 const _AUTOSAVE_INDICATOR_FONT_SIZE: int = 22
 
@@ -142,6 +144,32 @@ var _applies_this_frame: int = 0  # reset each _process; see try_consume_apply_b
 # Ambient scanner timer — drives AmbientFx.tick at 10 Hz. Vanilla's
 # cy.java randomDisplayTick runs per-frame; we sample less often.
 var _ambient_scan_accum: float = 0.0
+# Mobile web: 5 Hz ambient + tick load-shedding while chunks stream in.
+# Cached once in _ready — the platform can't change mid-session.
+var _is_mobile_web: bool = false
+# Frames left to skip the fixed-cadence ticks (ambient scan + scheduled/
+# random block ticks) after a chunk apply consumed the frame budget.
+# A 6×-throttled phone proxy measured chunk_node.apply at 5-18 ms p95;
+# stacking the ~9 ms of fixed ticks onto those same frames is what pushed
+# streaming-while-walking under the 30 fps floor. The accumulators catch
+# up on the next quiet frame (TickScheduler clamps catch-up at 2), so
+# shedding costs a frame of growth/particle latency at most. Only ever
+# set on mobile web — desktop frame composition is untouched.
+var _shed_tick_frames: int = 0
+# Scheduler delta banked across shed frames (see _process) so skipped
+# frames still count toward the 20 Hz game-tick accumulator.
+var _shed_sched_delta: float = 0.0
+# World-entry drain boost deadline (ticks msec; 0 = inactive). The
+# initial ring's neighbor re-mesh + border-relight waves land right
+# after the loading screen drops — every materialized chunk dirties its
+# loaded neighbors once for edge-culling/light seams, and relights
+# drain 1/frame. On desktop web's 81-chunk ring that measured ~2 s of
+# 8-40 fps immediately post-spawn before settling at 60. While boosted,
+# the apply budget triples and relight drains double, clearing the
+# backlog ~3× faster; steady-state budgets are untouched afterward.
+# Mobile web keeps flat budgets — its ring is 25 chunks (small wave)
+# and per-apply frame cost is its scarcest resource.
+var _entry_boost_until_msec: int = 0
 # Spiral-offsets cache + spawn-queue membership set: rebuilding the 1088
 # offset array + sorting every frame at FAR cost ~1-2 ms; O(n) _spawn_queue.has
 # inside the 1089-iteration loop compounds. Both keyed off render_distance.
@@ -166,8 +194,34 @@ var _autosave_label: Label
 var _session_start_msec: int = 0
 
 
+func _entry_boost_active() -> bool:
+	if _is_mobile_web:
+		return false
+	# Never boost while the LoadingScreen is up — its per-frame
+	# synchronous chunk gen is already the heaviest work in the session,
+	# and stacking extra applies/relights onto those frames measurably
+	# stretched total load time on heavy-biome seeds. Arm the window on
+	# the first post-loading frame instead: the deferred wave then
+	# drains at triple rate exactly when the player starts watching.
+	if Game.is_loading:
+		return false
+	if _entry_boost_until_msec == 0:
+		_entry_boost_until_msec = Time.get_ticks_msec() + _ENTRY_BOOST_WINDOW_MSEC
+	return Time.get_ticks_msec() < _entry_boost_until_msec
+
+
 func _ready() -> void:
 	_player = get_node_or_null(player_path) as Node3D
+	_is_mobile_web = Game.is_mobile_web()
+	if _is_mobile_web:
+		# Phones have cores to spare (typically 8) while the MAIN thread
+		# is the scarce resource — a deeper worker pool shrinks the
+		# leading-edge pop-in ring while walking (reported as "missing
+		# map, slow to load in"). The desktop cap stays 3 (see the
+		# @export comment: cave-gen workers starved the main thread on
+		# 8-core desktops at 8 workers; 5 is safe on mobile because the
+		# per-worker chunks are also ~3× slower there, arriving spread).
+		max_concurrent_jobs = 5
 	# Wipe leftover tile-entity state from any prior world load in this
 	# same engine process. Without this, the autoload Dictionaries keep
 	# entries from World 1 when the player picks World 2 from the menu.
@@ -276,8 +330,18 @@ func _process(_delta: float) -> void:
 	var t_relight_drain := PerfProbe.begin("chunk_mgr.tick.relight_drain")
 	_drain_relight_results()
 	PerfProbe.end("chunk_mgr.tick.relight_drain", t_relight_drain)
+	# Load-shed window: right after a chunk apply, skip this frame's
+	# ambient scan + block-tick pass (mobile web only — the flag is only
+	# ever set there; see _shed_tick_frames). Skipped scheduler time is
+	# banked in _shed_sched_delta so game-tick timing doesn't drift.
+	var shed_this_frame: bool = _shed_tick_frames > 0
+	if shed_this_frame:
+		_shed_tick_frames -= 1
 	_ambient_scan_accum += _delta
-	if _ambient_scan_accum >= 0.1:
+	# 5 Hz on mobile web (measured 3.5 ms/scan on a low-end phone proxy
+	# even at the reduced 250-cell budget); 10 Hz everywhere else.
+	var ambient_interval: float = 0.2 if _is_mobile_web else 0.1
+	if not shed_this_frame and _ambient_scan_accum >= ambient_interval:
 		_ambient_scan_accum = 0.0
 		var t_ambient := PerfProbe.begin("chunk_mgr.tick.ambient")
 		AmbientFx.tick(self, _chunks, _player.global_position)
@@ -309,9 +373,16 @@ func _process(_delta: float) -> void:
 	# sometimes lags one reload behind when a new class_name lands,
 	# which manifests as "Identifier TickScheduler not declared" on
 	# first run. The preload path doesn't depend on the index.
-	var t_sched := PerfProbe.begin("chunk_mgr.tick.scheduler")
-	_TICK_SCHEDULER.advance(_delta, self)
-	PerfProbe.end("chunk_mgr.tick.scheduler", t_sched)
+	if shed_this_frame:
+		# Bank the skipped delta — the next un-shed frame advances the
+		# scheduler by the full elapsed time (catch-up stays clamped at
+		# 2 ticks inside advance), so fluid/growth cadence doesn't drift.
+		_shed_sched_delta += _delta
+	else:
+		var t_sched := PerfProbe.begin("chunk_mgr.tick.scheduler")
+		_TICK_SCHEDULER.advance(_delta + _shed_sched_delta, self)
+		_shed_sched_delta = 0.0
+		PerfProbe.end("chunk_mgr.tick.scheduler", t_sched)
 	PerfProbe.end("chunk_mgr.tick", probe_token)
 
 
@@ -749,13 +820,14 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 # run the snapshot + worker dispatch. Chunks that unloaded between
 # materialize and drain are skipped (get_chunk_at_coord returns null).
 func _drain_one_relight_dispatch() -> void:
-	while not _pending_relight_dispatch.is_empty():
+	var budget: int = 2 if _entry_boost_active() else 1
+	while not _pending_relight_dispatch.is_empty() and budget > 0:
 		var coord: Vector2i = _pending_relight_dispatch.pop_front()
 		_pending_relight_dispatch_set.erase(coord)
 		if get_chunk_at_coord(coord) == null:
 			continue
 		_dispatch_relight(coord)
-		return
+		budget -= 1
 
 
 func _dispatch_relight(coord: Vector2i) -> void:
@@ -792,6 +864,15 @@ func _relight_worker(coord: Vector2i, chunk_data: Array) -> void:
 # assigns + dirty marks) but each one re-meshes the touched chunks, so
 # spreading them out reads as smoother frames.
 func _drain_relight_results() -> void:
+	var budget: int = 2 if _entry_boost_active() else 1
+	for _i in range(budget):
+		if not _drain_one_relight_result():
+			return
+
+
+# Pops and applies a single relight result. Returns false when the
+# queue was empty (caller stops draining this frame).
+func _drain_one_relight_result() -> bool:
 	_result_mutex.lock()
 	var coord: Vector2i = Vector2i.ZERO
 	var result: Dictionary = {}
@@ -805,9 +886,10 @@ func _drain_relight_results() -> void:
 		_relight_results.erase(coord)
 	_result_mutex.unlock()
 	if not has_one:
-		return
+		return false
 	_pending_relights.erase(coord)
 	Lighting.apply_relight_result(result, self)
+	return true
 
 
 # --- Autosave (step 7.4) ---
@@ -1012,35 +1094,59 @@ func _build_chunk_save_entry(coord: Vector2i, chunk: Chunk, destructive: bool) -
 # constructs, so it's safe to run off the main thread.
 static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 	var c := Chunk.new()
-	c.blocks = (entry.bytes as PackedByteArray).decompress(Chunk.TOTAL_BLOCKS, _COMPRESS_MODE)
+	var blocks: PackedByteArray = (entry.bytes as PackedByteArray).decompress(
+		Chunk.TOTAL_BLOCKS, _COMPRESS_MODE
+	)
+	# Torn/corrupt save entry — decompress returns a short (usually
+	# empty) array on failure. Seen in the wild on web: closing the tab
+	# mid-IndexedDB sync tears the region write. The old behavior
+	# materialized the chunk as a permanent all-air hole AND re-persisted
+	# it on evict, making the damage permanent. Deterministic worldgen
+	# means we can do better: regenerate the chunk from the seed — only
+	# that chunk's player edits are lost, and the world self-heals on
+	# the next load instead of keeping a void pit.
+	if blocks.size() != Chunk.TOTAL_BLOCKS:
+		push_warning("[chunk_mgr] corrupt saved chunk %s — regenerating from seed" % coord)
+		return [Worldgen.generate_chunk(coord.x, coord.y), []]
+	c.blocks = blocks
 	c.max_y = entry.max_y
 	# Light arrays — older save entries (from before slice 1 lighting
 	# landed) won't have these keys; fall through to Chunk._init's defaults
 	# (sky=15 everywhere, block=0) for backward compatibility with any
 	# in-memory caches still holding pre-lighting payloads.
 	if entry.has("sky_light"):
-		c.sky_light = ((entry.sky_light as PackedByteArray).decompress(
+		var sky: PackedByteArray = (entry.sky_light as PackedByteArray).decompress(
 			Chunk.TOTAL_BLOCKS, _COMPRESS_MODE
-		))
+		)
+		if sky.size() == Chunk.TOTAL_BLOCKS:
+			c.sky_light = sky
 	if entry.has("block_light"):
-		c.block_light = ((entry.block_light as PackedByteArray).decompress(
+		var blk: PackedByteArray = (entry.block_light as PackedByteArray).decompress(
 			Chunk.TOTAL_BLOCKS, _COMPRESS_MODE
-		))
+		)
+		if blk.size() == Chunk.TOTAL_BLOCKS:
+			c.block_light = blk
 	# Block metadata — required once flow-fluid landed in Flow #1. Older
 	# saves without the key fall through to Chunk._init's zero defaults,
 	# which is still correct for any block that was ID-only (pre-flow).
 	if entry.has("block_meta"):
-		c.block_meta = ((entry.block_meta as PackedByteArray).decompress(
+		var meta: PackedByteArray = (entry.block_meta as PackedByteArray).decompress(
 			Chunk.TOTAL_BLOCKS, _COMPRESS_MODE
-		))
+		)
+		if meta.size() == Chunk.TOTAL_BLOCKS:
+			c.block_meta = meta
 	# Heightmap — restore when present, else flag dirty so the next
 	# is_sky_exposed call rebuilds from raw blocks. Saves a 32 KB rescan
 	# on every chunk reload from save cache.
 	if entry.has("height_map"):
-		c.height_map = ((entry.height_map as PackedByteArray).decompress(
+		var hm: PackedByteArray = (entry.height_map as PackedByteArray).decompress(
 			Chunk.SIZE_X * Chunk.SIZE_Z, _COMPRESS_MODE
-		))
-		c._height_map_dirty = false
+		)
+		if hm.size() == Chunk.SIZE_X * Chunk.SIZE_Z:
+			c.height_map = hm
+			c._height_map_dirty = false
+		else:
+			c._height_map_dirty = true
 	else:
 		c._height_map_dirty = true
 	# Rescan non-cube + chest flags, collect sapling positions, and pick
@@ -1751,6 +1857,21 @@ func set_world_block_with_meta(world_pos: Vector3i, id: int, meta: int) -> void:
 # reads both return the AIR / sky=15 defaults, which without this gate
 # false-positives the settle and lets a spawn-in-terrain save stay
 # embedded once chunks actually arrive.
+# True when the chunk under `world_pos` exists AND its collision shape
+# is live. The player freezes (velocity zero, like the F2 teleport
+# hold) while this is false so no load-order race — world entry,
+# save-position restore, corrupt-chunk regeneration, streaming lag —
+# can drop them through terrain that hasn't physically landed yet.
+func is_ground_ready_at(world_pos: Vector3) -> bool:
+	var coord := Vector2i(
+		int(floor(world_pos.x / float(Chunk.SIZE_X))), int(floor(world_pos.z / float(Chunk.SIZE_Z)))
+	)
+	var node: Node3D = _chunks.get(coord)
+	if node == null:
+		return false
+	return bool(node.call("has_live_collision"))
+
+
 func is_chunk_loaded(chunk_coord: Vector2i) -> bool:
 	return _chunks.has(chunk_coord)
 
@@ -1890,9 +2011,17 @@ func get_player_chunk_coord() -> Vector2i:
 # chunk_node asks before each _apply_mesh_data; false → hold the result
 # for next frame. Spreads multi-chunk apply bursts over multiple frames.
 func try_consume_apply_budget() -> bool:
-	if _applies_this_frame >= apply_budget_per_frame:
+	var budget: int = apply_budget_per_frame
+	if _entry_boost_active():
+		budget = apply_budget_per_frame * 3
+	if _applies_this_frame >= budget:
 		return false
 	_applies_this_frame += 1
+	# A chunk apply (ArrayMesh upload, 5-18 ms p95 on a low-end phone
+	# proxy) is landing this frame — shed the next couple of tick passes
+	# so the fixed costs don't stack on the same frames. Mobile web only.
+	if _is_mobile_web:
+		_shed_tick_frames = 2
 	return true
 
 

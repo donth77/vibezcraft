@@ -202,7 +202,7 @@ func close() -> void:
 		return
 	visible = false
 	get_tree().paused = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Game.recapture_mouse()
 
 
 func is_open() -> bool:

@@ -298,6 +298,9 @@ var _was_on_floor: bool = false
 # the ground for the first time post-spawn. Without this we'd take 37
 # damage from the initial drop at (8, 100, 8) and respawn-loop forever.
 var _fall_immune_next_landing: bool = true
+# Ground-readiness guard state — see _physics_process.
+var _chunk_manager_ref: Node = null
+var _ground_wait_sec: float = 0.0
 # Counts down each physics tick after spawn / respawn. While > 0, the
 # spawn-relocate check runs every tick (looking at the actual loaded
 # chunks for dry land). Decrements to 0 once relocated or after the
@@ -484,10 +487,11 @@ func _ready() -> void:
 		hotbar.bind(inventory)
 	# Vanilla Alpha draws the version string top-left on the HUD every
 	# frame (nl.java:156 — "Minecraft Alpha v1.2.6" at (2,2), white with
-	# a 1px shadow; the F3 screen swaps in an extended header). Numbers
-	# are that layout at the HUD's 4× scale. Inserted at the hotbar's
-	# index: above the damage/water tint rects, below the UI screens and
-	# pause menu, so the pause dim darkens it like vanilla's overlay.
+	# a 1px shadow). We keep the play HUD clean and only surface it while
+	# the pause / game menu is up. The label still lives at the hotbar's
+	# index — above the damage/water tint rects, below the UI screens and
+	# pause menu — so the pause dim darkens it like vanilla's overlay; its
+	# visibility just mirrors the pause menu's open state.
 	var crosshair_layer: CanvasLayer = get_node_or_null("Crosshair") as CanvasLayer
 	if crosshair_layer != null and hotbar != null:
 		var version_label := Label.new()
@@ -503,8 +507,14 @@ func _ready() -> void:
 		version_label.add_theme_constant_override("shadow_offset_y", 4)
 		version_label.position = Vector2(8, 8)
 		version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		version_label.visible = false
 		crosshair_layer.add_child(version_label)
 		crosshair_layer.move_child(version_label, hotbar.get_index())
+		var pause_menu_for_version: Control = get_node_or_null("Crosshair/PauseMenu")
+		if pause_menu_for_version != null:
+			pause_menu_for_version.visibility_changed.connect(
+				func() -> void: version_label.visible = pause_menu_for_version.visible
+			)
 	# On-screen touch HUD (mobile web / forced preview). Inserted at the
 	# InventoryScreen's index so every UI screen and the pause menu draw
 	# over it; the HUD additionally disables itself while one is open.
@@ -1350,7 +1360,16 @@ func _unhandled_input(event: InputEvent) -> void:
 				pause_menu_node.open()
 				get_viewport().set_input_as_handled()
 		return
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if (
+		event is InputEventMouseMotion
+		and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+		# Touch mode: TouchControls owns look. Even if pointer lock ever
+		# gets granted (Android Chrome grants it inside tap gestures),
+		# emulated-mouse-from-touch must not steer the camera — the
+		# synthesized jump between two fingers reads as a huge look
+		# delta that "snaps the view back" mid-gesture.
+		and not Game.touch_controls_enabled()
+	):
 		# Block mouse motion while dead. _apply_death_tilt is currently
 		# rotating _camera.rotation.z (0 → 90° over 1 s); if mouse motion
 		# keeps calling _camera.rotate_x during that window, the rotation
@@ -1918,6 +1937,27 @@ func _physics_process(delta: float) -> void:
 	if Game.is_loading:
 		velocity = Vector3.ZERO
 		return
+	# Ground-readiness guard — the loading-screen freeze above covers
+	# world entry, but the chunk under our feet can ALSO lack live
+	# collision right after the saved-position restore (collision
+	# activation is radius-limited around wherever we stood during
+	# loading), after corrupt-chunk regeneration, or when streaming
+	# lags a sprint on slow devices. Freeze in place (like the F2
+	# teleport hold below) until the chunk's trimesh is attached; the
+	# timeout escape hatch lets void-recovery handle genuinely missing
+	# terrain instead of soft-locking forever.
+	if _chunk_manager_ref == null or not is_instance_valid(_chunk_manager_ref):
+		_chunk_manager_ref = get_tree().get_root().find_child("ChunkManager", true, false)
+	if (
+		_chunk_manager_ref != null
+		and not _chunk_manager_ref.call("is_ground_ready_at", global_position)
+	):
+		_ground_wait_sec += delta
+		if _ground_wait_sec < 4.0:
+			velocity = Vector3.ZERO
+			return
+	else:
+		_ground_wait_sec = 0.0
 	# F2 dungeon-teleport hold — pin player at destination until the
 	# target chunk lands in ChunkManager._chunks. Without this, gravity
 	# drops them through the missing-chunk void faster than streaming
