@@ -493,6 +493,10 @@ func _sample_leg_color(tex: Texture2D) -> Color:
 	var img: Image = tex.get_image()
 	if img == null:
 		return _LEG_COLOR_FALLBACK
+	# Exported builds VRAM-compress the mob sheet (3D material use) and
+	# get_pixel errors on compressed data — decompress first.
+	if img.is_compressed():
+		img.decompress()
 	var px: Vector2i = _LEG_COLOR_SAMPLE_PX
 	if px.x < 0 or px.y < 0 or px.x >= img.get_width() or px.y >= img.get_height():
 		return _LEG_COLOR_FALLBACK

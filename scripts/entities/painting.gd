@@ -231,6 +231,15 @@ static func _get_variant_texture(variant_idx: int) -> ImageTexture:
 	var atlas_img: Image = tex.get_image()
 	if atlas_img == null:
 		return null
+	# Exported builds hand back a VRAM-compressed image (detect_3d flips
+	# the import to a GPU format), and Image.get_region() errors out on
+	# compressed data — paintings rendered textureless in release while
+	# looking fine in-editor (issue #4). Same guard BlockAtlas.build()
+	# applies before its pixel ops.
+	if atlas_img.is_compressed():
+		atlas_img.decompress()
+	if atlas_img.get_format() != Image.FORMAT_RGBA8:
+		atlas_img.convert(Image.FORMAT_RGBA8)
 	var v: Array = VARIANTS[variant_idx]
 	var atlas_x: int = v[3]
 	var atlas_y: int = v[4]

@@ -29,11 +29,21 @@ const FP_ARM_SIZE: Vector3 = Vector3(0.28, 0.6, 0.28)
 # UV rects per face in normalized [0,1] space, ordered:
 #   [+Y top, -Y bottom, +X right, -X left, +Z back, -Z front]
 # These map a standard 64x64 MC skin layout onto each body-part box.
+# Head side tiles: (16,8) on +X and (0,8) on -X. Combined with
+# _build_textured_box's per-face U directions this renders the head as
+# the exact GLOBAL MIRROR of vanilla's wrap (vanilla: ka.java quads ×
+# the renderer's 180° yaw × glScalef(-1,-1,1)) — seam-continuous around
+# all four sides, just chirality-flipped, which is invisible on our
+# near-symmetric skins. The head originally had these two tiles swapped
+# = vanilla tiles with each face's U flipped IN PLACE, which broke the
+# hair/sideburn wrap at every corner seam ("head sides inverted",
+# issue #4). Bit-exact vanilla would need per-face U-direction changes
+# in the shared box builder (armor + FP arm risk) for zero visual gain.
 const _HEAD_UVS: Array[Rect2] = [
 	Rect2(0.125, 0.0, 0.125, 0.125),
 	Rect2(0.25, 0.0, 0.125, 0.125),
-	Rect2(0.0, 0.125, 0.125, 0.125),
 	Rect2(0.25, 0.125, 0.125, 0.125),
+	Rect2(0.0, 0.125, 0.125, 0.125),
 	Rect2(0.375, 0.125, 0.125, 0.125),
 	Rect2(0.125, 0.125, 0.125, 0.125),
 ]
@@ -104,8 +114,8 @@ const _LEG_L_UVS: Array[Rect2] = [
 const _ARMOR_HEAD_UVS: Array[Rect2] = [
 	Rect2(0.125, 0.0, 0.125, 0.25),  # +Y top: (8, 0, 8, 8)
 	Rect2(0.25, 0.0, 0.125, 0.25),  # -Y bottom: (16, 0, 8, 8)
-	Rect2(0.0, 0.25, 0.125, 0.25),  # +X right: (0, 8, 8, 8)
-	Rect2(0.25, 0.25, 0.125, 0.25),  # -X left: (16, 8, 8, 8)
+	Rect2(0.25, 0.25, 0.125, 0.25),  # +X: (16, 8, 8, 8) — matches _HEAD_UVS
+	Rect2(0.0, 0.25, 0.125, 0.25),  # -X: (0, 8, 8, 8) — matches _HEAD_UVS
 	Rect2(0.375, 0.25, 0.125, 0.25),  # +Z back: (24, 8, 8, 8)
 	Rect2(0.125, 0.25, 0.125, 0.25),  # -Z front: (8, 8, 8, 8)
 ]

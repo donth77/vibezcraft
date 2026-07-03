@@ -1350,6 +1350,30 @@ func _any_ui_screen_open() -> bool:
 	return false
 
 
+# Movement polls routed through a UI gate. Godot's poll state
+# (Input.get_vector / is_action_*) stays latched no matter which Control
+# consumed the key events, so WASD and Space kept steering the body while
+# a container screen was up (issue #4). Vanilla ignores movement keys
+# whenever a GuiScreen is open; these wrappers are the poll-site
+# equivalent. Gravity and momentum still run — only fresh input stops.
+func _move_vector() -> Vector2:
+	if _any_ui_screen_open():
+		return Vector2.ZERO
+	return Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+
+
+func _move_pressed(action: String) -> bool:
+	if _any_ui_screen_open():
+		return false
+	return Input.is_action_pressed(action)
+
+
+func _move_just_pressed(action: String) -> bool:
+	if _any_ui_screen_open():
+		return false
+	return Input.is_action_just_pressed(action)
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	# Sleeping — vanilla bd.java::a holds the player in bed until the
 	# time-skip + auto-wake fire. Block ALL input (camera + actions + UI
@@ -2047,11 +2071,11 @@ func _physics_process(delta: float) -> void:
 	# While the sign-edit screen is open the player is typing text and
 	# Input.is_action_pressed("jump") / get_vector still see WASD + Space
 	# (LineEdit consumes the InputEvent but the underlying poll state
-	# stays latched). Freeze the body so keystrokes don't leak into
-	# movement. Vanilla pauses the world entirely on GUI open in
-	# singleplayer; we pause just the player. Only SignEditScreen needs
-	# this — inventory/chest/furnace are click-only and the player can
-	# walk away from them freely.
+	# stays latched). Hard-freeze the body so keystrokes don't leak into
+	# movement. Container screens (inventory/chest/furnace) get the softer
+	# _move_vector()/_move_pressed() gate instead — fresh input is ignored
+	# but gravity and momentum still play out, matching vanilla's
+	# GuiScreen behavior.
 	var sign_edit: Node = get_node_or_null("Crosshair/SignEditScreen")
 	if sign_edit != null and sign_edit.has_method("is_open") and sign_edit.is_open():
 		velocity = Vector3.ZERO
@@ -2109,7 +2133,7 @@ func _physics_process(delta: float) -> void:
 	# jump on the first tap; the second tap within FLY_DOUBLE_TAP_SEC
 	# promotes it to a flight toggle. While flying, gravity is skipped and
 	# sneak/jump drive vertical motion directly.
-	if creative_mode and Input.is_action_just_pressed("jump"):
+	if creative_mode and _move_just_pressed("jump"):
 		var now: float = Time.get_ticks_msec() / 1000.0
 		if now - _last_jump_press_time < FLY_DOUBLE_TAP_SEC:
 			_is_flying = not _is_flying
@@ -2217,13 +2241,11 @@ func _physics_process(delta: float) -> void:
 		velocity.y = maxf(velocity.y, -LADDER_MAX_DESCENT)
 		if _is_sneaking:
 			velocity.y = maxf(velocity.y, 0.0)
-	if Input.is_action_just_pressed("jump") and is_on_floor():
+	if _move_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 	_update_sneak()
 
-	var input_dir: Vector2 = Input.get_vector(
-		"move_left", "move_right", "move_forward", "move_back"
-	)
+	var input_dir: Vector2 = _move_vector()
 	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 	var speed: float = SNEAK_SPEED if _is_sneaking else WALK_SPEED
 
@@ -2235,9 +2257,7 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0, speed)
 
 	if on_ladder and not _is_sneaking:
-		var climbing: bool = (
-			Input.is_action_pressed("move_forward") or Input.is_action_pressed("jump")
-		)
+		var climbing: bool = _move_pressed("move_forward") or _move_pressed("jump")
 		if climbing:
 			velocity.y = LADDER_CLIMB_SPEED
 	var was_grounded: bool = is_on_floor()
@@ -3018,9 +3038,7 @@ func _try_water_step_up() -> void:
 func _update_water_physics(delta: float) -> void:
 	var tick_scale: float = delta * 20.0  # how many 20 Hz vanilla ticks this frame spans
 	# Horizontal input → target velocity (X/Z). No input → drag-only.
-	var input_dir: Vector2 = Input.get_vector(
-		"move_left", "move_right", "move_forward", "move_back"
-	)
+	var input_dir: Vector2 = _move_vector()
 	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 	if direction != Vector3.ZERO:
 		velocity.x = direction.x * WATER_MOVE_SPEED
@@ -3041,7 +3059,7 @@ func _update_water_physics(delta: float) -> void:
 	var v_drag: float = pow(WATER_DRAG_PER_TICK, tick_scale)
 	velocity.y *= v_drag
 	velocity.y -= WATER_GRAVITY_PER_TICK * tick_scale * 20.0
-	if Input.is_action_pressed("jump"):
+	if _move_pressed("jump"):
 		# Upward thrust, scaled like vanilla's motY += 0.04/tick in m/s².
 		velocity.y += SWIM_UP_PER_TICK * tick_scale * 20.0
 	# Flow-current push. Vanilla ld.java:157 `a(cy,x,y,z,Entity,Vec3)` adds
@@ -3078,15 +3096,13 @@ func _apply_fluid_flow_push(tick_scale: float) -> void:
 # = down, neither = hover. Both descend bindings are first-class — sneak
 # matches vanilla Java, Ctrl/Cmd is the more ergonomic alt.
 func _update_flight_physics() -> void:
-	var input_dir: Vector2 = Input.get_vector(
-		"move_left", "move_right", "move_forward", "move_back"
-	)
+	var input_dir: Vector2 = _move_vector()
 	var direction: Vector3 = (transform.basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
 	velocity.x = direction.x * FLY_SPEED
 	velocity.z = direction.z * FLY_SPEED
-	if Input.is_action_pressed("jump"):
+	if _move_pressed("jump"):
 		velocity.y = FLY_VERTICAL_SPEED
-	elif Input.is_action_pressed("sneak") or Input.is_action_pressed("fly_down"):
+	elif _move_pressed("sneak") or _move_pressed("fly_down"):
 		velocity.y = -FLY_VERTICAL_SPEED
 	else:
 		velocity.y = 0.0

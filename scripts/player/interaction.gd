@@ -226,7 +226,14 @@ func _try_attack_mob() -> bool:
 	var damage: int = Items.melee_damage(held_id)
 	var landed: bool = bool(mob.call("take_damage", damage, attacker_xz))
 	_trigger_player_use_swing()
-	SFX.play_player_hit()
+	# Hurt cue only when the hit actually landed — vanilla plays the hit
+	# sound inside the `if (attackEntityFrom(...))` success branch, so
+	# clicks absorbed by hurtResistantTime are silent. The arm swing stays
+	# unconditional (vanilla swings on every click). Unconditional playback
+	# here made iframe-absorbed spam clicks sound like landed hits
+	# (issue #4).
+	if landed:
+		SFX.play_player_hit()
 	# Vanilla EntityPlayer.attackTargetEntityWithCurrentItem runs
 	# ItemStack.hitEntity (the durability decrement) ONLY inside the
 	# `if (attackEntityFrom(...))` branch — i.e. iframe-absorbed clicks
@@ -1410,6 +1417,13 @@ func _try_place() -> void:
 		_last_place_ms = now
 		return
 	if _place_block_from_held(hit):
+		# Vanilla swings the arm on every successful use/place
+		# (ItemStack.useItem → swingItem). Covering it here catches every
+		# placement route — cubes, torches, ladders, doors, beds, rails —
+		# in one spot; handlers that already swing internally just restart
+		# the same one-shot, which is visually identical (issue #4: placing
+		# blocks showed no animation at all).
+		_trigger_player_use_swing()
 		_last_place_ms = now
 
 

@@ -570,6 +570,11 @@ static func _ensure_compass_base() -> void:
 	if tex == null:
 		return
 	_compass_base = tex.get_image()
+	# Release exports can return a VRAM-compressed image (detect_3d via the
+	# extruded held-item path); decompress before convert/set_pixelv or the
+	# needle draw errors out on exported builds.
+	if _compass_base != null and _compass_base.is_compressed():
+		_compass_base.decompress()
 	if _compass_base != null and _compass_base.get_format() != Image.FORMAT_RGBA8:
 		_compass_base.convert(Image.FORMAT_RGBA8)
 
@@ -579,12 +584,16 @@ static func _ensure_clock_base() -> void:
 		var tex: Texture2D = _load_item_sprite("clock")
 		if tex != null:
 			_clock_base = tex.get_image()
+			if _clock_base != null and _clock_base.is_compressed():
+				_clock_base.decompress()
 			if _clock_base != null and _clock_base.get_format() != Image.FORMAT_RGBA8:
 				_clock_base.convert(Image.FORMAT_RGBA8)
 	if _clock_dial == null:
 		var dial_tex: Texture2D = load("res://assets/textures/gui/dial.png") as Texture2D
 		if dial_tex != null:
 			_clock_dial = dial_tex.get_image()
+			if _clock_dial != null and _clock_dial.is_compressed():
+				_clock_dial.decompress()
 			if _clock_dial != null and _clock_dial.get_format() != Image.FORMAT_RGBA8:
 				_clock_dial.convert(Image.FORMAT_RGBA8)
 
