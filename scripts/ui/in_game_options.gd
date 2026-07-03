@@ -126,8 +126,9 @@ func _build_panel() -> void:
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
 	# Hidden in touch mode (mobile web) — same reasoning as
-	# settings_menu.gd: there's no keyboard to rebind.
-	if not Game.touch_controls_enabled():
+	# settings_menu.gd: there's no keyboard to rebind. A connected
+	# gamepad overrides that: the screen carries the pad rows.
+	if not Game.touch_controls_enabled() or not Input.get_connected_joypads().is_empty():
 		var controls_btn := VanillaButton.new()
 		controls_btn.text = "Controls..."
 		controls_btn.pressed.connect(_on_controls_pressed)

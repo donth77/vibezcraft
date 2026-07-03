@@ -200,8 +200,10 @@ func _build_panel() -> void:
 	# Keyboard rebinding is meaningless on a phone — touch mode (mobile
 	# web) drives everything through the on-screen HUD, so the rebind
 	# screen is hidden rather than shown broken. The VBox collapses the
-	# gap on its own.
-	if not Game.touch_controls_enabled():
+	# gap on its own. EXCEPT when a gamepad is connected: the controls
+	# screen then carries the pad-rebinding rows, which a phone + pad
+	# player needs.
+	if not Game.touch_controls_enabled() or not Input.get_connected_joypads().is_empty():
 		var controls_btn := VanillaButton.new()
 		controls_btn.text = "Controls..."
 		controls_btn.pressed.connect(_on_controls_pressed)

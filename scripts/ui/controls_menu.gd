@@ -15,16 +15,31 @@ extends Control
 # until the user picks a new key for it. No popup, no confirmation.
 
 const _SETTINGS_PATH: String = "user://settings.cfg"
+# Pending-map marker meaning "erase this action's saved override so the
+# next boot falls through to register_defaults." Reset uses it instead
+# of stamping the current primary event — stamping flattened multi-bound
+# defaults (V+F5, Ctrl/Cmd, X+Y pad) down to one binding in the cfg.
+const _RESET_MARKER: String = "__reset__"
 const _ROW_HEIGHT: int = 56
 const _ROW_SEPARATION: int = 8
 
 var _rows: Dictionary = {}  # action_id -> Button (the rebind button)
+var _pad_rows: Dictionary = {}  # action_id -> Button (gamepad channel)
 var _pending_events: Dictionary = {}  # action_id -> InputEvent | null (null = NONE)
+var _pending_pad_events: Dictionary = {}  # pad channel of _pending_events
 var _listening_action: StringName = &""
 var _listening_button: Button = null
+# True while the armed row is a GAMEPAD row — capture then accepts pad
+# buttons/triggers instead of keys/mouse. Stick axes are never
+# capturable (drift would self-bind instantly; Bedrock fixes sticks too).
+var _listening_pad: bool = false
+# Row container — kept so the list can rebuild when a controller
+# connects/disconnects while the screen is open.
+var _rows_vbox: VBoxContainer = null
 # True until Save/Cancel decides what to do. Cancel reverts InputMap to
 # whatever was loaded; Save persists the _pending_events map to disk.
-var _baseline: Dictionary = {}  # action_id -> InputEvent | null (snapshot on open)
+var _baseline: Dictionary = {}  # action_id -> Array[InputEvent] (snapshot on open)
+var _baseline_pad: Dictionary = {}  # pad channel of _baseline
 # When opened from the main-menu Settings screen (which has a dirt-tile
 # bg), the parent screen hides itself so the controls overlay needs to
 # render its OWN dirt bg — without it the screen is just a black void.
@@ -44,6 +59,9 @@ func _ready() -> void:
 	_build_panel()
 	_snapshot_baseline()
 	_refresh_all_rows()
+	# Rebuild the row list live when a pad arrives/leaves so the Gamepad
+	# section appears without reopening the screen.
+	Input.joy_connection_changed.connect(_on_joy_connection_changed)
 
 
 func _build_background() -> void:
@@ -98,7 +116,7 @@ func _build_panel() -> void:
 
 	# Hint line — small, sits under the title so the user knows what to do.
 	var hint := Label.new()
-	hint.text = "Click a binding, then press a key or mouse button. Esc to cancel."
+	hint.text = "Click a binding, then press its new input. Esc cancels."
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hint.anchor_left = 0.0
 	hint.anchor_right = 1.0
@@ -127,21 +145,8 @@ func _build_panel() -> void:
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", _ROW_SEPARATION)
 	scroll.add_child(vbox)
-
-	for entry: Array in InputActions.GAMEPLAY_ACTIONS:
-		var action: StringName = entry[0]
-		var display: String = entry[1]
-		_add_action_row(vbox, action, display)
-	# Surface debug actions inline only when debug mode is currently on —
-	# we don't want to confuse survival-mode players with rows for F3 / T /
-	# F8 / etc. Once revealed, they're rebindable like any other row, and
-	# the rebind scanner already considers them for conflict detection.
-	if Game.debug_enabled:
-		_add_section_header(vbox, "Debug")
-		for entry: Array in InputActions.DEBUG_ACTIONS:
-			var action: StringName = entry[0]
-			var display: String = entry[1]
-			_add_action_row(vbox, action, display)
+	_rows_vbox = vbox
+	_rebuild_rows()
 
 	# Bottom button bar: Reset / Save / Cancel side-by-side. Row is sized
 	# wider than the sum of buttons + separation so HBoxContainer's
@@ -185,7 +190,43 @@ func _build_panel() -> void:
 	button_row.add_child(cancel_btn)
 
 
-func _add_action_row(parent: VBoxContainer, action: StringName, display_name: String) -> void:
+# (Re)build the scrollable row list. Gamepad section renders FIRST —
+# when a pad is connected it's the binding set the player is actively
+# using, so it gets the visibility — followed by keyboard/mouse, then
+# debug rows when debug mode is on.
+func _rebuild_rows() -> void:
+	if _rows_vbox == null:
+		return
+	for child in _rows_vbox.get_children():
+		child.queue_free()
+	_rows.clear()
+	_pad_rows.clear()
+	if not Input.get_connected_joypads().is_empty():
+		_add_section_header(_rows_vbox, "Gamepad")
+		for entry: Array in InputActions.GAMEPLAY_ACTIONS:
+			_add_action_row(_rows_vbox, entry[0], entry[1], true)
+		_add_section_header(_rows_vbox, "Keyboard & Mouse")
+	for entry: Array in InputActions.GAMEPLAY_ACTIONS:
+		_add_action_row(_rows_vbox, entry[0], entry[1], false)
+	# Surface debug actions inline only when debug mode is currently on —
+	# we don't want to confuse survival-mode players with rows for F3 / T /
+	# F8 / etc. Once revealed, they're rebindable like any other row, and
+	# the rebind scanner already considers them for conflict detection.
+	if Game.debug_enabled:
+		_add_section_header(_rows_vbox, "Debug")
+		for entry: Array in InputActions.DEBUG_ACTIONS:
+			_add_action_row(_rows_vbox, entry[0], entry[1], false)
+
+
+func _on_joy_connection_changed(_device: int, _connected: bool) -> void:
+	if _listening_action != &"":
+		_cancel_listen()
+	_rebuild_rows()
+
+
+func _add_action_row(
+	parent: VBoxContainer, action: StringName, display_name: String, pad: bool = false
+) -> void:
 	var row := HBoxContainer.new()
 	row.custom_minimum_size = Vector2(0, _ROW_HEIGHT)
 	row.add_theme_constant_override("separation", 16)
@@ -204,7 +245,7 @@ func _add_action_row(parent: VBoxContainer, action: StringName, display_name: St
 	row.add_child(lbl)
 
 	var btn := Button.new()
-	btn.text = InputActions.event_display_name(InputActions.primary_event(action))
+	btn.text = InputActions.event_display_name(_channel_event(action, pad))
 	btn.custom_minimum_size = Vector2(280, _ROW_HEIGHT)
 	btn.add_theme_font_size_override("font_size", 26)
 	btn.add_theme_color_override("font_color", Color.WHITE)
@@ -222,9 +263,12 @@ func _add_action_row(parent: VBoxContainer, action: StringName, display_name: St
 		"pressed", _make_button_panel(Color(0x4A / 255.0, 0x4C / 255.0, 0x58 / 255.0))
 	)
 	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	btn.pressed.connect(_on_rebind_pressed.bind(action, btn))
+	btn.pressed.connect(_on_rebind_pressed.bind(action, btn, pad))
 	row.add_child(btn)
-	_rows[action] = btn
+	if pad:
+		_pad_rows[action] = btn
+	else:
+		_rows[action] = btn
 
 
 # Lightweight divider label so the Debug rows read as a separate group
@@ -259,14 +303,15 @@ static func _make_button_panel(fill: Color) -> StyleBoxFlat:
 # --- Rebind capture ---
 
 
-func _on_rebind_pressed(action: StringName, btn: Button) -> void:
+func _on_rebind_pressed(action: StringName, btn: Button, pad: bool = false) -> void:
 	# Already listening for a different action? Cancel that one first so
 	# we don't end up with two armed buttons + ambiguous _input routing.
 	if _listening_action != &"":
 		_cancel_listen()
 	_listening_action = action
 	_listening_button = btn
-	btn.text = "> press a key <"
+	_listening_pad = pad
+	btn.text = "> press a button <" if pad else "> press a key <"
 	SFX.play_click()
 
 
@@ -282,27 +327,58 @@ func _input(event: InputEvent) -> void:
 	# Only react to "press" frames — releases (key-up / button-up) would
 	# fire twice per binding attempt otherwise.
 	if event is InputEventKey:
-		var key_event: InputEventKey = event
-		if not key_event.pressed or key_event.echo:
-			return
-		# ESC = cancel, regardless of whether the user is currently rebinding
-		# the pause action. Refusing to bind ESC is one less footgun.
-		if key_event.physical_keycode == KEY_ESCAPE:
-			_cancel_listen()
-			get_viewport().set_input_as_handled()
-			return
-		_commit_binding(key_event)
+		_capture_key_event(event as InputEventKey)
+	elif event is InputEventMouseButton:
+		_capture_mouse_event(event as InputEventMouseButton)
+	elif _listening_pad:
+		_capture_pad_event(event)
+
+
+func _capture_key_event(key_event: InputEventKey) -> void:
+	if not key_event.pressed or key_event.echo:
+		return
+	# ESC = cancel, regardless of whether the user is currently rebinding
+	# the pause action. Refusing to bind ESC is one less footgun.
+	if key_event.physical_keycode == KEY_ESCAPE:
+		_cancel_listen()
 		get_viewport().set_input_as_handled()
 		return
-	if event is InputEventMouseButton:
-		var mb: InputEventMouseButton = event
-		if not mb.pressed:
-			# Swallow the release that pairs with the press we already
-			# captured — otherwise it would propagate to the GUI and (e.g.)
-			# trigger the rebind button under the cursor.
-			get_viewport().set_input_as_handled()
+	if _listening_pad:
+		return  # pad rows only take pad input; keys pass through
+	_commit_binding(key_event)
+	get_viewport().set_input_as_handled()
+
+
+func _capture_mouse_event(mb: InputEventMouseButton) -> void:
+	if _listening_pad:
+		return  # let the GUI process clicks (e.g. arming another row)
+	if not mb.pressed:
+		# Swallow the release that pairs with the press we already
+		# captured — otherwise it would propagate to the GUI and (e.g.)
+		# trigger the rebind button under the cursor.
+		get_viewport().set_input_as_handled()
+		return
+	_commit_binding(mb)
+	get_viewport().set_input_as_handled()
+
+
+# Pad-row capture: buttons and triggers only. Stick axes (0-3) must
+# never capture — resting drift would self-bind the row the instant it
+# armed (Bedrock fixes the sticks for the same reason).
+func _capture_pad_event(event: InputEvent) -> void:
+	if event is InputEventJoypadButton:
+		var jb: InputEventJoypadButton = event
+		if not jb.pressed:
 			return
-		_commit_binding(mb)
+		_commit_binding(jb)
+		get_viewport().set_input_as_handled()
+		return
+	if event is InputEventJoypadMotion:
+		var jm: InputEventJoypadMotion = event
+		var trigger: bool = jm.axis == JOY_AXIS_TRIGGER_LEFT or jm.axis == JOY_AXIS_TRIGGER_RIGHT
+		if not trigger or jm.axis_value < 0.6:
+			return
+		_commit_binding(jm)
 		get_viewport().set_input_as_handled()
 
 
@@ -318,28 +394,47 @@ func _commit_binding(event: InputEvent) -> void:
 		var m := InputEventMouseButton.new()
 		m.button_index = (event as InputEventMouseButton).button_index
 		clean = m
+	elif event is InputEventJoypadButton:
+		var jb := InputEventJoypadButton.new()
+		jb.button_index = (event as InputEventJoypadButton).button_index
+		clean = jb
+	elif event is InputEventJoypadMotion:
+		var jm := InputEventJoypadMotion.new()
+		jm.axis = (event as InputEventJoypadMotion).axis
+		jm.axis_value = 1.0
+		clean = jm
 	if clean == null:
 		_cancel_listen()
 		return
 	var displaced: Array[StringName] = InputActions.rebind_action(_listening_action, clean)
-	_pending_events[_listening_action] = clean
+	var pending: Dictionary = _pending_pad_events if _listening_pad else _pending_events
+	pending[_listening_action] = clean
 	# Any actions cleared as collateral get an explicit NONE entry so Save
 	# writes "" for them too (otherwise the next boot would silently
-	# restore the defaults we just displaced).
+	# restore the defaults we just displaced). rebind_action's conflict
+	# matching is type-segregated, so pad rebinds displace pad bindings
+	# and key rebinds displace key/mouse — same channel as `pending`.
 	for d in displaced:
-		_pending_events[d] = null
+		pending[d] = null
 	_listening_action = &""
 	_listening_button = null
+	_listening_pad = false
 	_refresh_all_rows()
 
 
 func _cancel_listen() -> void:
 	if _listening_button != null and is_instance_valid(_listening_button):
 		_listening_button.text = InputActions.event_display_name(
-			InputActions.primary_event(_listening_action)
+			_channel_event(_listening_action, _listening_pad)
 		)
 	_listening_action = &""
 	_listening_button = null
+	_listening_pad = false
+
+
+# The label source for a row: first key/mouse event or first pad event.
+func _channel_event(action: StringName, pad: bool) -> InputEvent:
+	return InputActions.primary_pad_event(action) if pad else InputActions.primary_event(action)
 
 
 # --- Snapshot / save / cancel ---
@@ -358,19 +453,25 @@ func _visible_actions() -> Array:
 
 
 func _snapshot_baseline() -> void:
-	# Capture the InputMap state at open so Cancel can restore it.
+	# Capture the InputMap state at open so Cancel can restore it. The pad
+	# channel snapshots regardless of whether a pad is currently connected
+	# — bindings exist independent of hardware, and a pad may connect
+	# while the screen is open.
 	for entry: Array in _visible_actions():
 		var action: StringName = entry[0]
-		_baseline[action] = InputActions.primary_event(action)
+		_baseline[action] = InputActions.channel_events(action, false)
+		_baseline_pad[action] = InputActions.channel_events(action, true)
 
 
 func _refresh_all_rows() -> void:
 	for entry: Array in _visible_actions():
 		var action: StringName = entry[0]
 		var btn: Button = _rows.get(action)
-		if btn == null:
-			continue
-		btn.text = InputActions.event_display_name(InputActions.primary_event(action))
+		if btn != null:
+			btn.text = InputActions.event_display_name(InputActions.primary_event(action))
+		var pad_btn: Button = _pad_rows.get(action)
+		if pad_btn != null:
+			pad_btn.text = InputActions.event_display_name(InputActions.primary_pad_event(action))
 
 
 func _on_save_pressed() -> void:
@@ -380,23 +481,39 @@ func _on_save_pressed() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(_SETTINGS_PATH)
 	for action: StringName in _pending_events.keys():
-		var ev: InputEvent = _pending_events[action]
-		cfg.set_value("controls", action, InputActions.encode_event(ev))
+		_write_pending(cfg, String(action), _pending_events[action])
+	for action: StringName in _pending_pad_events.keys():
+		_write_pending(cfg, String(action) + InputActions.PAD_SUFFIX, _pending_pad_events[action])
 	cfg.save(_SETTINGS_PATH)
 	SFX.play_click()
 	queue_free()
 
 
+# One pending entry -> settings.cfg. InputEvent/null encode in place;
+# the reset marker ERASES the key so next boot falls through to the
+# full defaults (preserving multi-bound actions).
+func _write_pending(cfg: ConfigFile, key: String, pending) -> void:
+	if pending is String and pending == _RESET_MARKER:
+		if cfg.has_section_key("controls", key):
+			cfg.erase_section_key("controls", key)
+		return
+	cfg.set_value("controls", key, InputActions.encode_event(pending))
+
+
 func _on_cancel_pressed() -> void:
 	# Roll the live InputMap back to the baseline. Without this, any
 	# rebinds the user did would persist for this session even though
-	# they cancelled.
+	# they cancelled. Each channel restores independently — a blanket
+	# action_erase_events here used to strip pad bindings that the
+	# baseline (keyboard primary only) never restored.
 	for entry: Array in _visible_actions():
 		var action: StringName = entry[0]
-		InputMap.action_erase_events(action)
-		var ev: InputEvent = _baseline[action]
-		if ev != null:
+		InputActions.erase_key_mouse_events(action)
+		for ev: InputEvent in _baseline.get(action, []):
 			InputMap.action_add_event(action, ev)
+		InputActions.erase_joypad_events(action)
+		for pad_ev: InputEvent in _baseline_pad.get(action, []):
+			InputMap.action_add_event(action, pad_ev)
 	SFX.play_click()
 	queue_free()
 
@@ -422,8 +539,10 @@ func _on_reset_pressed() -> void:
 	# writes them (otherwise Save would skip them and the on-disk cfg
 	# would keep stale entries from a previous session).
 	_pending_events.clear()
+	_pending_pad_events.clear()
 	for entry: Array in _visible_actions():
 		var action: StringName = entry[0]
-		_pending_events[action] = InputActions.primary_event(action)
+		_pending_events[action] = _RESET_MARKER
+		_pending_pad_events[action] = _RESET_MARKER
 	_refresh_all_rows()
 	SFX.play_click()

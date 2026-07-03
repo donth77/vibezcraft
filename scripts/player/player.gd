@@ -20,6 +20,10 @@ const GRAVITY: float = -32.0
 # without jumping. Enables walking up stairs (0.5-block steps).
 const STEP_HEIGHT: float = 0.6
 const MOUSE_SENSITIVITY: float = 0.002
+# Right-stick look rate (radians/second at full deflection) and stick
+# deadzone. See _poll_pad_look.
+const PAD_LOOK_SPEED: float = 2.8
+const PAD_LOOK_DEADZONE: float = 0.18
 const PITCH_LIMIT_DEG: float = 89.0
 # Vanilla ladder climbing (hf.java / EntityLiving.e()). Climb speed
 # 0.1175 blocks/tick × 20 TPS = 2.35 b/s. Max descent 0.15 b/tick = 3 b/s.
@@ -1746,6 +1750,28 @@ func _process(_delta: float) -> void:
 	_update_camera_collision()
 	_tick_held_bow_stage()
 	_tick_sleep(_delta)
+	_poll_pad_look(_delta)
+
+
+# Right-stick camera look — polled per rendered frame (matching the
+# mouse/touch cadence) because continuous rotation isn't an InputMap
+# shape. Deadzone + quadratic response: precise near center, fast at
+# full deflection. Every other pad input rides the InputMap layer (see
+# InputActions._register_gamepad_defaults).
+func _poll_pad_look(delta: float) -> void:
+	var pads: Array[int] = Input.get_connected_joypads()
+	if pads.is_empty():
+		return
+	if Game.is_loading or _any_ui_screen_open():
+		return
+	var stick := Vector2(
+		Input.get_joy_axis(pads[0], JOY_AXIS_RIGHT_X), Input.get_joy_axis(pads[0], JOY_AXIS_RIGHT_Y)
+	)
+	var deflection: float = stick.length()
+	if deflection < PAD_LOOK_DEADZONE:
+		return
+	var t: float = (minf(deflection, 1.0) - PAD_LOOK_DEADZONE) / (1.0 - PAD_LOOK_DEADZONE)
+	apply_look_delta(stick.normalized() * t * t * PAD_LOOK_SPEED * delta)
 
 
 # Drive the Beta-style sleep state machine. Runs every frame so the

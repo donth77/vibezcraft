@@ -16,6 +16,12 @@ extends RefCounted
 # Order matters — drives the row order in controls_menu.gd. Debug-only
 # actions live in DEBUG_ACTIONS below and only render in the menu while
 # Game.debug_enabled is true.
+# Settings key suffix for the gamepad channel: [controls] stores the
+# key/mouse override under "<action>" and the pad override under
+# "<action>__pad" — two independent channels so rebinding one never
+# clobbers the other on disk.
+const PAD_SUFFIX: String = "__pad"
+
 const GAMEPLAY_ACTIONS: Array = [
 	["move_forward", "Walk Forward"],
 	["move_back", "Walk Backward"],
@@ -68,6 +74,39 @@ const DEBUG_ACTIONS: Array = [
 
 # Concatenated list — used by the rebind conflict scanner and by
 # apply_saved_overrides so both sets get the same treatment.
+# Gamepad layer — console-MC conventions layered on top of the keyboard
+# defaults; pad and keyboard feed the same actions so they're always
+# interchangeable. Left stick = analog movement through the exact
+# actions Input.get_vector already consumes; triggers follow the
+# console convention (RT mine/attack, LT place/use). Right-stick LOOK
+# is polled in player.gd — continuous rotation isn't an InputMap shape.
+# B doubles as sneak AND dismount (contextual, like Shift on keyboard).
+static func _register_gamepad_defaults() -> void:
+	_add_joy_axis("move_forward", JOY_AXIS_LEFT_Y, -1.0)
+	_add_joy_axis("move_back", JOY_AXIS_LEFT_Y, 1.0)
+	_add_joy_axis("move_left", JOY_AXIS_LEFT_X, -1.0)
+	_add_joy_axis("move_right", JOY_AXIS_LEFT_X, 1.0)
+	_add_joy_button("jump", JOY_BUTTON_A)
+	_add_joy_button("sneak", JOY_BUTTON_B)
+	_add_joy_button("dismount", JOY_BUTTON_B)
+	_add_joy_button("fly_down", JOY_BUTTON_B)
+	# Bedrock: X opens the crafting screen, Y the inventory — for us both
+	# land on the same inventory-with-craft-grid screen, so X mirrors Y
+	# rather than surprising Bedrock muscle memory with a different verb.
+	_add_joy_button("toggle_inventory", JOY_BUTTON_Y)
+	_add_joy_button("toggle_inventory", JOY_BUTTON_X)
+	_add_joy_axis("interact_break", JOY_AXIS_TRIGGER_RIGHT, 1.0)
+	_add_joy_axis("interact_place", JOY_AXIS_TRIGGER_LEFT, 1.0)
+	_add_joy_button("hotbar_prev", JOY_BUTTON_LEFT_SHOULDER)
+	_add_joy_button("hotbar_next", JOY_BUTTON_RIGHT_SHOULDER)
+	_add_joy_button("pause", JOY_BUTTON_START)
+	# D-pad up/down = perspective/drop, matching Bedrock exactly. L3
+	# (sprint) and R3 (fly-down-slow) stay unbound — Alpha has neither
+	# mechanic, so their Bedrock functions don't exist here.
+	_add_joy_button("toggle_perspective", JOY_BUTTON_DPAD_UP)
+	_add_joy_button("drop_selected", JOY_BUTTON_DPAD_DOWN)
+
+
 static func all_actions() -> Array:
 	var combined: Array = []
 	combined.append_array(GAMEPLAY_ACTIONS)
@@ -161,6 +200,7 @@ static func register_defaults() -> void:
 	# spelunking through caves. F2 is unused on macOS by default
 	# (unlike F9/F10/F11 which Mission Control eats).
 	_add_key("debug_find_dungeon", KEY_F2)
+	_register_gamepad_defaults()
 
 
 static func _add_key(action: StringName, keycode: Key) -> void:
@@ -191,6 +231,27 @@ static func _add_mouse(action: StringName, button: MouseButton) -> void:
 	InputMap.action_add_event(action, event)
 
 
+static func _add_joy_button(action: StringName, button: JoyButton) -> void:
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+	var ev := InputEventJoypadButton.new()
+	ev.button_index = button
+	# Idempotent like _add_key — register_defaults re-runs on Reset, and
+	# unguarded appends would stack duplicate pad events each time.
+	if not InputMap.action_has_event(action, ev):
+		InputMap.action_add_event(action, ev)
+
+
+static func _add_joy_axis(action: StringName, axis: JoyAxis, value: float) -> void:
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+	var ev := InputEventJoypadMotion.new()
+	ev.axis = axis
+	ev.axis_value = value
+	if not InputMap.action_has_event(action, ev):
+		InputMap.action_add_event(action, ev)
+
+
 # --- Rebinding API (controls_menu.gd) ---
 
 
@@ -207,12 +268,19 @@ static func apply_saved_overrides(cfg: ConfigFile) -> void:
 		# Sentinel keeps un-touched actions on their default bindings —
 		# get_value's own default isn't enough because we need to
 		# distinguish "user cleared to NONE" from "never customized."
-		if encoded == "__unset__":
-			continue
-		InputMap.action_erase_events(action)
-		var ev: InputEvent = _decode_event(encoded)
-		if ev != null:
-			InputMap.action_add_event(action, ev)
+		if encoded != "__unset__":
+			erase_key_mouse_events(action)
+			var ev: InputEvent = _decode_event(encoded)
+			if ev != null:
+				InputMap.action_add_event(action, ev)
+		# Pad channel — stored under "<action>__pad", applied with the
+		# same unset-vs-cleared semantics as the key/mouse channel.
+		var pad_encoded: String = cfg.get_value("controls", action + PAD_SUFFIX, "__unset__")
+		if pad_encoded != "__unset__":
+			erase_joypad_events(action)
+			var pad_ev: InputEvent = _decode_event(pad_encoded)
+			if pad_ev != null:
+				InputMap.action_add_event(action, pad_ev)
 
 
 # Vanilla-style rebind: any other action currently holding this key/button
@@ -239,9 +307,36 @@ static func rebind_action(action: StringName, event: InputEvent) -> Array[String
 	# Replace the target action's events with just this one (we don't expose
 	# secondary bindings in the UI; single-binding-per-action keeps the row
 	# count manageable and matches vanilla MC).
-	InputMap.action_erase_events(action)
+	if is_pad_event(event):
+		erase_joypad_events(action)
+	else:
+		erase_key_mouse_events(action)
 	InputMap.action_add_event(action, event)
 	return displaced
+
+
+# ALL events on one channel of an action — baseline/cancel in the
+# controls menu must restore multi-bound actions (V+F5 perspective,
+# Ctrl/Cmd fly-down, X+Y inventory pad) faithfully, not just the first.
+static func channel_events(action: StringName, pad: bool) -> Array[InputEvent]:
+	var out: Array[InputEvent] = []
+	if not InputMap.has_action(action):
+		return out
+	for ev: InputEvent in InputMap.action_get_events(action):
+		if is_pad_event(ev) == pad:
+			out.append(ev)
+	return out
+
+
+# First PAD event bound to `action` (the gamepad rows' label source),
+# or null when the pad channel is unbound.
+static func primary_pad_event(action: StringName) -> InputEvent:
+	if not InputMap.has_action(action):
+		return null
+	for ev: InputEvent in InputMap.action_get_events(action):
+		if is_pad_event(ev):
+			return ev
+	return null
 
 
 # Return the first event bound to `action`, or null if none. The UI shows
@@ -277,6 +372,46 @@ static func event_display_name(event: InputEvent) -> String:
 				return "Wheel Down"
 			_:
 				return "Mouse %d" % (event as InputEventMouseButton).button_index
+	if event is InputEventJoypadButton:
+		match (event as InputEventJoypadButton).button_index:
+			JOY_BUTTON_A:
+				return "A"
+			JOY_BUTTON_B:
+				return "B"
+			JOY_BUTTON_X:
+				return "X"
+			JOY_BUTTON_Y:
+				return "Y"
+			JOY_BUTTON_LEFT_SHOULDER:
+				return "LB"
+			JOY_BUTTON_RIGHT_SHOULDER:
+				return "RB"
+			JOY_BUTTON_LEFT_STICK:
+				return "L3"
+			JOY_BUTTON_RIGHT_STICK:
+				return "R3"
+			JOY_BUTTON_START:
+				return "Start"
+			JOY_BUTTON_BACK:
+				return "Select"
+			JOY_BUTTON_DPAD_UP:
+				return "D-Pad Up"
+			JOY_BUTTON_DPAD_DOWN:
+				return "D-Pad Down"
+			JOY_BUTTON_DPAD_LEFT:
+				return "D-Pad Left"
+			JOY_BUTTON_DPAD_RIGHT:
+				return "D-Pad Right"
+			_:
+				return "Pad %d" % (event as InputEventJoypadButton).button_index
+	if event is InputEventJoypadMotion:
+		match (event as InputEventJoypadMotion).axis:
+			JOY_AXIS_TRIGGER_LEFT:
+				return "LT"
+			JOY_AXIS_TRIGGER_RIGHT:
+				return "RT"
+			_:
+				return "Axis %d" % (event as InputEventJoypadMotion).axis
 	return "?"
 
 
@@ -284,6 +419,8 @@ static func event_display_name(event: InputEvent) -> String:
 # Format:
 #   "K:<physical_keycode>"   — keyboard
 #   "M:<button_index>"       — mouse
+#   "J:<button_index>"       — gamepad button
+#   "JA:<axis>"              — gamepad trigger axis (LT/RT)
 #   ""                       — cleared / NONE
 static func encode_event(event: InputEvent) -> String:
 	if event == null:
@@ -292,11 +429,37 @@ static func encode_event(event: InputEvent) -> String:
 		return "K:%d" % int((event as InputEventKey).physical_keycode)
 	if event is InputEventMouseButton:
 		return "M:%d" % int((event as InputEventMouseButton).button_index)
+	if event is InputEventJoypadButton:
+		return "J:%d" % int((event as InputEventJoypadButton).button_index)
+	if event is InputEventJoypadMotion:
+		return "JA:%d" % int((event as InputEventJoypadMotion).axis)
 	return ""
 
 
 # Inverse of encode_event. Returns null for the empty / cleared form so
 # callers can tell "user cleared this" apart from "malformed entry."
+# Erase only keyboard/mouse events, preserving the gamepad layer. The
+# rebind UI and saved overrides manage key/mouse bindings exclusively —
+# without this, applying a saved rebind (or rebinding in the menu)
+# stripped the pad defaults from that action.
+# Mirror of erase_key_mouse_events for the pad channel: pad rebinds
+# and pad overrides must never disturb keyboard/mouse bindings.
+static func erase_joypad_events(action: StringName) -> void:
+	for ev: InputEvent in InputMap.action_get_events(action):
+		if ev is InputEventJoypadButton or ev is InputEventJoypadMotion:
+			InputMap.action_erase_event(action, ev)
+
+
+static func is_pad_event(event: InputEvent) -> bool:
+	return event is InputEventJoypadButton or event is InputEventJoypadMotion
+
+
+static func erase_key_mouse_events(action: StringName) -> void:
+	for ev: InputEvent in InputMap.action_get_events(action):
+		if ev is InputEventKey or ev is InputEventMouseButton:
+			InputMap.action_erase_event(action, ev)
+
+
 static func _decode_event(encoded: String) -> InputEvent:
 	if encoded == "":
 		return null
@@ -307,6 +470,15 @@ static func _decode_event(encoded: String) -> InputEvent:
 	if encoded.begins_with("M:"):
 		var ev := InputEventMouseButton.new()
 		ev.button_index = int(encoded.substr(2))
+		return ev
+	if encoded.begins_with("JA:"):
+		var ev := InputEventJoypadMotion.new()
+		ev.axis = int(encoded.substr(3)) as JoyAxis
+		ev.axis_value = 1.0
+		return ev
+	if encoded.begins_with("J:"):
+		var ev := InputEventJoypadButton.new()
+		ev.button_index = int(encoded.substr(2)) as JoyButton
 		return ev
 	return null
 
@@ -324,4 +496,12 @@ static func _events_match(a: InputEvent, b: InputEvent) -> bool:
 		return (
 			(a as InputEventMouseButton).button_index == (b as InputEventMouseButton).button_index
 		)
+	if a is InputEventJoypadButton and b is InputEventJoypadButton:
+		return (
+			(a as InputEventJoypadButton).button_index == (b as InputEventJoypadButton).button_index
+		)
+	if a is InputEventJoypadMotion and b is InputEventJoypadMotion:
+		var ma := a as InputEventJoypadMotion
+		var mb := b as InputEventJoypadMotion
+		return ma.axis == mb.axis and signf(ma.axis_value) == signf(mb.axis_value)
 	return false

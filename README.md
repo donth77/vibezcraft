@@ -79,6 +79,25 @@ godot --path . main.tscn               # run main scene directly
 
 All gameplay actions are configurable in **Main Menu → Settings → Controls** (or in-game **Pause → Options → Controls**). The list below is the default mapping; click any binding in the controls screen and press a key or mouse button to rebind. Overrides persist to `user://settings.cfg`.
 
+### Gamepad
+
+Controllers work on desktop and in the browser (press any button once so the browser exposes the pad). Bindings mirror Bedrock Edition's default layout and coexist with keyboard/mouse — both stay live:
+
+| Control | Binding |
+|---|---|
+| Move / Look | Left stick / Right stick |
+| Jump / Fly up | A (Cross) |
+| Sneak / Dismount / Fly down | B (Circle) |
+| Attack / Destroy | Right trigger |
+| Place / Use | Left trigger |
+| Hotbar cycle | LB / RB |
+| Open inventory | Y or X (Triangle / Square) |
+| Toggle perspective | D-pad up |
+| Drop item | D-pad down |
+| Pause | Start / Menu |
+
+L3 (sprint) and R3 (slow-descend) are unbound — Alpha predates both mechanics. Menus and inventory screens remain pointer-driven (mouse on desktop, touch on mobile); pad bindings are fixed defaults (the rebind screen manages keyboard/mouse).
+
 ### Creative & Debug shortcuts
 
 Creative is its own user-facing mode — no debug-toggle required. Debug mode adds a stats panel + tool-tuner / lighting / scout shortcuts, and shows debug rows in the controls screen.
