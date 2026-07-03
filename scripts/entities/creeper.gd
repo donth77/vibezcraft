@@ -272,10 +272,15 @@ func _build_collision_shape() -> void:
 # `_visual_root` Node3D so the fuse-pulse scale can deform the whole
 # rig as one unit while keeping the underlying CollisionShape3D fixed.
 func _build_model() -> void:
-	# Shared cached material — see MobBase.get_shared_material. Drops
-	# per-spawn _ready cost ~3x by reusing one StandardMaterial3D +
-	# Texture2D across every creeper.
-	var mat: StandardMaterial3D = MobBase.get_shared_material(_CREEPER_TEXTURE_PATH, false)
+	# PRIVATE duplicate of the shared species material. The fuse flash
+	# animates albedo_color per frame — writing that on the shared
+	# instance made every creeper in the world flash white when one was
+	# primed. The texture object is still shared (the duplicate holds a
+	# reference, not a copy), so the per-spawn cost stays a cheap
+	# material clone. See also _owns_brightness_materials() below.
+	var mat: StandardMaterial3D = (
+		MobBase.get_shared_material(_CREEPER_TEXTURE_PATH, false).duplicate() as StandardMaterial3D
+	)
 	_all_materials.append(mat)
 	_visual_root = Node3D.new()
 	add_child(_visual_root)
@@ -776,17 +781,27 @@ func _apply_fuse_flash(f3_raw: float) -> void:
 # Modulates every cached material's albedo_color toward bright white
 # by `amount` (0 = pure texture under current world brightness, 1 =
 # doubled brightness). Called from `_apply_fuse_flash` per render
-# frame. Reads `_last_lit_brightness` from mob_base so the inert path
-# preserves the day-night dim instead of overwriting it with pure
-# white (which was leaving creepers visibly lit at night).
+# frame. Reads current_world_brightness() from mob_base so the inert
+# path preserves the day-night dim instead of overwriting it with pure
+# white (which was leaving creepers visibly lit at night). Safe to
+# mutate: _all_materials holds this creeper's PRIVATE duplicates.
 func _set_flash_tint(amount: float) -> void:
-	var b: float = _last_lit_brightness if _last_lit_brightness >= 0.0 else 1.0
+	var b: float = current_world_brightness()
 	var base: Color = Color(b, b, b, 1.0)
 	var bright: Color = Color(2.0, 2.0, 2.0, 1.0)
 	var c: Color = base.lerp(bright, amount)
 	for mat: StandardMaterial3D in _all_materials:
 		if mat != null:
 			mat.albedo_color = c
+
+
+# Creeper animates its own (private) materials via the fuse flash —
+# opt out of MobBase's shared-variant brightness swap so the two
+# systems don't fight over material_override. Day/night dim still
+# applies: the inert flash path multiplies current_world_brightness()
+# into albedo every frame.
+func _owns_brightness_materials() -> bool:
+	return true
 
 
 func _play_step() -> void:

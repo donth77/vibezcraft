@@ -71,6 +71,11 @@ const _HURT_FLASH_SEC: float = 0.3
 const _DEATH_DURATION: float = 1.0
 const _DEATH_TILT_ANGLE: float = -PI * 0.5  # 90° fall to left (vanilla)
 
+# Brightness quantization for the tinted material variants — the
+# sampler emits 16 discrete LUT levels scaled by time-of-day; 32
+# buckets keeps every step distinct while bounding the variant cache.
+const _BRIGHTNESS_BUCKETS: int = 32
+
 # Knockback magnitudes when hit. Vanilla applies `xz × 0.4, y × 0.4` to
 # the entity's velocity (scaled by attacker's knockback enchant — we
 # have no enchants, so flat values).
@@ -253,6 +258,17 @@ static var _cached_player_node: Node3D = null
 # any visual / state-reset risk (materials are immutable per species).
 static var _shared_materials: Dictionary = {}
 
+# Brightness-tinted variants of mob materials, keyed base material →
+# {bucket: StandardMaterial3D}. World brightness is per-MOB state, so
+# it must never be written onto a shared material — doing so made every
+# pig/chicken flip to whichever herd member ticked last (visible as
+# random lighting pops on mobs every few seconds). Each (material,
+# brightness) pair gets ONE cached variant shared by every mob at that
+# light level, preserving the draw batching the shared cache exists
+# for — and restoring the "materials are immutable per species"
+# invariant the cache was designed around.
+static var _brightness_variants: Dictionary = {}
+
 # Per-mob-class shape caches. Every chicken's body capsule has
 # identical (radius, height); every pig's head box has identical size.
 # Sharing one Shape3D resource across all instances of a class saves
@@ -281,10 +297,10 @@ var _last_damage_amount: int = 0
 var _hurt_flash_remaining: float = 0.0
 var _chunk_manager: Node
 var _hurt_mat_overrides: Array = []  # [(MeshInstance3D, original_override)] pairs
-# Cached world-brightness from EntityLighting.sample_brightness. -1
-# forces the first per-frame material write; later frames skip if the
-# delta is < 0.005 to avoid GPU uniform churn on a stationary mob.
-var _last_lit_brightness: float = -1.0
+# Cached brightness bucket from _tick_world_brightness. -1 forces the
+# first material assignment; later frames skip while the mob stays in
+# the same bucket, so a stationary mob costs one int compare per frame.
+var _last_lit_bucket: int = -1
 # Counts up every AI tick; on idle-SFX hit, resets to
 # `-_IDLE_SFX_TALK_INTERVAL` for a mandatory cooldown. See
 # `roll_idle_sfx_tick` for the vanilla `EntityLiving.bs` math.
@@ -420,6 +436,11 @@ static func get_shared_material(
 	if alpha_scissor:
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 		mat.alpha_scissor_threshold = 0.5
+	# Marks the material as species-shared for the brightness system:
+	# shared instances stay immutable and dim via cached variants, while
+	# unmarked per-mob materials are tinted in place (see
+	# _tick_world_brightness).
+	mat.set_meta("species_shared", true)
 	_shared_materials[key] = mat
 	return mat
 
@@ -471,6 +492,11 @@ static func refresh_for_pack() -> void:
 		var original_path: String = key.substr(0, sep)
 		var resolved: String = _resolve_pack_mob_path(original_path)
 		mat.albedo_texture = load(resolved) as Texture2D
+	# Brightness variants hold their own albedo_texture reference, so
+	# they'd keep the old pack's art — drop the cache and let post-swap
+	# ticks rebuild variants from the refreshed bases. (Pack swaps run
+	# from the main menu, where no live mob holds a variant.)
+	_brightness_variants.clear()
 
 
 func _on_gated_despawn_check() -> void:
@@ -1407,14 +1433,16 @@ func _clear_hurt_flash() -> void:
 
 # Vanilla `EntityRenderer.setBrightness` — entity colors are texture ×
 # world.getBrightnessForRender(cell). Mirror that by sampling the cell
-# at the mob's body center every frame and pushing the result into
-# every StandardMaterial3D.albedo_color descendant. Same EntityLighting
-# helper the player + boat + cart use (0.25 floor, 0.05 → 1.0 LUT) so
-# mobs match terrain brightness as time of day passes.
+# at the mob's body center every frame and, when the quantized level
+# changes, swapping every mesh onto the cached brightness VARIANT of
+# its material (see _brightness_variant). Materials are never mutated:
+# most are shared across the whole species, and writing per-mob state
+# into a shared instance made every herd member flip to the last
+# ticker's light level.
 #
 # Skipped during hurt flash — the red flash material temporarily owns
-# every mesh's material_override, and tinting it grey would visibly
-# kill the flash. Resumes on the next frame after _clear_hurt_flash.
+# every mesh's material_override, and swapping it would visibly kill
+# the flash. Resumes on the next frame after _clear_hurt_flash.
 func _tick_world_brightness() -> void:
 	if _chunk_manager == null:
 		return
@@ -1426,30 +1454,83 @@ func _tick_world_brightness() -> void:
 		int(floor(global_position.z))
 	)
 	var lit: float = EntityLighting.sample_brightness(_chunk_manager, cell)
-	if absf(lit - _last_lit_brightness) < 0.005:
-		return  # imperceptible drift — skip the per-mesh material write
-	_last_lit_brightness = lit
+	var bucket: int = clampi(
+		int(round(lit * float(_BRIGHTNESS_BUCKETS - 1))), 0, _BRIGHTNESS_BUCKETS - 1
+	)
+	if bucket == _last_lit_bucket:
+		return
+	_last_lit_bucket = bucket
+	# Species that animate their own materials (creeper fuse flash)
+	# consume current_world_brightness() directly instead.
+	if _owns_brightness_materials():
+		return
+	var lit_q: float = float(bucket) / float(_BRIGHTNESS_BUCKETS - 1)
 	for mi in _find_mesh_instances(self):
 		var mat := mi.material_override as StandardMaterial3D
 		if mat == null:
 			continue
-		# Cache the original (pre-tint) albedo the first time we touch
-		# this material — otherwise we'd lose it after the first call
-		# replaces albedo_color with the tint. Stashed via set_meta on
-		# the material itself so each mob's materials stay independent.
-		# Without this, solid-color meshes (chicken legs, etc.) had
-		# their carefully-chosen color overwritten to grey every frame
-		# and rendered as washed-out white in daylight.
-		var original: Color
-		if mat.has_meta("original_albedo"):
-			original = mat.get_meta("original_albedo")
+		var base: StandardMaterial3D = mat
+		if mat.has_meta("brightness_base"):
+			base = mat.get_meta("brightness_base") as StandardMaterial3D
+		if base.has_meta("species_shared"):
+			mi.material_override = _brightness_variant(base, bucket)
 		else:
-			original = mat.albedo_color
-			mat.set_meta("original_albedo", original)
-		# Multiply so textured mats (white texel * lit = lit grey, as
-		# before) and solid-color mats (orange-yellow * lit = dimmer
-		# orange-yellow) both dim correctly with time of day.
-		mat.albedo_color = Color(original.r * lit, original.g * lit, original.b * lit, original.a)
+			# Per-mob private material (chicken legs, saddles, fire
+			# billboards) — tint in place. Only this mob holds it, and
+			# caching variants keyed by short-lived materials would pin
+			# them in the static dict forever as mobs despawn.
+			_tint_private_material(base, lit_q)
+
+
+# One brightness-tinted duplicate per (base material, bucket), shared
+# by every mob sitting at that light level. Full brightness returns the
+# base itself, so daylight mobs keep the pristine shared material (and
+# the shader-warmup pre-compile stays valid). The base is never
+# mutated; variants multiply its albedo so textured mats dim to grey
+# and solid-color mats (chicken legs) dim in their own hue.
+static func _brightness_variant(base: StandardMaterial3D, bucket: int) -> StandardMaterial3D:
+	if bucket >= _BRIGHTNESS_BUCKETS - 1:
+		return base
+	var per_base: Dictionary = _brightness_variants.get_or_add(base, {})
+	var cached: StandardMaterial3D = per_base.get(bucket) as StandardMaterial3D
+	if cached != null:
+		return cached
+	var lit: float = float(bucket) / float(_BRIGHTNESS_BUCKETS - 1)
+	var dup := base.duplicate() as StandardMaterial3D
+	var orig: Color = base.albedo_color
+	dup.albedo_color = Color(orig.r * lit, orig.g * lit, orig.b * lit, orig.a)
+	dup.set_meta("brightness_base", base)
+	per_base[bucket] = dup
+	return dup
+
+
+# In-place tint for a mob-private material — the pre-variant behavior,
+# kept for materials only one mob holds. Stashes the pristine albedo in
+# meta on first touch so repeated tints multiply the ORIGINAL color,
+# not the previous tint.
+static func _tint_private_material(mat: StandardMaterial3D, lit: float) -> void:
+	var original: Color
+	if mat.has_meta("original_albedo"):
+		original = mat.get_meta("original_albedo")
+	else:
+		original = mat.albedo_color
+		mat.set_meta("original_albedo", original)
+	mat.albedo_color = Color(original.r * lit, original.g * lit, original.b * lit, original.a)
+
+
+# Current sampled world brightness as the 0..1 tint factor the variant
+# system applies. -1 bucket (no sample yet) reads as full bright.
+func current_world_brightness() -> float:
+	if _last_lit_bucket < 0:
+		return 1.0
+	return float(_last_lit_bucket) / float(_BRIGHTNESS_BUCKETS - 1)
+
+
+# Species override hook — return true when the subclass animates its
+# mesh materials itself (creeper fuse flash) and therefore needs
+# per-instance materials that the variant swap must leave alone.
+func _owns_brightness_materials() -> bool:
+	return false
 
 
 # Recursive child walk — collects every MeshInstance3D under `node`.
