@@ -3,15 +3,15 @@ extends "res://scripts/entities/mob_base.gd"
 
 # Vanilla Alpha 1.2.6 EntitySpider (`be.java`). Second hostile mob in
 # the clone. Light-gated targeting (hostile in darkness, neutral in
-# day), 0-2 string drops, melee with an Alpha-faithful pounce instead
-# of the Beta wall-climb (vanilla be.java pre-Beta has no `bz`
-# climbable-block flag, just the leap toward the target in attackEntity).
+# day), 0-2 string drops, melee with the vanilla pounce.
 #
 # Differences vs vanilla Alpha:
+#   * Beta 1.5 wall-climb deliberately added (explicit carve-in on the
+#     Alpha baseline — be.java has no climb; it arrived in Beta 1.5 via
+#     EntitySpider.isOnLadder = isCollidedHorizontally and the ladder
+#     branch of EntityLiving.moveEntityWithHeading). See _CLIMB_SPEED.
 #   * No daylight burn (zombies have it via lk.java::B; vanilla spider
 #     stays neutral in light but doesn't ignite — matches our impl).
-#   * Pathfinding uses the existing voxel A*; spider doesn't climb
-#     walls in Alpha so the standard path is fine.
 #   * Pounce kick strength halved from vanilla's per-tick × 20 scaling
 #     because vanilla's 8 m/s vertical sends the spider out of frame.
 #
@@ -174,21 +174,19 @@ const _AI_PATHFIND_RADIUS: float = 24.0
 const _AI_PATHFIND_MAX_ITERS: int = 300
 const _AI_ARRIVE_DIST: float = 0.7
 
-# Beta wall-climb. Vanilla `EntitySpider.onUpdate()` from Beta 1.5+ sets
-# the spider's `isOnLadder` flag to `isCollidedHorizontally`, and
-# `EntityLiving.moveEntityWithHeading` then writes `motY = 0.2/tick`
-# (= 4 m/sec) while on a ladder + horizontally collided. The effect is
-# a steady vertical climb up any wall the spider runs into. The slow
-# falling cap (motY clamped at -0.15/tick = -3 m/s) is the "sticky to
-# wall" portion. Alpha 1.2.6's `be.java` doesn't have wall climb yet —
-# this is one of the Beta physics behaviors our `feedback_alpha_clone
-# _scope` carve-out explicitly pulls in.
-const _AI_WALL_CLIMB_VELOCITY: float = 4.0
-const _AI_WALL_FALL_CAP: float = -3.0
-# Phys ticks at 60 Hz to keep applying the climb after the last
-# horizontal collision — covers ~2 AI ticks (50 ms × 2 = 100 ms) so
-# the spider keeps moving up while the AI re-pushes into the wall.
-const _WALL_CLIMB_PERSIST_TICKS: int = 6
+# Beta 1.5 wall-climb (mc-dev): EntitySpider.isOnLadder() returns the
+# horizontal-collision flag, and EntityLiving.moveEntityWithHeading
+# writes motY = 0.2/tick (= 4 m/s) AFTER the move whenever both hold —
+# so the climb velocity feeds the NEXT tick's move. fallDistance resets
+# while "on the ladder": a failed climb banks no fall damage. The
+# -0.15/tick descent cap is omitted — for spiders the climb write fires
+# under exactly the same flag, so the cap is unreachable in practice.
+const _CLIMB_SPEED: float = 4.0
+# Physics runs at 60 Hz but the AI re-applies the wall push at 20 Hz,
+# and the voxel collider zeroes the clipped horizontal velocity every
+# frame — the collision flag only latches on frames right after an AI
+# push. Hold the climb for ~2 AI ticks to bridge the gap.
+const _CLIMB_HOLD_FRAMES: int = 6
 
 # Walk-anim params — leg pairs sway around their pivot in opposing
 # phase pairs. Driven by walk distance; amplitude scales with speed.
@@ -229,10 +227,8 @@ var _ai_player_cache: Node3D = null
 # Spider goes hostile FOR THIS DURATION regardless of light level. 5 s
 # matches vanilla EntityLiving's revenge persistence (~100 ticks).
 var _ai_revenge_remaining_sec: float = 0.0
-# Phys-frame counter for wall climb. Reset to _WALL_CLIMB_PERSIST_TICKS
-# each time mob_base flags a horizontal collision; decrements per
-# physics tick. While > 0 we override velocity.y with the climb speed.
-var _wall_climb_persist_ticks: int = 0
+# Phys frames of climb remaining since the last horizontal collision.
+var _climb_hold_frames: int = 0
 
 # --- Walk-anim state ---
 var _walk_dist: float = 0.0
@@ -403,29 +399,19 @@ func _make_textured_material(tex: Texture2D) -> StandardMaterial3D:
 
 
 func _physics_process(delta: float) -> void:
-	# Beta wall-climb. Vanilla `EntitySpider.onUpdate()` writes
-	# `motY = 0.2/tick` after moveEntity whenever the spider is
-	# collidedHorizontally. Two wrinkles port awkwardly to our
-	# decoupled tick rates:
-	#   1. mob_base zeros the horizontal velocity component the
-	#      collider clipped (so AI knows it's stuck). Between AI
-	#      ticks (20 Hz vs physics 60 Hz), velocity.x is 0 — no push
-	#      into the wall, no further collision flag, no climb. Result:
-	#      spider hops 1 frame then stops. We hold the climb intent
-	#      for _WALL_CLIMB_PERSIST_TICKS phys frames after the last
-	#      horizontal collision so the climb bridges the gap.
-	#   2. Velocity is written BEFORE super so the upcoming move
-	#      receives it — same prev-tick/next-tick coupling vanilla
-	#      uses between onUpdate and moveEntityWithHeading.
-	if _was_collided_horizontally and not _dying and not _physics_gated:
-		_wall_climb_persist_ticks = _WALL_CLIMB_PERSIST_TICKS
-	if _wall_climb_persist_ticks > 0 and not _dying and not _physics_gated:
-		velocity.y = maxf(velocity.y, _AI_WALL_CLIMB_VELOCITY)
-		velocity.y = maxf(velocity.y, _AI_WALL_FALL_CAP)
-		_wall_climb_persist_ticks -= 1
 	super._physics_process(delta)
 	if _dying or _physics_gated:
 		return
+	# Beta wall-climb — applied AFTER the move, mirroring vanilla's
+	# ordering (this tick's collision flag drives next tick's motY).
+	if _was_collided_horizontally:
+		_climb_hold_frames = _CLIMB_HOLD_FRAMES
+	if _climb_hold_frames > 0:
+		_climb_hold_frames -= 1
+		velocity.y = _CLIMB_SPEED
+		# Vanilla zeroes fallDistance while on the "ladder" — re-base
+		# the fall tracker so a failed climb banks no fall damage.
+		_fall_peak_y = global_position.y
 	# LOD-scaled tick rate — same pattern as skeleton/creeper/zombie.
 	var tick_scale: float = 1.0
 	if _lod_tier == LOD_MID:
@@ -556,6 +542,13 @@ func _tick_chase(player: Node3D) -> void:
 		_repath_toward(player)
 	if not _ai_path.is_empty():
 		_tick_walk_path()
+	else:
+		# No walkable route — the target is elevated or walled off (the
+		# voxel A* only expands ground cells, so a player on a pillar
+		# yields an empty path). Beta mobs crowd toward the target
+		# anyway; pressing into the obstruction is also what latches
+		# the horizontal-collision flag that arms the wall-climb.
+		_press_toward(player)
 
 
 # Vanilla `fc.b_()` (EntityCreature pathToRandomDirection) — inherited
@@ -714,6 +707,20 @@ func _attack_player(player: Node3D) -> void:
 	# Player.take_damage(amount, source) — "mob" matches Player.DAMAGE_MOB.
 	player.call("take_damage", _AI_MELEE_DAMAGE, "mob")
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
+
+
+# Direct horizontal drive toward the target — the no-path fallback.
+# Produces the sustained wall push that keeps the climb latched while
+# the spider scales the face under an elevated target.
+func _press_toward(target: Node3D) -> void:
+	var to_target: Vector3 = target.global_position - global_position
+	to_target.y = 0.0
+	if to_target.length_squared() < 0.0001:
+		return
+	var dir: Vector3 = to_target.normalized()
+	velocity.x = dir.x * _AI_WALK_SPEED
+	velocity.z = dir.z * _AI_WALK_SPEED
+	_face_walk_direction()
 
 
 func _velocity_brake() -> void:
