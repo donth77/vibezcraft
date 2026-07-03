@@ -49,7 +49,14 @@ fog_mode = 1
 fog_light_color = Color(0.88, 0.93, 1.0, 1)
 fog_depth_begin = 64.0
 fog_depth_end = 128.0
-fog_sky_affect = 0.0
+; Sky is treated as max-depth by the fog, blended in by this factor. At
+; 0.0 the sky stayed pin-sharp behind fogged terrain — no vanilla "fog
+; dome around the player", and terrain silhouettes cut out crisply
+; against the gradient. fog_light_color tracks the sky horizon per frame
+; (day_night_driver), so this haze merges the terrain fade and the sky
+; band into one wash. 0.35 keeps the zenith mostly clean; raise toward
+; 0.6 for a heavier Alpha-era murk.
+fog_sky_affect = 0.35
 
 [node name="Main" type="Node3D"]
 

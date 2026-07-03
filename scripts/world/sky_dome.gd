@@ -360,7 +360,14 @@ void fragment() {
 	if (c.a < 0.01) {
 		discard;
 	}
-	float tint = mix(0.15, 1.0, sky_factor);
+	// Vanilla World.getCloudColour: per-channel brightness curve
+	// (f*0.9+0.1 on R/G, f*0.85+0.15 on B) — night clouds sit dark
+	// BLUE-gray, not flat gray, and dusk keeps a slightly cool cast.
+	vec3 tint = vec3(
+		sky_factor * 0.9 + 0.1,
+		sky_factor * 0.9 + 0.1,
+		sky_factor * 0.85 + 0.15
+	);
 	ALBEDO = c.rgb * tint;
 	ALPHA = c.a * 0.8;
 	FOG = vec4(0.0);
@@ -441,10 +448,12 @@ uniform sampler2D cloud_texture : filter_nearest;
 uniform float scroll_offset = 0.0;
 uniform float tex_world_size = 3072.0;
 uniform float cell_world_size = 12.0;
+uniform float field_half_size = 288.0;
 uniform float sky_factor = 1.0;
 
 varying float v_face_tint;
 varying vec2 v_cell_center;
+varying vec2 v_cell_local;
 varying vec3 v_face_normal;
 
 void vertex() {
@@ -452,8 +461,11 @@ void vertex() {
 	v_face_normal = NORMAL;
 	// CPU emits cell-center XZ in UV2 (same value for all 4 verts of a
 	// quad) so this varying is constant across the face after interpolation.
+	// Kept in BOTH spaces: world for texture sampling, mesh-local for the
+	// finite-field boundary test in the interior-wall cull.
 	vec4 world_center = MODEL_MATRIX * vec4(UV2.x, 0.0, UV2.y, 1.0);
 	v_cell_center = world_center.xz;
+	v_cell_local = UV2;
 }
 
 void fragment() {
@@ -475,17 +487,34 @@ void fragment() {
 	// cases at ALPHA=0), explicit neighbor-cull is the robust equivalent.
 	// Top + bottom faces never cull (sky above and below is always empty).
 	if (abs(v_face_normal.y) < 0.5) {
-		vec2 nb_center = v_cell_center
+		vec2 nb_local = v_cell_local
 			+ vec2(v_face_normal.x, v_face_normal.z) * cell_world_size;
-		vec4 nc = texture(
-			cloud_texture,
-			fract(vec2(nb_center.x + scroll_offset, nb_center.y) / tex_world_size)
-		);
-		if (nc.a >= 0.01) {
-			discard;
+		// Finite-field guard: the mesh is a 48×48-cell grid recentered on
+		// the player, but the cloud TEXTURE wraps forever. A cell on the
+		// field's outer ring has no mesh neighbor outward, so culling its
+		// wall against the wrapped texture sample opened the rim clusters
+		// up (tops floating with no sides near the horizon). Only cull
+		// when the neighbor cell physically exists in the mesh.
+		if (max(abs(nb_local.x), abs(nb_local.y)) < field_half_size) {
+			vec2 nb_center = v_cell_center
+				+ vec2(v_face_normal.x, v_face_normal.z) * cell_world_size;
+			vec4 nc = texture(
+				cloud_texture,
+				fract(vec2(nb_center.x + scroll_offset, nb_center.y) / tex_world_size)
+			);
+			if (nc.a >= 0.01) {
+				discard;
+			}
 		}
 	}
-	float day_tint = mix(0.15, 1.0, sky_factor);
+	// Vanilla World.getCloudColour per-channel curve — see the flat-cloud
+	// shader note; replaces the old flat-gray mix that read as dark slabs
+	// against a sunset sky.
+	vec3 day_tint = vec3(
+		sky_factor * 0.9 + 0.1,
+		sky_factor * 0.9 + 0.1,
+		sky_factor * 0.85 + 0.15
+	);
 	ALBEDO = c.rgb * v_face_tint * day_tint;
 	// Fully opaque — vanilla's literal 0.8 × texture_alpha produces a
 	// blend that looks translucent on our hardware: small single-cell
@@ -509,6 +538,9 @@ void fragment() {
 	# Cell width — interior-wall cull samples one cell-width out along the
 	# outward face normal. Must match the F7 constant in _build_fancy_cloud_mesh.
 	_cloud_material.set_shader_parameter("cell_world_size", 12.0)
+	# Field half-extent for the finite-field guard: CELLS_PER_SIDE × F7 / 2
+	# (48 × 12 / 2). Must match _build_fancy_cloud_mesh's HALF constant.
+	_cloud_material.set_shader_parameter("field_half_size", 288.0)
 	mi.material_override = _cloud_material
 	return mi
 
