@@ -1291,14 +1291,31 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 			var target: Vector2i = coord + off
 			if _chunks.has(target):
 				_chunks[target].chunk.dirty = true
-	# Gravity — when a block becomes air, settle anything gravity-affected
-	# (sand, gravel) sitting above. Single-pass column scan, no recursion.
-	# Then notify the 6 direct neighbors so gravel floating from worldgen
-	# (air already below it) collapses on the first adjacent break — same
-	# trigger as vanilla BlockFalling.doPhysics neighbor updates.
-	if id == Blocks.AIR:
+	# Gravity — when a block becomes air OR fluid, settle anything gravity-
+	# affected (sand, gravel) sitting above. Single-pass column scan, no
+	# recursion. Then notify the 6 direct neighbors so gravel floating from
+	# worldgen (air already below it) collapses on the first adjacent break
+	# — same trigger as vanilla BlockFalling.doPhysics neighbor updates.
+	# The fluid arm covers water flowing INTO the cell under a sand block:
+	# fluid writes route through set_world_block_with_meta → here, and
+	# without it the sand kept treating the new water as support.
+	if id == Blocks.AIR or Blocks.is_fluid(id):
 		_settle_gravity_above(coord, local_x, world_pos.y, local_z)
 		_notify_gravity_neighbors(world_pos)
+	# Vanilla BlockSand.onBlockAdded — a gravity block PLACED over a non-
+	# supporting cell (air, fire, liquid) starts falling immediately;
+	# without this, placed sand floats until some neighbor update. The
+	# settle helper clears the just-written cell and hands it to a
+	# FallingBlock. The light BFS below recomputes from the live grid
+	# (which holds AIR again by then), so the transient write costs one
+	# extra — still correct — relight, nothing more. MUST use the
+	# entity's own passability here: is_replaceable includes saplings,
+	# which STOP a fall, so triggering on them spawned an entity that
+	# landed straight back into this cell and re-triggered forever.
+	elif Blocks.has_gravity(id) and world_pos.y > 0:
+		var support_id: int = get_world_block(world_pos + Vector3i(0, -1, 0))
+		if FallingBlock.is_passable_for_fall(support_id):
+			_settle_gravity_above(coord, local_x, world_pos.y - 1, local_z)
 	# Sky-light incremental update — bounded BFS in WORLD coords so it
 	# crosses chunk boundaries cleanly. Mirrors vanilla cy.a(SKY, ...) →
 	# mc.a() relight box (vendor/alpha-1.2.6-src/src/mc.java). Skipped
@@ -1505,7 +1522,11 @@ func _notify_gravity_neighbors(world_pos: Vector3i) -> void:
 		if not Blocks.has_gravity(nid):
 			continue
 		var below_id: int = get_world_block(np + Vector3i(0, -1, 0))
-		if below_id != Blocks.AIR and not Blocks.is_replaceable(below_id):
+		# Same passability as the falling entity (vanilla canFallBelow:
+		# air/fire/liquids). is_replaceable was too wide — saplings are
+		# replaceable but stop a falling block, so triggering on them
+		# spawned an entity that landed straight back into its own cell.
+		if not FallingBlock.is_passable_for_fall(below_id):
 			continue
 		var cx: int = int(floor(float(np.x) / float(Chunk.SIZE_X)))
 		var cz: int = int(floor(float(np.z) / float(Chunk.SIZE_Z)))

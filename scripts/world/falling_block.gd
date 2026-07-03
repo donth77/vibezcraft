@@ -19,6 +19,21 @@ var _ray_query: PhysicsRayQueryParameters3D
 var _chunk_manager: Node
 
 
+# Vanilla BlockSand.canFallBelow: a falling block passes through air,
+# fire, and liquids ONLY — torches, plants, and every other non-cube
+# still stop the fall (sand rests on a torch in Alpha). Landing inside
+# a liquid column replaces the bottom liquid cell (sand sinks to the
+# pond floor). The previous `!= AIR` test treated water as a landing
+# surface, so sand hovered on the surface while the gravity trigger
+# treated the same water as no-support — "water as both air and a
+# block". Public: ChunkManager's gravity triggers use the SAME
+# predicate, so a block only starts falling when this entity can
+# actually descend (is_replaceable was too wide — saplings are
+# replaceable but stop a fall, which spawn/land-looped).
+static func is_passable_for_fall(id: int) -> bool:
+	return id == Blocks.AIR or id == Blocks.FIRE or Blocks.is_fluid(id)
+
+
 func setup(p_block_id: int) -> void:
 	block_id = p_block_id
 	_spawn_time = Time.get_ticks_msec() / 1000.0
@@ -59,7 +74,7 @@ func _process(delta: float) -> void:
 	# its own descent. Check every frame whether the cell our mesh bottom
 	# is currently in became solid; if so, land on top of it immediately.
 	var bottom_cell_y: int = int(floor(global_position.y - MESH_SIZE * 0.5))
-	if _chunk_manager.get_world_block(Vector3i(x, bottom_cell_y, z)) != Blocks.AIR:
+	if not is_passable_for_fall(_chunk_manager.get_world_block(Vector3i(x, bottom_cell_y, z))):
 		_land_at(bottom_cell_y + 1)
 		return
 
@@ -76,7 +91,7 @@ func _process(delta: float) -> void:
 	if new_bottom_y < bottom_cell_y:
 		# Walk down through the cells we'd cross this frame.
 		for check_y in range(bottom_cell_y - 1, new_bottom_y - 1, -1):
-			if _chunk_manager.get_world_block(Vector3i(x, check_y, z)) != Blocks.AIR:
+			if not is_passable_for_fall(_chunk_manager.get_world_block(Vector3i(x, check_y, z))):
 				_land_at(check_y + 1)
 				return
 	global_position.y = new_y
@@ -85,15 +100,18 @@ func _process(delta: float) -> void:
 		queue_free()
 
 
-# Place the block at the landing cell, but if that cell isn't air (player
-# raced us by placing something), settle on top instead. Cascades up while
-# the target is occupied so we never overwrite an existing block.
+# Place the block at the landing cell, but if that cell isn't passable
+# (player raced us by placing something), settle on top instead. Cascades
+# up while the target is occupied so we never overwrite a real block —
+# fluids/fire ARE overwritten, which is how sand lands on a pond floor
+# (the displaced water just vanishes, vanilla-style; neighbors re-flow
+# via the fluid notify in set_world_block).
 func _land_at(land_y: int) -> void:
 	var x: int = int(floor(global_position.x))
 	var z: int = int(floor(global_position.z))
 	while land_y < 128:
 		var pos := Vector3i(x, land_y, z)
-		if _chunk_manager.get_world_block(pos) == Blocks.AIR:
+		if is_passable_for_fall(_chunk_manager.get_world_block(pos)):
 			# `_immediate` forces the chunk to remesh this frame so the
 			# landed block is drawn on the same frame we hide the entity
 			# below. Without it, the entity vanishes first and the block
