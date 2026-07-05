@@ -52,6 +52,9 @@ const _TEXT_DISABLED: Color = Color8(160, 160, 160)
 
 var _font: FontFile
 var _widgets: Texture2D
+# Set by the options overlay (Teleport to Spawn) so that when it closes
+# we resume gameplay outright instead of re-showing the pause menu.
+var _resume_after_options: bool = false
 
 
 func _ready() -> void:
@@ -255,14 +258,26 @@ func _on_open_options() -> void:
 	overlay.tree_exited.connect(_on_options_closed.bind(hidden_hud_children))
 
 
+func request_resume_after_options() -> void:
+	_resume_after_options = true
+
+
 func _on_options_closed(hidden_hud_children: Array[CanvasItem]) -> void:
-	# Fired when the options overlay queue_frees itself. Re-show pause
-	# menu + the gameplay HUD children we hid (DebugLabel stayed visible
-	# throughout). Tree stays paused.
-	visible = true
+	# Fired when the options overlay queue_frees itself. Restore the
+	# gameplay HUD children we hid (DebugLabel stayed visible throughout).
 	for child in hidden_hud_children:
 		if is_instance_valid(child):
 			child.visible = true
+	if _resume_after_options:
+		# Teleport-to-Spawn path: skip re-showing the menu and unpause
+		# directly (close() would early-out on our still-hidden state).
+		_resume_after_options = false
+		visible = false
+		get_tree().paused = false
+		Game.recapture_mouse()
+		return
+	# Normal Save/Cancel path — re-show pause menu, tree stays paused.
+	visible = true
 
 
 func _on_quit_to_title() -> void:

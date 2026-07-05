@@ -211,6 +211,10 @@ func _entry_boost_active() -> bool:
 
 
 func _ready() -> void:
+	# Scope the diagnostic event log to this world session. ChunkManager
+	# is the first node in the world scene (before Player), so resetting
+	# here captures every subsequent load / spawn / recovery event.
+	DebugLog.reset()
 	_player = get_node_or_null(player_path) as Node3D
 	_is_mobile_web = Game.is_mobile_web()
 	if _is_mobile_web:
@@ -1107,6 +1111,13 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 	# the next load instead of keeping a void pit.
 	if blocks.size() != Chunk.TOTAL_BLOCKS:
 		push_warning("[chunk_mgr] corrupt saved chunk %s — regenerating from seed" % coord)
+		DebugLog.add(
+			DebugLog.CHUNK,
+			(
+				"corrupt saved chunk (%d,%d) — regenerated from seed (edits in that chunk lost)"
+				% [coord.x, coord.y]
+			)
+		)
 		return [Worldgen.generate_chunk(coord.x, coord.y), []]
 	c.blocks = blocks
 	c.max_y = entry.max_y

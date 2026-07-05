@@ -71,18 +71,25 @@ func _build_panel() -> void:
 	title.add_theme_constant_override("shadow_offset_y", 8)
 	add_child(title)
 
+	# Options rows live in a ScrollContainer so a tall list (mobile adds
+	# Fullscreen + Touch sensitivity rows) scrolls instead of colliding
+	# with the pinned button column below. Desktop's 5 rows fit the
+	# window without scrolling. The window sits between the title and the
+	# button column (fixed anchors, 0.20..0.58).
+	var scroll := ScrollContainer.new()
+	scroll.anchor_left = 0.5
+	scroll.anchor_right = 0.5
+	scroll.anchor_top = 0.19
+	scroll.anchor_bottom = 0.58
+	scroll.offset_left = -380
+	scroll.offset_right = 380
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	add_child(scroll)
+
 	var vbox := VBoxContainer.new()
-	vbox.anchor_left = 0.5
-	vbox.anchor_right = 0.5
-	vbox.anchor_top = 0.24
-	vbox.anchor_bottom = 0.24
-	vbox.offset_left = -360
-	vbox.offset_right = 360
-	vbox.offset_top = 0
-	# 5 rows × 64 px + 4 × 16 separation = 384 px.
-	vbox.offset_bottom = 384
+	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_theme_constant_override("separation", 16)
-	add_child(vbox)
+	scroll.add_child(vbox)
 
 	_add_music_row(vbox)
 	_sfx_checkbox = _add_checkbox_row(vbox, "Sound effects")
@@ -93,38 +100,39 @@ func _build_panel() -> void:
 	# the toggle acts immediately (the checkbox press IS the gesture)
 	# rather than waiting for Save. Hidden where the API doesn't exist
 	# (native desktop, iPhone Safari).
-	var extra_rows: int = 0
 	if Game.web_fullscreen_available():
 		_fullscreen_checkbox = _add_checkbox_row(vbox, "Fullscreen")
 		_fullscreen_checkbox.set_pressed_no_signal(Game.web_is_fullscreen())
 		_fullscreen_checkbox.text = "On" if _fullscreen_checkbox.button_pressed else "Off"
 		_fullscreen_checkbox.toggled.connect(_on_fullscreen_toggled)
-		extra_rows += 1
 	# Touch-only: look sensitivity for the drag-look gesture. Applied on
 	# Save like the rest of the column.
 	if Game.touch_controls_enabled():
 		_add_sensitivity_row(vbox)
-		extra_rows += 1
 
-	# Controls / Save / Cancel stacked vertically below the options. Three
-	# VanillaButtons (800×80 each) + 2 × 16 px separation = 272 px tall.
+	# Recovery row + Controls + Save + Cancel, pinned above the bottom
+	# edge (anchor 0.60, 4 rows ≈ 372 px → ends ≈ y=1020 at 1080 p). The
+	# ScrollContainer above absorbs any option-row growth, so this column
+	# never needs a per-row shift and never clips.
 	var button_col := VBoxContainer.new()
 	button_col.anchor_left = 0.5
 	button_col.anchor_right = 0.5
-	# 0.65 keeps the column above the bottom edge at 1080p (ends y≈974)
-	# while leaving ~25 px of breathing room below vbox (which ends y≈643).
-	# One optional row still fits; each row beyond that shifts the column
-	# down a row-height (0.075 of viewport) so rows never hide behind it.
-	var button_shift: float = 0.075 * maxi(0, extra_rows - 1)
-	button_col.anchor_top = 0.65 + button_shift
-	button_col.anchor_bottom = 0.65 + button_shift
+	button_col.anchor_top = 0.60
+	button_col.anchor_bottom = 0.60
 	button_col.offset_left = -400
 	button_col.offset_right = 400
 	button_col.offset_top = 0
-	button_col.offset_bottom = 272
+	button_col.offset_bottom = 372
 	button_col.add_theme_constant_override("separation", 16)
 	button_col.alignment = BoxContainer.ALIGNMENT_CENTER
 	add_child(button_col)
+	# Recovery + diagnostics entry — one MC-styled button matching the
+	# rest of the column; opens the Unstuck / Debug submenu. First so a
+	# softlocked player reaches it fastest. See issue #5.
+	var unstuck_btn := VanillaButton.new()
+	unstuck_btn.text = "Unstuck / Debug"
+	unstuck_btn.pressed.connect(_on_unstuck_debug_pressed)
+	button_col.add_child(unstuck_btn)
 	# Hidden in touch mode (mobile web) — same reasoning as
 	# settings_menu.gd: there's no keyboard to rebind. A connected
 	# gamepad overrides that: the screen carries the pad rows.
@@ -141,6 +149,44 @@ func _build_panel() -> void:
 	cancel_btn.text = "Cancel"
 	cancel_btn.pressed.connect(_on_cancel_pressed)
 	button_col.add_child(cancel_btn)
+
+
+# Open the Unstuck / Debug submenu (recovery + diagnostics). Same
+# overlay pattern as _on_controls_pressed: hide this screen, add the
+# submenu at the tree root, re-show ourselves when it closes.
+func _on_unstuck_debug_pressed() -> void:
+	var packed: PackedScene = load("res://scenes/ui/unstuck_debug_menu.tscn") as PackedScene
+	if packed == null:
+		return
+	var overlay: Control = packed.instantiate() as Control
+	if overlay == null:
+		return
+	overlay.process_mode = Node.PROCESS_MODE_ALWAYS
+	if overlay.has_method("setup"):
+		overlay.call("setup", self)
+	visible = false
+	# Re-show Options when the submenu backs out (Esc). If the submenu's
+	# Teleport action closed us to gameplay instead, we've been freed and
+	# Godot drops this connection automatically — so no guard needed.
+	overlay.tree_exited.connect(_on_unstuck_debug_closed)
+	get_tree().get_root().add_child(overlay)
+
+
+func _on_unstuck_debug_closed() -> void:
+	visible = true
+
+
+# Dismiss this overlay AND the pause menu beneath it, returning straight
+# to gameplay. Public so the Unstuck / Debug submenu's Teleport action
+# can resume all the way out instead of unwinding menu-by-menu. The
+# pause menu re-shows itself on our tree_exited; we ask it to fully
+# resume instead so a teleport doesn't dump the player back on a menu
+# stacked over their fresh spawn.
+func close_to_gameplay() -> void:
+	var pause: Node = get_tree().root.find_child("PauseMenu", true, false)
+	if pause != null and pause.has_method("request_resume_after_options"):
+		pause.call("request_resume_after_options")
+	queue_free()
 
 
 func _add_option_row(parent: VBoxContainer, label_text: String, options: Array) -> OptionButton:

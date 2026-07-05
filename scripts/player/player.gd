@@ -305,6 +305,23 @@ var _fall_immune_next_landing: bool = true
 # Ground-readiness guard state — see _physics_process.
 var _chunk_manager_ref: Node = null
 var _ground_wait_sec: float = 0.0
+# Always-on embedded-in-solid recovery. The spawn-window settle pass
+# (_settle_remaining_frames) stops after load, so a player driven into
+# terrain AFTER spawn — knockback, a streaming seam, a mob shove near a
+# wall — had no recovery: held by collision at a normal Y, they never
+# fell far enough to trip void recovery either, and just sat wedged
+# forever (issue #5 "fell through the map... unable to move"). This
+# timer accrues only while the capsule is demonstrably embedded AND not
+# moving; past _STUCK_RECOVERY_SEC we run the same gentle column-climb
+# unstick (never a surprise teleport — that stays manual). See
+# _tick_stuck_recovery.
+var _stuck_timer: float = 0.0
+const _STUCK_RECOVERY_SEC: float = 1.5
+# Diagnostic event-log edge trackers (see DebugLog). One-shot spawn line;
+# rising/falling edge on the ground-readiness freeze so it logs the
+# freeze + release once each, not once per frame.
+var _logged_spawn: bool = false
+var _ground_frozen: bool = false
 # Counts down each physics tick after spawn / respawn. While > 0, the
 # spawn-relocate check runs every tick (looking at the actual loaded
 # chunks for dry land). Decrements to 0 once relocated or after the
@@ -1987,6 +2004,27 @@ func _physics_process(delta: float) -> void:
 	if Game.is_loading:
 		velocity = Vector3.ZERO
 		return
+	# First live physics frame after the loading screen clears — record
+	# where we actually landed so the log has a baseline to compare later
+	# position anomalies against.
+	if not _logged_spawn:
+		_logged_spawn = true
+		DebugLog.add(
+			DebugLog.SPAWN,
+			(
+				"entered world at (%.1f, %.1f, %.1f) health=%d/%d"
+				% [global_position.x, global_position.y, global_position.z, health, MAX_HEALTH]
+			)
+		)
+	# Void recovery runs FIRST, before the ground-readiness guard's early
+	# return below could otherwise freeze a player who is already past
+	# the world floor over a missing chunk — they'd sit frozen in the
+	# void for the 4 s guard window instead of being pulled to spawn
+	# immediately. Cheap (one float compare on the common path).
+	if global_position.y < -20.0:
+		_recover_from_void()
+		velocity = Vector3.ZERO
+		return
 	# Ground-readiness guard — the loading-screen freeze above covers
 	# world entry, but the chunk under our feet can ALSO lack live
 	# collision right after the saved-position restore (collision
@@ -2002,11 +2040,35 @@ func _physics_process(delta: float) -> void:
 		_chunk_manager_ref != null
 		and not _chunk_manager_ref.call("is_ground_ready_at", global_position)
 	):
+		if not _ground_frozen:
+			_ground_frozen = true
+			var cx: int = int(floor(global_position.x / float(Chunk.SIZE_X)))
+			var cz: int = int(floor(global_position.z / float(Chunk.SIZE_Z)))
+			DebugLog.add(
+				DebugLog.GROUND,
+				(
+					"no live collision under (%.0f, %.0f) chunk (%d, %d) at y=%.1f — freezing"
+					% [global_position.x, global_position.z, cx, cz, global_position.y]
+				)
+			)
 		_ground_wait_sec += delta
 		if _ground_wait_sec < 4.0:
 			velocity = Vector3.ZERO
 			return
+		# Timed out — give up freezing and let gravity + void recovery take
+		# over. Logged once (the freeze flag stays set until collision
+		# actually arrives) so a genuine missing-chunk stall is visible.
+		if _ground_wait_sec < 4.0 + delta:
+			DebugLog.add(
+				DebugLog.GROUND,
+				"collision still missing after 4.0s — releasing to gravity / void recovery"
+			)
 	else:
+		if _ground_frozen:
+			_ground_frozen = false
+			DebugLog.add(
+				DebugLog.GROUND, "collision ready — released after %.1fs" % _ground_wait_sec
+			)
 		_ground_wait_sec = 0.0
 	# F2 dungeon-teleport hold — pin player at destination until the
 	# target chunk lands in ChunkManager._chunks. Without this, gravity
@@ -2290,6 +2352,7 @@ func _physics_process(delta: float) -> void:
 		_fall_peak_y = global_position.y
 	_update_fall_tracking()
 	_tick_health_regen(delta)
+	_tick_stuck_recovery(delta)
 	_check_void_recovery()
 
 
@@ -2332,6 +2395,22 @@ func _check_void_recovery() -> void:
 # in creative mode.
 func _update_fall_tracking() -> void:
 	var on_floor: bool = is_on_floor()
+	# Fall-through ONSET detector — logs the exact spot a clip-through
+	# begins, which the event log otherwise misses (it only catches the
+	# outcome: VOID at y<-20, STUCK when wedged, GROUND over a missing
+	# chunk). Trigger: we LEFT the floor while descending (not a jump,
+	# which starts vy>0) with a full solid cube still directly under the
+	# feet — normal walk-offs have air below, so solid-below means the
+	# collision failed to catch us. This is the "fell through the map
+	# after getting hit" signal (issue #5).
+	if _was_on_floor and not on_floor and velocity.y < -0.5 and _foot_cell_is_full_solid():
+		DebugLog.add(
+			DebugLog.FALL,
+			(
+				"clipped through solid ground at (%.1f, %.1f, %.1f) vy=%.1f"
+				% [global_position.x, global_position.y, global_position.z, velocity.y]
+			)
+		)
 	if not on_floor:
 		_fall_peak_y = maxf(_fall_peak_y, global_position.y)
 	elif not _was_on_floor:
@@ -2534,10 +2613,106 @@ func safe_teleport(pos: Vector3) -> void:
 # teleport as respawn, but doesn't touch health / fire / inventory —
 # it's a recovery, not a death.
 func _recover_from_void() -> void:
+	var fell_from: float = global_position.y
 	_teleport_to_safe_spawn()
+	DebugLog.add(
+		DebugLog.VOID,
+		(
+			"fell past world floor (y=%.1f) — recovered to spawn (%.0f, %.0f, %.0f)"
+			% [fell_from, global_position.x, global_position.y, global_position.z]
+		)
+	)
 	_fall_peak_y = global_position.y
 	_fall_immune_next_landing = true
 	_spawn_check_ticks_remaining = 90
+
+
+# Manual escape hatch (Pause → Options → Teleport to Spawn). The
+# universal recovery for ANY stuck state the automatic passes miss —
+# wedged in terrain, frozen over a void, ridden off the loaded ring.
+# Routes through safe_teleport so the destination chunks sync-load
+# first, and re-arms every post-spawn safety pass so landing is clean.
+func _teleport_to_spawn() -> void:
+	var from: Vector3 = global_position
+	if _mounted_to != null and _mounted_to.has_method("dismount"):
+		_mounted_to.dismount()
+	is_sleeping = false
+	safe_teleport(_safe_spawn_position())
+	DebugLog.add(
+		DebugLog.TP,
+		(
+			"manual Teleport to Spawn: (%.1f, %.1f, %.1f) → (%.0f, %.0f, %.0f)"
+			% [from.x, from.y, from.z, global_position.x, global_position.y, global_position.z]
+		)
+	)
+	velocity = Vector3.ZERO
+	_fall_peak_y = global_position.y
+	_fall_immune_next_landing = true
+	_spawn_check_ticks_remaining = 90
+	_ground_wait_sec = 0.0
+	_stuck_timer = 0.0
+	_settled = false
+	_settle_remaining_frames = 60
+
+
+# Copyable diagnostics for bug reports (Pause → Options → Copy Debug
+# Info). Everything a fall-through / softlock report needs to be
+# actionable without a back-and-forth: exact position + motion state,
+# whether the chunk under the player is loaded with live collision,
+# whether the capsule is embedded, and the build / platform / native
+# status. Plain text, safe to paste into a GitHub issue.
+func _build_debug_report() -> String:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	var p: Vector3 = global_position
+	var coord := Vector2i(
+		int(floor(p.x / float(Chunk.SIZE_X))), int(floor(p.z / float(Chunk.SIZE_Z)))
+	)
+	var chunk_loaded: bool = (
+		cm != null and cm.has_method("is_chunk_loaded") and cm.is_chunk_loaded(coord)
+	)
+	var ground_ready: bool = (
+		cm != null and cm.has_method("is_ground_ready_at") and cm.is_ground_ready_at(p)
+	)
+	var loaded_count: int = 0
+	if cm != null:
+		var chunks: Dictionary = cm.get("_chunks")
+		loaded_count = chunks.size() if chunks != null else 0
+	var foot_block: int = -1
+	if cm != null and cm.has_method("get_world_block"):
+		foot_block = cm.get_world_block(
+			Vector3i(int(floor(p.x)), int(floor(p.y - 0.85)), int(floor(p.z)))
+		)
+	var platform: String = "desktop"
+	if Game.is_mobile_web():
+		platform = "mobile-web"
+	elif OS.has_feature("web"):
+		platform = "desktop-web"
+	var native: String = "native" if ClassDB.class_exists("MesherNative") else "gdscript"
+	var lines: Array[String] = [
+		"=== VibezCraft debug ===",
+		"version: %s" % ProjectSettings.get_setting("application/config/version", "dev"),
+		"platform: %s | ext: %s | fps: %d" % [platform, native, Engine.get_frames_per_second()],
+		"world: %s" % Game.active_world,
+		"pos: %.2f, %.2f, %.2f" % [p.x, p.y, p.z],
+		(
+			"vertical_velocity: %.2f m/s%s"
+			% [velocity.y, "  <-- FALLING" if velocity.y < -4.0 else ""]
+		),
+		"on_floor: %s | embedded_in_solid: %s" % [is_on_floor(), _is_embedded_in_solid()],
+		(
+			"health: %d/%d | creative: %s | flying: %s"
+			% [health, MAX_HEALTH, creative_mode, _is_flying]
+		),
+		(
+			"chunk: (%d, %d) | loaded: %s | ground_ready: %s"
+			% [coord.x, coord.y, chunk_loaded, ground_ready]
+		),
+		"block_at_feet: %d | loaded_chunks: %d" % [foot_block, loaded_count],
+		"stuck_timer: %.2f | ground_wait: %.2f" % [_stuck_timer, _ground_wait_sec],
+	]
+	# Snapshot first, then the rolling event log (spawn / fall-through /
+	# stuck / missing-chunk events with timestamps). See DebugLog.
+	return "\n".join(lines) + "\n\n=== event log ===\n" + DebugLog.dump()
 
 
 func _respawn() -> void:
@@ -2893,6 +3068,86 @@ func _is_in_water() -> bool:
 # true ONLY when we've confirmed the position is clear AND the chunk is
 # loaded (so we know AIR reads aren't OOB-default). Returns false if
 # chunks haven't streamed in yet — the caller retries next frame.
+# True when the capsule's sample cells (feet / mid / head) are inside
+# opaque solid blocks — i.e. genuinely embedded, not merely standing on
+# a floor (the feet sample sits ABOVE the floor block, in the air the
+# feet occupy). Chunk-load-gated: OOB / unloaded reads return AIR, so we
+# never false-positive "embedded" over terrain that hasn't streamed.
+# True when the cell directly under the feet is a full, opaque, solid
+# cube — i.e. we were genuinely standing on real ground. Used by the
+# fall-through detector to tell a clip-through (solid below) from a
+# normal walk-off a ledge (air below) or a block broken underfoot.
+func _foot_cell_is_full_solid() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var below: int = cm.get_world_block(
+		Vector3i(
+			int(floor(global_position.x)),
+			int(floor(global_position.y - 1.0)),
+			int(floor(global_position.z))
+		)
+	)
+	return below != Blocks.AIR and Blocks.is_opaque(below) and Blocks.is_solid_collision(below)
+
+
+func _is_embedded_in_solid() -> bool:
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	var chunk_x: int = int(floor(global_position.x / float(Chunk.SIZE_X)))
+	var chunk_z: int = int(floor(global_position.z / float(Chunk.SIZE_Z)))
+	if cm.has_method("is_chunk_loaded") and not cm.is_chunk_loaded(Vector2i(chunk_x, chunk_z)):
+		return false
+	var x: int = int(floor(global_position.x))
+	var z: int = int(floor(global_position.z))
+	for dy: float in [-0.85, 0.0, 0.7]:
+		var y: int = int(floor(global_position.y + dy))
+		var b: int = cm.get_world_block(Vector3i(x, y, z))
+		if b != Blocks.AIR and Blocks.is_opaque(b):
+			return true
+	return false
+
+
+# Always-on companion to the spawn-window settle pass — see _stuck_timer.
+# Only acts when the player is embedded in solid AND essentially not
+# moving (so a normal, mobile player is never touched), and only after a
+# sustained window so a single-frame clip during fast movement resolves
+# itself via move_and_slide before we intervene. The remedy is the gentle
+# column-climb (identical to spawn settle), never an auto-teleport.
+func _tick_stuck_recovery(delta: float) -> void:
+	# Skip states where "embedded + still" is legitimate or handled
+	# elsewhere: flying, mounted, sleeping, dead, or mid-load.
+	if (_is_flying and creative_mode) or _mounted_to != null or is_sleeping or health <= 0:
+		_stuck_timer = 0.0
+		return
+	var barely_moving: bool = velocity.length_squared() < 0.04  # < 0.2 m/s
+	if barely_moving and _is_embedded_in_solid():
+		_stuck_timer += delta
+		if _stuck_timer >= _STUCK_RECOVERY_SEC:
+			_stuck_timer = 0.0
+			var from_y: float = global_position.y
+			_settle_out_of_solid_block()
+			DebugLog.add(
+				DebugLog.STUCK,
+				(
+					"embedded in solid at (%.1f, %.1f, %.1f) for %.1fs — climbed out to y=%.1f"
+					% [
+						global_position.x,
+						from_y,
+						global_position.z,
+						_STUCK_RECOVERY_SEC,
+						global_position.y
+					]
+				)
+			)
+			velocity = Vector3.ZERO
+			_fall_peak_y = global_position.y
+			_fall_immune_next_landing = true
+	else:
+		_stuck_timer = 0.0
+
+
 func _settle_out_of_solid_block() -> bool:
 	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if cm == null or not cm.has_method("get_world_block"):
