@@ -94,6 +94,11 @@ static var _native_mesher: RefCounted
 # non-cube pass). Stale platform binaries built before lit2 keep working
 # through the legacy lit + full-scan GDScript appendix.
 static var _native_has_lit2: bool = false
+# True when the extension exposes mesh_chunk_data_lit3 (cross-chunk
+# edge LIGHT slices — border faces sample the neighbor's real light
+# instead of the sky=15 OOB default; docs/lighting-chunk-seams.md).
+# Stale binaries fall back to lit2 with today's border-lighting quirk.
+static var _native_has_lit3: bool = false
 
 
 # Main-thread init. No-op if the native extension isn't available; callers
@@ -111,6 +116,7 @@ static func enable_native() -> bool:
 		push_warning("Mesher.enable_native: failed to instantiate MesherNative")
 		return false
 	_native_has_lit2 = _native_mesher.has_method("mesh_chunk_data_lit2")
+	_native_has_lit3 = _native_mesher.has_method("mesh_chunk_data_lit3")
 	if _native_has_lit2:
 		# The lit2 pass needs the selection-AABB table on workers; build
 		# it now on the main thread (same warm rule as uv_table_flat).
@@ -137,7 +143,41 @@ static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
 		return result
 	var probe_token := PerfProbe.begin("mesher.mesh_chunk")
 	var result: Dictionary
-	if _native_has_lit2:
+	if _native_has_lit3:
+		# lit2 + cross-chunk edge LIGHT slices: border faces sample the
+		# neighbor's real sky/block light instead of the OOB sky=15
+		# default that lit seams full-bright in caves and at night.
+		result = (
+			_native_mesher
+			. mesh_chunk_data_lit3(
+				chunk.blocks,
+				chunk.block_meta,
+				chunk.sky_light,
+				chunk.block_light,
+				chunk.max_y,
+				BlockAtlas.uv_table_flat(),
+				chunk.edge_blocks_west,
+				chunk.edge_blocks_east,
+				chunk.edge_blocks_north,
+				chunk.edge_blocks_south,
+				chunk.edge_meta_west,
+				chunk.edge_meta_east,
+				chunk.edge_meta_north,
+				chunk.edge_meta_south,
+				chunk.edge_sky_light_west,
+				chunk.edge_sky_light_east,
+				chunk.edge_sky_light_north,
+				chunk.edge_sky_light_south,
+				chunk.edge_block_light_west,
+				chunk.edge_block_light_east,
+				chunk.edge_block_light_north,
+				chunk.edge_block_light_south,
+				Blocks.selection_aabb_flat(),
+			)
+		)
+		if chunk.has_non_cube_blocks:
+			_append_special_cells(chunk, result)
+	elif _native_has_lit2:
 		# Native owns the full-grid scan AND the worldgen-hot non-cube
 		# shapes (cross plants, snow layers); only the sparse player-built
 		# cells it returns in `special_cells` go through GDScript. This is

@@ -105,6 +105,26 @@ struct EdgeSlices {
 	int64_t meta_north_size;
 	const uint8_t *meta_south;
 	int64_t meta_south_size;
+	// Neighbor LIGHT planes (mesh_chunk_data_lit3 only). Default null =
+	// slice absent, so existing brace-inits (lit / lit2 / non-lit paths)
+	// keep the legacy OOB light defaults (sky=15, block=0) untouched.
+	// Mirror of Chunk.edge_sky_light_* / edge_block_light_*.
+	const uint8_t *sky_west = nullptr;
+	int64_t sky_west_size = 0;
+	const uint8_t *sky_east = nullptr;
+	int64_t sky_east_size = 0;
+	const uint8_t *sky_north = nullptr;
+	int64_t sky_north_size = 0;
+	const uint8_t *sky_south = nullptr;
+	int64_t sky_south_size = 0;
+	const uint8_t *blklight_west = nullptr;
+	int64_t blklight_west_size = 0;
+	const uint8_t *blklight_east = nullptr;
+	int64_t blklight_east_size = 0;
+	const uint8_t *blklight_north = nullptr;
+	int64_t blklight_north_size = 0;
+	const uint8_t *blklight_south = nullptr;
+	int64_t blklight_south_size = 0;
 };
 
 // Single-cell read helpers. In-chunk fast path uses blocks_ptr directly.
@@ -162,6 +182,62 @@ static inline int read_meta(
 	if (z == MesherNative::SIZE_Z && edges.meta_south_size > 0 && x >= 0
 			&& x < MesherNative::SIZE_X) {
 		return edges.meta_south[y * MesherNative::SIZE_X + x];
+	}
+	return 0;
+}
+
+// Light reads with the same edge-slice fallthrough as read_block.
+// Empty slice (unloaded neighbor / pre-lit3 caller) keeps the vanilla
+// defaults: sky=15 (EnumSkyBlock.SKY), block=0 (EnumSkyBlock.BLOCK) —
+// mirrors Chunk.get_sky_light / get_block_light exactly.
+static inline int read_sky_light(
+		const uint8_t *sky_ptr, const EdgeSlices &edges, int x, int y, int z) {
+	if (y < 0 || y >= MesherNative::SIZE_Y) {
+		return 15;
+	}
+	if (x >= 0 && x < MesherNative::SIZE_X && z >= 0 && z < MesherNative::SIZE_Z) {
+		return sky_ptr[y * MesherNative::SIZE_X * MesherNative::SIZE_Z
+				+ z * MesherNative::SIZE_X + x];
+	}
+	if (x == -1 && edges.sky_west_size > 0 && z >= 0 && z < MesherNative::SIZE_Z) {
+		return edges.sky_west[y * MesherNative::SIZE_Z + z];
+	}
+	if (x == MesherNative::SIZE_X && edges.sky_east_size > 0 && z >= 0
+			&& z < MesherNative::SIZE_Z) {
+		return edges.sky_east[y * MesherNative::SIZE_Z + z];
+	}
+	if (z == -1 && edges.sky_north_size > 0 && x >= 0 && x < MesherNative::SIZE_X) {
+		return edges.sky_north[y * MesherNative::SIZE_X + x];
+	}
+	if (z == MesherNative::SIZE_Z && edges.sky_south_size > 0 && x >= 0
+			&& x < MesherNative::SIZE_X) {
+		return edges.sky_south[y * MesherNative::SIZE_X + x];
+	}
+	return 15;
+}
+
+static inline int read_block_light(
+		const uint8_t *block_light_ptr, const EdgeSlices &edges, int x, int y, int z) {
+	if (y < 0 || y >= MesherNative::SIZE_Y) {
+		return 0;
+	}
+	if (x >= 0 && x < MesherNative::SIZE_X && z >= 0 && z < MesherNative::SIZE_Z) {
+		return block_light_ptr[y * MesherNative::SIZE_X * MesherNative::SIZE_Z
+				+ z * MesherNative::SIZE_X + x];
+	}
+	if (x == -1 && edges.blklight_west_size > 0 && z >= 0 && z < MesherNative::SIZE_Z) {
+		return edges.blklight_west[y * MesherNative::SIZE_Z + z];
+	}
+	if (x == MesherNative::SIZE_X && edges.blklight_east_size > 0 && z >= 0
+			&& z < MesherNative::SIZE_Z) {
+		return edges.blklight_east[y * MesherNative::SIZE_Z + z];
+	}
+	if (z == -1 && edges.blklight_north_size > 0 && x >= 0 && x < MesherNative::SIZE_X) {
+		return edges.blklight_north[y * MesherNative::SIZE_X + x];
+	}
+	if (z == MesherNative::SIZE_Z && edges.blklight_south_size > 0 && x >= 0
+			&& x < MesherNative::SIZE_X) {
+		return edges.blklight_south[y * MesherNative::SIZE_X + x];
 	}
 	return 0;
 }
@@ -384,22 +460,12 @@ static void emit_fluid_cell(
 		wuvs.append(Vector2(u1, v1));
 		// Per-face per-vertex light. Mirrors the cube-face rule: sample
 		// the open neighbor cell so the face brightens / darkens with the
-		// air it looks at. OOB neighbors fall back to (sky=15, block=0)
-		// like Chunk.get_sky_light's default.
+		// air it looks at. Edge-aware (lit3): border faces read the
+		// neighbor chunk's light plane; empty slice falls back to the
+		// legacy (sky=15, block=0) defaults like Chunk.get_sky_light.
 		if (wcolors != nullptr && sky_ptr != nullptr && block_light_ptr != nullptr) {
-			int nsky;
-			int nblk;
-			if (nx < 0 || nx >= MesherNative::SIZE_X
-					|| ny < 0 || ny >= MesherNative::SIZE_Y
-					|| nz < 0 || nz >= MesherNative::SIZE_Z) {
-				nsky = 15;
-				nblk = 0;
-			} else {
-				const int nidx = ny * MesherNative::SIZE_X * MesherNative::SIZE_Z
-						+ nz * MesherNative::SIZE_X + nx;
-				nsky = sky_ptr[nidx];
-				nblk = block_light_ptr[nidx];
-			}
+			const int nsky = read_sky_light(sky_ptr, edges, nx, ny, nz);
+			const int nblk = read_block_light(block_light_ptr, edges, nx, ny, nz);
 			const float sky_n = float(double(nsky) * light_scale);
 			const float blk_n = float(double(nblk) * light_scale);
 			// R=sky/15, G=block/15 (per-face light), B=flow.x encoded,
@@ -683,7 +749,11 @@ Dictionary MesherNative::mesh_chunk_data(
 // face looks at). Mirrors the GDScript Mesher.mesh_chunk lighting branch
 // added in slice 5 — keep them in sync. Parity test:
 // tests/test_mesher_native.gd::test_parity_lit_chunk.
-Dictionary MesherNative::mesh_chunk_data_lit(
+//
+// Shared core behind mesh_chunk_data_lit (empty light edges → legacy
+// OOB light defaults, byte-identical) and mesh_chunk_data_lit3 (real
+// neighbor light planes).
+Dictionary MesherNative::mesh_lit_core(
 		const PackedByteArray &p_blocks,
 		const PackedByteArray &p_block_meta,
 		const PackedByteArray &p_sky_light,
@@ -697,7 +767,15 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 		const PackedByteArray &p_edge_meta_west,
 		const PackedByteArray &p_edge_meta_east,
 		const PackedByteArray &p_edge_meta_north,
-		const PackedByteArray &p_edge_meta_south) const {
+		const PackedByteArray &p_edge_meta_south,
+		const PackedByteArray &p_edge_sky_west,
+		const PackedByteArray &p_edge_sky_east,
+		const PackedByteArray &p_edge_sky_north,
+		const PackedByteArray &p_edge_sky_south,
+		const PackedByteArray &p_edge_blklight_west,
+		const PackedByteArray &p_edge_blklight_east,
+		const PackedByteArray &p_edge_blklight_north,
+		const PackedByteArray &p_edge_blklight_south) const {
 	PackedVector3Array verts;
 	PackedVector3Array norms;
 	PackedVector2Array uvs;
@@ -772,6 +850,14 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 		p_edge_meta_east.ptr(), p_edge_meta_east.size(),
 		p_edge_meta_north.ptr(), p_edge_meta_north.size(),
 		p_edge_meta_south.ptr(), p_edge_meta_south.size(),
+		p_edge_sky_west.ptr(), p_edge_sky_west.size(),
+		p_edge_sky_east.ptr(), p_edge_sky_east.size(),
+		p_edge_sky_north.ptr(), p_edge_sky_north.size(),
+		p_edge_sky_south.ptr(), p_edge_sky_south.size(),
+		p_edge_blklight_west.ptr(), p_edge_blklight_west.size(),
+		p_edge_blklight_east.ptr(), p_edge_blklight_east.size(),
+		p_edge_blklight_north.ptr(), p_edge_blklight_north.size(),
+		p_edge_blklight_south.ptr(), p_edge_blklight_south.size(),
 	};
 
 	const int top = std::min(p_max_y + 1, SIZE_Y - 1);
@@ -810,23 +896,17 @@ Dictionary MesherNative::mesh_chunk_data_lit(
 					const int ny = y + FACE_NEIGHBOR[face][1];
 					const int nz = z + FACE_NEIGHBOR[face][2];
 					// Neighbor block — edge-aware, same semantics as
-					// the non-lit path. Light samples stay at the
-					// slice-1 invariant (OOB sky=15, block=0) because
-					// we don't snapshot neighbor light arrays; the
-					// worker always sees the target chunk's own light
-					// at its borders. Mesher parity tests don't cover
-					// cross-chunk light sampling yet.
+					// the non-lit path. Light samples are edge-aware
+					// too (lit3): border faces read the neighbor
+					// chunk's light plane; empty slices (lit / lit2 /
+					// unloaded neighbor) keep the legacy OOB defaults
+					// (sky=15, block=0), which is what rendered seam
+					// faces full-bright in caves — see
+					// docs/lighting-chunk-seams.md.
 					const int neighbor_id = read_block(blocks_ptr, edges, nx, ny, nz);
-					int neighbor_sky;
-					int neighbor_block;
-					if (nx < 0 || nx >= SIZE_X || ny < 0 || ny >= SIZE_Y || nz < 0 || nz >= SIZE_Z) {
-						neighbor_sky = 15;
-						neighbor_block = 0;
-					} else {
-						const int nidx = ny * SIZE_X * SIZE_Z + nz * SIZE_X + nx;
-						neighbor_sky = sky_ptr[nidx];
-						neighbor_block = block_light_ptr[nidx];
-					}
+					const int neighbor_sky = read_sky_light(sky_ptr, edges, nx, ny, nz);
+					const int neighbor_block =
+							read_block_light(block_light_ptr, edges, nx, ny, nz);
 					const bool neighbor_is_water =
 							(neighbor_id == WATER_FLOWING || neighbor_id == WATER_STILL);
 					const bool neighbor_is_lava =
@@ -1157,6 +1237,35 @@ void MesherNative::emit_snow_cell(int x, int y, int z,
 	emit_collision_box(plant_faces, mn, mx);
 }
 
+// Public legacy lit entry — routes through mesh_lit_core with EMPTY
+// light edges, so border light keeps the historic OOB defaults. Kept
+// bound + byte-identical for stale platform binaries.
+Dictionary MesherNative::mesh_chunk_data_lit(
+		const PackedByteArray &p_blocks,
+		const PackedByteArray &p_block_meta,
+		const PackedByteArray &p_sky_light,
+		const PackedByteArray &p_block_light,
+		int p_max_y,
+		const PackedFloat32Array &p_uv_table,
+		const PackedByteArray &p_edge_blocks_west,
+		const PackedByteArray &p_edge_blocks_east,
+		const PackedByteArray &p_edge_blocks_north,
+		const PackedByteArray &p_edge_blocks_south,
+		const PackedByteArray &p_edge_meta_west,
+		const PackedByteArray &p_edge_meta_east,
+		const PackedByteArray &p_edge_meta_north,
+		const PackedByteArray &p_edge_meta_south) const {
+	const PackedByteArray empty;
+	return mesh_lit_core(p_blocks, p_block_meta,
+			p_sky_light, p_block_light, p_max_y, p_uv_table,
+			p_edge_blocks_west, p_edge_blocks_east,
+			p_edge_blocks_north, p_edge_blocks_south,
+			p_edge_meta_west, p_edge_meta_east,
+			p_edge_meta_north, p_edge_meta_south,
+			empty, empty, empty, empty,
+			empty, empty, empty, empty);
+}
+
 Dictionary MesherNative::mesh_chunk_data_lit2(
 		const PackedByteArray &p_blocks,
 		const PackedByteArray &p_block_meta,
@@ -1181,7 +1290,65 @@ Dictionary MesherNative::mesh_chunk_data_lit2(
 			p_edge_blocks_north, p_edge_blocks_south,
 			p_edge_meta_west, p_edge_meta_east,
 			p_edge_meta_north, p_edge_meta_south);
+	append_noncube_pass(result, p_blocks, p_sky_light, p_block_light,
+			p_max_y, p_uv_table, p_selection_aabbs);
+	return result;
+}
 
+// lit2 + cross-chunk edge LIGHT slices — see mesher_native.h and
+// docs/lighting-chunk-seams.md. Same geometry contract as lit2; only
+// the border faces' vertex COLOR changes (real neighbor light instead
+// of the sky=15 / block=0 OOB defaults).
+Dictionary MesherNative::mesh_chunk_data_lit3(
+		const PackedByteArray &p_blocks,
+		const PackedByteArray &p_block_meta,
+		const PackedByteArray &p_sky_light,
+		const PackedByteArray &p_block_light,
+		int p_max_y,
+		const PackedFloat32Array &p_uv_table,
+		const PackedByteArray &p_edge_blocks_west,
+		const PackedByteArray &p_edge_blocks_east,
+		const PackedByteArray &p_edge_blocks_north,
+		const PackedByteArray &p_edge_blocks_south,
+		const PackedByteArray &p_edge_meta_west,
+		const PackedByteArray &p_edge_meta_east,
+		const PackedByteArray &p_edge_meta_north,
+		const PackedByteArray &p_edge_meta_south,
+		const PackedByteArray &p_edge_sky_west,
+		const PackedByteArray &p_edge_sky_east,
+		const PackedByteArray &p_edge_sky_north,
+		const PackedByteArray &p_edge_sky_south,
+		const PackedByteArray &p_edge_blklight_west,
+		const PackedByteArray &p_edge_blklight_east,
+		const PackedByteArray &p_edge_blklight_north,
+		const PackedByteArray &p_edge_blklight_south,
+		const PackedFloat32Array &p_selection_aabbs) const {
+	Dictionary result = mesh_lit_core(p_blocks, p_block_meta,
+			p_sky_light, p_block_light, p_max_y, p_uv_table,
+			p_edge_blocks_west, p_edge_blocks_east,
+			p_edge_blocks_north, p_edge_blocks_south,
+			p_edge_meta_west, p_edge_meta_east,
+			p_edge_meta_north, p_edge_meta_south,
+			p_edge_sky_west, p_edge_sky_east,
+			p_edge_sky_north, p_edge_sky_south,
+			p_edge_blklight_west, p_edge_blklight_east,
+			p_edge_blklight_north, p_edge_blklight_south);
+	append_noncube_pass(result, p_blocks, p_sky_light, p_block_light,
+			p_max_y, p_uv_table, p_selection_aabbs);
+	return result;
+}
+
+// Native non-cube second pass shared by lit2 / lit3 — cross plants +
+// snow layers emitted natively, everything else handed back through
+// `special_cells`. Samples the cell's OWN light only (in-chunk by
+// construction), so it needs no edge data.
+void MesherNative::append_noncube_pass(Dictionary &result,
+		const PackedByteArray &p_blocks,
+		const PackedByteArray &p_sky_light,
+		const PackedByteArray &p_block_light,
+		int p_max_y,
+		const PackedFloat32Array &p_uv_table,
+		const PackedFloat32Array &p_selection_aabbs) const {
 	PackedInt32Array special_cells;
 	PackedVector3Array nc_verts;
 	PackedVector3Array nc_norms;
@@ -1269,10 +1436,9 @@ Dictionary MesherNative::mesh_chunk_data_lit2(
 		result["indices"] = ri;
 	}
 	// The GDScript reference dict always carries plant_faces (possibly
-	// empty) — match its shape. special_cells always present on lit2.
+	// empty) — match its shape. special_cells always present on lit2/lit3.
 	result["plant_faces"] = nc_plant_faces;
 	result["special_cells"] = special_cells;
-	return result;
 }
 
 void MesherNative::_bind_methods() {
@@ -1327,4 +1493,30 @@ void MesherNative::_bind_methods() {
 					"edge_meta_south",
 					"selection_aabbs"),
 			&MesherNative::mesh_chunk_data_lit2);
+	ClassDB::bind_method(
+			D_METHOD("mesh_chunk_data_lit3",
+					"blocks",
+					"block_meta",
+					"sky_light",
+					"block_light",
+					"max_y",
+					"uv_table",
+					"edge_blocks_west",
+					"edge_blocks_east",
+					"edge_blocks_north",
+					"edge_blocks_south",
+					"edge_meta_west",
+					"edge_meta_east",
+					"edge_meta_north",
+					"edge_meta_south",
+					"edge_sky_west",
+					"edge_sky_east",
+					"edge_sky_north",
+					"edge_sky_south",
+					"edge_blklight_west",
+					"edge_blklight_east",
+					"edge_blklight_north",
+					"edge_blklight_south",
+					"selection_aabbs"),
+			&MesherNative::mesh_chunk_data_lit3);
 }

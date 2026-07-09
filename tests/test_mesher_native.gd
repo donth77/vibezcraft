@@ -337,3 +337,83 @@ func test_parity_native_noncube_pass_mixed_shapes() -> void:
 	_assert_parity(both[0], both[1], "mixed non-cube shapes")
 	assert_gt(int(both[1].vertices.size()), 0, "mixed chunk emits geometry")
 	assert_gt(int(both[1].plant_faces.size()), 0, "plants emit selection soup")
+
+
+# --- Cross-chunk edge light (lit3) ---
+
+
+# Two-chunk seam scenario: a dark room in the EAST neighbor hugging the
+# boundary. With the neighbor's edge slices (blocks + meta + LIGHT)
+# attached, the surviving seam faces must sample the neighbor's real
+# light (dark), not the sky=15 OOB default — and native lit3 must stay
+# byte-identical to the GDScript reference. Regression guard for the
+# fix in docs/lighting-chunk-seams.md (seam faces rendered full-bright
+# in caves / at night).
+func test_parity_lit3_seam_light() -> void:
+	var a := Chunk.new()
+	var b := Chunk.new()
+	for y in range(0, 64):
+		for z in range(16):
+			for x in range(16):
+				a.set_block(x, y, z, Blocks.STONE)
+				b.set_block(x, y, z, Blocks.STONE)
+	# Dark room in B hugging the seam (x=0..1, y=30..32, z=6..9).
+	for y in range(30, 33):
+		for z in range(6, 10):
+			for x in range(0, 2):
+				b.set_block(x, y, z, Blocks.AIR)
+	# Chunk._init defaults sky light to 15 — darken B's border column so
+	# the room is genuinely pitch black at the plane the slice reads.
+	for y in range(Chunk.SIZE_Y):
+		for z in range(Chunk.SIZE_Z):
+			b.set_sky_light(0, y, z, 0)
+	Lighting.fill_sky_light(a)
+	# Attach B's west plane (blocks + meta + sky + block light) to A's
+	# east edge — the steady-state seam-heal configuration.
+	var pair: Array = b.west_edge_slices()
+	a.edge_blocks_east = pair[0]
+	a.edge_meta_east = pair[1]
+	a.edge_sky_light_east = pair[2]
+	a.edge_block_light_east = pair[3]
+	var gds: Dictionary = Mesher.mesh_chunk(a)
+	var native = ClassDB.instantiate("MesherNative")
+	var empty := PackedByteArray()
+	var nat: Dictionary = native.mesh_chunk_data_lit3(
+		a.blocks,
+		a.block_meta,
+		a.sky_light,
+		a.block_light,
+		a.max_y,
+		BlockAtlas.uv_table_flat(),
+		empty,
+		pair[0],
+		empty,
+		empty,
+		empty,
+		pair[1],
+		empty,
+		empty,
+		empty,
+		pair[2],
+		empty,
+		empty,
+		empty,
+		pair[3],
+		empty,
+		empty,
+		Blocks.selection_aabb_flat()
+	)
+	_assert_parity(gds, nat, "lit3 seam light")
+	# The surviving seam faces (the 3x4 room wall) must be DARK —
+	# sampled from B's border column, not the OOB default.
+	var seam_faces: int = 0
+	var verts: PackedVector3Array = nat.vertices
+	var norms: PackedVector3Array = nat.normals
+	var cols: PackedColorArray = nat.colors
+	var i: int = 0
+	while i + 3 < verts.size():
+		if norms[i] == Vector3(1, 0, 0) and verts[i].x == 16.0:
+			assert_eq(cols[i].r, 0.0, "seam face samples the neighbor's dark light")
+			seam_faces += 1
+		i += 4
+	assert_eq(seam_faces, 12, "exactly the 3x4 room wall survives at the seam")

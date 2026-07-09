@@ -240,6 +240,39 @@ public:
 			const PackedByteArray &p_edge_meta_south,
 			const PackedFloat32Array &p_selection_aabbs) const;
 
+	// lit2 + cross-chunk edge LIGHT slices. Border faces sample the
+	// neighbor chunk's real sky/block light through the extra 8 planes
+	// (same layout as edge_blocks_*) instead of falling back to the
+	// OOB defaults (sky=15, block=0) that rendered chunk-seam faces
+	// full-bright in caves and at night — see
+	// docs/lighting-chunk-seams.md. Empty light slice preserves the
+	// old defaults, so a chunk meshed before its neighbor loads
+	// behaves exactly as lit2 until the seam-heal re-mesh.
+	Dictionary mesh_chunk_data_lit3(
+			const PackedByteArray &p_blocks,
+			const PackedByteArray &p_block_meta,
+			const PackedByteArray &p_sky_light,
+			const PackedByteArray &p_block_light,
+			int p_max_y,
+			const PackedFloat32Array &p_uv_table,
+			const PackedByteArray &p_edge_blocks_west,
+			const PackedByteArray &p_edge_blocks_east,
+			const PackedByteArray &p_edge_blocks_north,
+			const PackedByteArray &p_edge_blocks_south,
+			const PackedByteArray &p_edge_meta_west,
+			const PackedByteArray &p_edge_meta_east,
+			const PackedByteArray &p_edge_meta_north,
+			const PackedByteArray &p_edge_meta_south,
+			const PackedByteArray &p_edge_sky_west,
+			const PackedByteArray &p_edge_sky_east,
+			const PackedByteArray &p_edge_sky_north,
+			const PackedByteArray &p_edge_sky_south,
+			const PackedByteArray &p_edge_blklight_west,
+			const PackedByteArray &p_edge_blklight_east,
+			const PackedByteArray &p_edge_blklight_north,
+			const PackedByteArray &p_edge_blklight_south,
+			const PackedFloat32Array &p_selection_aabbs) const;
+
 protected:
 	static void _bind_methods();
 
@@ -265,6 +298,44 @@ private:
 			PackedInt32Array &indices);
 	static void emit_collision_box(PackedVector3Array &faces,
 			const Vector3 &mn, const Vector3 &mx);
+
+	// Shared cube+fluid pass behind mesh_chunk_data_lit (empty light
+	// edges → legacy OOB light defaults, byte-identical) and
+	// mesh_chunk_data_lit3 (real neighbor light planes attached).
+	Dictionary mesh_lit_core(
+			const PackedByteArray &p_blocks,
+			const PackedByteArray &p_block_meta,
+			const PackedByteArray &p_sky_light,
+			const PackedByteArray &p_block_light,
+			int p_max_y,
+			const PackedFloat32Array &p_uv_table,
+			const PackedByteArray &p_edge_blocks_west,
+			const PackedByteArray &p_edge_blocks_east,
+			const PackedByteArray &p_edge_blocks_north,
+			const PackedByteArray &p_edge_blocks_south,
+			const PackedByteArray &p_edge_meta_west,
+			const PackedByteArray &p_edge_meta_east,
+			const PackedByteArray &p_edge_meta_north,
+			const PackedByteArray &p_edge_meta_south,
+			const PackedByteArray &p_edge_sky_west,
+			const PackedByteArray &p_edge_sky_east,
+			const PackedByteArray &p_edge_sky_north,
+			const PackedByteArray &p_edge_sky_south,
+			const PackedByteArray &p_edge_blklight_west,
+			const PackedByteArray &p_edge_blklight_east,
+			const PackedByteArray &p_edge_blklight_north,
+			const PackedByteArray &p_edge_blklight_south) const;
+
+	// Native non-cube second pass shared by lit2 / lit3 (cross plants +
+	// snow layers + the special_cells hand-off list). Samples the cell's
+	// OWN light only, so it needs no edge data.
+	void append_noncube_pass(Dictionary &result,
+			const PackedByteArray &p_blocks,
+			const PackedByteArray &p_sky_light,
+			const PackedByteArray &p_block_light,
+			int p_max_y,
+			const PackedFloat32Array &p_uv_table,
+			const PackedFloat32Array &p_selection_aabbs) const;
 };
 
 } // namespace godot

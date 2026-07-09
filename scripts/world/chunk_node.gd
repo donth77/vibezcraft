@@ -268,24 +268,32 @@ func _attach_neighbor_edges(snap: Chunk) -> void:
 		var pair: Array = west.east_edge_slices()
 		snap.edge_blocks_west = pair[0]
 		snap.edge_meta_west = pair[1]
+		snap.edge_sky_light_west = pair[2]
+		snap.edge_block_light_west = pair[3]
 	# East neighbor: its west edge feeds our x=SIZE_X plane.
 	var east: Chunk = manager.get_chunk_at_coord(my_coord + Vector2i(1, 0))
 	if east != null:
 		var pair: Array = east.west_edge_slices()
 		snap.edge_blocks_east = pair[0]
 		snap.edge_meta_east = pair[1]
+		snap.edge_sky_light_east = pair[2]
+		snap.edge_block_light_east = pair[3]
 	# North neighbor (−Z): its south edge feeds our z=-1 plane.
 	var north: Chunk = manager.get_chunk_at_coord(my_coord + Vector2i(0, -1))
 	if north != null:
 		var pair: Array = north.south_edge_slices()
 		snap.edge_blocks_north = pair[0]
 		snap.edge_meta_north = pair[1]
+		snap.edge_sky_light_north = pair[2]
+		snap.edge_block_light_north = pair[3]
 	# South neighbor (+Z): its north edge feeds our z=SIZE_Z plane.
 	var south: Chunk = manager.get_chunk_at_coord(my_coord + Vector2i(0, 1))
 	if south != null:
 		var pair: Array = south.north_edge_slices()
 		snap.edge_blocks_south = pair[0]
 		snap.edge_meta_south = pair[1]
+		snap.edge_sky_light_south = pair[2]
+		snap.edge_block_light_south = pair[3]
 
 
 # Derive the chunk's (cx, cz) coord from its Node3D position. chunk_node

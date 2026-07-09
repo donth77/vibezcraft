@@ -92,6 +92,20 @@ var edge_meta_west: PackedByteArray
 var edge_meta_east: PackedByteArray
 var edge_meta_north: PackedByteArray
 var edge_meta_south: PackedByteArray
+# Neighbor LIGHT planes — same geometry as edge_blocks_*, carrying the
+# adjacent chunk's sky/block light so border faces can sample the cell
+# they actually look into. Without these, every boundary face lit
+# itself with the OOB default (sky=15) and seams glowed full-bright in
+# caves / at night (docs/lighting-chunk-seams.md). Empty = neighbor
+# unloaded; the accessors keep the 15 / 0 defaults in that case.
+var edge_sky_light_west: PackedByteArray
+var edge_sky_light_east: PackedByteArray
+var edge_sky_light_north: PackedByteArray
+var edge_sky_light_south: PackedByteArray
+var edge_block_light_west: PackedByteArray
+var edge_block_light_east: PackedByteArray
+var edge_block_light_north: PackedByteArray
+var edge_block_light_south: PackedByteArray
 var _height_map_dirty: bool = true
 
 
@@ -129,18 +143,24 @@ func _init() -> void:
 	_height_map_dirty = false
 
 
-# Extract the blocks + meta at a constant-x plane in a single pass.
-# Returns [blocks_slice, meta_slice] indexed `y * SIZE_Z + z`. Fuses
-# the two separate 2048-cell loops (_slice_x + _slice_meta_x) into one
-# — halves the iteration count per edge extraction.
+# Extract the blocks + meta + sky/block light at a constant-x plane in
+# a single pass. Returns [blocks, meta, sky_light, block_light] slices
+# indexed `y * SIZE_Z + z`. Fused into one loop so one edge extraction
+# costs a single 2048-cell walk regardless of how many planes ride it.
 func _edge_slices_x(local_x: int) -> Array:
 	var sz: int = SIZE_Y * SIZE_Z
 	var out_b := PackedByteArray()
 	out_b.resize(sz)
 	var out_m := PackedByteArray()
 	out_m.resize(sz)
+	var out_s := PackedByteArray()
+	out_s.resize(sz)
+	var out_l := PackedByteArray()
+	out_l.resize(sz)
 	var src_b := blocks
 	var src_m := block_meta
+	var src_s := sky_light
+	var src_l := block_light
 	for y in range(SIZE_Y):
 		var base: int = y * SIZE_X * SIZE_Z + local_x
 		for z in range(SIZE_Z):
@@ -148,7 +168,9 @@ func _edge_slices_x(local_x: int) -> Array:
 			var dst_idx: int = y * SIZE_Z + z
 			out_b[dst_idx] = src_b[src_idx]
 			out_m[dst_idx] = src_m[src_idx]
-	return [out_b, out_m]
+			out_s[dst_idx] = src_s[src_idx]
+			out_l[dst_idx] = src_l[src_idx]
+	return [out_b, out_m, out_s, out_l]
 
 
 func _edge_slices_z(local_z: int) -> Array:
@@ -157,8 +179,14 @@ func _edge_slices_z(local_z: int) -> Array:
 	out_b.resize(sz)
 	var out_m := PackedByteArray()
 	out_m.resize(sz)
+	var out_s := PackedByteArray()
+	out_s.resize(sz)
+	var out_l := PackedByteArray()
+	out_l.resize(sz)
 	var src_b := blocks
 	var src_m := block_meta
+	var src_s := sky_light
+	var src_l := block_light
 	for y in range(SIZE_Y):
 		var base: int = y * SIZE_X * SIZE_Z + local_z * SIZE_X
 		for x in range(SIZE_X):
@@ -166,7 +194,9 @@ func _edge_slices_z(local_z: int) -> Array:
 			var dst_idx: int = y * SIZE_X + x
 			out_b[dst_idx] = src_b[src_idx]
 			out_m[dst_idx] = src_m[src_idx]
-	return [out_b, out_m]
+			out_s[dst_idx] = src_s[src_idx]
+			out_l[dst_idx] = src_l[src_idx]
+	return [out_b, out_m, out_s, out_l]
 
 
 func east_edge_slices() -> Array:
@@ -290,10 +320,25 @@ func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
 # Without this, edge cells would read as 0 from a missing chunk and the
 # mesher's per-face sample at (x+1, y, z) for a +X face on a chunk-border
 # block would erroneously darken the face once lighting consumes the data.
+# Sky-light access. Cross-chunk reads consult the attached neighbor
+# light planes (mirrors get_block's edge fallthrough); an empty slice
+# (unloaded neighbor) keeps the vanilla EnumSkyBlock.SKY default of 15
+# so world-edge behavior and the lighting BFS are unchanged.
+# gdlint: disable=max-returns
 func get_sky_light(x: int, y: int, z: int) -> int:
-	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
+	if y < 0 or y >= SIZE_Y:
 		return 15
-	return sky_light[index(x, y, z)]
+	if x >= 0 and x < SIZE_X and z >= 0 and z < SIZE_Z:
+		return sky_light[index(x, y, z)]
+	if x == -1 and edge_sky_light_west.size() > 0 and z >= 0 and z < SIZE_Z:
+		return edge_sky_light_west[y * SIZE_Z + z]
+	if x == SIZE_X and edge_sky_light_east.size() > 0 and z >= 0 and z < SIZE_Z:
+		return edge_sky_light_east[y * SIZE_Z + z]
+	if z == -1 and edge_sky_light_north.size() > 0 and x >= 0 and x < SIZE_X:
+		return edge_sky_light_north[y * SIZE_X + x]
+	if z == SIZE_Z and edge_sky_light_south.size() > 0 and x >= 0 and x < SIZE_X:
+		return edge_sky_light_south[y * SIZE_X + x]
+	return 15
 
 
 func set_sky_light(x: int, y: int, z: int, value: int) -> void:
@@ -303,11 +348,23 @@ func set_sky_light(x: int, y: int, z: int, value: int) -> void:
 
 
 # Block-light access. OOB returns 0 (no emitters — matches vanilla
-# EnumSkyBlock.BLOCK default).
+# EnumSkyBlock.BLOCK default). Cross-chunk reads consult the attached
+# neighbor light planes, same pattern as get_sky_light above.
+# gdlint: disable=max-returns
 func get_block_light(x: int, y: int, z: int) -> int:
-	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
+	if y < 0 or y >= SIZE_Y:
 		return 0
-	return block_light[index(x, y, z)]
+	if x >= 0 and x < SIZE_X and z >= 0 and z < SIZE_Z:
+		return block_light[index(x, y, z)]
+	if x == -1 and edge_block_light_west.size() > 0 and z >= 0 and z < SIZE_Z:
+		return edge_block_light_west[y * SIZE_Z + z]
+	if x == SIZE_X and edge_block_light_east.size() > 0 and z >= 0 and z < SIZE_Z:
+		return edge_block_light_east[y * SIZE_Z + z]
+	if z == -1 and edge_block_light_north.size() > 0 and x >= 0 and x < SIZE_X:
+		return edge_block_light_north[y * SIZE_X + x]
+	if z == SIZE_Z and edge_block_light_south.size() > 0 and x >= 0 and x < SIZE_X:
+		return edge_block_light_south[y * SIZE_X + x]
+	return 0
 
 
 func set_block_light(x: int, y: int, z: int, value: int) -> void:

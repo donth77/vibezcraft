@@ -796,3 +796,25 @@ func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
 		6,
 		"seam-adjacent under-overhang cell pulls from chunk A's 7 with -1 decay"
 	)
+
+
+# --- Cross-chunk edge light slices (docs/lighting-chunk-seams.md) ---
+
+
+func test_light_accessors_consult_edge_slices() -> void:
+	var c := Chunk.new()
+	var sky_edge := PackedByteArray()
+	sky_edge.resize(Chunk.SIZE_Y * Chunk.SIZE_Z)
+	sky_edge.fill(7)
+	c.edge_sky_light_east = sky_edge
+	assert_eq(c.get_sky_light(Chunk.SIZE_X, 5, 3), 7, "east OOB read consults the slice")
+	assert_eq(c.get_sky_light(-1, 5, 3), 15, "empty west slice keeps the 15 default")
+	var blk_edge := PackedByteArray()
+	blk_edge.resize(Chunk.SIZE_Y * Chunk.SIZE_X)
+	blk_edge.fill(9)
+	c.edge_block_light_north = blk_edge
+	assert_eq(c.get_block_light(4, 5, -1), 9, "north OOB read consults the slice")
+	assert_eq(c.get_block_light(4, 5, Chunk.SIZE_Z), 0, "empty south slice keeps the 0 default")
+	# In-chunk reads are untouched by attached slices.
+	c.set_sky_light(3, 5, 3, 4)
+	assert_eq(c.get_sky_light(3, 5, 3), 4, "in-chunk read ignores edge slices")
