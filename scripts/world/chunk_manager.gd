@@ -906,6 +906,16 @@ func _drain_one_relight_result() -> bool:
 # noticeable but not distracting.
 func _setup_autosave() -> void:
 	_session_start_msec = Time.get_ticks_msec()
+	# Headless sessions are READ-ONLY. Game._ready pins the worldgen
+	# seed to the GUT test default under headless (game.gd), so any
+	# chunk generated in a headless boot of a real world has the WRONG
+	# terrain — an autosave firing in that state fossilizes it into the
+	# region files. This happened: World1 chunk (1,1) was persisted as
+	# seed-12345 terrain by a headless validation boot and surfaced as a
+	# chunk-shaped tower. The pause-menu save path is unreachable
+	# headless, so skipping the timer makes headless fully non-writing.
+	if DisplayServer.get_name() == "headless":
+		return
 	_autosave_timer = Timer.new()
 	_autosave_timer.wait_time = _AUTOSAVE_INTERVAL_SEC
 	_autosave_timer.one_shot = false
