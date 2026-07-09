@@ -1,7 +1,10 @@
 # Chunk-Seam Lighting: Investigation Report & Fix Plan
 
-**Status:** investigation complete, fix not started
-**Date:** 2026-07-03
+**Status:** Phases 1–3 implemented (edge light slices + border relight
+re-dirty + seam-heal priority applies); Phase 4 (smooth lighting)
+remains deferred. Parity + accessor tests live in
+`tests/test_mesher_native.gd` / `tests/test_lighting.gd`.
+**Date:** 2026-07-03 (investigation) / 2026-07-09 (fix)
 **Origin:** GitHub issue #4 — "lighting is bugged on surfaces. you can see the
 skybox between the blocks as slight lines" (grazing-angle grass grid) and the
 bright seam line visible in the dark-cave screenshot from the same report.

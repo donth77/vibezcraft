@@ -695,11 +695,21 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	# → mesh_chunk_fast) sees empty neighbor slices because workers can't
 	# safely read main-thread data; the first correct mesh happens on the
 	# next frame via chunk_node._process.
+	#
+	# Seam heals ride the PRIORITY apply lane. Until the heal lands, the
+	# un-culled boundary walls from the initial mesh render fully lit
+	# (empty light slices keep the sky=15 default) — the pale seam grid
+	# at grazing angles. Behind the 1-per-frame background budget, a
+	# render-distance ring enqueues minutes of stale seams; priority
+	# applies are bounded (once per seam, both sides) and the initial
+	# world load happens behind the loading cover, so the spike is
+	# invisible. See docs/lighting-chunk-seams.md Phase 3.
 	var had_neighbor: bool = false
 	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 		var neighbor_coord: Vector2i = coord + offset
 		if _chunks.has(neighbor_coord):
 			_chunks[neighbor_coord].chunk.dirty = true
+			_chunks[neighbor_coord].set("_priority_apply", true)
 			had_neighbor = true
 	# Set initial collision activity from distance so far-ring chunks
 	# don't waste a trimesh + BVH between materialize and the next
@@ -711,6 +721,9 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	node.call("set_collision_active", near)
 	if had_neighbor:
 		data.chunk.dirty = true
+		# The new chunk's own seam heal shares the priority lane — same
+		# rationale as the neighbor re-dirty above.
+		node.set("_priority_apply", true)
 		# Cross-chunk lighting relight (slice 3b). Per-chunk fill_*_light is
 		# pessimistic at borders — torches near a seam don't light into the
 		# neighbor, and a sealed cave under one chunk doesn't get sky-light
