@@ -1947,6 +1947,7 @@ func set_world_sky_light(world_pos: Vector3i, value: int) -> void:
 	chunk.set_sky_light(local_x, world_pos.y, local_z, value)
 	chunk.dirty = true
 	_dirty_loaded[coord] = true
+	_dirty_light_border_neighbors(coord, local_x, local_z)
 
 
 # World-coord block-light read. Returns 0 (`Chunk.get_block_light`'s OOB
@@ -1989,6 +1990,25 @@ func set_world_block_light(world_pos: Vector3i, value: int) -> void:
 	chunk.set_block_light(local_x, world_pos.y, local_z, value)
 	chunk.dirty = true
 	_dirty_loaded[coord] = true
+	_dirty_light_border_neighbors(coord, local_x, local_z)
+
+
+# Border-column light writes also re-mesh the ADJACENT chunk: its seam
+# faces sample this cell through the edge-light slices attached at
+# re-mesh time, so without the extra dirty a torch placed/broken next
+# to a seam left the neighbor's border faces at stale brightness
+# (docs/lighting-chunk-seams.md, Phase 2). Cardinal only — the light
+# planes don't cover diagonals. Coalesced by the per-chunk dirty flag,
+# so a BFS touching many border cells costs one re-mesh per neighbor.
+func _dirty_light_border_neighbors(coord: Vector2i, local_x: int, local_z: int) -> void:
+	var nx: int = -1 if local_x == 0 else (1 if local_x == Chunk.SIZE_X - 1 else 0)
+	var nz: int = -1 if local_z == 0 else (1 if local_z == Chunk.SIZE_Z - 1 else 0)
+	for off: Vector2i in [Vector2i(nx, 0), Vector2i(0, nz)]:
+		if off == Vector2i.ZERO:
+			continue
+		var target: Vector2i = coord + off
+		if _chunks.has(target):
+			_chunks[target].chunk.dirty = true
 
 
 # World-coord sky-exposed query — routes to the right chunk's cached
