@@ -935,6 +935,14 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 		# The new chunk's own seam heal shares the priority lane — same
 		# rationale as the neighbor re-dirty above.
 		node.set("_priority_apply", true)
+		# Redstone edge reconciliation (redstone-plan.md §7.2). Persisted
+		# metadata is a SNAPSHOT, not proof the power is still valid: a
+		# lever on this seam may have been flipped while the neighbouring
+		# chunk was unloaded, so wire arriving from disk can hold a stale
+		# level. Re-seed every wire cell on the four seams and let the
+		# propagation fixpoint sort it out — a network that is already
+		# correct costs a scan and zero writes.
+		_reconcile_redstone_edges(coord, data.chunk)
 		# Cross-chunk lighting relight (slice 3b). Per-chunk fill_*_light is
 		# pessimistic at borders — torches near a seam don't light into the
 		# neighbor, and a sealed cave under one chunk doesn't get sky-light
@@ -1657,6 +1665,13 @@ func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 	# spread algorithm re-runs; flowing fluids already tick on their own.
 	# Placing a fluid source (e.g. via bucket → set_world_block_with_meta)
 	# needs to schedule the initial tick — handled below.
+	# Redstone fanout for ANY id change, however it was caused — player
+	# edit, explosion, fluid washout, falling block. Without this an
+	# explosion could take out a lever and leave the door it was driving
+	# stuck open. Cheap when no redstone is nearby: the drain dispatches
+	# one match per cell.
+	if old_id != id:
+		enqueue_block_notification(world_pos)
 	if old_id != id:
 		_notify_fluid_neighbors(world_pos)
 		# Placing any fluid variant (source or flowing) at `pos` requires
@@ -2230,6 +2245,36 @@ func drain_block_notifications() -> void:
 
 func pending_notification_count() -> int:
 	return _notify_queue.size()
+
+
+# Re-run wire propagation for every wire cell on a freshly materialised
+# chunk's four seams. Cheap in the common case (no wire on the border →
+# no work at all) and the only thing that can repair a circuit whose
+# source changed while this chunk was on disk.
+func _reconcile_redstone_edges(coord: Vector2i, chunk: Chunk) -> void:
+	# Fast bail: one native scan of the 32 KB block array. Chunk
+	# streaming materialises many chunks per second and virtually none of
+	# them contain wire, so this keeps the seam walk off the hot path
+	# entirely rather than paying 8192 bounds-checked reads per chunk.
+	if chunk.blocks.find(Blocks.REDSTONE_WIRE) == -1:
+		return
+	var origin_x: int = coord.x * Chunk.SIZE_X
+	var origin_z: int = coord.y * Chunk.SIZE_Z
+	for y in range(Chunk.SIZE_Y):
+		for i in range(Chunk.SIZE_X):
+			# West/east columns, then north/south rows. Corners are
+			# visited twice; update_wire is idempotent so that's fine.
+			for cell: Vector3i in [
+				Vector3i(origin_x, y, origin_z + i),
+				Vector3i(origin_x + Chunk.SIZE_X - 1, y, origin_z + i),
+				Vector3i(origin_x + i, y, origin_z),
+				Vector3i(origin_x + i, y, origin_z + Chunk.SIZE_Z - 1),
+			]:
+				var local_x: int = cell.x - origin_x
+				var local_z: int = cell.z - origin_z
+				if chunk.get_block(local_x, y, local_z) != Blocks.REDSTONE_WIRE:
+					continue
+				Redstone.update_wire(self, cell)
 
 
 # --- Callbacks the redstone model dispatches back into the world ---

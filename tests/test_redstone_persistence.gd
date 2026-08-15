@@ -1,0 +1,231 @@
+# gdlint: disable=max-public-methods
+extends GutTest
+
+# Phase 8f — persistence, chunk edges, and world events
+# (.claude/redstone-plan.md §9 Batch 5a).
+#
+# Save/load cases use a UNIQUE throwaway world name per test and clean
+# it up on both sides, per the test-plan rule: touching World1 or any
+# player-selected world is forbidden.
+
+const Y: int = 64
+const REDSTONE_IDS: Array[int] = [
+	Blocks.REDSTONE_ORE,
+	Blocks.GLOWING_REDSTONE_ORE,
+	Blocks.REDSTONE_WIRE,
+	Blocks.REDSTONE_TORCH,
+	Blocks.REDSTONE_TORCH_OFF,
+	Blocks.LEVER,
+	Blocks.STONE_BUTTON,
+	Blocks.STONE_PRESSURE_PLATE,
+	Blocks.WOODEN_PRESSURE_PLATE,
+]
+
+var _world_name: String
+
+
+func before_each() -> void:
+	TickScheduler.reset_for_tests()
+	Redstone.reset_state()
+	# Unique per test so a crashed run can never collide with a real save.
+	_world_name = "test_redstone_%d" % Time.get_ticks_usec()
+	_purge()
+
+
+func after_each() -> void:
+	_purge()
+	TickScheduler.reset_for_tests()
+
+
+func _purge() -> void:
+	SaveLoad.clear_cache()
+	var dir: String = SaveLoad.world_dir(_world_name)
+	if DirAccess.dir_exists_absolute(dir):
+		OS.move_to_trash(ProjectSettings.globalize_path(dir))
+
+
+# --- Block + metadata round-trip ---
+
+
+func test_every_redstone_id_and_meta_survives_a_round_trip() -> void:
+	var chunk := Chunk.new()
+	var expected := {}
+	var i: int = 0
+	for id: int in REDSTONE_IDS:
+		# Give each one a distinct, meaningful metadata value: mount
+		# orientations, a mid-range wire level, pressed flags.
+		var meta: int = (i * 3) % 16
+		chunk.set_block(i, Y, 0, id)
+		chunk.set_block_meta(i, Y, 0, meta)
+		expected[i] = [id, meta]
+		i += 1
+	var entry := {
+		"bytes": chunk.blocks,
+		"block_meta": chunk.block_meta,
+		"sky_light": chunk.sky_light,
+		"block_light": chunk.block_light,
+		"height_map": PackedByteArray(),
+		"max_y": chunk.max_y,
+	}
+	assert_true(SaveLoad.save_chunk(Vector2i(0, 0), entry, _world_name), "saved")
+	SaveLoad.clear_cache()
+	var loaded: Dictionary = SaveLoad.load_chunk(Vector2i(0, 0), _world_name)
+	assert_false(loaded.is_empty(), "chunk came back")
+	var blocks: PackedByteArray = loaded["bytes"]
+	var metas: PackedByteArray = loaded["block_meta"]
+	for x: int in expected:
+		var idx: int = Chunk.index(x, Y, 0)
+		assert_eq(blocks[idx], expected[x][0], "id at x=%d" % x)
+		assert_eq(metas[idx], expected[x][1], "meta at x=%d" % x)
+
+
+func test_a_full_wire_level_range_round_trips() -> void:
+	# Wire uses the entire nibble, so every level must survive — a
+	# truncation bug would only show at the high end.
+	var chunk := Chunk.new()
+	for level in range(16):
+		chunk.set_block(level, Y, 1, Blocks.REDSTONE_WIRE)
+		chunk.set_block_meta(level, Y, 1, level)
+	var entry := {
+		"bytes": chunk.blocks,
+		"block_meta": chunk.block_meta,
+		"sky_light": chunk.sky_light,
+		"block_light": chunk.block_light,
+		"height_map": PackedByteArray(),
+		"max_y": chunk.max_y,
+	}
+	SaveLoad.save_chunk(Vector2i(0, 0), entry, _world_name)
+	SaveLoad.clear_cache()
+	var loaded: Dictionary = SaveLoad.load_chunk(Vector2i(0, 0), _world_name)
+	var metas: PackedByteArray = loaded["block_meta"]
+	for level in range(16):
+		assert_eq(metas[Chunk.index(level, Y, 1)], level, "wire level %d" % level)
+
+
+# --- Pending scheduled ticks ---
+
+
+func test_pending_redstone_ticks_harvest_and_restore() -> void:
+	# A pressed button, a lit ore and a torch all have work in flight.
+	# Unloading a chunk must carry that work with it.
+	TickScheduler.schedule(Vector3i(2, Y, 2), Blocks.STONE_BUTTON, 20)
+	TickScheduler.schedule(Vector3i(3, Y, 3), Blocks.GLOWING_REDSTONE_ORE, 400)
+	TickScheduler.schedule(Vector3i(4, Y, 4), Blocks.REDSTONE_TORCH, 2)
+	var harvested: Array = TickScheduler.take_for_chunk(0, 0)
+	assert_eq(harvested.size(), 3, "all three came out")
+	assert_eq(TickScheduler.pending_count(), 0, "queue drained by the harvest")
+	TickScheduler.restore_ticks(harvested)
+	assert_eq(TickScheduler.pending_count(), 3, "restored")
+
+
+func test_restored_ticks_keep_their_remaining_delay() -> void:
+	TickScheduler.schedule(Vector3i(5, Y, 5), Blocks.STONE_BUTTON, 20)
+	# Burn 5 ticks, then unload.
+	for _i in range(5):
+		TickScheduler.advance(0.05, _FakeWorld.new())
+	var harvested: Array = TickScheduler.take_for_chunk(0, 0)
+	assert_eq(harvested.size(), 1, "harvested")
+	assert_eq(int(harvested[0]["delay"]), 15, "15 of the 20 ticks remain, not a fresh 20")
+
+
+class _FakeWorld:
+	extends RefCounted
+	var blocks: Dictionary = {}
+	var metas: Dictionary = {}
+
+	func get_world_block(pos: Vector3i) -> int:
+		return blocks.get(pos, Blocks.AIR)
+
+	func get_world_block_meta(pos: Vector3i) -> int:
+		return metas.get(pos, 0)
+
+	func set_world_block_state(pos: Vector3i, id: int, meta: int, _n: bool = true) -> bool:
+		blocks[pos] = id
+		metas[pos] = meta & 0xF
+		return true
+
+	func put(pos: Vector3i, id: int, meta: int = 0) -> void:
+		blocks[pos] = id
+		metas[pos] = meta
+
+
+# --- Reconciliation after a stale load ---
+
+
+func test_wire_reconciles_when_its_source_changed_while_unloaded() -> void:
+	# The scenario chunk-edge reconciliation exists for: wire comes back
+	# from disk still holding power, but the lever that fed it is now
+	# off. Re-seeding the network must correct it.
+	var w := _FakeWorld.new()
+	for i in range(6):
+		w.put(Vector3i(i, Y - 1, 0), Blocks.STONE)
+		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, maxi(15 - i, 0))
+	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
+	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL)  # OFF
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	for i in range(6):
+		assert_eq(w.get_world_block_meta(Vector3i(i, Y, 0)), 0, "stale level cleared at %d" % i)
+
+
+func test_reconciliation_from_a_far_cell_still_fixes_the_line() -> void:
+	# Reconciliation seeds from whichever cells sit on the chunk seam,
+	# which may be the far end of a run rather than the source.
+	var w := _FakeWorld.new()
+	for i in range(6):
+		w.put(Vector3i(i, Y - 1, 0), Blocks.STONE)
+		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, 0)
+	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
+	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	Redstone.update_wire(w, Vector3i(5, Y, 0))
+	assert_eq(w.get_world_block_meta(Vector3i(0, Y, 0)), 15, "source end powered")
+	assert_eq(w.get_world_block_meta(Vector3i(5, Y, 0)), 10, "far end correct")
+
+
+# --- World events: fluids and explosions ---
+
+
+func test_redstone_components_are_washed_away_by_fluid() -> void:
+	for id: int in [
+		Blocks.REDSTONE_WIRE,
+		Blocks.REDSTONE_TORCH,
+		Blocks.REDSTONE_TORCH_OFF,
+		Blocks.STONE_BUTTON,
+		Blocks.STONE_PRESSURE_PLATE,
+		Blocks.WOODEN_PRESSURE_PLATE,
+	]:
+		assert_true(
+			Blocks.is_replaceable(id), "%s is flimsy enough to wash out" % Blocks.name_of(id)
+		)
+
+
+func test_redstone_ore_is_not_washed_away() -> void:
+	for id: int in [Blocks.REDSTONE_ORE, Blocks.GLOWING_REDSTONE_ORE]:
+		assert_false(Blocks.is_replaceable(id), "ore is an ordinary solid block")
+
+
+func test_removing_a_source_depowers_surviving_wire() -> void:
+	# Stands in for an explosion taking out the lever: the wire it fed
+	# must not stay lit.
+	var w := _FakeWorld.new()
+	for i in range(5):
+		w.put(Vector3i(i, Y - 1, 0), Blocks.STONE)
+		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, 0)
+	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
+	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	assert_eq(w.get_world_block_meta(Vector3i(0, Y, 0)), 15, "powered first")
+	# Blast removes the lever AND its mount.
+	w.put(Vector3i(-2, Y, 0), Blocks.AIR)
+	w.put(Vector3i(-1, Y, 0), Blocks.AIR)
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	for i in range(5):
+		assert_eq(w.get_world_block_meta(Vector3i(i, Y, 0)), 0, "cell %d de-powered" % i)
+
+
+func test_all_nine_ids_are_distinct_and_in_the_reserved_range() -> void:
+	var seen := {}
+	for id: int in REDSTONE_IDS:
+		assert_between(id, 88, 96, "%s inside the reserved block range" % Blocks.name_of(id))
+		assert_false(seen.has(id), "id %d used once" % id)
+		seen[id] = true
+	assert_eq(seen.size(), 9, "nine distinct redstone blocks")

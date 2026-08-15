@@ -1124,6 +1124,16 @@ static func is_replaceable(id: int) -> bool:
 		# the snow flat and stacks the new block in its place rather
 		# than floating above it. Same behavior as tall grass / saplings.
 		or id == SNOW_LAYER
+		# Redstone components are flimsy attachments: vanilla lets fluid
+		# flow through their cells and wash them out. Wire, torches,
+		# button and plates all go; the ore blocks are ordinary solids
+		# and are NOT in this list.
+		or id == REDSTONE_WIRE
+		or id == REDSTONE_TORCH
+		or id == REDSTONE_TORCH_OFF
+		or id == STONE_BUTTON
+		or id == STONE_PRESSURE_PLATE
+		or id == WOODEN_PRESSURE_PLATE
 	)
 
 
