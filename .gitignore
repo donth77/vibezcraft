@@ -55,3 +55,10 @@ godot-cpp/gen/
 .sconf_temp/
 config.log
 assets/icon/app_icon.iconset/
+.cate
+.playwright-mcp
+build
+*.png
+*.png.import
+test-screenshots/
+docs/
