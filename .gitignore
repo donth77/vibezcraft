@@ -62,3 +62,4 @@ build
 *.png.import
 test-screenshots/
 docs/
+scripts/dev/internal
