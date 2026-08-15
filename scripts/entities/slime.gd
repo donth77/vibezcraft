@@ -441,7 +441,12 @@ func _ai_tick() -> void:
 			if _attack_sfx_cooldown_sec <= 0.0:
 				SFX.play_slime_attack(global_position)
 				_attack_sfx_cooldown_sec = 1.0
-			player.call("take_damage", _size * _AI_ATTACK_DAMAGE_PER_SIZE, "mob")
+			player.call(
+				"take_damage",
+				_size * _AI_ATTACK_DAMAGE_PER_SIZE,
+				"mob",
+				player.global_position - global_position
+			)
 	# Hop logic. Only count down when grounded (vanilla `aH = onGround`).
 	if on_floor_now:
 		_hop_cooldown_ticks -= 1

@@ -472,7 +472,9 @@ func _attack_player(player: Node3D) -> void:
 	# declared as a global class_name (player.gd just `extends
 	# CharacterBody3D`), so the bare reference fails to parse at
 	# script load. Player.gd's DAMAGE_MOB const is `"mob"`.
-	player.call("take_damage", _AI_MELEE_DAMAGE, "mob")
+	# Pass the attacker→player direction so take_damage can knock the
+	# player back (vanilla mob melee shoves + pops the target).
+	player.call("take_damage", _AI_MELEE_DAMAGE, "mob", player.global_position - global_position)
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
 	# Beta `EntityLiving.swingItem()` — flip the swing flag so the
 	# overhead-chomp animation plays. Vanilla restarts the swing even

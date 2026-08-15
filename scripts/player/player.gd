@@ -84,6 +84,13 @@ const FALL_DAMAGE_SAFE_BLOCKS: float = 3.0
 # allows STRONGER overlapping damage to still land within this window;
 # we keep it simple and fully ignore everything for now.)
 const DAMAGE_COOLDOWN_SEC: float = 1.0
+# Mob-hit knockback (vanilla hf.java EntityLiving: halve current motion,
+# then shove away from the attacker + a clamped upward pop). Magnitudes
+# match MobBase's own knockback so a hit feels symmetric between player
+# and mob; small enough (sub-block per physics frame) that move_and_slide
+# resolves it against terrain rather than tunnelling.
+const KNOCKBACK_HORIZONTAL: float = 5.0
+const KNOCKBACK_VERTICAL: float = 4.0
 # Vanilla Alpha health regen (pre-Beta 1.8 hunger system): heals 1 HP
 # every 4 seconds while below max and not currently dying. No food
 # gating — just a constant background heal rate.
@@ -2431,7 +2438,9 @@ func _update_fall_tracking() -> void:
 # Public damage entry point. Applies armor-reduction unless the source
 # bypasses armor (fall damage does per vanilla Alpha behavior). Emits
 # signals for UI + sound hooks; routes to respawn on 0 HP.
-func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
+func take_damage(
+	amount: int, source: String = DAMAGE_GENERIC, knockback_dir: Vector3 = Vector3.ZERO
+) -> void:
 	# Suppress all damage while the loading screen is up. Physics ticks
 	# (drown / lava / fire / cactus / fall) all keep firing during load,
 	# but the post-spawn relocate + emergency-platform passes are gated
@@ -2483,6 +2492,16 @@ func take_damage(amount: int, source: String = DAMAGE_GENERIC) -> void:
 		_damage_armor(amount)
 	health = maxi(0, health - final_amount)
 	_damage_cooldown_remaining = DAMAGE_COOLDOWN_SEC
+	# Vanilla knockback (hf.java:350) — only reached on a real hit (the
+	# iframe gate above already returned for blocked ones). Halve current
+	# horizontal motion then add a shove away from the attacker; halve
+	# vertical then add the pop, clamped so a hit is a flinch, not a
+	# launch. `knockback_dir` is the attacker→player horizontal direction.
+	if knockback_dir.length_squared() > 0.0001:
+		var dir: Vector3 = Vector3(knockback_dir.x, 0.0, knockback_dir.z).normalized()
+		velocity.x = velocity.x * 0.5 + dir.x * KNOCKBACK_HORIZONTAL
+		velocity.z = velocity.z * 0.5 + dir.z * KNOCKBACK_HORIZONTAL
+		velocity.y = minf(velocity.y * 0.5 + KNOCKBACK_VERTICAL, KNOCKBACK_VERTICAL)
 	# Vanilla branches on source: fall damage plays fall.big/.small,
 	# generic hits play the rotating hit1/2/3. Matches EntityHuman.
 	if source == DAMAGE_FALL:

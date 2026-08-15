@@ -109,3 +109,35 @@ func test_find_safe_spawn_accepts_high_land_with_clearance() -> void:
 	assert_eq(cell, Vector3i(3, 124, 5), "high land column with clearance is accepted")
 	player.free()
 	cm.free()
+
+
+func test_mob_hit_applies_knockback() -> void:
+	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
+	autofree(player)
+	player.health = 20
+	player.velocity = Vector3.ZERO
+	# Attacker on the -X side → player shoved toward +X, plus an upward pop.
+	player.take_damage(3, "mob", Vector3(1.0, 0.0, 0.0))
+	assert_gt(player.velocity.x, 0.0, "knocked back along +X")
+	assert_almost_eq(player.velocity.z, 0.0, 0.01, "no lateral drift on a pure-X hit")
+	assert_gt(player.velocity.y, 0.0, "upward pop on hit")
+
+
+func test_knockback_direction_is_away_from_attacker() -> void:
+	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
+	autofree(player)
+	player.health = 20
+	player.velocity = Vector3.ZERO
+	# Attacker on the +Z side → player shoved toward -Z.
+	player.take_damage(3, "mob", Vector3(0.0, 0.0, -1.0))
+	assert_lt(player.velocity.z, 0.0, "pushed away from a +Z attacker")
+
+
+func test_ambient_damage_has_no_knockback() -> void:
+	var player: CharacterBody3D = _PLAYER_SCENE.instantiate()
+	autofree(player)
+	player.health = 20
+	player.velocity = Vector3.ZERO
+	# Drown / lava / fall etc. pass no direction — velocity must stay put.
+	player.take_damage(1, "drown")
+	assert_eq(player.velocity, Vector3.ZERO, "ambient damage does not knock back")

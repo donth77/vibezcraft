@@ -704,8 +704,9 @@ func _attack_player(player: Node3D) -> void:
 	if not player.has_method("take_damage"):
 		return
 	# Vanilla EntityMob.l calls EntityHuman.attackEntityFrom(this, attackDamage).
-	# Player.take_damage(amount, source) — "mob" matches Player.DAMAGE_MOB.
-	player.call("take_damage", _AI_MELEE_DAMAGE, "mob")
+	# Player.take_damage(amount, source, knockback_dir) — "mob" matches
+	# Player.DAMAGE_MOB; the direction knocks the player back on the hit.
+	player.call("take_damage", _AI_MELEE_DAMAGE, "mob", player.global_position - global_position)
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
 
 

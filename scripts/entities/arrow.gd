@@ -337,7 +337,9 @@ func _hit_player(player: Node, _hit_pos: Vector3) -> void:
 	# Use a string source tag, matching player.gd's take_damage
 	# signature. Other call sites (zombie melee, fall) pass tags like
 	# "mob" / "fall"; "arrow" mirrors vanilla EntityArrow.attackEntityFrom.
-	player.call("take_damage", dmg, "arrow")
+	# Knockback follows the arrow's flight direction (vanilla arrows shove
+	# the target along their motion).
+	player.call("take_damage", dmg, "arrow", Vector3(_velocity.x, 0.0, _velocity.z))
 	SFX.play_arrow_hit()
 	queue_free()
 
