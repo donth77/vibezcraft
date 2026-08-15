@@ -846,6 +846,12 @@ static func id_from_name(item_name: String) -> int:
 			return SLIMEBALL
 		"slime_block":
 			return Blocks.SLIME_BLOCK
+		"stone_button":
+			return Blocks.STONE_BUTTON
+		"stone_pressure_plate":
+			return Blocks.STONE_PRESSURE_PLATE
+		"wooden_pressure_plate":
+			return Blocks.WOODEN_PRESSURE_PLATE
 		"redstone_torch":
 			return Blocks.REDSTONE_TORCH
 		"lever":

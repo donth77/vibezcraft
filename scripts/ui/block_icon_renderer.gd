@@ -50,6 +50,9 @@ const _ICONIFIED_BLOCKS: Array = [
 	# pillar mesh is too thin to read at icon size.
 	Blocks.REDSTONE_TORCH,
 	Blocks.REDSTONE_TORCH_OFF,
+	Blocks.STONE_BUTTON,
+	Blocks.STONE_PRESSURE_PLATE,
+	Blocks.WOODEN_PRESSURE_PLATE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FARMLAND,
 	Blocks.GRAVEL,

@@ -1384,6 +1384,12 @@ func _try_place() -> void:
 		_toggle_lever(hit.block_pos)
 		_last_place_ms = now
 		return
+	if hit_id == Blocks.STONE_BUTTON:
+		# Press is a no-op while already down (iy.java:139), so an
+		# already-pressed button falls through to normal placement.
+		if Redstone.press_button(_chunk_manager, hit.block_pos):
+			_last_place_ms = now
+			return
 	if hit_id == Blocks.FENCE_GATE:
 		_toggle_fence_gate(hit.block_pos)
 		_last_place_ms = now
@@ -2030,6 +2036,38 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 				_spawn_dropped_item(place, ld)
 		_chunk_manager.set_world_block_state(place, Blocks.LEVER, lever_meta)
 		SFX.play_place(Blocks.LEVER)
+		inv.consume_one_selected()
+		return true
+	# Stone button — WALL ONLY. iy.java's canPlaceAt checks the four
+	# horizontal neighbours and nothing else, so a floor mount (meta 5)
+	# from the shared torch helper has to be rejected.
+	if stack.item_id == Blocks.STONE_BUTTON:
+		var btn_meta: int = _torch_meta_from_face(hit.normal_i, place)
+		if btn_meta == 0 or btn_meta >= Redstone.MOUNT_FLOOR:
+			return false
+		var displaced_for_btn: int = _chunk_manager.get_world_block(place)
+		if displaced_for_btn != Blocks.AIR:
+			var bd: int = Blocks.drops(displaced_for_btn)
+			if bd != Blocks.AIR:
+				_spawn_dropped_item(place, bd)
+		_chunk_manager.set_world_block_state(place, Blocks.STONE_BUTTON, btn_meta)
+		SFX.play_place(Blocks.STONE_BUTTON)
+		inv.consume_one_selected()
+		return true
+	# Pressure plates need a normal cube directly below (ap.java).
+	if (
+		stack.item_id == Blocks.STONE_PRESSURE_PLATE
+		or stack.item_id == Blocks.WOODEN_PRESSURE_PLATE
+	):
+		if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
+			return false
+		var displaced_for_plate: int = _chunk_manager.get_world_block(place)
+		if displaced_for_plate != Blocks.AIR:
+			var pd: int = Blocks.drops(displaced_for_plate)
+			if pd != Blocks.AIR:
+				_spawn_dropped_item(place, pd)
+		_chunk_manager.set_world_block_state(place, stack.item_id, 0)
+		SFX.play_place(stack.item_id)
 		inv.consume_one_selected()
 		return true
 	# Redstone torch — identical mount rules to the plain torch

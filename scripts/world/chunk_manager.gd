@@ -2271,6 +2271,43 @@ func redstone_burnout_log() -> Array:
 	return _redstone_burnout_log
 
 
+# Entity-overlap query for pressure plates (redstone-plan.md §7.3).
+# `living_only` distinguishes the two plate sensitivities: a stone plate
+# takes vanilla's lg.b (players + mobs), a wooden plate lg.a (every
+# physical entity — dropped items, projectiles and minecarts included).
+#
+# Walks the mob registry, the player, and our own entity children. The
+# counts here are small (a plate box is under one cubic metre and only
+# runs on contact or a 20-tick recheck), so a direct scan beats keeping
+# another spatial index in sync.
+func entities_overlap_box(box: AABB, living_only: bool) -> bool:
+	if _player != null and is_instance_valid(_player):
+		if box.has_point(_player.global_position):
+			return true
+	for mob: Variant in MobBase._active_mobs.keys():
+		if not is_instance_valid(mob):
+			continue
+		if box.has_point((mob as Node3D).global_position):
+			return true
+	if living_only:
+		return false
+	for child: Node in get_children():
+		if not (child is Node3D):
+			continue
+		if not (child is DroppedItem or child is Arrow or child is Minecart or child is Boat):
+			continue
+		if box.has_point((child as Node3D).global_position):
+			return true
+	return false
+
+
+# Vanilla plays `random.click` at volume 0.3 for every redstone
+# component transition: pitch 0.6 switching on, 0.5 switching off
+# (pl.java:145, iy.java:137, ap.java:96).
+func play_redstone_click(_block_pos: Vector3i, on: bool) -> void:
+	SFX.play_click(0.6 if on else 0.5, 0.3)
+
+
 # Torch burnout effect — vanilla plays random.fizz at volume 0.5 with a
 # wide pitch jitter and puffs five smoke particles.
 func play_torch_burnout(block_pos: Vector3i) -> void:

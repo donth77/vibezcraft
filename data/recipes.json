@@ -561,6 +561,27 @@
       "pattern": ["R", "S"],
       "key": {"R": "redstone", "S": "stick"},
       "result": {"id": "redstone_torch", "count": 1}
+    },
+    {
+      "_comment": "Stone button — vanilla en.java:62. Two stone stacked vertically.",
+      "id": "stone_button",
+      "pattern": ["S", "S"],
+      "key": {"S": "stone"},
+      "result": {"id": "stone_button", "count": 1}
+    },
+    {
+      "_comment": "Stone pressure plate — DEVIATION. Vanilla en.java:63 is 3 stone in a row, which collides with our stone_slab recipe (Alpha's slab is cobblestone-based, so vanilla had no conflict). Uses the modern 2-wide recipe instead; see redstone-plan.md 5.1.",
+      "id": "stone_pressure_plate",
+      "pattern": ["SS"],
+      "key": {"S": "stone"},
+      "result": {"id": "stone_pressure_plate", "count": 1}
+    },
+    {
+      "_comment": "Wooden pressure plate — DEVIATION, same reason as the stone plate: vanilla en.java:64 is 3 planks in a row, which collides with our wood_slab recipe.",
+      "id": "wooden_pressure_plate",
+      "pattern": ["PP"],
+      "key": {"P": "planks"},
+      "result": {"id": "wooden_pressure_plate", "count": 1}
     }
   ],
   "shapeless": [

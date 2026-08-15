@@ -310,6 +310,10 @@ static func _emit_special_cell(
 		_emit_rail_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_REDSTONE_WIRE:
 		_emit_wire_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_BUTTON:
+		_emit_button_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_PRESSURE_PLATE:
+		_emit_plate_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_LEVER:
 		_emit_lever_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_BED:
@@ -3819,3 +3823,53 @@ static func _wire_climbs(chunk: Chunk, x: int, y: int, z: int, dx: int, dz: int)
 	if _wire_solid(chunk, x, y + 1, z):
 		return false
 	return chunk.get_block(x + dx, y + 1, z + dz) == Blocks.REDSTONE_WIRE
+
+
+# Stone button (iy.java render). A single small box on the wall it is
+# mounted on, sunk in by half when pressed — that visible travel is the
+# only feedback the button gives.
+static func _emit_button_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	_plant_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.STONE_BUTTON, BlockAtlas.FACE_SIDE)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
+	var aabb: AABB = Blocks.selection_aabb(Blocks.STONE_BUTTON, meta)
+	var o := Vector3(float(x), float(y), float(z))
+	_emit_box(verts, norms, uvs, colors, indices, o + aabb.position, o + aabb.end, rect, face_light)
+
+
+# Pressure plate (ap.java render). A flat pad inset 1/16 on each side,
+# 1/16 tall and 1/32 when pressed. No collision — you walk over it.
+static func _emit_plate_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	_plant_faces: PackedVector3Array
+) -> void:
+	var id: int = chunk.get_block(x, y, z)
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var rect: Rect2 = BlockAtlas.uv_rect_for(id, BlockAtlas.FACE_TOP)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
+	var aabb: AABB = Blocks.selection_aabb(id, meta)
+	var o := Vector3(float(x), float(y), float(z))
+	_emit_box(verts, norms, uvs, colors, indices, o + aabb.position, o + aabb.end, rect, face_light)

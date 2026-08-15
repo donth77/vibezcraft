@@ -68,6 +68,17 @@ const TORCH_TICK_RATE: int = 2
 const TORCH_BURNOUT_WINDOW_TICKS: int = 100
 const TORCH_BURNOUT_LIMIT: int = 8
 
+# Button pulse and plate re-check interval — iy.java d() and ap.java
+# d() both return 20 ticks (one second).
+const BUTTON_PULSE_TICKS: int = 20
+const PLATE_RECHECK_TICKS: int = 20
+
+# ap.java's inset detection box: (x+0.125, y, z+0.125) to
+# (x+0.875, y+0.25, z+0.875). Standing at the very corner of the cell
+# does NOT trip a plate.
+const PLATE_BOX_INSET: float = 0.125
+const PLATE_BOX_HEIGHT: float = 0.25
+
 # Safety ceiling on a single propagation drain. A 15-decay network can
 # only be so large, but a malformed world shouldn't be able to spin here.
 const _WIRE_WORKLIST_CAP: int = 8192
@@ -148,6 +159,12 @@ static func provides_weak_power(manager, pos: Vector3i, slot: int) -> bool:
 			# bo.java:65 — a lit torch powers every direction EXCEPT into
 			# the block it is attached to.
 			return slot != _torch_excluded_slot(manager.get_world_block_meta(pos))
+		Blocks.STONE_BUTTON:
+			# iy.java:180 — a pressed button powers every direction.
+			return (manager.get_world_block_meta(pos) & POWERED_BIT) > 0
+		Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
+			# ap.java:127 — a pressed plate powers every direction.
+			return manager.get_world_block_meta(pos) > 0
 	return false
 
 
@@ -203,6 +220,17 @@ static func provides_strong_power(manager, pos: Vector3i, slot: int) -> bool:
 			if (meta & POWERED_BIT) == 0:
 				return false
 			return _MOUNT_TO_STRONG_SLOT.get(meta & 0x7, SLOT_ABOVE) == slot
+		Blocks.STONE_BUTTON:
+			# iy.java:184 — like the lever, only into its mount block.
+			var button_meta: int = manager.get_world_block_meta(pos)
+			if (button_meta & POWERED_BIT) == 0:
+				return false
+			return _MOUNT_TO_STRONG_SLOT.get(button_meta & 0x7, SLOT_ABOVE) == slot
+		Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
+			# ap.java:131 — slot 1, i.e. the block directly BELOW it.
+			if manager.get_world_block_meta(pos) == 0:
+				return false
+			return slot == SLOT_ABOVE
 		Blocks.REDSTONE_TORCH:
 			# bo.java:121 — strong power only at slot 0, i.e. into the
 			# block directly ABOVE the torch. That single rule is why the
@@ -273,6 +301,10 @@ static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 			_check_wire_support(manager, pos)
 		Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
 			_update_torch(manager, pos, id)
+		Blocks.STONE_BUTTON:
+			_check_mounted_support(manager, pos, id)
+		Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
+			_check_plate_support(manager, pos, id)
 		Blocks.LEVER:
 			_check_mounted_support(manager, pos, id)
 		Blocks.WOODEN_DOOR, Blocks.IRON_DOOR:
@@ -596,3 +628,81 @@ static func reset_state() -> void:
 	# leaving burnout history alive across worlds and test cases.
 	_fallback_burnout_log.clear()
 	_wire_output_enabled = true
+
+
+# --- Stone button (iy.java) --------------------------------------------
+
+
+# Right-click. A pressed button ignores further clicks (iy.java:139)
+# and releases itself on a scheduled tick.
+static func press_button(manager, pos: Vector3i) -> bool:
+	var meta: int = manager.get_world_block_meta(pos)
+	if (meta & POWERED_BIT) != 0:
+		return false
+	manager.set_world_block_state(pos, Blocks.STONE_BUTTON, meta | POWERED_BIT)
+	TickScheduler.schedule(pos, Blocks.STONE_BUTTON, BUTTON_PULSE_TICKS)
+	if manager.has_method("play_redstone_click"):
+		manager.call("play_redstone_click", pos, true)
+	return true
+
+
+# Scheduled release, exactly BUTTON_PULSE_TICKS after the press.
+static func button_tick(manager, pos: Vector3i) -> void:
+	var meta: int = manager.get_world_block_meta(pos)
+	if (meta & POWERED_BIT) == 0:
+		return
+	manager.set_world_block_state(pos, Blocks.STONE_BUTTON, meta & 0x7)
+	if manager.has_method("play_redstone_click"):
+		manager.call("play_redstone_click", pos, false)
+
+
+# --- Pressure plates (ap.java) -----------------------------------------
+
+
+# The inset box an entity has to be inside to trip a plate.
+static func plate_detection_box(pos: Vector3i) -> AABB:
+	return AABB(
+		Vector3(float(pos.x) + PLATE_BOX_INSET, float(pos.y), float(pos.z) + PLATE_BOX_INSET),
+		Vector3(1.0 - PLATE_BOX_INSET * 2.0, PLATE_BOX_HEIGHT, 1.0 - PLATE_BOX_INSET * 2.0)
+	)
+
+
+# Wooden plates take every entity (lg.a); stone plates only living ones
+# (lg.b). The manager decides what "living" means for its entity set.
+static func plate_living_only(block_id: int) -> bool:
+	return block_id == Blocks.STONE_PRESSURE_PLATE
+
+
+# Re-evaluate a plate against whatever is standing on it. Called from
+# entity contact and from the 20-tick scheduled re-check, so a plate
+# releases once the box empties.
+static func update_plate(manager, pos: Vector3i, block_id: int) -> void:
+	var occupied: bool = false
+	if manager.has_method("entities_overlap_box"):
+		occupied = bool(
+			manager.call(
+				"entities_overlap_box", plate_detection_box(pos), plate_living_only(block_id)
+			)
+		)
+	var was_pressed: bool = manager.get_world_block_meta(pos) > 0
+	if occupied and not was_pressed:
+		manager.set_world_block_state(pos, block_id, 1)
+		if manager.has_method("play_redstone_click"):
+			manager.call("play_redstone_click", pos, true)
+	elif not occupied and was_pressed:
+		manager.set_world_block_state(pos, block_id, 0)
+		if manager.has_method("play_redstone_click"):
+			manager.call("play_redstone_click", pos, false)
+	# While held down, keep re-checking so the plate can notice the
+	# entity leaving (ap.java:104).
+	if occupied:
+		TickScheduler.schedule(pos, block_id, PLATE_RECHECK_TICKS)
+
+
+# Plates need a normal cube below, same as wire.
+static func _check_plate_support(manager, pos: Vector3i, block_id: int) -> void:
+	if is_normal_cube(manager, pos + Vector3i(0, -1, 0)):
+		return
+	manager.set_world_block_state(pos, Blocks.AIR, 0)
+	if manager.has_method("spawn_block_drop"):
+		manager.call("spawn_block_drop", pos, Blocks.drops(block_id))

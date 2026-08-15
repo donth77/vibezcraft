@@ -64,6 +64,10 @@ const _BLOCKS: Array = [
 	# spawnable too so its state machine can be poked directly.
 	Blocks.REDSTONE_TORCH,
 	Blocks.REDSTONE_TORCH_OFF,
+	# Button + both pressure plates (Phase 8e).
+	Blocks.STONE_BUTTON,
+	Blocks.STONE_PRESSURE_PLATE,
+	Blocks.WOODEN_PRESSURE_PLATE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,

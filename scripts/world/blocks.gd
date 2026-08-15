@@ -440,9 +440,9 @@ const SLIME_BLOCK := 87
 #   91 redstone_torch          (defined below)
 #   92 redstone_torch_off      (defined below)
 #   93 lever                   (defined below)
-#   94 stone_button            (Phase 8e)
-#   95 stone_pressure_plate    (Phase 8e)
-#   96 wooden_pressure_plate   (Phase 8e)
+#   94 stone_button            (defined below)
+#   95 stone_pressure_plate    (defined below)
+#   96 wooden_pressure_plate   (defined below)
 
 # Redstone ore — vanilla an.java via nq.aN (id 73, tex 51). Stone
 # material, hardness 3.0, blast registration b(5.0f) (same arm as the
@@ -471,6 +471,22 @@ const REDSTONE_TORCH := 91
 # Breaking either variant hands back the LIT one (bo.java a()), so a
 # burnt-out torch is never a dead item.
 const REDSTONE_TORCH_OFF := 92
+
+# Stone button — vanilla iy.java via nq.aR (id 77, stone texture).
+# WALL-ONLY (meta 1-4; iy.java's canPlaceAt checks the four horizontal
+# neighbours and nothing else) with the pressed flag in bit 3. Emits a
+# 20-tick pulse and releases itself — Alpha's only momentary source.
+const STONE_BUTTON := 94
+
+# Stone pressure plate — vanilla ap.java via nq.aK (id 70). Triggers for
+# LIVING entities only (the lg.b sensitivity), so a dropped item won't
+# set it off.
+const STONE_PRESSURE_PLATE := 95
+
+# Wooden pressure plate — vanilla ap.java via nq.aM (id 72). Sensitivity
+# lg.a: EVERY entity, including dropped items, arrows and minecarts.
+# That difference is the whole point of having two plates.
+const WOODEN_PRESSURE_PLATE := 96
 
 # Redstone wire — vanilla lu.java via nq.av (id 55, tex 84/85 with the
 # powered variants at +16). Hardness 0, no collision box, needs a normal
@@ -561,6 +577,10 @@ const MESH_SHAPE_LEVER: int = 15
 # cross/line texture selection from neighbour connectivity and optional
 # quads climbing the side of an adjacent solid block (lu render type 5).
 const MESH_SHAPE_REDSTONE_WIRE: int = 16
+# Button — a small box on a wall that sinks in when pressed.
+const MESH_SHAPE_BUTTON: int = 17
+# Pressure plate — a flat pad on the floor, thinner when pressed.
+const MESH_SHAPE_PRESSURE_PLATE: int = 18
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -617,6 +637,12 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		# new files aren't in the cache until the editor scans them,
 		# and headless test runs skip that scan.
 		_MOB_SPAWNER_MGR.on_tick(manager, pos)
+	elif block_id == STONE_BUTTON:
+		# 20-tick pulse release (iy.java d() == 20).
+		Redstone.button_tick(manager, pos)
+	elif block_id == STONE_PRESSURE_PLATE or block_id == WOODEN_PRESSURE_PLATE:
+		# 20-tick re-check so a plate notices the entity stepping off.
+		Redstone.update_plate(manager, pos, block_id)
 	elif block_id == REDSTONE_TORCH or block_id == REDSTONE_TORCH_OFF:
 		# The 2-tick inverter delay (bo.java d() == 2).
 		Redstone.torch_tick(manager, pos, block_id)
@@ -830,6 +856,21 @@ static func on_entity_walking(manager, pos: Vector3i, _entity: Node = null) -> v
 	var id: int = manager.get_world_block(pos)
 	if id == REDSTONE_ORE or id == GLOWING_REDSTONE_ORE:
 		touch_redstone_ore(manager, pos)
+		return
+	# An entity standing IN a plate's cell wakes it immediately; the
+	# 20-tick recheck then handles release (ap.java's onEntityCollision
+	# plus its scheduled tick).
+	#
+	# Callers pass the cell an entity is standing ON, but a plate is
+	# walk-through and occupies the cell the FEET are in, one above its
+	# support. Check both so either convention wakes the plate.
+	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
+		Redstone.update_plate(manager, pos, id)
+		return
+	var above: Vector3i = pos + Vector3i(0, 1, 0)
+	var above_id: int = manager.get_world_block(above)
+	if above_id == STONE_PRESSURE_PLATE or above_id == WOODEN_PRESSURE_PLATE:
+		Redstone.update_plate(manager, above, above_id)
 
 
 # One contact event on a redstone ore cell. Returns the number of
@@ -979,6 +1020,11 @@ static func is_opaque(id: int) -> bool:
 		# Neighbor cubes (especially the support below) must keep
 		# emitting their faces, since the rail doesn't fill its cell.
 		and id != RAIL
+		# Button and plates are thin non-cube attachments; neighbours
+		# must keep their faces, and none of them may conduct.
+		and id != STONE_BUTTON
+		and id != STONE_PRESSURE_PLATE
+		and id != WOODEN_PRESSURE_PLATE
 		# Both redstone torch variants are the same small pillar the
 		# normal torch is — non-cube, and must never conduct power.
 		and id != REDSTONE_TORCH
@@ -1152,6 +1198,9 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[REDSTONE_WIRE] = 0
 	_light_opacity_lut[REDSTONE_TORCH] = 0
 	_light_opacity_lut[REDSTONE_TORCH_OFF] = 0
+	_light_opacity_lut[STONE_BUTTON] = 0
+	_light_opacity_lut[STONE_PRESSURE_PLATE] = 0
+	_light_opacity_lut[WOODEN_PRESSURE_PLATE] = 0
 	# Bed: 9/16 tall, light passes through the open top. Vanilla
 	# bd.java doesn't override isOpaqueCube either.
 	_light_opacity_lut[BED_FOOT] = 0
@@ -1296,6 +1345,24 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
 		# — full-width slab, 2/16 tall.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
+	if id == STONE_BUTTON:
+		# iy.java:113-125 — 6/16 tall, 6/16 wide, 2/16 deep unpressed and
+		# 1/16 when pressed, hugging the wall it is mounted on.
+		var depth: float = 0.0625 if (meta & 8) != 0 else 0.125
+		match meta & 7:
+			1:
+				return AABB(Vector3(0.0, 0.375, 0.3125), Vector3(depth, 0.25, 0.375))
+			2:
+				return AABB(Vector3(1.0 - depth, 0.375, 0.3125), Vector3(depth, 0.25, 0.375))
+			3:
+				return AABB(Vector3(0.3125, 0.375, 0.0), Vector3(0.375, 0.25, depth))
+			_:
+				return AABB(Vector3(0.3125, 0.375, 1.0 - depth), Vector3(0.375, 0.25, depth))
+	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
+		# ap.java ctor + :118-124 — inset 1/16 on each side, 1/16 tall
+		# unpressed and 1/32 pressed.
+		var height: float = 0.03125 if meta != 0 else 0.0625
+		return AABB(Vector3(0.0625, 0.0, 0.0625), Vector3(0.875, height, 0.875))
 	if id == REDSTONE_WIRE:
 		# lu.java ctor: setBlockBounds(0, 0, 0, 1, 0.0625, 1) — a film
 		# one pixel thick across the whole cell.
@@ -1518,6 +1585,10 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_LEVER
 	if id == REDSTONE_WIRE:
 		return MESH_SHAPE_REDSTONE_WIRE
+	if id == STONE_BUTTON:
+		return MESH_SHAPE_BUTTON
+	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
+		return MESH_SHAPE_PRESSURE_PLATE
 	return MESH_SHAPE_CUBE
 
 
@@ -1688,6 +1759,9 @@ static func hardness(id: int) -> float:
 		REDSTONE_WIRE, REDSTONE_TORCH, REDSTONE_TORCH_OFF:
 			# lu.java / bo.java both `c(0.0f)` — instant break, any tool.
 			return 0.0
+		STONE_BUTTON, STONE_PRESSURE_PLATE, WOODEN_PRESSURE_PLATE:
+			# iy.java / ap.java both `c(0.5f)`.
+			return 0.5
 		BED_FOOT, BED_HEAD:
 			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
 			# doesn't gate on tool; bare-hand breaks in under a second.
@@ -2262,6 +2336,12 @@ static func name_of(id: int) -> String:
 			return "redstone_torch"
 		REDSTONE_TORCH_OFF:
 			return "redstone_torch_off"
+		STONE_BUTTON:
+			return "stone_button"
+		STONE_PRESSURE_PLATE:
+			return "stone_pressure_plate"
+		WOODEN_PRESSURE_PLATE:
+			return "wooden_pressure_plate"
 		# Pre-existing gaps found by tests/test_debug_tools.gd: all four
 		# are spawnable and were falling through to "unknown", which the
 		# item spawner capitalizes into an "Unknown" button label and the
@@ -2342,6 +2422,12 @@ static func get_face_texture(id: int, face: String) -> String:
 		# nq.aO both register texture index 51) — the glow is the light
 		# emission + reddust particles, not a texture swap.
 		return "redstone_ore"
+	if id == STONE_BUTTON or id == STONE_PRESSURE_PLATE:
+		# iy.java/ap.java register nq.t.bg — the plain stone tile.
+		return "stone"
+	if id == WOODEN_PRESSURE_PLATE:
+		# ap.java registers nq.x.bg — planks.
+		return "planks"
 	if id == REDSTONE_TORCH:
 		return "redstone_torch_on"
 	if id == REDSTONE_TORCH_OFF:
