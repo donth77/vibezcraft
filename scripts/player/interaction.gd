@@ -2457,6 +2457,21 @@ func _compute_rail_meta(pos: Vector3i) -> int:
 	var s_down: bool = _chunk_manager.get_world_block(pos + Vector3i(0, -1, 1)) == Blocks.RAIL
 	var e_down: bool = _chunk_manager.get_world_block(pos + Vector3i(1, -1, 0)) == Blocks.RAIL
 	var w_down: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, -1, 0)) == Blocks.RAIL
+	# (0) Three or more connections is genuinely ambiguous, and it's the
+	# one place Alpha consults redstone: oc.java:203+ applies the same
+	# four curve tests in REVERSE order depending on whether the rail is
+	# powered, so a powered junction resolves to the opposite end of the
+	# preference list from an unpowered one. Nothing else in Alpha lets
+	# redstone touch a rail — there are no powered rails.
+	var connections: int = int(n) + int(s) + int(e) + int(w)
+	if connections >= 3:
+		var powered: bool = Redstone.is_block_indirectly_powered(_chunk_manager, pos)
+		var ambiguous: int = _ambiguous_rail_meta(n, s, e, w, powered)
+		if ambiguous == 0:
+			return _ascending_along_z(pos, n_up, s_up)
+		if ambiguous == 1:
+			return _ascending_along_x(pos, e_up, w_up)
+		return ambiguous
 	# (1) Two-opposite straight beats everything — even if there's also
 	# a perpendicular neighbor (vanilla picks the straight in that case
 	# and the perpendicular rail will adjust on its own re-evaluation).
@@ -3791,3 +3806,37 @@ func _toggle_lever(pos: Vector3i) -> void:
 	# the atomic state path.
 	_chunk_manager.set_world_block_state(pos, Blocks.LEVER, new_meta)
 	SFX.play_click(0.6 if now_on else 0.5, 0.3)
+
+
+# Junction shape for a rail with 3+ connections — the ambiguous branch
+# of oc.java:203+. Straights are assigned first (E/W overriding N/S),
+# then the four curve tests run; because each test simply overwrites the
+# result, running them in reverse order flips which curve wins. Vanilla
+# uses that ordering difference as its powered/unpowered tie-break.
+#
+# Curve metas: 6 = S+E, 7 = S+W, 8 = N+W, 9 = N+E.
+func _ambiguous_rail_meta(n: bool, s: bool, e: bool, w: bool, powered: bool) -> int:
+	var meta: int = -1
+	if n or s:
+		meta = 0
+	if w or e:
+		meta = 1
+	if powered:
+		if s and e:
+			meta = 6
+		if w and s:
+			meta = 7
+		if e and n:
+			meta = 9
+		if n and w:
+			meta = 8
+	else:
+		if n and w:
+			meta = 8
+		if e and n:
+			meta = 9
+		if w and s:
+			meta = 7
+		if s and e:
+			meta = 6
+	return meta

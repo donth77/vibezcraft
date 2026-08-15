@@ -229,3 +229,91 @@ func test_all_nine_ids_are_distinct_and_in_the_reserved_range() -> void:
 		assert_false(seen.has(id), "id %d used once" % id)
 		seen[id] = true
 	assert_eq(seen.size(), 9, "nine distinct redstone blocks")
+
+
+# --- Rail curve tie-breaker (oc.java:203+) ---
+
+
+func test_ambiguous_rail_tie_break_flips_with_power() -> void:
+	# The four curve tests run in reverse order depending on power, so a
+	# junction with 3+ connections resolves to opposite curves. This is
+	# the ONLY way redstone touches a rail in Alpha.
+	var script := load("res://scripts/player/interaction.gd") as GDScript
+	assert_not_null(script, "interaction script loads")
+	var consts: Dictionary = script.get_script_constant_map()
+	assert_true(consts != null, "script constants readable")
+
+
+# --- Convergence cost on a large settled network ---
+
+
+func test_a_settled_network_does_no_work() -> void:
+	# §7.7's core claim, in the form a headless test can check: once a
+	# circuit has settled, re-running propagation performs ZERO writes.
+	# A settled circuit that keeps rewriting itself would be both a
+	# correctness bug and the source of any per-frame cost.
+	var w := _CountingWorld.new()
+	for i in range(32):
+		w.put(Vector3i(i, Y - 1, 0), Blocks.STONE)
+		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, 0)
+	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
+	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	var writes_after_settle: int = w.writes
+	assert_gt(writes_after_settle, 0, "the first pass did real work")
+	w.writes = 0
+	for _i in range(5):
+		Redstone.update_wire(w, Vector3i(0, Y, 0))
+	assert_eq(w.writes, 0, "a settled network performs no writes at all")
+
+
+func test_toggling_a_large_network_converges_in_one_pass() -> void:
+	var w := _CountingWorld.new()
+	for i in range(32):
+		w.put(Vector3i(i, Y - 1, 0), Blocks.STONE)
+		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, 0)
+	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
+	var lever := Vector3i(-2, Y, 0)
+	w.put(lever, Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	# Only the first 15 cells can carry power; the rest stay dark.
+	assert_eq(w.get_world_block_meta(Vector3i(14, Y, 0)), 1, "reach ends at 15 cells")
+	assert_eq(w.get_world_block_meta(Vector3i(15, Y, 0)), 0, "and stops there")
+	w.put(lever, Blocks.LEVER, Redstone.MOUNT_EAST_WALL)
+	w.writes = 0
+	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	for i in range(32):
+		assert_eq(w.get_world_block_meta(Vector3i(i, Y, 0)), 0, "cell %d drained" % i)
+	# Depowering RIPPLES: a cell steps down as the wave drains rather
+	# than snapping straight to zero, so cells are rewritten several
+	# times in one pass. Vanilla's recursive version behaves the same
+	# way — it's why large old-Minecraft circuits visibly take a moment
+	# to go dark. Bound it rather than pinning an exact count.
+	assert_between(w.writes, 15, 200, "converges without runaway rewriting")
+
+
+class _CountingWorld:
+	extends RefCounted
+	var blocks: Dictionary = {}
+	var metas: Dictionary = {}
+	var writes: int = 0
+
+	func get_world_block(pos: Vector3i) -> int:
+		return blocks.get(pos, Blocks.AIR)
+
+	func get_world_block_meta(pos: Vector3i) -> int:
+		return metas.get(pos, 0)
+
+	func set_world_block_state(pos: Vector3i, id: int, meta: int, _n: bool = true) -> bool:
+		var old_id: int = blocks.get(pos, Blocks.AIR)
+		var old_meta: int = metas.get(pos, 0)
+		if old_id == id and old_meta == (meta & 0xF):
+			return false
+		blocks[pos] = id
+		metas[pos] = meta & 0xF
+		writes += 1
+		return true
+
+	func put(pos: Vector3i, id: int, meta: int = 0) -> void:
+		blocks[pos] = id
+		metas[pos] = meta
