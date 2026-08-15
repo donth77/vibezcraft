@@ -45,6 +45,14 @@ const _BLOCKS: Array = [
 	Blocks.IRON_ORE,
 	Blocks.GOLD_ORE,
 	Blocks.DIAMOND_ORE,
+	# Redstone ore (Phase 8). Both variants are spawnable: the glowing id
+	# is normally a transient contact state, but placing it directly is
+	# the fastest way to eyeball the light-9 emission and its revert.
+	# Phase 8b-8e append lever / wire / torch / button / plates here as
+	# each one is defined — tests/test_debug_tools.gd fails the build if
+	# a defined redstone block is missing from this grid.
+	Blocks.REDSTONE_ORE,
+	Blocks.GLOWING_REDSTONE_ORE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,

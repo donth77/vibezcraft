@@ -2145,6 +2145,20 @@ static func name_of(id: int) -> String:
 			return "redstone_ore"
 		GLOWING_REDSTONE_ORE:
 			return "glowing_redstone_ore"
+		# Pre-existing gaps found by tests/test_debug_tools.gd: all four
+		# are spawnable and were falling through to "unknown", which the
+		# item spawner capitalizes into an "Unknown" button label and the
+		# F3 overlay prints as the looked-at block name. Texture lookup
+		# doesn't go through here for them (get_face_texture has explicit
+		# arms), so these are display-only names.
+		BRICK:
+			return "brick"
+		OBSIDIAN:
+			return "obsidian"
+		CHEST:
+			return "chest"
+		FENCE:
+			return "fence"
 	return "unknown"
 
 

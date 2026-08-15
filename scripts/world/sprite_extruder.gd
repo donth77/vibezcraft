@@ -42,6 +42,9 @@ static func get_handle_pivot_offset(texture: Texture2D) -> Vector2:
 		img.decompress()
 	if img.get_format() != Image.FORMAT_RGBA8:
 		img.convert(Image.FORMAT_RGBA8)
+	# Match the frame the mesh is built from (see _build_uncached) so the
+	# grip pivot is measured against the same pixels.
+	img = ItemIcons.sprite_frame(img, 0)
 	var w: int = img.get_width()
 	var h: int = img.get_height()
 	var hx: float = float(w) * 0.5
@@ -76,6 +79,14 @@ static func _build_uncached(texture: Texture2D) -> ArrayMesh:
 		img.decompress()
 	if img.get_format() != Image.FORMAT_RGBA8:
 		img.convert(Image.FORMAT_RGBA8)
+	# Animated items ship as a vertical strip of square frames in modern
+	# resource packs (pixel_perfection clock.png = 16×1024, 64 frames;
+	# programmer_art compass.png = 16×128, 8 frames). Extruding the raw
+	# strip voxelizes every frame stacked into one tall mesh — the held
+	# item reads as a column of duplicated sprites. Extrude frame 0 only:
+	# the mesh is cached per texture path, so rebuilding it per animation
+	# frame would be far too expensive for a cosmetic dial.
+	img = ItemIcons.sprite_frame(img, 0)
 	var w: int = img.get_width()
 	var h: int = img.get_height()
 

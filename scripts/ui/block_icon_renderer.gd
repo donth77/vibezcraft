@@ -33,6 +33,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.IRON_ORE,
 	Blocks.GOLD_ORE,
 	Blocks.DIAMOND_ORE,
+	# Redstone ore — plain cubes sharing one tile (nq.aN/aO both register
+	# texture 51), so the standard iso bake works for both ids. Without
+	# an entry here the spawner button and hotbar slot render blank.
+	Blocks.REDSTONE_ORE,
+	Blocks.GLOWING_REDSTONE_ORE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FARMLAND,
 	Blocks.GRAVEL,

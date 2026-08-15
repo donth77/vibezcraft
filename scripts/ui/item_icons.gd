@@ -258,6 +258,21 @@ static var _clock_texture: ImageTexture
 static var _compass_base: Image = null
 static var _clock_base: Image = null
 static var _clock_dial: Image = null
+
+# Animation-strip frame counts for the two dial items. Alpha's own
+# terrain/items sheets store clock + compass as a SINGLE 16×16 sprite
+# whose dial is drawn procedurally (marker-pixel substitution below).
+# Modern resource packs instead ship them as a vertical strip of
+# pre-rendered frames — pixel_perfection's clock.png is 16×1024 (64
+# frames), programmer_art's compass.png is 16×128 (8 frames). Without
+# frame-awareness the whole column is treated as one sprite: the icon
+# renders as a squashed streak (or blank, since the marker pixels the
+# procedural path looks for don't exist in those packs) and the
+# extruded held mesh voxelizes every frame stacked on top of each
+# other. Count > 1 means "this pack animates by frame" and we select a
+# frame instead of drawing the dial ourselves.
+static var _compass_frames: int = 1
+static var _clock_frames: int = 1
 # Smoothed angle + angular velocity for the spring-damped needle motion.
 # Mirrors vanilla ae.java's `this.i` (angle) + `this.j` (velocity) and
 # gp.java's same pair for the clock. Persisted across frames so the
@@ -397,6 +412,33 @@ static func clear_cache() -> void:
 #   3. Shared `assets/textures/items/` (catch-all)
 # Without step 2, packs that don't ship every item sprite would silently
 # drop ~22 icons in the debug spawner / inventory.
+# How many stacked square frames an item sprite holds. 1 for a normal
+# square sprite; N for a vertical animation strip (height = N × width).
+# A non-multiple height is treated as a single frame — better a squashed
+# icon than a crash on a malformed pack asset.
+static func sprite_frame_count(img: Image) -> int:
+	if img == null:
+		return 1
+	var w: int = img.get_width()
+	var h: int = img.get_height()
+	if w <= 0 or h <= w or h % w != 0:
+		return 1
+	return h / w
+
+
+# Crop one square frame out of a vertical animation strip. Index wraps,
+# so callers can feed an unbounded animation counter.
+static func sprite_frame(img: Image, index: int) -> Image:
+	var frames: int = sprite_frame_count(img)
+	if frames <= 1:
+		return img
+	var size: int = img.get_width()
+	var frame: int = ((index % frames) + frames) % frames
+	var out: Image = Image.create(size, size, false, Image.FORMAT_RGBA8)
+	out.blit_rect(img, Rect2i(0, frame * size, size, size), Vector2i.ZERO)
+	return out
+
+
 static func _load_item_sprite(basename: String) -> Texture2D:
 	var pack_path := "%s%s/items/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, basename]
 	if ResourceLoader.exists(pack_path):
@@ -577,6 +619,7 @@ static func _ensure_compass_base() -> void:
 		_compass_base.decompress()
 	if _compass_base != null and _compass_base.get_format() != Image.FORMAT_RGBA8:
 		_compass_base.convert(Image.FORMAT_RGBA8)
+	_compass_frames = sprite_frame_count(_compass_base)
 
 
 static func _ensure_clock_base() -> void:
@@ -588,6 +631,7 @@ static func _ensure_clock_base() -> void:
 				_clock_base.decompress()
 			if _clock_base != null and _clock_base.get_format() != Image.FORMAT_RGBA8:
 				_clock_base.convert(Image.FORMAT_RGBA8)
+			_clock_frames = sprite_frame_count(_clock_base)
 	if _clock_dial == null:
 		var dial_tex: Texture2D = load("res://assets/textures/gui/dial.png") as Texture2D
 		if dial_tex != null:
@@ -619,6 +663,17 @@ static func _render_compass_icon(target_angle: float) -> Texture2D:
 	_compass_smoothed += _compass_velocity
 	var d6: float = sin(_compass_smoothed)
 	var d7: float = cos(_compass_smoothed)
+	# Frame-strip pack (programmer_art): the needle is pre-rendered per
+	# frame, so pick the frame for this angle instead of drawing our own.
+	# Frame 0 points at the target, matching vanilla's strip ordering.
+	if _compass_base != null and _compass_frames > 1:
+		var frame_index: int = roundi(-_compass_smoothed / TAU * float(_compass_frames))
+		var picked: Image = sprite_frame(_compass_base, frame_index)
+		if _compass_texture == null:
+			_compass_texture = ImageTexture.create_from_image(picked)
+		else:
+			_compass_texture.set_image(picked)
+		return _compass_texture
 	# Start from base sprite (gives us the navy bezel + cardinal marks).
 	var img: Image
 	if _compass_base != null:
@@ -666,6 +721,19 @@ static func _render_clock_icon(target_angle: float) -> Texture2D:
 	_clock_smoothed += _clock_velocity
 	var d4: float = sin(_clock_smoothed)
 	var d5: float = cos(_clock_smoothed)
+	# Frame-strip pack (pixel_perfection): the dial is pre-rendered per
+	# frame, so the marker-substitution path below has nothing to match.
+	# Select the frame for this angle instead. Frame 0 is noon in
+	# vanilla's strip ordering, which is where _clock_target_angle's zero
+	# sits too.
+	if _clock_base != null and _clock_frames > 1:
+		var frame_index: int = roundi(_clock_smoothed / TAU * float(_clock_frames))
+		var picked: Image = sprite_frame(_clock_base, frame_index)
+		if _clock_texture == null:
+			_clock_texture = ImageTexture.create_from_image(picked)
+		else:
+			_clock_texture.set_image(picked)
+		return _clock_texture
 	# Fallback if base sprites missing (shouldn't normally happen).
 	if _clock_base == null or _clock_dial == null:
 		var fallback := Image.create(16, 16, false, Image.FORMAT_RGBA8)
