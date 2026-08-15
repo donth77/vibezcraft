@@ -53,6 +53,9 @@ const _BLOCKS: Array = [
 	# a defined redstone block is missing from this grid.
 	Blocks.REDSTONE_ORE,
 	Blocks.GLOWING_REDSTONE_ORE,
+	# Lever (Phase 8b) — Alpha's latching power source. Place it on any
+	# wall or floor, right-click to toggle.
+	Blocks.LEVER,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,

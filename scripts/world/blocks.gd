@@ -439,7 +439,7 @@ const SLIME_BLOCK := 87
 #   90 redstone_wire           (Phase 8c)
 #   91 redstone_torch          (lit — Phase 8d)
 #   92 redstone_torch_off      (Phase 8d)
-#   93 lever                   (Phase 8b)
+#   93 lever                   (defined below)
 #   94 stone_button            (Phase 8e)
 #   95 stone_pressure_plate    (Phase 8e)
 #   96 wooden_pressure_plate   (Phase 8e)
@@ -458,6 +458,14 @@ const REDSTONE_ORE := 88
 # random-tick sweep, but our 24/chunk budget would stretch the ~20 s
 # glow to ~68 s).
 const GLOWING_REDSTONE_ORE := 89
+
+# Lever — vanilla pl.java via nq.aJ (id 69, tex 96). Hardness 0.5, no
+# collision box, mounts on the 4 walls or a floor. Metadata packs the
+# mount orientation in bits 0-2 (Redstone.MOUNT_*) and the on/off state
+# in bit 3, so a toggle is a metadata-only write — the reason the
+# atomic state path in ChunkManager exists. Alpha's only latching
+# power source: unlike the button it stays where you put it.
+const LEVER := 93
 
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
@@ -526,6 +534,9 @@ const MESH_SHAPE_RAIL: int = 13
 # the local quads to align with the placer's direction without
 # reading neighbors.
 const MESH_SHAPE_BED: int = 14
+# Lever — small cobble base box flush against its mount face plus a
+# handle box that tilts with the on/off bit (pl.java render type 12).
+const MESH_SHAPE_LEVER: int = 15
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -934,6 +945,12 @@ static func is_opaque(id: int) -> bool:
 		# Neighbor cubes (especially the support below) must keep
 		# emitting their faces, since the rail doesn't fill its cell.
 		and id != RAIL
+		# Lever is a small cobble base + handle occupying a fraction of
+		# its cell (pl.java a() returns false for isOpaqueCube). It also
+		# must never conduct redstone — Redstone.is_normal_cube keys off
+		# is_opaque, so marking it opaque would let a lever relay power
+		# through itself.
+		and id != LEVER
 		# Bed halves are 9/16 tall and leave the top 7/16 of their cells
 		# open — adjacent cubes must keep emitting faces facing into the
 		# bed cell so the air above the bed stays visible / lightable.
@@ -1086,6 +1103,8 @@ static func _build_light_opacity_lut() -> void:
 	# Rail: 1-pixel-tall flat plane, light passes through. Vanilla
 	# qe.java doesn't override isOpaqueCube → defaults to false → 0.
 	_light_opacity_lut[RAIL] = 0
+	# Lever — small non-cube attachment, passes light like the torch.
+	_light_opacity_lut[LEVER] = 0
 	# Bed: 9/16 tall, light passes through the open top. Vanilla
 	# bd.java doesn't override isOpaqueCube either.
 	_light_opacity_lut[BED_FOOT] = 0
@@ -1228,6 +1247,20 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
 		# — full-width slab, 2/16 tall.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
+	if id == LEVER:
+		# pl.java:118-129 — f2 = 0.1875 for the four wall mounts, 0.25
+		# for the floor variants (meta 5 and 6 share one box).
+		match meta & 7:
+			1:
+				return AABB(Vector3(0.0, 0.2, 0.3125), Vector3(0.375, 0.6, 0.375))
+			2:
+				return AABB(Vector3(0.625, 0.2, 0.3125), Vector3(0.375, 0.6, 0.375))
+			3:
+				return AABB(Vector3(0.3125, 0.2, 0.0), Vector3(0.375, 0.6, 0.375))
+			4:
+				return AABB(Vector3(0.3125, 0.2, 0.625), Vector3(0.375, 0.6, 0.375))
+			_:
+				return AABB(Vector3(0.25, 0.0, 0.25), Vector3(0.5, 0.6, 0.5))
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -1424,6 +1457,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_RAIL
 	if id == BED_FOOT or id == BED_HEAD:
 		return MESH_SHAPE_BED
+	if id == LEVER:
+		return MESH_SHAPE_LEVER
 	return MESH_SHAPE_CUBE
 
 
@@ -1587,6 +1622,10 @@ static func hardness(id: int) -> float:
 		RAIL:
 			# qe.java::c(0.7f) — soft, breaks fast with bare hand.
 			return 0.7
+		LEVER:
+			# pl.java via nq.aJ `c(0.5f)`. No tool affinity in vanilla —
+			# breaks fast bare-handed.
+			return 0.5
 		BED_FOOT, BED_HEAD:
 			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
 			# doesn't gate on tool; bare-hand breaks in under a second.
@@ -2145,6 +2184,8 @@ static func name_of(id: int) -> String:
 			return "redstone_ore"
 		GLOWING_REDSTONE_ORE:
 			return "glowing_redstone_ore"
+		LEVER:
+			return "lever"
 		# Pre-existing gaps found by tests/test_debug_tools.gd: all four
 		# are spawnable and were falling through to "unknown", which the
 		# item spawner capitalizes into an "Unknown" button label and the
@@ -2225,6 +2266,11 @@ static func get_face_texture(id: int, face: String) -> String:
 		# nq.aO both register texture index 51) — the glow is the light
 		# emission + reddust particles, not a texture swap.
 		return "redstone_ore"
+	if id == LEVER:
+		# The handle tile. The mesher pulls the cobblestone tile
+		# separately for the base box (pl.java renders the base with
+		# nq.w's texture).
+		return "lever"
 	if id == HALF_SLAB or id == DOUBLE_SLAB:
 		# Vanilla qj.java::a(int) returns texture index 6 for top/bottom
 		# (stone_slab_top) and 5 for sides (stone_slab_side).

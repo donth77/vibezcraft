@@ -16,6 +16,27 @@ const _SAVE_LOAD: GDScript = preload("res://scripts/persistence/save_load.gd")
 # lag that bites new class_name registrations on first reload (same
 # workaround as `_TICK_SCHEDULER` above).
 const _PASSIVE_SPAWNER_SCRIPT: GDScript = preload("res://scripts/world/passive_spawner.gd")
+# Redstone-triggered TNT ignition. Preload (not class_name) for the same
+# editor-index reason as the scripts above.
+const _PRIMED_TNT_SCRIPT: GDScript = preload("res://scripts/world/primed_tnt.gd")
+
+# --- Block-update notification fanout (redstone-plan.md §7.2) ---
+# The changed cell plus its 6 neighbours, matching vanilla
+# World.applyPhysics.
+const _NOTIFY_OFFSETS: Array[Vector3i] = [
+	Vector3i(0, 0, 0),
+	Vector3i(1, 0, 0),
+	Vector3i(-1, 0, 0),
+	Vector3i(0, 1, 0),
+	Vector3i(0, -1, 0),
+	Vector3i(0, 0, 1),
+	Vector3i(0, 0, -1),
+]
+# Ceiling on positions dispatched per drain. A pathological network
+# pauses and resumes next frame rather than stalling the frame; sized
+# well above any hand-built Alpha circuit (there are no repeaters or
+# pistons to build a large clock out of).
+const _NOTIFY_BUDGET_PER_DRAIN: int = 4096
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
 # World-entry drain-boost window (see _entry_boost_until_msec).
 const _ENTRY_BOOST_WINDOW_MSEC: int = 12000
@@ -131,6 +152,13 @@ var _growing_canes: Array = []
 # Guard: prevents recursive STILL-water cell cascades via set_world_block
 # from inside on_neighbor_changed. See BlockFluids for the fanout shape.
 var _inside_fluid_notify: bool = false
+
+# --- Block-update notification queue (redstone-plan.md §7.2) ---
+# Queue + membership set (see _NOTIFY_OFFSETS above) so a cascade
+# (lever → wire → wire → …) converges without recursion or lost events.
+var _notify_queue: Array[Vector3i] = []
+var _notify_queued: Dictionary = {}
+var _notify_draining: bool = false
 # Deferred sky/block-light seeds + fizz during batch edits and fluid
 # fanouts. The outermost unwind performs one multi-source pass per channel.
 var _light_defer_depth: int = 0
@@ -317,6 +345,11 @@ func _process(_delta: float) -> void:
 	# isolate the 80+ ms tick spikes without guessing. Lightweight —
 	# Time.get_ticks_usec is one syscall per begin/end and the ring
 	# write is ~50 ns. Total overhead ~1-2 µs per frame.
+	# Resume any block-update fanout that hit its per-drain budget last
+	# frame. No-op (one array check) when the queue is empty, which is
+	# the case for every frame that isn't mid-cascade.
+	if not _notify_queue.is_empty():
+		drain_block_notifications()
 	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
 	_drain_retiring_chunks()
@@ -1493,7 +1526,7 @@ func _flush_deferred_updates() -> void:
 # World-coord block edit. Looks up the right chunk, converts to local coords,
 # applies. Silently no-ops if the target is outside the currently loaded area.
 # Marks the chunk as "modified" so it's preserved across unload/reload.
-func set_world_block(world_pos: Vector3i, id: int) -> void:
+func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
 	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
 	var coord := Vector2i(chunk_x, chunk_z)
@@ -1504,6 +1537,17 @@ func set_world_block(world_pos: Vector3i, id: int) -> void:
 	var chunk_node: Node3D = _chunks[coord]
 	var old_id: int = chunk_node.chunk.get_block(local_x, world_pos.y, local_z)
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
+	# `meta >= 0` commits metadata in the SAME step as the id, before any
+	# side effect below runs. Chunk.set_block zeros meta by vanilla
+	# parity, so the old set_world_block_with_meta patched it afterwards —
+	# which meant every callback in this function (lighting, gravity,
+	# fluid notify, and now redstone) observed meta 0 on a block whose
+	# real state was already different. A redstone torch changing id
+	# on↔off would have looked floor-mounted to its own neighbors for the
+	# duration of the fanout. Default -1 preserves the zeroing behavior
+	# for the many callers that don't care.
+	if meta >= 0:
+		chunk_node.chunk.set_block_meta(local_x, world_pos.y, local_z, meta & 0xF)
 	_dirty_loaded[coord] = true
 	# Priority-apply flag — the upcoming worker re-mesh result skips the
 	# 1-per-frame apply budget queue. Without this, player edits at FAR
@@ -2076,16 +2120,143 @@ func get_world_block_meta(world_pos: Vector3i) -> int:
 # set_world_block zeros meta by vanilla parity. Used by BlockFluids to
 # place flowing fluid cells at specific levels.
 func set_world_block_with_meta(world_pos: Vector3i, id: int, meta: int) -> void:
-	set_world_block(world_pos, id)
+	# Now a thin wrapper over the atomic path so existing callers (fluids,
+	# doors, rails, beds…) stop exposing the transient meta-0 window.
+	set_world_block(world_pos, id, meta)
+
+
+# --- Authoritative world-state write (redstone-plan.md §7.2) ---
+#
+# One path for "this cell's id and/or metadata changed". Redstone
+# components mutate meta WITHOUT changing id (lever bit 3, wire power
+# 0-15, plate pressed), which the plain setters handle badly: a same-id
+# meta change marks nothing dirty and notifies nobody, so the mesh keeps
+# the stale texture and downstream consumers never re-evaluate.
+#
+# Contract:
+#   1. No-op when neither id nor masked meta actually changes.
+#   2. id + meta commit together; callbacks never see a half-applied cell.
+#   3. Persistence, local mesh, and seam neighbours go dirty on either
+#      kind of change.
+#   4. Lighting runs off the final id (inside set_world_block) before any
+#      block notification is dispatched.
+#   5. Metadata-only changes still notify.
+# Returns true when something actually changed.
+func set_world_block_state(
+	world_pos: Vector3i, new_id: int, new_meta: int, notify: bool = true
+) -> bool:
 	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
 	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
 	var coord := Vector2i(chunk_x, chunk_z)
 	if not _chunks.has(coord):
-		return
+		return false
 	var local_x: int = world_pos.x - chunk_x * Chunk.SIZE_X
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
-	chunk_node.chunk.set_block_meta(local_x, world_pos.y, local_z, meta)
+	var chunk: Chunk = chunk_node.chunk
+	var old_id: int = chunk.get_block(local_x, world_pos.y, local_z)
+	var old_meta: int = chunk.get_block_meta(local_x, world_pos.y, local_z)
+	var masked: int = new_meta & 0xF
+	if old_id == new_id and old_meta == masked:
+		return false
+	if old_id != new_id:
+		# Full path — every existing side effect (lighting, gravity,
+		# plant detach, fluid notify) plus the atomic meta commit.
+		set_world_block(world_pos, new_id, masked)
+	else:
+		# Metadata-only. Emission and opacity are keyed by block id, so
+		# light cannot move here; skip the BFS and just re-render.
+		chunk.set_block_meta(local_x, world_pos.y, local_z, masked)
+		_dirty_loaded[coord] = true
+		chunk.dirty = true
+		chunk_node.set("_priority_apply", true)
+		_dirty_seam_neighbors(coord, local_x, local_z)
+	if notify:
+		enqueue_block_notification(world_pos)
+	return true
+
+
+# Mark the cardinal/diagonal chunk neighbours of a seam cell dirty so
+# their meshes rebuild against the new state. Same shape as the
+# edge-edit refresh inside set_world_block.
+func _dirty_seam_neighbors(coord: Vector2i, local_x: int, local_z: int) -> void:
+	var nx: int = -1 if local_x == 0 else (1 if local_x == Chunk.SIZE_X - 1 else 0)
+	var nz: int = -1 if local_z == 0 else (1 if local_z == Chunk.SIZE_Z - 1 else 0)
+	for off: Vector2i in [Vector2i(nx, 0), Vector2i(0, nz), Vector2i(nx, nz)]:
+		if off == Vector2i.ZERO:
+			continue
+		var target: Vector2i = coord + off
+		if _chunks.has(target):
+			_chunks[target].chunk.dirty = true
+
+
+# Queue the changed cell + its 6 neighbours for block-update dispatch.
+# Deduplicated on "currently queued", NOT "already processed": a cell
+# whose inputs change again must be eligible for re-evaluation or a
+# network can settle on a stale value. Unlike the fluid guard, a nested
+# write during the drain does not drop its fanout — it lands in the same
+# queue and the outer loop keeps going to a fixpoint.
+func enqueue_block_notification(world_pos: Vector3i) -> void:
+	for offset: Vector3i in _NOTIFY_OFFSETS:
+		var cell: Vector3i = world_pos + offset
+		if _notify_queued.has(cell):
+			continue
+		_notify_queued[cell] = true
+		_notify_queue.append(cell)
+	if not _notify_draining:
+		drain_block_notifications()
+
+
+# Drain up to `_NOTIFY_BUDGET_PER_DRAIN` positions. Hitting the budget
+# PAUSES — the remainder stays queued and `_process` resumes it next
+# frame. Work is never discarded; a partially-updated network would be
+# worse than a late one.
+func drain_block_notifications() -> void:
+	if _notify_draining:
+		return
+	_notify_draining = true
+	var budget: int = _NOTIFY_BUDGET_PER_DRAIN
+	while not _notify_queue.is_empty() and budget > 0:
+		var cell: Vector3i = _notify_queue.pop_front()
+		_notify_queued.erase(cell)
+		budget -= 1
+		Redstone.on_neighbor_changed(self, cell)
+	_notify_draining = false
+
+
+func pending_notification_count() -> int:
+	return _notify_queue.size()
+
+
+# --- Callbacks the redstone model dispatches back into the world ---
+#
+# Redstone.gd is a pure static module taking `manager` first, so it can
+# run against a fake world in tests. Anything needing the scene tree
+# (entities, audio) is invoked through has_method, which those fakes
+# simply don't implement.
+
+
+# Drop a broken component as an item. Public because Redstone calls it
+# when a mounted block loses its support.
+func spawn_block_drop(block_pos: Vector3i, dropped_id: int) -> void:
+	if dropped_id == Blocks.AIR:
+		return
+	_spawn_dropped_item(block_pos, dropped_id)
+
+
+# Redstone-triggered TNT ignition (v.java:23). Same primed-entity setup
+# the fire-spread path uses, so a redstone detonation and a flint-and-
+# steel detonation are indistinguishable downstream.
+func prime_tnt(block_pos: Vector3i) -> void:
+	var primed = _PRIMED_TNT_SCRIPT.new()
+	add_child(primed)
+	primed.global_position = Vector3(block_pos) + Vector3(0.5, 0.5, 0.5)
+	primed.setup()
+	SFX.play_fuse()
+
+
+func play_door_sound(_block_pos: Vector3i) -> void:
+	SFX.play_door_toggle()
 
 
 # Reports whether the chunk at the given chunk-space coord has fully

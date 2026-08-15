@@ -38,6 +38,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# an entry here the spawner button and hotbar slot render blank.
 	Blocks.REDSTONE_ORE,
 	Blocks.GLOWING_REDSTONE_ORE,
+	# Lever bakes as a cobblestone-textured cube like FENCE/CHEST above —
+	# the iso bake of its real two-box mesh would be nearly invisible at
+	# icon size.
+	Blocks.LEVER,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FARMLAND,
 	Blocks.GRAVEL,

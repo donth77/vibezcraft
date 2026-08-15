@@ -547,6 +547,13 @@
       "pattern": ["I I", "ISI", "I I"],
       "key": {"I": "iron_ingot", "S": "stick"},
       "result": {"id": "rail", "count": 16}
+    },
+    {
+      "_comment": "Lever — vanilla en.java:58. Stick above cobblestone. Alpha's only latching redstone source.",
+      "id": "lever",
+      "pattern": ["S", "C"],
+      "key": {"S": "stick", "C": "cobblestone"},
+      "result": {"id": "lever", "count": 1}
     }
   ],
   "shapeless": [

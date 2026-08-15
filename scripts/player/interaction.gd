@@ -1380,6 +1380,10 @@ func _try_place() -> void:
 		_toggle_door(hit.block_pos, hit_id)
 		_last_place_ms = now
 		return
+	if hit_id == Blocks.LEVER:
+		_toggle_lever(hit.block_pos)
+		_last_place_ms = now
+		return
 	if hit_id == Blocks.FENCE_GATE:
 		_toggle_fence_gate(hit.block_pos)
 		_last_place_ms = now
@@ -1992,6 +1996,25 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5
 	# encoding which neighbor is the support. Without this, torches just
 	# float in mid-air when the player aims at a wall.
+	# Lever — same mount rules as the torch (4 walls + floor, no ceiling),
+	# so it reuses _torch_meta_from_face. Vanilla pl.java:47 then picks
+	# `5 + nextInt(2)` for a floor lever, giving the two ground rotations
+	# at random; later versions use player facing, Alpha really rolls.
+	if stack.item_id == Blocks.LEVER:
+		var lever_meta: int = _torch_meta_from_face(hit.normal_i, place)
+		if lever_meta == 0:
+			return false
+		if lever_meta == Redstone.MOUNT_FLOOR and randi() % 2 == 1:
+			lever_meta = Redstone.MOUNT_FLOOR_ALT
+		var displaced_for_lever: int = _chunk_manager.get_world_block(place)
+		if displaced_for_lever != Blocks.AIR:
+			var ld: int = Blocks.drops(displaced_for_lever)
+			if ld != Blocks.AIR:
+				_spawn_dropped_item(place, ld)
+		_chunk_manager.set_world_block_state(place, Blocks.LEVER, lever_meta)
+		SFX.play_place(Blocks.LEVER)
+		inv.consume_one_selected()
+		return true
 	if stack.item_id == Blocks.TORCH:
 		var torch_meta: int = _torch_meta_from_face(hit.normal_i, place)
 		if torch_meta == 0:
@@ -3681,3 +3704,18 @@ func _break_replacement(target: Vector3i, broken_id: int) -> int:
 	if Blocks.is_solid_collision(below) or Blocks.is_fluid(below):
 		return Blocks.WATER_STILL
 	return Blocks.AIR
+
+
+# Lever toggle — vanilla pl.java:136-157. Flips bit 3 of the metadata
+# (orientation in bits 0-2 is preserved), plays `random.click` at volume
+# 0.3 / pitch 0.6 on, 0.5 off, then lets the state write notify the
+# lever's own cell and its mount block.
+func _toggle_lever(pos: Vector3i) -> void:
+	var meta: int = _chunk_manager.get_world_block_meta(pos)
+	var now_on: bool = (meta & Redstone.POWERED_BIT) == 0
+	var new_meta: int = (meta & 0x7) | (Redstone.POWERED_BIT if now_on else 0)
+	# Metadata-only write: this is exactly the case the plain setters
+	# mishandled (no dirty flag, no notification), so it must go through
+	# the atomic state path.
+	_chunk_manager.set_world_block_state(pos, Blocks.LEVER, new_meta)
+	SFX.play_click(0.6 if now_on else 0.5, 0.3)

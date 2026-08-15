@@ -308,6 +308,8 @@ static func _emit_special_cell(
 		_emit_sign_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_RAIL:
 		_emit_rail_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_LEVER:
+		_emit_lever_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_BED:
 		_emit_bed_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
 
@@ -3538,3 +3540,88 @@ static func _bed_vertex_uv(
 		# SIDE face — U along bed length.
 		u_out = u1 if along_at_high else u0
 	return Vector2(u_out, v_out)
+
+
+# Lever (pl.java render type 12). Two boxes: a cobblestone base plate
+# flush against the mount face, and the handle sticking out of it. The
+# handle tilts to the opposite side when the powered bit flips, which is
+# the only visual feedback Alpha gives for lever state — there's no
+# texture swap, so getting the tilt right matters.
+#
+# Meta layout (Redstone.MOUNT_*): bits 0-2 = mount face, bit 3 = on.
+static func _emit_lever_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	_plant_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var mount: int = meta & 7
+	var powered: bool = (meta & 8) != 0
+	var base_rect: Rect2 = BlockAtlas.uv_rect("cobblestone")
+	var handle_rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.LEVER, BlockAtlas.FACE_SIDE)
+	# Light from this cell — the lever never fills it, so its own cell's
+	# light is the right sample (same choice as the torch/rail paths).
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
+	var o := Vector3(float(x), float(y), float(z))
+	# Base plate: 6/16 × 8/16 × 3/16, pressed against the mount face.
+	var b_min: Vector3
+	var b_max: Vector3
+	match mount:
+		Redstone.MOUNT_WEST_WALL:
+			b_min = Vector3(0.0, 0.25, 0.3125)
+			b_max = Vector3(0.1875, 0.75, 0.6875)
+		Redstone.MOUNT_EAST_WALL:
+			b_min = Vector3(0.8125, 0.25, 0.3125)
+			b_max = Vector3(1.0, 0.75, 0.6875)
+		Redstone.MOUNT_NORTH_WALL:
+			b_min = Vector3(0.3125, 0.25, 0.0)
+			b_max = Vector3(0.6875, 0.75, 0.1875)
+		Redstone.MOUNT_SOUTH_WALL:
+			b_min = Vector3(0.3125, 0.25, 0.8125)
+			b_max = Vector3(0.6875, 0.75, 1.0)
+		Redstone.MOUNT_FLOOR_ALT:
+			# Second floor rotation — base runs along X instead of Z.
+			b_min = Vector3(0.25, 0.0, 0.375)
+			b_max = Vector3(0.75, 0.1875, 0.625)
+		_:
+			b_min = Vector3(0.375, 0.0, 0.25)
+			b_max = Vector3(0.625, 0.1875, 0.75)
+	_emit_box(verts, norms, uvs, colors, indices, o + b_min, o + b_max, base_rect, face_light)
+	# Handle: a thin stick rooted at the base centre, leaning ±up-ish.
+	# Vanilla rotates the handle model; a two-position box reads the same
+	# at our texture resolution and keeps the mesher allocation-free.
+	var centre: Vector3 = (b_min + b_max) * 0.5
+	var lean: float = 0.1875 if powered else -0.1875
+	var h_min: Vector3
+	var h_max: Vector3
+	match mount:
+		Redstone.MOUNT_WEST_WALL:
+			h_min = Vector3(0.1875, centre.y - 0.0625, centre.z - 0.0625 + lean)
+			h_max = Vector3(0.5, centre.y + 0.0625, centre.z + 0.0625 + lean)
+		Redstone.MOUNT_EAST_WALL:
+			h_min = Vector3(0.5, centre.y - 0.0625, centre.z - 0.0625 + lean)
+			h_max = Vector3(0.8125, centre.y + 0.0625, centre.z + 0.0625 + lean)
+		Redstone.MOUNT_NORTH_WALL:
+			h_min = Vector3(centre.x - 0.0625, centre.y - 0.0625 + lean, 0.1875)
+			h_max = Vector3(centre.x + 0.0625, centre.y + 0.0625 + lean, 0.5)
+		Redstone.MOUNT_SOUTH_WALL:
+			h_min = Vector3(centre.x - 0.0625, centre.y - 0.0625 + lean, 0.5)
+			h_max = Vector3(centre.x + 0.0625, centre.y + 0.0625 + lean, 0.8125)
+		Redstone.MOUNT_FLOOR_ALT:
+			h_min = Vector3(centre.x - 0.0625 + lean, 0.1875, centre.z - 0.0625)
+			h_max = Vector3(centre.x + 0.0625 + lean, 0.625, centre.z + 0.0625)
+		_:
+			h_min = Vector3(centre.x - 0.0625, 0.1875, centre.z - 0.0625 + lean)
+			h_max = Vector3(centre.x + 0.0625, 0.625, centre.z + 0.0625 + lean)
+	_emit_box(verts, norms, uvs, colors, indices, o + h_min, o + h_max, handle_rect, face_light)
+	# No collision faces emitted — vanilla pl.java d() returns null, so
+	# the player walks straight through a lever.

@@ -748,7 +748,12 @@ func play_flint_and_steel() -> void:
 # Menu/button click — vanilla MC plays `random.click` at pitch 1.0 for any
 # menu button activation. Pitch is fixed (no jitter) in vanilla so repeated
 # clicks read as a single consistent UI cue.
-func play_click() -> void:
+#
+# Redstone components reuse the same asset at vanilla's quieter, pitched
+# settings: pl.java:145 / iy.java:137 / ap.java:96 all play `random.click`
+# at volume 0.3, pitch 0.6 when switching ON and 0.5 when switching OFF.
+# Defaults keep every existing UI caller on the original full-volume cue.
+func play_click(pitch: float = 1.0, volume_linear: float = 1.0) -> void:
 	if not Game.sfx_enabled or Game.is_loading:
 		return
 	var stream: AudioStream = _stream_cache.get(_CLICK_SOUND)
@@ -760,8 +765,8 @@ func play_click() -> void:
 	var player: AudioStreamPlayer = _players[_next_player]
 	_next_player = (_next_player + 1) % POOL_SIZE
 	player.stream = stream
-	player.volume_db = 0.0
-	player.pitch_scale = 1.0
+	player.volume_db = linear_to_db(clampf(volume_linear, 0.0001, 1.0))
+	player.pitch_scale = pitch
 	player.play()
 
 

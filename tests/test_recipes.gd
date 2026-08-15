@@ -177,3 +177,39 @@ func test_ring_metal_selects_the_result() -> void:
 	assert_ne(mixed.get("item_id", -1), Items.COMPASS, "gold ring never yields a compass")
 	var iron: Dictionary = Recipes.match_grid(_ring_grid(Items.IRON_INGOT, Items.REDSTONE), 3, 3)
 	assert_ne(iron.get("item_id", -1), Items.CLOCK, "iron ring never yields a clock")
+
+
+# --- Lever (Phase 8b — en.java:58) ---
+
+
+func test_lever_from_stick_over_cobblestone() -> void:
+	var grid: Array = _empty_grid(2, 2)
+	grid[0] = Items.STICK
+	grid[2] = Blocks.COBBLESTONE
+	var result: Dictionary = Recipes.match_grid(grid, 2, 2)
+	assert_eq(result.get("item_id", -1), Blocks.LEVER, "stick over cobblestone → lever")
+	assert_eq(result.get("count", 0), 1, "yields one lever")
+
+
+func test_lever_ingredients_are_not_interchangeable() -> void:
+	# Cobblestone over stick is the wrong way up — vanilla shaped recipes
+	# are order-sensitive and this must not match.
+	var grid: Array = _empty_grid(2, 2)
+	grid[0] = Blocks.COBBLESTONE
+	grid[2] = Items.STICK
+	var result: Dictionary = Recipes.match_grid(grid, 2, 2)
+	assert_ne(result.get("item_id", -1), Blocks.LEVER, "inverted pattern rejected")
+
+
+func test_lever_does_not_collide_with_the_torch_recipe() -> void:
+	# Both are two-cell vertical recipes; only the ingredients separate
+	# them (coal-over-stick vs stick-over-cobblestone).
+	var grid: Array = _empty_grid(2, 2)
+	grid[0] = Items.COAL
+	grid[2] = Items.STICK
+	var result: Dictionary = Recipes.match_grid(grid, 2, 2)
+	assert_eq(result.get("item_id", -1), Blocks.TORCH, "still a torch")
+
+
+func test_lever_name_resolves_for_recipe_json() -> void:
+	assert_eq(Items.id_from_name("lever"), Blocks.LEVER, "recipe key resolves to the block id")
