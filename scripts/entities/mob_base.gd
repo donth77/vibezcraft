@@ -788,6 +788,22 @@ func _physics_process(delta: float) -> void:
 		_in_water = _check_in_water()
 		_in_lava = _check_in_lava()
 		_in_fire_cached = _check_in_fire()
+		# Shared entity-contact hook (redstone-plan.md §7.3): mobs count
+		# as walking entities for redstone ore (vanilla an.java b(…, lw2)
+		# fires for ANY entity). Rides the 20 Hz env cadence — vanilla's
+		# own per-tick rate — and only while grounded and actually moving,
+		# so idle mobs cost one boolean here and nothing else.
+		if (
+			_chunk_manager != null
+			and _voxel_on_floor
+			and Vector2(velocity.x, velocity.z).length_squared() > 0.04
+		):
+			var walk_cell := Vector3i(
+				int(floor(global_position.x)),
+				int(floor(global_position.y - 0.5)),
+				int(floor(global_position.z))
+			)
+			Blocks.on_entity_walking(_chunk_manager, walk_cell, self)
 	var in_fire: bool = _in_fire_cached
 	# Gravity / drag — fluid cells replace normal gravity entirely.
 	# Vanilla water: velocity *= 0.8/tick, gravity -0.02/tick.

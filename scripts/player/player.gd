@@ -1697,6 +1697,12 @@ func _play_footstep() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_step(block_id)
+	# Shared entity-contact hook (redstone-plan.md §7.3) — vanilla
+	# Entity.move fires Block.b(world, …, entity) for the cell underfoot.
+	# Footstep cadence ≈ vanilla's per-move-tick rate while walking, and
+	# standing still fires nothing, so lit redstone ore reverts under a
+	# stationary player exactly like vanilla.
+	Blocks.on_entity_walking(chunk_manager, block_pos, self)
 
 
 func _cancel_bow_if_charging() -> void:

@@ -130,3 +130,50 @@ func test_grid_size_mismatch_returns_empty() -> void:
 	# 4 cells passed but width*height = 9 — should reject without crashing.
 	var result: Dictionary = Recipes.match_grid([Blocks.LOG], 3, 3)
 	assert_eq(result.size(), 0)
+
+
+# --- Compass + clock (Phase 8 B1b — redstone-plan.md §5) ---
+# en.java:61 compass = iron ring + redstone core; en.java:60 clock =
+# gold ring + redstone core. Both were already in recipes.json with the
+# items; the redstone-ore economy (B1a) is what makes the dust input
+# legitimately obtainable, so lock the exact patterns here.
+
+
+func _ring_grid(ring_id: int, center_id: int) -> Array:
+	return [
+		Blocks.AIR,
+		ring_id,
+		Blocks.AIR,
+		ring_id,
+		center_id,
+		ring_id,
+		Blocks.AIR,
+		ring_id,
+		Blocks.AIR,
+	]
+
+
+func test_compass_from_iron_ring_and_redstone_core() -> void:
+	var result: Dictionary = Recipes.match_grid(_ring_grid(Items.IRON_INGOT, Items.REDSTONE), 3, 3)
+	assert_eq(result.get("item_id", -1), Items.COMPASS, "iron ring + redstone → compass")
+	assert_eq(result.get("count", 0), 1, "yields exactly one")
+
+
+func test_clock_from_gold_ring_and_redstone_core() -> void:
+	var result: Dictionary = Recipes.match_grid(_ring_grid(Items.GOLD_INGOT, Items.REDSTONE), 3, 3)
+	assert_eq(result.get("item_id", -1), Items.CLOCK, "gold ring + redstone → clock")
+	assert_eq(result.get("count", 0), 1, "yields exactly one")
+
+
+func test_compass_requires_the_redstone_core() -> void:
+	var result: Dictionary = Recipes.match_grid(
+		_ring_grid(Items.IRON_INGOT, Items.IRON_INGOT), 3, 3
+	)
+	assert_ne(result.get("item_id", -1), Items.COMPASS, "iron center is not a compass")
+
+
+func test_ring_metal_selects_the_result() -> void:
+	var mixed: Dictionary = Recipes.match_grid(_ring_grid(Items.GOLD_INGOT, Items.REDSTONE), 3, 3)
+	assert_ne(mixed.get("item_id", -1), Items.COMPASS, "gold ring never yields a compass")
+	var iron: Dictionary = Recipes.match_grid(_ring_grid(Items.IRON_INGOT, Items.REDSTONE), 3, 3)
+	assert_ne(iron.get("item_id", -1), Items.CLOCK, "iron ring never yields a clock")

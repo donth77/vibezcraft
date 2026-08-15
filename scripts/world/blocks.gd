@@ -6,6 +6,9 @@ extends RefCounted
 # can race on first run (headless tests skip the editor scan that
 # populates the class cache), so we resolve the script statically here.
 const _MOB_SPAWNER_MGR: GDScript = preload("res://scripts/world/mob_spawner_manager.gd")
+# Preload (not class_name lookup) for the same editor-index-lag reason
+# as _MOB_SPAWNER_MGR above. Used by the redstone-ore contact sparkle.
+const _BLOCK_FX_SCRIPT: GDScript = preload("res://scripts/world/block_fx.gd")
 # Random-tick density per loaded chunk per game tick. Vanilla picks 3
 # random cells per 16×16×16 chunk section per tick; our 16×128×16
 # chunks have 8 vertical sections → 24 cells/chunk/tick at 20 Hz.
@@ -29,6 +32,24 @@ const _RANDOM_TICKS_PER_CHUNK_MOBILE_WEB: int = 12
 # cost (see PerfProbe "random_tick"). Scheduled ticks (fluids, falling
 # blocks, redstone) are NOT gated by this — they stay global.
 const _SIMULATION_RADIUS_CHUNKS: int = 5
+
+# Redstone-ore glow revert (Phase 8 B1b). Vanilla reverts lit ore via
+# the 80-cells/chunk random-tick sweep (~20 s observed mean); our
+# 24/chunk budget would stretch that to ~68 s, so the light-up schedules
+# an explicit 300-499 tick revert instead (deviation §11.3 in
+# .claude/redstone-plan.md).
+const _ORE_REVERT_MIN_TICKS: int = 300
+const _ORE_REVERT_SPAN_TICKS: int = 200
+
+# The six face normals — shared by the ore-sparkle exposure scan.
+const _FACE_NORMALS: Array[Vector3i] = [
+	Vector3i(0, 1, 0),
+	Vector3i(0, -1, 0),
+	Vector3i(1, 0, 0),
+	Vector3i(-1, 0, 0),
+	Vector3i(0, 0, 1),
+	Vector3i(0, 0, -1),
+]
 
 # Block IDs (Uint8 0-255). IDs are stable — append to the end, never renumber.
 # File length cap is intentionally lifted: this is the canonical block
@@ -561,6 +582,11 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		# new files aren't in the cache until the editor scans them,
 		# and headless test runs skip that scan.
 		_MOB_SPAWNER_MGR.on_tick(manager, pos)
+	elif block_id == GLOWING_REDSTONE_ORE:
+		# an.java updateTick — lit redstone ore decays back to the unlit
+		# id. The stale-ID guard above already dropped this tick if the
+		# cell changed (mined, exploded, replaced) during the delay.
+		manager.set_world_block(pos, REDSTONE_ORE)
 
 
 # --- Random-tick subsystem (vanilla `cy.java::a(...)` per-tick sweep) ---
@@ -738,6 +764,61 @@ static func _tick_crops(manager, pos: Vector3i) -> void:
 	# schedule permanently.
 	var jitter: int = 100 + randi() % 200  # [100, 300] ticks
 	TickScheduler.schedule(pos, CROPS, jitter)
+
+
+# --- Redstone ore contact glow (Phase 8 B1b — redstone-plan.md §3.1) ---
+#
+# Vanilla an.java h(): walking on the ore (`b(…, lw2)`), punching it
+# (`a(…, eb2)`), and right-clicking it (`b(…, eb2)`) all sparkle + swap
+# the unlit id to the glowing one. Constants for the revert timer +
+# face-normal table live with the other consts at the top of the file
+# (gdlint definitions-order).
+
+
+# Shared entity-contact hook (redstone-plan.md §7.3). Vanilla Entity.move
+# fires Block.b(world, x, y, z, entity) for the cell under ANY entity's
+# feet — players and mobs both route here, and pressure plates (Phase
+# 8e) extend the same surface to items / projectiles / carts. The fast
+# path is one block read + two compares, cheap enough for per-footstep
+# (player) and 20 Hz env-tick (mob) call sites.
+static func on_entity_walking(manager, pos: Vector3i, _entity: Node = null) -> void:
+	var id: int = manager.get_world_block(pos)
+	if id == REDSTONE_ORE or id == GLOWING_REDSTONE_ORE:
+		touch_redstone_ore(manager, pos)
+
+
+# One contact event on a redstone ore cell. Returns the number of
+# reddust particles emitted (one per exposed face) so the GUT harness
+# can assert the exposure rule against a fake manager without a scene
+# tree. The revert is scheduled ONLY on the unlit→lit transition —
+# TickScheduler allows duplicate (pos, id) entries, so scheduling on
+# every contact would grow the queue without bound while an entity
+# stands sparkling on the same cell.
+static func touch_redstone_ore(manager, pos: Vector3i) -> int:
+	var id: int = manager.get_world_block(pos)
+	if id != REDSTONE_ORE and id != GLOWING_REDSTONE_ORE:
+		return 0
+	if id == REDSTONE_ORE:
+		manager.set_world_block(pos, GLOWING_REDSTONE_ORE)
+		TickScheduler.schedule(
+			pos, GLOWING_REDSTONE_ORE, _ORE_REVERT_MIN_TICKS + (randi() % _ORE_REVERT_SPAN_TICKS)
+		)
+	return _emit_ore_reddust(manager, pos)
+
+
+# an.java i() — one `reddust` per exposed face, none through a solid
+# neighbor. FX spawn is gated on the manager being a real Node (the
+# live ChunkManager); fake test managers skip the visual and just get
+# the emitted count back.
+static func _emit_ore_reddust(manager, pos: Vector3i) -> int:
+	var emitted: int = 0
+	for normal: Vector3i in _FACE_NORMALS:
+		if is_opaque(manager.get_world_block(pos + normal)):
+			continue
+		emitted += 1
+		if manager is Node:
+			_BLOCK_FX_SCRIPT.spawn_reddust(manager, pos, Vector3(normal))
+	return emitted
 
 
 # Blocks with full-cell physical collision: a mob can't walk INTO the

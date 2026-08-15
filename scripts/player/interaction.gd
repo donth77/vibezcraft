@@ -815,6 +815,12 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 func _start_mining(target: Vector3i) -> void:
 	_mining_target = target
 	_mining_progress = 0.0
+	# Punching redstone ore sparkles + lights it (an.java a(…, eb2) →
+	# h()). Fires once per fresh mining target — vanilla's attackBlock
+	# cadence — independent of whether the break completes.
+	var punched_id: int = _chunk_manager.get_world_block(target)
+	if punched_id == Blocks.REDSTONE_ORE or punched_id == Blocks.GLOWING_REDSTONE_ORE:
+		Blocks.touch_redstone_ore(_chunk_manager, target)
 	# Seed to NOW (not 0) so the first dig sound of this block waits a full
 	# DIG_SOUND_INTERVAL_MS rather than firing the next frame. Without this,
 	# _complete_break's `SFX.play_break(...)` on the just-finished block
@@ -1346,6 +1352,11 @@ func _try_place() -> void:
 	# RMB on a placed crafting table opens its 3x3 craft screen instead of
 	# placing whatever the player is holding. Vanilla MC behavior.
 	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	# Right-clicking redstone ore sparkles + lights it WITHOUT consuming
+	# the click — an.java b(…, eb2) calls h() then defers to super (false),
+	# so vanilla still places the held block against the ore's face.
+	if hit_id == Blocks.REDSTONE_ORE or hit_id == Blocks.GLOWING_REDSTONE_ORE:
+		Blocks.touch_redstone_ore(_chunk_manager, hit.block_pos)
 	if hit_id == Blocks.CRAFTING_TABLE:
 		_open_crafting_table()
 		_last_place_ms = now

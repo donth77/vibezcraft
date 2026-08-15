@@ -182,3 +182,39 @@ func test_sub_tick_delta_accumulates() -> void:
 	TickScheduler.advance(0.01, _manager)
 	assert_eq(TickScheduler.current_tick(), 1)
 	assert_eq(TickScheduler.pending_count(), 0, "entry fired on the 5th 10 ms tick")
+
+
+# --- Redstone ore dispatch (Phase 8 B1b) ---
+
+
+class FakeWritableManager:
+	extends RefCounted
+	var world: Dictionary = {}
+
+	func get_world_block(pos: Vector3i) -> int:
+		return world.get(pos, Blocks.AIR)
+
+	func set_world_block(pos: Vector3i, id: int) -> void:
+		world[pos] = id
+
+
+func test_glowing_ore_tick_reverts_to_unlit() -> void:
+	var manager := FakeWritableManager.new()
+	var pos := Vector3i(2, 12, 2)
+	manager.world[pos] = Blocks.GLOWING_REDSTONE_ORE
+	TickScheduler.schedule(pos, Blocks.GLOWING_REDSTONE_ORE, 4)
+	for _i in range(4):
+		TickScheduler.advance(0.05, manager)
+	assert_eq(manager.get_world_block(pos), Blocks.REDSTONE_ORE, "dispatch swaps lit → unlit")
+
+
+func test_glowing_ore_tick_is_stale_safe() -> void:
+	# The generic stale-ID guard in Blocks.on_scheduled_tick must protect
+	# the ore dispatch: a cell mined (or replaced) mid-delay stays as-is.
+	var manager := FakeWritableManager.new()
+	var pos := Vector3i(2, 12, 2)
+	manager.world[pos] = Blocks.STONE
+	TickScheduler.schedule(pos, Blocks.GLOWING_REDSTONE_ORE, 2)
+	for _i in range(2):
+		TickScheduler.advance(0.05, manager)
+	assert_eq(manager.get_world_block(pos), Blocks.STONE, "stale ore tick is a no-op")

@@ -39,6 +39,12 @@ const _POOL_SIZE: int = 4
 # 8 so the steady-state recycles cleanly without queue_free churn.
 const _MINING_POOL_SIZE: int = 8
 
+# Redstone-ore sparkle (Phase 8 B1b). One reddust mote per exposed face
+# per contact event — six emitters worst-case per touch, so the pool is
+# sized for two simultaneous full sparkles.
+const _REDDUST_LIFETIME_SEC: float = 0.55
+const _REDDUST_POOL_SIZE: int = 12
+
 # Per-block-id material cache. Key = block id, value = StandardMaterial3D
 # with the block's atlas region as albedo texture.
 static var _materials: Dictionary = {}
@@ -48,6 +54,10 @@ static var _pool: Array = []
 # because we only mine one block at a time, so 1-2 emitters in flight
 # at any given moment.
 static var _mining_pool: Array = []
+
+# Pool + shared material for the reddust sparkle.
+static var _reddust_pool: Array = []
+static var _reddust_material: StandardMaterial3D = null
 # Last parent we reused. Pool nodes stay parented under whichever node was
 # the first caller (typically ChunkManager, lives for the whole session).
 static var _pool_parent: Node = null
@@ -361,6 +371,101 @@ static func spawn_mining(
 	particles.visible = true
 	particles.restart()
 	_schedule_return_mining(parent, particles)
+
+
+# Redstone-ore reddust mote (vanilla an.java i() → "reddust"). One call
+# emits ONE particle just outside `face_normal`'s face, jittered within
+# the face plane the way vanilla samples `x + rand` then snaps the
+# normal axis 1/16 outside the cube. Self-illuminated flat red — vanilla
+# reddust is fullbright (nk.java pins the sprite color, not the world
+# light), which is what makes ore sparkle readable in a dark cave.
+static func spawn_reddust(parent: Node, world_pos: Vector3i, face_normal: Vector3) -> void:
+	var particles: CPUParticles3D = _acquire_reddust(parent)
+	var face_abs: Vector3 = face_normal.abs()
+	# Span the face on the two non-normal axes (±0.35), zero on the
+	# normal axis; sit 1/16 + a hair outside the face plane.
+	particles.emission_box_extents = Vector3(0.35, 0.35, 0.35) - face_abs * 0.35
+	particles.position = Vector3(world_pos) + Vector3(0.5, 0.5, 0.5) + face_normal * 0.57
+	particles.visible = true
+	particles.restart()
+	_schedule_return_reddust(parent, particles)
+
+
+static func _acquire_reddust(parent: Node) -> CPUParticles3D:
+	if _pool_parent == null or not is_instance_valid(_pool_parent):
+		_pool_parent = parent
+	while not _reddust_pool.is_empty():
+		var raw: Variant = _reddust_pool.pop_back()
+		if is_instance_valid(raw):
+			return raw as CPUParticles3D
+	var fresh := _build_reddust_particles()
+	parent.add_child(fresh)
+	return fresh
+
+
+static func _schedule_return_reddust(parent: Node, particles: CPUParticles3D) -> void:
+	var tree: SceneTree = parent.get_tree()
+	if tree == null:
+		return
+	var cleanup := tree.create_timer(_REDDUST_LIFETIME_SEC + 0.2)
+	cleanup.timeout.connect(func() -> void: _return_reddust(particles))
+
+
+static func _return_reddust(particles: CPUParticles3D) -> void:
+	if not is_instance_valid(particles):
+		return
+	particles.emitting = false
+	particles.visible = false
+	if _reddust_pool.size() < _REDDUST_POOL_SIZE:
+		_reddust_pool.append(particles)
+	else:
+		particles.queue_free()
+
+
+static func _reddust_mat() -> StandardMaterial3D:
+	if _reddust_material == null:
+		var mat := StandardMaterial3D.new()
+		# Fullbright red dot — no texture, no world-light response.
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.15, 0.05)
+		mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		mat.vertex_color_use_as_albedo = true
+		_reddust_material = mat
+	return _reddust_material
+
+
+static func _build_reddust_particles() -> CPUParticles3D:
+	var particles := CPUParticles3D.new()
+	particles.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	particles.emission_box_extents = Vector3(0.35, 0, 0.35)
+	# Vanilla nk.java damps motion ×0.1 then floats — near-static mote
+	# with a whisper of drift, no gravity.
+	particles.direction = Vector3(0, 1, 0)
+	particles.spread = 180.0
+	particles.initial_velocity_min = 0.0
+	particles.initial_velocity_max = 0.08
+	particles.gravity = Vector3.ZERO
+	# Shrink over lifetime — reads as the vanilla fade-out.
+	particles.scale_amount_min = 0.5
+	particles.scale_amount_max = 0.8
+	particles.scale_amount_curve = _reddust_fade_curve()
+	var draw := QuadMesh.new()
+	draw.size = Vector2(0.12, 0.12)
+	draw.material = _reddust_mat()
+	particles.mesh = draw
+	particles.amount = 1
+	particles.lifetime = _REDDUST_LIFETIME_SEC
+	particles.one_shot = true
+	particles.explosiveness = 1.0
+	particles.emitting = false
+	return particles
+
+
+static func _reddust_fade_curve() -> Curve:
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 1.0))
+	curve.add_point(Vector2(1.0, 0.0))
+	return curve
 
 
 static func _acquire_mining(parent: Node) -> CPUParticles3D:
