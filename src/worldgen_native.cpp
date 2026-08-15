@@ -1421,6 +1421,76 @@ PackedByteArray WorldgenNative::apply_surface_layer_3d(
 	return out;
 }
 
+Dictionary WorldgenNative::settle_generated_gravity(
+		const PackedByteArray &p_blocks, const PackedByteArray &p_meta) const {
+	constexpr int total = SIZE_X * SIZE_Y * SIZE_Z;
+	Dictionary result;
+	if (p_blocks.size() != total || p_meta.size() != total) {
+		result["blocks"] = p_blocks;
+		result["meta"] = p_meta;
+		result["moved"] = 0;
+		result["max_y"] = 0;
+		return result;
+	}
+	PackedByteArray blocks = p_blocks;
+	PackedByteArray meta = p_meta;
+	uint8_t *bp = blocks.ptrw();
+	uint8_t *mp = meta.ptrw();
+	constexpr int y_stride = SIZE_X * SIZE_Z;
+	int moved = 0;
+	int final_max_y = 0;
+
+	for (int x = 0; x < SIZE_X; x++) {
+		for (int z = 0; z < SIZE_Z; z++) {
+			int landing_y = -1;
+			const int column_idx = z * SIZE_X + x;
+			for (int y = 0; y < SIZE_Y; y++) {
+				const int idx = y * y_stride + column_idx;
+				const int id = bp[idx];
+				if (id == SAND || id == GRAVEL) {
+					if (landing_y < 0) {
+						bp[idx] = AIR;
+						mp[idx] = 0;
+						moved++;
+						continue;
+					}
+					if (landing_y < y) {
+						const int dst_idx = landing_y * y_stride + column_idx;
+						const uint8_t source_meta = mp[idx];
+						bp[idx] = AIR;
+						mp[idx] = 0;
+						bp[dst_idx] = static_cast<uint8_t>(id);
+						mp[dst_idx] = source_meta;
+						final_max_y = std::max(final_max_y, landing_y);
+						landing_y++;
+						moved++;
+						continue;
+					}
+					final_max_y = std::max(final_max_y, y);
+					landing_y = y + 1;
+					continue;
+				}
+				const bool passable = id == AIR || id == FIRE
+						|| id == WATER_STILL || id == WATER_FLOWING
+						|| id == LAVA_STILL || id == LAVA_FLOWING;
+				if (passable) {
+					if (id != AIR) {
+						final_max_y = std::max(final_max_y, y);
+					}
+				} else {
+					final_max_y = std::max(final_max_y, y);
+					landing_y = y + 1;
+				}
+			}
+		}
+	}
+	result["blocks"] = blocks;
+	result["meta"] = meta;
+	result["moved"] = moved;
+	result["max_y"] = final_max_y;
+	return result;
+}
+
 void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("build_base_terrain", "chunk_x", "chunk_z", "heightmap"),
@@ -1437,6 +1507,9 @@ void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("apply_surface_layer_3d", "chunk_x", "chunk_z", "blocks"),
 			&WorldgenNative::apply_surface_layer_3d);
+	ClassDB::bind_method(
+			D_METHOD("settle_generated_gravity", "blocks", "meta"),
+			&WorldgenNative::settle_generated_gravity);
 	// Static class method exposed as instance-callable so GDScript can
 	// invoke `_native_worldgen.set_world_seed(N)` symmetrically with the
 	// other native APIs. The static keyword in the header keeps the

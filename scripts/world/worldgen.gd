@@ -404,6 +404,14 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 		# Trilerp output occasionally produces these in mid-air where
 		# density grazes above zero; vanilla terrain doesn't have them.
 		_strip_floating_terrain(chunk)
+	# Fresh-generation gravity settlement. Terrain, ore, cave, spring, and
+	# beach passes write directly into Chunk arrays, deliberately bypassing
+	# ChunkManager's runtime neighbor callbacks. A cave can therefore carve
+	# the support out from under SAND / GRAVEL and leave it dormant until the
+	# player updates a nearby block. Settle every column once before any
+	# decorator inspects the surface. This is a linear, allocation-free data
+	# pass: no FallingBlock entities, scene-tree work, or runtime tick cost.
+	_settle_generated_gravity_blocks(chunk)
 	# 4.5. Dungeons — Alpha cm.java port. Runs AFTER caves so the
 	# wall-opening check sees cave intersections, BEFORE trees so the
 	# roof isn't covered with leaves growing through stone. Per-chunk
@@ -438,6 +446,100 @@ static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:
 	chunk.dirty = true
 	PerfProbe.end("worldgen.generate_chunk", probe_token)
 	return chunk
+
+
+# Collapse freshly generated SAND / GRAVEL through AIR, FIRE, and fluids using
+# the exact passability rule used by runtime FallingBlock entities.
+#
+# The scan is bottom-up and tracks the next landing cell above the latest
+# non-passable support. That makes an entire stacked column settle in one pass:
+# each gravity block moves at most once, with no nested downward search. Fluids
+# are replaced at the landing cell (Alpha BlockSand behavior) while remaining
+# fluid cells above it stay intact. A gravity block over an all-passable column
+# falls out of the world, matching the runtime entity's below-world despawn.
+#
+# Returns the number of moved/removed gravity cells for diagnostics and tests.
+static func _settle_generated_gravity_blocks(chunk: Chunk) -> int:
+	if _native_worldgen != null and _native_worldgen.has_method("settle_generated_gravity"):
+		var native_result: Dictionary = _native_worldgen.call(
+			"settle_generated_gravity", chunk.blocks, chunk.block_meta
+		)
+		var native_moved: int = int(native_result.get("moved", 0))
+		chunk.blocks = native_result.get("blocks", chunk.blocks)
+		chunk.block_meta = native_result.get("meta", chunk.block_meta)
+		chunk.max_y = int(native_result.get("max_y", chunk.max_y))
+		if native_moved > 0:
+			chunk.lighting_revision += 1
+			chunk._height_map_dirty = true
+			chunk.dirty = true
+		return native_moved
+	var blocks: PackedByteArray = chunk.blocks
+	var meta: PackedByteArray = chunk.block_meta
+	var moved: int = 0
+	var final_max_y: int = 0
+	# Hoist registry lookups and use the flat-array stride directly. This pass
+	# runs for every fresh chunk, so avoiding 65k GDScript function calls
+	# (Chunk.index + FallingBlock/Blocks predicates) saves ~3× wall time.
+	var sand: int = Blocks.SAND
+	var gravel: int = Blocks.GRAVEL
+	var air: int = Blocks.AIR
+	var fire: int = Blocks.FIRE
+	var water_still: int = Blocks.WATER_STILL
+	var water_flowing: int = Blocks.WATER_FLOWING
+	var lava_still: int = Blocks.LAVA_STILL
+	var lava_flowing: int = Blocks.LAVA_FLOWING
+	var y_stride: int = Chunk.SIZE_X * Chunk.SIZE_Z
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			var landing_y: int = -1
+			var column_idx: int = z * Chunk.SIZE_X + x
+			for y in range(Chunk.SIZE_Y):
+				var idx: int = y * y_stride + column_idx
+				var id: int = blocks[idx]
+				if id == sand or id == gravel:
+					if landing_y < 0:
+						# Nothing solid exists below this cell.
+						blocks[idx] = air
+						meta[idx] = 0
+						moved += 1
+						continue
+					if landing_y < y:
+						var dst_idx: int = landing_y * y_stride + column_idx
+						var source_meta: int = meta[idx]
+						blocks[idx] = air
+						meta[idx] = 0
+						blocks[dst_idx] = id
+						meta[dst_idx] = source_meta
+						final_max_y = maxi(final_max_y, landing_y)
+						landing_y += 1
+						moved += 1
+						continue
+					# Already resting directly on its support.
+					final_max_y = maxi(final_max_y, y)
+					landing_y = y + 1
+				elif (
+					id == air
+					or id == fire
+					or id == water_still
+					or id == water_flowing
+					or id == lava_still
+					or id == lava_flowing
+				):
+					# AIR leaves no bookkeeping. Fluids/fire still count as
+					# non-AIR for max_y even though gravity passes through.
+					if id != air:
+						final_max_y = maxi(final_max_y, y)
+				else:
+					final_max_y = maxi(final_max_y, y)
+					landing_y = y + 1
+	chunk.blocks = blocks
+	chunk.block_meta = meta
+	chunk.max_y = final_max_y
+	if moved > 0:
+		chunk.lighting_revision += 1
+		chunk._height_map_dirty = true
+		chunk.dirty = true
+	return moved
 
 
 # Pure-GDScript fill. Kept as the reference implementation; the native

@@ -37,7 +37,9 @@ public:
 	static constexpr int GRAVEL = 18;
 	static constexpr int WATER_FLOWING = 23;
 	static constexpr int WATER_STILL = 24;
+	static constexpr int LAVA_FLOWING = 25;
 	static constexpr int LAVA_STILL = 26;
+	static constexpr int FIRE = 27;
 	// Mirrors scripts/world/worldgen.gd. Alpha 1.2.6 px.java:103 (sea level).
 	// world_seed is mutable so the GDScript main-menu "World seed" setting
 	// can rewrite it via set_world_seed() before any chunk gen runs. The
@@ -106,6 +108,13 @@ public:
 	// (same RNG sequence). Returns mutated blocks; caller assigns to chunk.blocks.
 	PackedByteArray apply_surface_layer_3d(
 			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
+
+	// Allocation-bounded fresh-generation gravity settlement. Collapses
+	// SAND/GRAVEL columns through AIR/FIRE/fluids in one bottom-up pass and
+	// returns {blocks, meta, moved, max_y}. Mirrors the GDScript fallback
+	// byte-for-byte while keeping the production path below a millisecond.
+	Dictionary settle_generated_gravity(
+			const PackedByteArray &p_blocks, const PackedByteArray &p_meta) const;
 
 protected:
 	static void _bind_methods();
