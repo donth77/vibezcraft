@@ -92,6 +92,13 @@ const _ORE_CONFIGS: Array = [
 	[Blocks.IRON_ORE, 20, 8, 0, 64],
 	[Blocks.GOLD_ORE, 2, 8, 0, 32],
 	[Blocks.DIAMOND_ORE, 1, 7, 0, 16],
+	# Redstone — px.java:336-341: 8 attempts/chunk, vein size 7, seed y
+	# nextInt(16). Same deep band as diamond under the house contract
+	# (inclusive final-cell clamp, y=0 excluded → cells land in Y 1-16;
+	# vanilla's unclamped upward ellipsoid tail is deviation §11.4 in
+	# .claude/redstone-plan.md). Flows into WorldgenNative.scatter_ores
+	# unchanged — the flat config array keeps both paths byte-identical.
+	[Blocks.REDSTONE_ORE, 8, 7, 0, 16],
 ]
 
 # Sibling generator modules. Loaded via preload() because using `class_name`

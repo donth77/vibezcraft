@@ -193,6 +193,17 @@ const _LAYOUT := {
 	# comment alongside the asset). Translucent green cube; all 6 faces
 	# share this single tile.
 	"slime_block": 101,
+	# Redstone set (Phase 8, redstone-plan.md §4.1). All eight land in
+	# B1a so later batches (wire mesh, lever, torch) only consume them.
+	# Buttons + plates reuse the existing stone/planks slots — no tiles.
+	"redstone_ore": 102,
+	"redstone_dust_cross": 103,
+	"redstone_dust_line": 104,
+	"redstone_dust_cross_powered": 105,
+	"redstone_dust_line_powered": 106,
+	"lever": 107,
+	"redstone_torch_on": 108,
+	"redstone_torch_off": 109,
 }
 
 # Foliage tint variants.

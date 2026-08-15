@@ -55,6 +55,7 @@ func test_chunk_layering() -> void:
 		Blocks.IRON_ORE,
 		Blocks.GOLD_ORE,
 		Blocks.DIAMOND_ORE,
+		Blocks.REDSTONE_ORE,
 	]
 	# Above the surface we expect air on dry land, a tree block if a canopy
 	# overlaps, or water if this column is below the sea.
@@ -150,7 +151,11 @@ func test_ores_only_replace_stone() -> void:
 	# must have been stone-eligible (i.e. we never observe grass/dirt/bedrock
 	# converted to ore). Equivalent check: no ore at y=0 (bedrock band).
 	var ore_ids: Array[int] = [
-		Blocks.COAL_ORE, Blocks.IRON_ORE, Blocks.GOLD_ORE, Blocks.DIAMOND_ORE
+		Blocks.COAL_ORE,
+		Blocks.IRON_ORE,
+		Blocks.GOLD_ORE,
+		Blocks.DIAMOND_ORE,
+		Blocks.REDSTONE_ORE,
 	]
 	for cx in range(-1, 2):
 		for cz in range(-1, 2):

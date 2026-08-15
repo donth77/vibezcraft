@@ -96,3 +96,21 @@ func test_native_chunk_still_passes_base_layer_assertions() -> void:
 				chunk.get_block(x, h - 1, z) in subsurface_ok,
 				"(%d,%d,%d) dirt or sand" % [x, h - 1, z]
 			)
+
+
+func test_parity_holds_with_redstone_config_row() -> void:
+	# Phase 8 B1a: the redstone row rides the same flattened _ORE_CONFIGS
+	# array both paths consume, so native and GDScript must stay
+	# byte-identical AND both must actually place redstone. A parity pass
+	# with zero redstone would mean the native loop silently dropped the
+	# new row (e.g. a hard-coded config count).
+	var native_chunk := _generate_with_native(-3, 2)
+	var gds_chunk := _generate_with_gdscript(-3, 2)
+	assert_eq(native_chunk.blocks, gds_chunk.blocks, "byte parity with 7 ore configs")
+	var native_count: int = 0
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			for y in range(1, 17):
+				if native_chunk.get_block(x, y, z) == Blocks.REDSTONE_ORE:
+					native_count += 1
+	assert_gt(native_count, 0, "native path places redstone cells in the deep band")

@@ -408,6 +408,36 @@ const MOSSY_COBBLESTONE := 86
 # a `slow_landing` block-tag layer that the player physics reads).
 const SLIME_BLOCK := 87
 
+# --- Phase 8 redstone ID reservation (.claude/redstone-plan.md §1.1) ---
+# IDs 88-96 are CLAIMED for the redstone set. Like the ID-50 burn note
+# above: these assignments are load-bearing the moment a chunk persists
+# them — never renumber, never reuse for anything else. Remaining
+# unreserved budget after this block: 97-99 (three IDs).
+#   88 redstone_ore            (defined below)
+#   89 glowing_redstone_ore    (defined below)
+#   90 redstone_wire           (Phase 8c)
+#   91 redstone_torch          (lit — Phase 8d)
+#   92 redstone_torch_off      (Phase 8d)
+#   93 lever                   (Phase 8b)
+#   94 stone_button            (Phase 8e)
+#   95 stone_pressure_plate    (Phase 8e)
+#   96 wooden_pressure_plate   (Phase 8e)
+
+# Redstone ore — vanilla an.java via nq.aN (id 73, tex 51). Stone
+# material, hardness 3.0, blast registration b(5.0f) (same arm as the
+# other ores below), iron+ pickaxe to drop 4-5 redstone dust. Contact
+# (walk / punch / right-click) swaps it to the glowing variant.
+const REDSTONE_ORE := 88
+
+# Glowing redstone ore — vanilla an.java via nq.aO (id 74, same tex 51,
+# light .a(0.625f) → 9). Separate ID rather than a meta bit because
+# light_emission() and the native lighting emission LUT are keyed by
+# block ID (redstone-plan.md §3.1). Reverts to REDSTONE_ORE on a
+# scheduled 300-500 tick timer (deviation §11.3 — vanilla uses the
+# random-tick sweep, but our 24/chunk budget would stretch the ~20 s
+# glow to ~68 s).
+const GLOWING_REDSTONE_ORE := 89
+
 # Mesh shape selectors — used by the chunk mesher to pick the right
 # vertex layout per block. Default CUBE is the hot path; non-cube
 # shapes (CROSS, TORCH, SLAB, …) emit custom geometry. Adding a new
@@ -1041,6 +1071,8 @@ static func light_emission(id: int) -> int:
 			return 1  # int(15 * 0.125), nq.java brown mushroom
 		JACK_O_LANTERN:
 			return 15  # nq.java registers jack o'lantern with .a(1.0f)
+		GLOWING_REDSTONE_ORE:
+			return 9  # int(15 * 0.625), nq.aO glowing redstone ore
 	return 0
 
 
@@ -1391,6 +1423,10 @@ static func explosion_resistance(id: int) -> float:
 			return 25.0
 		STONE, BRICK, FURNACE, LIT_FURNACE, IRON_ORE, COAL_ORE, GOLD_ORE, DIAMOND_ORE:
 			return 6.0
+		REDSTONE_ORE, GLOWING_REDSTONE_ORE:
+			# an.java registers b(5.0f) — identical to the hz.java ores
+			# above, so both variants share the ore-family resistance.
+			return 6.0
 		WOODEN_DOOR:
 			return 15.0
 		LOG, PLANKS, CRAFTING_TABLE, FENCE, WOOD_STAIRS, CHEST, LADDER, BOOKSHELF, FENCE_GATE:
@@ -1490,6 +1526,11 @@ static func hardness(id: int) -> float:
 			return 3.5
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
 			return 3.0
+		REDSTONE_ORE, GLOWING_REDSTONE_ORE:
+			# an.java `c(3.0f)` — same as the other ores. The glowing
+			# variant keeps identical break math (vanilla registers both
+			# through the same constructor chain).
+			return 3.0
 		OBSIDIAN:
 			return 50.0
 		PUMPKIN, JACK_O_LANTERN:
@@ -1554,7 +1595,7 @@ static func required_harvest_level(id: int) -> int:
 	match id:
 		IRON_ORE:
 			return 1
-		GOLD_ORE, DIAMOND_ORE:
+		GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			return 2
 		OBSIDIAN:
 			return 3
@@ -1571,7 +1612,7 @@ static func preferred_tool_type(id: int) -> int:
 	match id:
 		STONE, COBBLESTONE, MOSSY_COBBLESTONE, COBBLESTONE_STAIRS, BRICK, OBSIDIAN:
 			return Items.TOOL_TYPE_PICKAXE
-		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
+		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			return Items.TOOL_TYPE_PICKAXE
 		FURNACE, LIT_FURNACE:
 			return Items.TOOL_TYPE_PICKAXE
@@ -1706,7 +1747,7 @@ static func break_time_bare_hand(id: int) -> float:
 			return 7.5  # painfully slow without a pickaxe — Alpha-faithful
 		FURNACE, LIT_FURNACE:
 			return 17.5  # 3.5 hardness × 5 (no-tool penalty)
-		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE:
+		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			return 15.0  # ores are tougher than stone — wood-pick takes ~2.5s
 		OBSIDIAN:
 			return 250.0  # only diamond pickaxe is practical
@@ -1771,6 +1812,11 @@ static func drops(id: int) -> int:
 			return Items.COAL
 		DIAMOND_ORE:
 			return Items.DIAMOND
+		REDSTONE_ORE, GLOWING_REDSTONE_ORE:
+			# an.java::a(int, Random) returns dx.aA (redstone dust) for
+			# BOTH ore ids — a lit ore mined mid-glow still pays out.
+			# Quantity 4-5 comes from drop_quantity below.
+			return Items.REDSTONE
 		IRON_ORE, GOLD_ORE:
 			return id  # iron/gold ore drops itself (smelt for ingot)
 		LIT_FURNACE:
@@ -1836,6 +1882,13 @@ static func drop_quantity(id: int) -> int:
 	if id == SNOW_BLOCK:
 		# Vanilla bo.java::a — snow block drops 4 snowballs.
 		return 4
+	if id == REDSTONE_ORE or id == GLOWING_REDSTONE_ORE:
+		# an.java::a(Random) — `4 + random.nextInt(2)` dust per break.
+		# Randomized here (not in drops()) so interaction.gd's per-slot
+		# loop spawns 4 or 5 separate dropped items, mirroring vanilla's
+		# per-item spread. The tool-tier gate still applies per slot via
+		# random_drop → drop_with_tool.
+		return 4 + (randi() % 2)
 	return 1
 
 
@@ -2007,6 +2060,10 @@ static func name_of(id: int) -> String:
 			return "jukebox"
 		SLIME_BLOCK:
 			return "slime_block"
+		REDSTONE_ORE:
+			return "redstone_ore"
+		GLOWING_REDSTONE_ORE:
+			return "glowing_redstone_ore"
 	return "unknown"
 
 
@@ -2068,6 +2125,11 @@ static func get_face_texture(id: int, face: String) -> String:
 		# All 6 faces share one tile; the chunk shader's per-face shading
 		# LUT still gives the cube edge contrast.
 		return "slime_block"
+	if id == REDSTONE_ORE or id == GLOWING_REDSTONE_ORE:
+		# Vanilla renders both variants with the SAME tile (nq.aN and
+		# nq.aO both register texture index 51) — the glow is the light
+		# emission + reddust particles, not a texture swap.
+		return "redstone_ore"
 	if id == HALF_SLAB or id == DOUBLE_SLAB:
 		# Vanilla qj.java::a(int) returns texture index 6 for top/bottom
 		# (stone_slab_top) and 5 for sides (stone_slab_side).

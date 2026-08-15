@@ -1,5 +1,17 @@
 extends GutTest
 
+# Phase 8 B1a — the eight redstone tile names (redstone-plan.md §4.1).
+const _REDSTONE_TILE_NAMES: Array[String] = [
+	"redstone_ore",
+	"redstone_dust_cross",
+	"redstone_dust_line",
+	"redstone_dust_cross_powered",
+	"redstone_dust_line_powered",
+	"lever",
+	"redstone_torch_on",
+	"redstone_torch_off",
+]
+
 
 func before_each() -> void:
 	BlockAtlas.reset()
@@ -49,3 +61,39 @@ func test_reset_clears_face_uvs() -> void:
 	# uv_rect_for should lazy-init on next call.
 	var stone_side: Rect2 = BlockAtlas.uv_rect_for(Blocks.STONE, BlockAtlas.FACE_SIDE)
 	assert_gt(stone_side.size.x, 0.0, "lazy-rebuild after reset works")
+
+
+# --- Redstone tiles (Phase 8 B1a — redstone-plan.md §4.1) ---
+
+
+func test_redstone_tiles_resolve_in_alpha_vanilla() -> void:
+	for tex_name: String in _REDSTONE_TILE_NAMES:
+		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+		assert_gt(rect.size.x, 0.0, "%s has a non-empty atlas rect" % tex_name)
+
+
+func test_redstone_tiles_resolve_via_fallback_in_other_packs() -> void:
+	# pixel_perfection / programmer_art ship no redstone art yet — the
+	# atlas builder must fall back to the alpha_vanilla tile per name
+	# (block_atlas.gd pack-incomplete fallback) instead of dropping the
+	# slot. Ore block faces must also route to the shared tile.
+	var prev_pack: String = BlockAtlas.active_pack
+	for pack: String in ["pixel_perfection", "programmer_art"]:
+		BlockAtlas.active_pack = pack
+		BlockAtlas.reset()
+		BlockAtlas.build()
+		for tex_name: String in _REDSTONE_TILE_NAMES:
+			var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+			assert_gt(rect.size.x, 0.0, "%s resolves in %s via fallback" % [tex_name, pack])
+		var ore_rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.REDSTONE_ORE, BlockAtlas.FACE_SIDE)
+		assert_eq(ore_rect, BlockAtlas.uv_rect("redstone_ore"), "ore face → redstone_ore tile")
+	BlockAtlas.active_pack = prev_pack
+	BlockAtlas.reset()
+	BlockAtlas.build()
+
+
+func test_glowing_ore_uses_same_uv_as_unlit() -> void:
+	var lit: Rect2 = BlockAtlas.uv_rect_for(Blocks.GLOWING_REDSTONE_ORE, BlockAtlas.FACE_TOP)
+	var unlit: Rect2 = BlockAtlas.uv_rect_for(Blocks.REDSTONE_ORE, BlockAtlas.FACE_TOP)
+	assert_eq(lit, unlit, "both ore ids sample tile index 51's slot")
+	assert_gt(lit.size.x, 0.0, "shared rect is non-empty")
