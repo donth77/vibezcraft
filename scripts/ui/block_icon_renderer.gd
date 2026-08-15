@@ -46,6 +46,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# red-dust block, which is clear enough for a debug-grid button. The
 	# dust ITEM keeps its own flat sprite via the normal item path.
 	Blocks.REDSTONE_WIRE,
+	# Torch variants bake as cubes like the plain TORCH does — the real
+	# pillar mesh is too thin to read at icon size.
+	Blocks.REDSTONE_TORCH,
+	Blocks.REDSTONE_TORCH_OFF,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FARMLAND,
 	Blocks.GRAVEL,

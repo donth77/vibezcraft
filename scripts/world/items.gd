@@ -846,6 +846,8 @@ static func id_from_name(item_name: String) -> int:
 			return SLIMEBALL
 		"slime_block":
 			return Blocks.SLIME_BLOCK
+		"redstone_torch":
+			return Blocks.REDSTONE_TORCH
 		"lever":
 			# Block-id result (93): levers are placed straight from the
 			# inventory like any other block, so the recipe yields the

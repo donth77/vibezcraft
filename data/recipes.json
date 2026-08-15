@@ -554,6 +554,13 @@
       "pattern": ["S", "C"],
       "key": {"S": "stick", "C": "cobblestone"},
       "result": {"id": "lever", "count": 1}
+    },
+    {
+      "_comment": "Redstone torch — vanilla en.java:59. Redstone dust above a stick. Alpha's inverter and its only delay primitive.",
+      "id": "redstone_torch",
+      "pattern": ["R", "S"],
+      "key": {"R": "redstone", "S": "stick"},
+      "result": {"id": "redstone_torch", "count": 1}
     }
   ],
   "shapeless": [

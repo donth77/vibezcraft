@@ -58,6 +58,16 @@ const _WIRE_HORIZONTALS: Array[Vector3i] = [
 	Vector3i(0, 0, 1),
 ]
 
+# Torch timing (bo.java). d() returns 2, so an inverter reacts two ticks
+# after its mount changes — Alpha's only delay primitive.
+const TORCH_TICK_RATE: int = 2
+# Burnout: entries older than 100 ticks are discarded, and the 8th
+# retained off-transition at one position burns the torch out
+# (bo.java:20-32). A torch feeding its own mount through one wire
+# oscillates, and this is what stops it.
+const TORCH_BURNOUT_WINDOW_TICKS: int = 100
+const TORCH_BURNOUT_LIMIT: int = 8
+
 # Safety ceiling on a single propagation drain. A 15-decay network can
 # only be so large, but a malformed world shouldn't be able to spin here.
 const _WIRE_WORKLIST_CAP: int = 8192
@@ -84,6 +94,10 @@ const _MOUNT_TO_STRONG_SLOT: Dictionary = {
 # through the power queries.
 static var _wire_output_enabled: bool = true
 
+# Fallback burnout log for managers that don't own one (see
+# _burnout_log). Only reached by bare test doubles.
+static var _fallback_burnout_log: Array = []
+
 
 # True for blocks that can act as a redstone source — vanilla
 # `Block.e()` / `isPowerSource`. Wire is included: `lu.java:e()` returns
@@ -91,7 +105,9 @@ static var _wire_output_enabled: bool = true
 static func is_power_source(id: int) -> bool:
 	if id == Blocks.REDSTONE_WIRE:
 		return _wire_output_enabled
-	return id == Blocks.LEVER
+	# bo.java:e() returns true for BOTH torch variants, so wire links to
+	# an unlit torch as well as a lit one.
+	return id == Blocks.LEVER or id == Blocks.REDSTONE_TORCH or id == Blocks.REDSTONE_TORCH_OFF
 
 
 # Offset from a mounted component to the block it is attached to.
@@ -128,7 +144,18 @@ static func provides_weak_power(manager, pos: Vector3i, slot: int) -> bool:
 			return (manager.get_world_block_meta(pos) & POWERED_BIT) > 0
 		Blocks.REDSTONE_WIRE:
 			return _wire_powers_slot(manager, pos, slot)
+		Blocks.REDSTONE_TORCH:
+			# bo.java:65 — a lit torch powers every direction EXCEPT into
+			# the block it is attached to.
+			return slot != _torch_excluded_slot(manager.get_world_block_meta(pos))
 	return false
+
+
+# The one slot a lit torch withholds power from: the one where the
+# asking cell IS the torch's mount block.
+static func _torch_excluded_slot(meta: int) -> int:
+	var away: Vector3i = -mount_offset(meta)
+	return SLOT_OFFSETS.find(away)
 
 
 # lu.java:c(pk, x, y, z, n5) — what a powered wire feeds outward.
@@ -176,6 +203,11 @@ static func provides_strong_power(manager, pos: Vector3i, slot: int) -> bool:
 			if (meta & POWERED_BIT) == 0:
 				return false
 			return _MOUNT_TO_STRONG_SLOT.get(meta & 0x7, SLOT_ABOVE) == slot
+		Blocks.REDSTONE_TORCH:
+			# bo.java:121 — strong power only at slot 0, i.e. into the
+			# block directly ABOVE the torch. That single rule is why the
+			# classic "torch under a block, wire on top" circuit works.
+			return slot == SLOT_BELOW and provides_weak_power(manager, pos, slot)
 		Blocks.REDSTONE_WIRE:
 			# lu.java:224 delegates the World overload straight to the
 			# IBlockAccess one — wire's strong and weak output are the
@@ -239,6 +271,8 @@ static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 	match id:
 		Blocks.REDSTONE_WIRE:
 			_check_wire_support(manager, pos)
+		Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
+			_update_torch(manager, pos, id)
 		Blocks.LEVER:
 			_check_mounted_support(manager, pos, id)
 		Blocks.WOODEN_DOOR, Blocks.IRON_DOOR:
@@ -458,3 +492,107 @@ static func _check_wire_support(manager, pos: Vector3i) -> void:
 	manager.set_world_block_state(pos, Blocks.AIR, 0)
 	if manager.has_method("spawn_block_drop"):
 		manager.call("spawn_block_drop", pos, Blocks.drops(Blocks.REDSTONE_WIRE))
+
+
+# --- Redstone torch (bo.java) ------------------------------------------
+
+
+# Is the block this torch hangs on receiving power? bo.java:86-100 asks
+# `cy.k(mount, slot)` — the indirect-power query, so a mount block that
+# is merely strong-powered by something else counts.
+static func torch_mount_powered(manager, pos: Vector3i) -> bool:
+	var meta: int = manager.get_world_block_meta(pos)
+	var offset: Vector3i = mount_offset(meta)
+	var slot: int = SLOT_OFFSETS.find(offset)
+	if slot < 0:
+		return false
+	return indirect_power_from(manager, pos + offset, slot)
+
+
+# Prune the burnout log, then count how many off-transitions this
+# position has inside the retained window. `record` adds the current
+# transition first, matching bo.java's `a(world, x, y, z, true)`.
+# Vanilla keeps its RedstoneUpdateInfo list in a `private static List`.
+# We hang it off the WORLD instead: burnout history is world state, and
+# a static outlives the world it belongs to — a torch that burnt out in
+# one save would still be suppressed after loading another. Managers
+# expose `redstone_burnout_log()`; the static below is only a fallback
+# for bare test doubles.
+static func _burnout_log(manager) -> Array:
+	if manager != null and manager.has_method("redstone_burnout_log"):
+		return manager.call("redstone_burnout_log")
+	return _fallback_burnout_log
+
+
+static func _torch_burned_out(manager, pos: Vector3i, record: bool) -> bool:
+	var now: int = _world_tick(manager)
+	var log: Array = _burnout_log(manager)
+	if record:
+		log.append({"pos": pos, "tick": now})
+	while not log.is_empty() and now - int(log[0]["tick"]) > TORCH_BURNOUT_WINDOW_TICKS:
+		log.pop_front()
+	var count: int = 0
+	for entry: Dictionary in log:
+		if entry["pos"] == pos:
+			count += 1
+			if count >= TORCH_BURNOUT_LIMIT:
+				return true
+	return false
+
+
+static func _world_tick(manager) -> int:
+	if manager.has_method("redstone_tick"):
+		return int(manager.call("redstone_tick"))
+	return TickScheduler.current_tick()
+
+
+# Scheduled-tick handler for both torch ids (bo.java:104-124). Lit torch
+# over a powered mount turns off; unlit torch over an unpowered mount
+# turns back on unless it has burnt out.
+static func torch_tick(manager, pos: Vector3i, block_id: int) -> void:
+	var mount_powered: bool = torch_mount_powered(manager, pos)
+	var meta: int = manager.get_world_block_meta(pos)
+	if block_id == Blocks.REDSTONE_TORCH:
+		if not mount_powered:
+			return
+		manager.set_world_block_state(pos, Blocks.REDSTONE_TORCH_OFF, meta)
+		if _torch_burned_out(manager, pos, true):
+			# Vanilla plays random.fizz at volume 0.5 with a wide pitch
+			# jitter and puffs five smoke particles.
+			if manager.has_method("play_torch_burnout"):
+				manager.call("play_torch_burnout", pos)
+		return
+	if mount_powered:
+		return
+	if _torch_burned_out(manager, pos, false):
+		return
+	manager.set_world_block_state(pos, Blocks.REDSTONE_TORCH, meta)
+
+
+# Neighbour-change entry: schedule the 2-tick re-evaluation, and pop the
+# torch off if its mount is gone.
+static func _update_torch(manager, pos: Vector3i, block_id: int) -> void:
+	var meta: int = manager.get_world_block_meta(pos)
+	var support: Vector3i = pos + mount_offset(meta)
+	if not is_normal_cube(manager, support):
+		manager.set_world_block_state(pos, Blocks.AIR, 0)
+		if manager.has_method("spawn_block_drop"):
+			manager.call("spawn_block_drop", pos, Blocks.drops(block_id))
+		return
+	# Only schedule when the torch actually disagrees with its mount, so
+	# a settled circuit doesn't refill the tick queue on every update.
+	var mount_powered: bool = torch_mount_powered(manager, pos)
+	var lit: bool = block_id == Blocks.REDSTONE_TORCH
+	if lit == mount_powered:
+		TickScheduler.schedule(pos, block_id, TORCH_TICK_RATE)
+
+
+# Resets the transient module state. Burnout history is per-world and
+# lives on the manager, so this only clears the fallback log and the
+# wire recomputation guard.
+static func reset_state() -> void:
+	# Reassign rather than clear(): a plain in-place clear on this static
+	# did NOT propagate to readers outside the class (verified by probe),
+	# leaving burnout history alive across worlds and test cases.
+	_fallback_burnout_log.clear()
+	_wire_output_enabled = true

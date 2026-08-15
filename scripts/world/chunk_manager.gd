@@ -159,6 +159,10 @@ var _inside_fluid_notify: bool = false
 var _notify_queue: Array[Vector3i] = []
 var _notify_queued: Dictionary = {}
 var _notify_draining: bool = false
+
+# Per-world redstone-torch burnout entries ({pos, tick}); see
+# redstone_burnout_log().
+var _redstone_burnout_log: Array = []
 # Deferred sky/block-light seeds + fizz during batch edits and fluid
 # fanouts. The outermost unwind performs one multi-source pass per channel.
 var _light_defer_depth: int = 0
@@ -2257,6 +2261,31 @@ func prime_tnt(block_pos: Vector3i) -> void:
 
 func play_door_sound(_block_pos: Vector3i) -> void:
 	SFX.play_door_toggle()
+
+
+# Redstone-torch burnout history for THIS world (vanilla's static
+# RedstoneUpdateInfo list). Owned here rather than in Redstone so it
+# dies with the world — a static one would carry a burnt-out torch's
+# history into the next save you load.
+func redstone_burnout_log() -> Array:
+	return _redstone_burnout_log
+
+
+# Torch burnout effect — vanilla plays random.fizz at volume 0.5 with a
+# wide pitch jitter and puffs five smoke particles.
+func play_torch_burnout(block_pos: Vector3i) -> void:
+	SFX.play_fizz()
+	# Five motes spread over the faces around the torch, standing in for
+	# vanilla's smoke puff — we have no generic smoke emitter yet, and
+	# the reddust mote reads correctly at the torch tip.
+	for normal: Vector3 in [
+		Vector3(0, 1, 0),
+		Vector3(1, 0, 0),
+		Vector3(-1, 0, 0),
+		Vector3(0, 0, 1),
+		Vector3(0, 0, -1),
+	]:
+		_BLOCK_FX.spawn_reddust(self, block_pos, normal)
 
 
 # Reports whether the chunk at the given chunk-space coord has fully

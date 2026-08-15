@@ -437,8 +437,8 @@ const SLIME_BLOCK := 87
 #   88 redstone_ore            (defined below)
 #   89 glowing_redstone_ore    (defined below)
 #   90 redstone_wire           (defined below)
-#   91 redstone_torch          (lit — Phase 8d)
-#   92 redstone_torch_off      (Phase 8d)
+#   91 redstone_torch          (defined below)
+#   92 redstone_torch_off      (defined below)
 #   93 lever                   (defined below)
 #   94 stone_button            (Phase 8e)
 #   95 stone_pressure_plate    (Phase 8e)
@@ -458,6 +458,19 @@ const REDSTONE_ORE := 88
 # random-tick sweep, but our 24/chunk budget would stretch the ~20 s
 # glow to ~68 s).
 const GLOWING_REDSTONE_ORE := 89
+
+# Redstone torch, lit — vanilla bo.java via nq.aQ (id 76, tex 99).
+# Hardness 0, light .a(0.5f) → 7, mounts exactly like a normal torch
+# (meta 1-5). Alpha's ONLY inverter and its only timing primitive: it
+# turns off 2 ticks after the block it is attached to becomes powered.
+const REDSTONE_TORCH := 91
+
+# Redstone torch, unlit — vanilla bo.java via nq.aP (id 75, tex 115).
+# Separate ID rather than a meta bit for the same reason as the ore
+# pair: light_emission and the native lighting LUT are keyed by id.
+# Breaking either variant hands back the LIT one (bo.java a()), so a
+# burnt-out torch is never a dead item.
+const REDSTONE_TORCH_OFF := 92
 
 # Redstone wire — vanilla lu.java via nq.av (id 55, tex 84/85 with the
 # powered variants at +16). Hardness 0, no collision box, needs a normal
@@ -604,6 +617,9 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 		# new files aren't in the cache until the editor scans them,
 		# and headless test runs skip that scan.
 		_MOB_SPAWNER_MGR.on_tick(manager, pos)
+	elif block_id == REDSTONE_TORCH or block_id == REDSTONE_TORCH_OFF:
+		# The 2-tick inverter delay (bo.java d() == 2).
+		Redstone.torch_tick(manager, pos, block_id)
 	elif block_id == GLOWING_REDSTONE_ORE:
 		# an.java updateTick — lit redstone ore decays back to the unlit
 		# id. The stale-ID guard above already dropped this tick if the
@@ -639,7 +655,11 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 # branch on the block id. Add new entries here as blocks gain random-
 # tick behavior (leaves decay, crops, ice melt, fire spread, …).
 static func is_random_tickable(id: int) -> bool:
-	return id == GRASS
+	# Both redstone torch ids set setTickRandomly in bo.java's ctor. The
+	# random tick just re-evaluates the inverter, which is harmless and
+	# is what lets a burnt-out torch recover once its entries age out
+	# even if nothing nearby changes.
+	return id == GRASS or id == REDSTONE_TORCH or id == REDSTONE_TORCH_OFF
 
 
 # Driver — iterate every loaded chunk and fire N random cells. Called
@@ -699,6 +719,9 @@ static func run_random_tick_pass(manager) -> void:
 # unknown ids is a no-op (defensive against id mismatch between the
 # `is_random_tickable` filter and this dispatch).
 static func on_random_tick(manager, pos: Vector3i, block_id: int) -> void:
+	if block_id == REDSTONE_TORCH or block_id == REDSTONE_TORCH_OFF:
+		Redstone.torch_tick(manager, pos, block_id)
+		return
 	if block_id == GRASS:
 		_tick_grass(manager, pos)
 
@@ -956,6 +979,10 @@ static func is_opaque(id: int) -> bool:
 		# Neighbor cubes (especially the support below) must keep
 		# emitting their faces, since the rail doesn't fill its cell.
 		and id != RAIL
+		# Both redstone torch variants are the same small pillar the
+		# normal torch is — non-cube, and must never conduct power.
+		and id != REDSTONE_TORCH
+		and id != REDSTONE_TORCH_OFF
 		# Wire is a flat 1/16 film on the floor — the block below and all
 		# four neighbours must keep emitting their faces. It must also
 		# never conduct: Redstone.is_normal_cube keys off is_opaque, and
@@ -1123,6 +1150,8 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[LEVER] = 0
 	# Wire is a flat film; light passes straight through it.
 	_light_opacity_lut[REDSTONE_WIRE] = 0
+	_light_opacity_lut[REDSTONE_TORCH] = 0
+	_light_opacity_lut[REDSTONE_TORCH_OFF] = 0
 	# Bed: 9/16 tall, light passes through the open top. Vanilla
 	# bd.java doesn't override isOpaqueCube either.
 	_light_opacity_lut[BED_FOOT] = 0
@@ -1191,6 +1220,8 @@ static func light_emission(id: int) -> int:
 			return 15  # nq.java registers jack o'lantern with .a(1.0f)
 		GLOWING_REDSTONE_ORE:
 			return 9  # int(15 * 0.625), nq.aO glowing redstone ore
+		REDSTONE_TORCH:
+			return 7  # int(15 * 0.5), nq.aQ lit redstone torch
 	return 0
 
 
@@ -1283,6 +1314,10 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 				return AABB(Vector3(0.3125, 0.2, 0.625), Vector3(0.375, 0.6, 0.375))
 			_:
 				return AABB(Vector3(0.25, 0.0, 0.25), Vector3(0.5, 0.6, 0.5))
+	if id == REDSTONE_TORCH or id == REDSTONE_TORCH_OFF:
+		# Identical geometry to the plain torch (bo.java extends ob.java),
+		# so reuse its meta-aware boxes below.
+		return selection_aabb(TORCH, meta)
 	if id == TORCH:
 		# Vanilla ob.java:122-138 — meta-aware bounding box per orientation:
 		#   1 (-X support): (0,    0.2, 0.35)..(0.3, 0.8, 0.65)
@@ -1455,7 +1490,7 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_CROSS
 	if id == FIRE:
 		return MESH_SHAPE_FIRE
-	if id == TORCH:
+	if id == TORCH or id == REDSTONE_TORCH or id == REDSTONE_TORCH_OFF:
 		return MESH_SHAPE_TORCH
 	if id == CHEST:
 		return MESH_SHAPE_EXTERNAL
@@ -1650,8 +1685,8 @@ static func hardness(id: int) -> float:
 			# pl.java via nq.aJ `c(0.5f)`. No tool affinity in vanilla —
 			# breaks fast bare-handed.
 			return 0.5
-		REDSTONE_WIRE:
-			# lu.java via nq.av `c(0.0f)` — instant break, any tool.
+		REDSTONE_WIRE, REDSTONE_TORCH, REDSTONE_TORCH_OFF:
+			# lu.java / bo.java both `c(0.0f)` — instant break, any tool.
 			return 0.0
 		BED_FOOT, BED_HEAD:
 			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
@@ -1959,6 +1994,10 @@ static func drops(id: int) -> int:
 			return Items.COAL
 		DIAMOND_ORE:
 			return Items.DIAMOND
+		REDSTONE_TORCH, REDSTONE_TORCH_OFF:
+			# bo.java::a(int, Random) returns nq.aQ — the LIT id — so an
+			# unlit or burnt-out torch still gives back a usable one.
+			return REDSTONE_TORCH
 		REDSTONE_WIRE:
 			# lu.java::a(int, Random) returns dx.aA — breaking wire hands
 			# back the dust that placed it.
@@ -2219,6 +2258,10 @@ static func name_of(id: int) -> String:
 			return "lever"
 		REDSTONE_WIRE:
 			return "redstone_wire"
+		REDSTONE_TORCH:
+			return "redstone_torch"
+		REDSTONE_TORCH_OFF:
+			return "redstone_torch_off"
 		# Pre-existing gaps found by tests/test_debug_tools.gd: all four
 		# are spawnable and were falling through to "unknown", which the
 		# item spawner capitalizes into an "Unknown" button label and the
@@ -2299,6 +2342,10 @@ static func get_face_texture(id: int, face: String) -> String:
 		# nq.aO both register texture index 51) — the glow is the light
 		# emission + reddust particles, not a texture swap.
 		return "redstone_ore"
+	if id == REDSTONE_TORCH:
+		return "redstone_torch_on"
+	if id == REDSTONE_TORCH_OFF:
+		return "redstone_torch_off"
 	if id == REDSTONE_WIRE:
 		# Default tile; the mesher picks cross vs line and the powered
 		# variant from neighbour connectivity + meta (lu.java:16).

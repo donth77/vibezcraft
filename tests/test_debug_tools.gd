@@ -26,8 +26,8 @@ const _REDSTONE_BLOCK_NAMES: Array[String] = [
 	"REDSTONE_ORE",
 	"GLOWING_REDSTONE_ORE",
 	"REDSTONE_WIRE",
-	# "REDSTONE_TORCH",           # 91 — Phase 8d
-	# "REDSTONE_TORCH_OFF",       # 92 — Phase 8d
+	"REDSTONE_TORCH",
+	"REDSTONE_TORCH_OFF",
 	"LEVER",
 	# "STONE_BUTTON",             # 94 — Phase 8e
 	# "STONE_PRESSURE_PLATE",     # 95 — Phase 8e

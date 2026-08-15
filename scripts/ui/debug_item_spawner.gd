@@ -60,6 +60,10 @@ const _BLOCKS: Array = [
 	# is in the items list below); the block form is here so a tester can
 	# drop a pre-powered run in directly.
 	Blocks.REDSTONE_WIRE,
+	# Redstone torch (Phase 8d) — Alpha's inverter. The unlit id is
+	# spawnable too so its state machine can be poked directly.
+	Blocks.REDSTONE_TORCH,
+	Blocks.REDSTONE_TORCH_OFF,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,

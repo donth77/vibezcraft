@@ -2032,6 +2032,23 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		SFX.play_place(Blocks.LEVER)
 		inv.consume_one_selected()
 		return true
+	# Redstone torch — identical mount rules to the plain torch
+	# (bo.java extends ob.java), so it shares _torch_meta_from_face.
+	# Placed LIT; the first neighbour update inverts it if its mount is
+	# already powered.
+	if stack.item_id == Blocks.REDSTONE_TORCH:
+		var rs_meta: int = _torch_meta_from_face(hit.normal_i, place)
+		if rs_meta == 0:
+			return false
+		var displaced_for_rs: int = _chunk_manager.get_world_block(place)
+		if displaced_for_rs != Blocks.AIR:
+			var rd: int = Blocks.drops(displaced_for_rs)
+			if rd != Blocks.AIR:
+				_spawn_dropped_item(place, rd)
+		_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_TORCH, rs_meta)
+		SFX.play_place(Blocks.REDSTONE_TORCH)
+		inv.consume_one_selected()
+		return true
 	if stack.item_id == Blocks.TORCH:
 		var torch_meta: int = _torch_meta_from_face(hit.normal_i, place)
 		if torch_meta == 0:
