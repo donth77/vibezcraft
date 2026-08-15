@@ -29,6 +29,14 @@ const PITCH_LIMIT_DEG: float = 89.0
 # 0.1175 blocks/tick × 20 TPS = 2.35 b/s. Max descent 0.15 b/tick = 3 b/s.
 const LADDER_CLIMB_SPEED: float = 2.35
 const LADDER_MAX_DESCENT: float = 3.0
+# The player scene's capsule is 1.8 m tall and centred on this body. Keep
+# the half-height here so the post-slide voxel guard can sweep the capsule's
+# bottom point without depending on a scene-tree lookup in the hot path.
+const _CAPSULE_HALF_HEIGHT: float = 0.9
+# Position correction and exact-cell-seam tolerance for the downward voxel
+# guard. Large enough to dominate float32 drift at normal world coordinates,
+# but far too small to broaden an actual ledge.
+const _VOXEL_FLOOR_SKIN: float = 0.001
 
 # Vanilla water physics (EntityLiving.e() in Bukkit/mc-dev):
 #   motY *= 0.5
@@ -312,6 +320,10 @@ var _fall_immune_next_landing: bool = true
 # Ground-readiness guard state — see _physics_process.
 var _chunk_manager_ref: Node = null
 var _ground_wait_sec: float = 0.0
+# Edge state for the downward voxel-floor safety net. A missing physics shape
+# can last more than one tick; log only the first correction in a contiguous
+# incident rather than flooding the diagnostic ring buffer every frame.
+var _voxel_floor_guard_active: bool = false
 # Always-on embedded-in-solid recovery. The spawn-window settle pass
 # (_settle_remaining_frames) stops after load, so a player driven into
 # terrain AFTER spawn — knockback, a streaming seam, a mob shove near a
@@ -809,8 +821,7 @@ func _build_held_tool(id: int) -> void:
 		_held_tool = sprite
 	else:
 		_held_tool = MeshInstance3D.new()
-		var mesh: ArrayMesh = SpriteExtruder.build(tex)
-		_held_tool.mesh = mesh
+		_held_tool.mesh = SpriteExtruder.build(tex)
 		_held_tool.scale = Vector3(ps, ps, ps)
 		# Find the actual handle tip (bottom-most opaque pixel — for the
 		# pickaxe that's the lower-left corner) and offset the mesh so THAT
@@ -2260,7 +2271,7 @@ func _physics_process(delta: float) -> void:
 		_update_water_physics(delta)
 		var attempted_vx: float = velocity.x
 		var attempted_vz: float = velocity.z
-		move_and_slide()
+		_move_and_slide_with_voxel_floor_guard()
 		# Swim cadence — tick a random swim sample every _SWIM_INTERVAL_M
 		# of horizontal travel. Mirrors Entity.h()'s `game.neutral.swim`.
 		var horiz_speed: float = Vector2(velocity.x, velocity.z).length()
@@ -2331,7 +2342,7 @@ func _physics_process(delta: float) -> void:
 			velocity.y = LADDER_CLIMB_SPEED
 	var was_grounded: bool = is_on_floor()
 	var pre_slide_vel: Vector3 = velocity
-	move_and_slide()
+	_move_and_slide_with_voxel_floor_guard()
 	if was_grounded and is_on_wall() and not Input.is_action_pressed("jump"):
 		_try_step_up(pre_slide_vel)
 
@@ -3080,6 +3091,113 @@ func _is_in_water() -> bool:
 		if Blocks.is_water(cm.get_world_block(Vector3i(x, y, z))):
 			return true
 	return false
+
+
+# Find the capsule-centre Y that rests on the highest full-cube top plane
+# crossed between two positions. NAN means there was no impossible crossing.
+#
+# This deliberately uses only opaque + physically-solid cells. Partial blocks
+# (slabs, stairs, fences, doors, chests) have bespoke trimesh collision and
+# must never be inflated to a one-metre cube by this fallback.
+#
+# Hot-path contract: no arrays and no voxel calls unless the capsule's bottom
+# actually crosses an integer Y plane. Ground movement and the frames between
+# successive metre boundaries therefore return after scalar arithmetic only.
+static func _crossed_full_cube_floor_center_y(
+	cm: Node, from_position: Vector3, to_position: Vector3
+) -> float:
+	if to_position.y >= from_position.y:
+		return NAN
+	var from_foot: float = from_position.y - _CAPSULE_HALF_HEIGHT
+	var to_foot: float = to_position.y - _CAPSULE_HALF_HEIGHT
+	var min_top: int = maxi(1, int(ceil(to_foot - _VOXEL_FLOOR_SKIN)))
+	var max_top: int = mini(Chunk.SIZE_Y, int(floor(from_foot + _VOXEL_FLOOR_SKIN)))
+	if min_top > max_top:
+		return NAN
+	if cm == null or not cm.has_method("get_world_block"):
+		return NAN
+
+	var destination_chunk := Vector2i(
+		int(floor(to_position.x / float(Chunk.SIZE_X))),
+		int(floor(to_position.z / float(Chunk.SIZE_Z)))
+	)
+	if cm.has_method("is_chunk_loaded") and not cm.is_chunk_loaded(destination_chunk):
+		# ChunkManager returns AIR for unloaded cells. Treating that fallback
+		# as authoritative would make collision depend on stream timing.
+		return NAN
+
+	var min_x: int = int(floor(to_position.x))
+	var max_x: int = min_x
+	var x_boundary: int = int(round(to_position.x))
+	if absf(to_position.x - float(x_boundary)) <= _VOXEL_FLOOR_SKIN:
+		min_x = x_boundary - 1
+		max_x = x_boundary
+	var min_z: int = int(floor(to_position.z))
+	var max_z: int = min_z
+	var z_boundary: int = int(round(to_position.z))
+	if absf(to_position.z - float(z_boundary)) <= _VOXEL_FLOOR_SKIN:
+		min_z = z_boundary - 1
+		max_z = z_boundary
+
+	# Descending top-plane order means the first hit is necessarily the
+	# highest crossed floor; return immediately instead of accumulating.
+	var top: int = max_top
+	while top >= min_top:
+		var x: int = min_x
+		while x <= max_x:
+			var z: int = min_z
+			while z <= max_z:
+				var block_id: int = cm.get_world_block(Vector3i(x, top - 1, z))
+				if (
+					Blocks.mesh_shape(block_id) == Blocks.MESH_SHAPE_CUBE
+					and Blocks.is_solid_collision(block_id)
+				):
+					return float(top) + _CAPSULE_HALF_HEIGHT + _VOXEL_FLOOR_SKIN
+				z += 1
+			x += 1
+		top -= 1
+	return NAN
+
+
+# Retain CharacterBody3D as the authoritative player controller, then guard
+# the single failure mode a face-culled chunk mesh cannot recover from: the
+# capsule has already crossed the exposed top face during a transient collision
+# swap. Normal physics never crosses the plane, so this path stays inert.
+func _move_and_slide_with_voxel_floor_guard() -> void:
+	var from_position: Vector3 = global_position
+	move_and_slide()
+	var crossed_position: Vector3 = global_position
+	# Keep the normal path entirely local: do not resolve ChunkManager or
+	# call into the voxel helper until scalar math proves that an integer
+	# top plane was traversed.
+	if crossed_position.y >= from_position.y:
+		_voxel_floor_guard_active = false
+		return
+	var from_foot: float = from_position.y - _CAPSULE_HALF_HEIGHT
+	var to_foot: float = crossed_position.y - _CAPSULE_HALF_HEIGHT
+	if ceil(to_foot - _VOXEL_FLOOR_SKIN) > floor(from_foot + _VOXEL_FLOOR_SKIN):
+		_voxel_floor_guard_active = false
+		return
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().root.get_node_or_null("Main/ChunkManager")
+	var corrected_y: float = _crossed_full_cube_floor_center_y(cm, from_position, crossed_position)
+	if is_nan(corrected_y):
+		_voxel_floor_guard_active = false
+		return
+	global_position.y = corrected_y
+	if velocity.y < 0.0:
+		velocity.y = 0.0
+	if not _voxel_floor_guard_active:
+		var detail := (
+			"voxel floor guard caught downward collision miss at "
+			+ (
+				"(%.2f, %.2f, %.2f) -> y=%.3f"
+				% [crossed_position.x, crossed_position.y, crossed_position.z, corrected_y]
+			)
+		)
+		DebugLog.add(DebugLog.FALL, detail)
+	_voxel_floor_guard_active = true
 
 
 # Walk Y up by 1 m at a time until the capsule (±0.9 m around origin)

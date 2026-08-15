@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends GutTest
 
 const _PLAYER_SCENE := preload("res://scenes/player/player.tscn")
@@ -56,6 +57,20 @@ class FakeSpawnCM:
 		return Blocks.AIR
 
 
+class FakeFloorCM:
+	extends Node
+	var cells: Dictionary = {}
+	var loaded: bool = true
+	var read_count: int = 0
+
+	func get_world_block(pos: Vector3i) -> int:
+		read_count += 1
+		return cells.get(pos, Blocks.AIR)
+
+	func is_chunk_loaded(_coord: Vector2i) -> bool:
+		return loaded
+
+
 func _make_player() -> CharacterBody3D:
 	# Instantiate WITHOUT adding to the tree so _ready (which builds the
 	# model, FP hand, etc.) doesn't fire — we only exercise the pure spawn
@@ -109,6 +124,155 @@ func test_find_safe_spawn_accepts_high_land_with_clearance() -> void:
 	assert_eq(cell, Vector3i(3, 124, 5), "high land column with clearance is accepted")
 	player.free()
 	cm.free()
+
+
+# --- Downward full-cube floor safety net ---
+
+
+func _guard_y(
+	player: CharacterBody3D, cm: FakeFloorCM, from_position: Vector3, to_position: Vector3
+) -> float:
+	return player._crossed_full_cube_floor_center_y(cm, from_position, to_position)
+
+
+func test_voxel_floor_guard_catches_world3_cave_floor_crossing() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(-131, 57, 19)] = Blocks.STONE
+	var corrected: float = _guard_y(
+		player, cm, Vector3(-130.4593, 58.905, 19.56569), Vector3(-130.4593, 57.70, 19.56569)
+	)
+	assert_almost_eq(corrected, 58.901, 0.0001, "rests capsule on the y=58 cave floor")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_selects_highest_crossed_top() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(2, 54, 3)] = Blocks.STONE
+	cm.cells[Vector3i(2, 56, 3)] = Blocks.DIRT
+	var corrected: float = _guard_y(player, cm, Vector3(2.5, 58.2, 3.5), Vector3(2.5, 54.2, 3.5))
+	assert_almost_eq(corrected, 57.901, 0.0001, "first crossed surface wins")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_allows_mined_opening_until_next_floor() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	# The former y=57 floor was mined; only the block one metre lower remains.
+	cm.cells[Vector3i(2, 56, 3)] = Blocks.STONE
+	var first_step: float = _guard_y(player, cm, Vector3(2.5, 58.901, 3.5), Vector3(2.5, 58.6, 3.5))
+	assert_true(is_nan(first_step), "does not recreate the mined y=57 block")
+	var landing_step: float = _guard_y(player, cm, Vector3(2.5, 58.2, 3.5), Vector3(2.5, 57.7, 3.5))
+	assert_almost_eq(landing_step, 57.901, 0.0001, "catches the next real floor")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_does_not_promote_partial_blocks() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	for block_id: int in [Blocks.HALF_SLAB, Blocks.WOOD_STAIRS, Blocks.FENCE]:
+		cm.cells[Vector3i(2, 57, 3)] = block_id
+		var corrected: float = _guard_y(
+			player, cm, Vector3(2.5, 58.905, 3.5), Vector3(2.5, 57.7, 3.5)
+		)
+		assert_true(is_nan(corrected), "block %d keeps bespoke collision" % block_id)
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_includes_nonopaque_full_collision_cubes() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	for block_id: int in [Blocks.GLASS, Blocks.LEAVES, Blocks.ICE, Blocks.MOB_SPAWNER]:
+		cm.cells[Vector3i(2, 57, 3)] = block_id
+		var corrected: float = _guard_y(
+			player, cm, Vector3(2.5, 58.905, 3.5), Vector3(2.5, 57.7, 3.5)
+		)
+		assert_almost_eq(
+			corrected, 58.901, 0.0001, "full-cube block %d remains protective" % block_id
+		)
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_skips_unloaded_destination_chunk() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.loaded = false
+	cm.cells[Vector3i(2, 57, 3)] = Blocks.STONE
+	var corrected: float = _guard_y(player, cm, Vector3(2.5, 58.905, 3.5), Vector3(2.5, 57.7, 3.5))
+	assert_true(is_nan(corrected), "unloaded AIR fallback cannot synthesize a floor")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_skips_upward_motion() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(2, 57, 3)] = Blocks.STONE
+	var corrected: float = _guard_y(player, cm, Vector3(2.5, 57.7, 3.5), Vector3(2.5, 58.905, 3.5))
+	assert_true(is_nan(corrected), "jumping upward is never corrected")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_samples_destination_not_departed_ledge() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(0, 57, 0)] = Blocks.STONE
+	var corrected: float = _guard_y(player, cm, Vector3(0.8, 58.905, 0.5), Vector3(1.2, 58.7, 0.5))
+	assert_true(is_nan(corrected), "walking off a ledge remains a real fall")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_checks_both_cells_at_exact_seam() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(0, 57, 0)] = Blocks.STONE
+	var corrected: float = _guard_y(player, cm, Vector3(1.0, 58.905, 0.5), Vector3(1.0, 57.7, 0.5))
+	assert_almost_eq(corrected, 58.901, 0.0001, "integer seam retains touching floor")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_common_paths_do_zero_voxel_reads() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	var stationary: float = _guard_y(
+		player, cm, Vector3(2.5, 58.901, 3.5), Vector3(2.6, 58.901, 3.6)
+	)
+	assert_true(is_nan(stationary))
+	assert_eq(cm.read_count, 0, "ground/horizontal movement performs no voxel lookup")
+	var between_planes: float = _guard_y(
+		player, cm, Vector3(2.5, 61.4, 3.5), Vector3(2.5, 61.2, 3.5)
+	)
+	assert_true(is_nan(between_planes))
+	assert_eq(cm.read_count, 0, "sub-metre falling between Y planes performs no voxel lookup")
+	cm.free()
+	player.free()
+
+
+func test_voxel_floor_guard_read_count_is_strictly_bounded() -> void:
+	var player := _make_player()
+	var cm := FakeFloorCM.new()
+	cm.cells[Vector3i(2, 57, 3)] = Blocks.STONE
+	_guard_y(player, cm, Vector3(2.5, 58.905, 3.5), Vector3(2.5, 57.7, 3.5))
+	assert_eq(cm.read_count, 1, "ordinary crossed floor resolves with one voxel read")
+
+	cm.read_count = 0
+	cm.cells.clear()
+	_guard_y(player, cm, Vector3(1.0, 58.905, 1.0), Vector3(1.0, 58.7, 1.0))
+	assert_eq(cm.read_count, 4, "exact X/Z seam has a four-read worst case")
+	cm.free()
+	player.free()
+
+
+# --- Mob-hit knockback (vanilla hf.java parity) ---
 
 
 func test_mob_hit_applies_knockback() -> void:
