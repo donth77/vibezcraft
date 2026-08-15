@@ -177,7 +177,7 @@ func test_button_pops_off_when_its_wall_goes() -> void:
 func test_wooden_plate_triggers_for_a_living_entity() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 1, "pressed")
 
 
@@ -185,7 +185,7 @@ func test_wooden_plate_triggers_for_a_non_living_entity() -> void:
 	# lg.a — dropped items, arrows and minecarts all count.
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(false)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 1, "an item trips a wooden plate")
 
 
@@ -194,14 +194,14 @@ func test_stone_plate_ignores_a_non_living_entity() -> void:
 	# difference between the two plates.
 	_place_plate(Blocks.STONE_PRESSURE_PLATE)
 	_stand(false)
-	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 0, "an item does not trip a stone plate")
 
 
 func test_stone_plate_triggers_for_a_living_entity() -> void:
 	_place_plate(Blocks.STONE_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 1, "a mob or player trips it")
 
 
@@ -225,14 +225,14 @@ func test_detection_box_matches_the_vanilla_inset() -> void:
 func test_an_entity_at_the_cell_corner_does_not_trip_it() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true, Vector3(0.05, 64.05, 0.05))
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 0, "outside the inset box")
 
 
 func test_an_entity_above_the_box_does_not_trip_it() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true, Vector3(0.5, 64.6, 0.5))
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 0, "jumping clear releases it")
 
 
@@ -242,14 +242,14 @@ func test_an_entity_above_the_box_does_not_trip_it() -> void:
 func test_plate_schedules_a_recheck_while_held() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(TickScheduler.pending_count(), 1, "recheck queued")
 
 
 func test_plate_releases_once_the_box_empties() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(_w.get_world_block_meta(PLATE), 1, "pressed")
 	_w.entities.clear()
 	for _i in range(Redstone.PLATE_RECHECK_TICKS):
@@ -259,19 +259,34 @@ func test_plate_releases_once_the_box_empties() -> void:
 
 func test_a_settled_empty_plate_stops_rechecking() -> void:
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	assert_eq(TickScheduler.pending_count(), 0, "nothing standing on it, nothing scheduled")
 
 
 func test_repeated_contact_does_not_stack_rechecks_unboundedly() -> void:
+	# ap.java:65 — once pressed, contact is a NO-OP. Without that guard
+	# every footstep of a player standing still on a plate would queue
+	# another recheck, and TickScheduler allows duplicates, so the queue
+	# would grow for as long as they stood there.
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true)
-	for _i in range(5):
-		Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
-	# One per contact is fine — they collapse as they fire — but the
-	# meta must not thrash.
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
+	assert_eq(TickScheduler.pending_count(), 1, "first contact schedules one recheck")
+	for _i in range(50):
+		Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
+	assert_eq(TickScheduler.pending_count(), 1, "50 more contacts add nothing")
 	assert_eq(_w.get_world_block_meta(PLATE), 1, "still pressed, not flapping")
 	assert_eq(_w.clicks.size(), 1, "only the initial press clicked")
+
+
+func test_a_released_plate_ignores_scheduled_ticks() -> void:
+	# ap.java:57 — a plate at rest has nothing to re-check, so the
+	# scheduled entry point returns immediately.
+	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
+	_stand(true)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	assert_eq(_w.get_world_block_meta(PLATE), 0, "scheduled tick on a released plate: no-op")
+	assert_eq(TickScheduler.pending_count(), 0, "and schedules nothing")
 
 
 # --- Plate power output ---
@@ -280,7 +295,7 @@ func test_repeated_contact_does_not_stack_rechecks_unboundedly() -> void:
 func test_pressed_plate_powers_every_direction_weakly() -> void:
 	_place_plate(Blocks.STONE_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE, true)
 	for slot in range(6):
 		assert_true(Redstone.provides_weak_power(_w, PLATE, slot), "weak slot %d" % slot)
 
@@ -288,7 +303,7 @@ func test_pressed_plate_powers_every_direction_weakly() -> void:
 func test_pressed_plate_strong_powers_the_block_below() -> void:
 	_place_plate(Blocks.STONE_PRESSURE_PLATE)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.STONE_PRESSURE_PLATE, true)
 	for slot in range(6):
 		assert_eq(
 			Redstone.provides_strong_power(_w, PLATE, slot),
@@ -319,6 +334,6 @@ func test_a_plate_opens_a_door_beside_it() -> void:
 	_w.put(door, Blocks.WOODEN_DOOR, 0)
 	_w.put(door + Vector3i(0, 1, 0), Blocks.WOODEN_DOOR, 8)
 	_stand(true)
-	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE)
+	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)
 	Redstone.on_neighbor_changed(_w, door)
 	assert_eq(_w.get_world_block_meta(door) & 4, 4, "door opened")

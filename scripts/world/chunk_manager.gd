@@ -2181,15 +2181,20 @@ func set_world_block_state(
 	if old_id != new_id:
 		# Full path — every existing side effect (lighting, gravity,
 		# plant detach, fluid notify) plus the atomic meta commit.
+		# set_world_block already enqueues the block-update fanout for an
+		# id change, so returning here avoids running it a second time.
+		# `notify` therefore governs metadata-only writes; an id change
+		# always fans out, which is right — the cell genuinely became
+		# something else.
 		set_world_block(world_pos, new_id, masked)
-	else:
-		# Metadata-only. Emission and opacity are keyed by block id, so
-		# light cannot move here; skip the BFS and just re-render.
-		chunk.set_block_meta(local_x, world_pos.y, local_z, masked)
-		_dirty_loaded[coord] = true
-		chunk.dirty = true
-		chunk_node.set("_priority_apply", true)
-		_dirty_seam_neighbors(coord, local_x, local_z)
+		return true
+	# Metadata-only from here. Emission and opacity are keyed by block
+	# id, so light cannot move; skip the BFS and just re-render.
+	chunk.set_block_meta(local_x, world_pos.y, local_z, masked)
+	_dirty_loaded[coord] = true
+	chunk.dirty = true
+	chunk_node.set("_priority_apply", true)
+	_dirty_seam_neighbors(coord, local_x, local_z)
 	if notify:
 		enqueue_block_notification(world_pos)
 	return true
@@ -2274,7 +2279,7 @@ func _reconcile_redstone_edges(coord: Vector2i, chunk: Chunk) -> void:
 				var local_z: int = cell.z - origin_z
 				if chunk.get_block(local_x, y, local_z) != Blocks.REDSTONE_WIRE:
 					continue
-				Redstone.update_wire(self, cell)
+				Redstone.update_wire(self, cell, true)
 
 
 # --- Callbacks the redstone model dispatches back into the world ---

@@ -445,7 +445,7 @@ static func computed_wire_power(manager, pos: Vector3i) -> int:
 # dedup set means CURRENTLY QUEUED, not "already seen" — a cell whose
 # input changes again must be re-eligible or the net can settle on a
 # stale value.
-static func update_wire(manager, origin: Vector3i) -> void:
+static func update_wire(manager, origin: Vector3i, reconcile: bool = false) -> void:
 	if manager.get_world_block(origin) != Blocks.REDSTONE_WIRE:
 		return
 	var queue: Array[Vector3i] = [origin]
@@ -455,6 +455,14 @@ static func update_wire(manager, origin: Vector3i) -> void:
 	# re-enqueueable after its inputs move. A cell is re-examined
 	# whenever a neighbour actually changes, regardless of visited.
 	var visited := {}
+	# RECONCILE mode walks the entire connected network even where
+	# nothing changes — needed when metadata may be stale (chunk load),
+	# and only then. The default CHANGE-DRIVEN mode expands only from
+	# cells that actually moved, which is what keeps the common path
+	# cheap: a neighbour notification on a settled net costs one cell
+	# evaluation instead of a full traversal. Getting this wrong made a
+	# 16-cell run cost 22 ms — more than a frame — because every one of
+	# the run's notifications re-walked the whole thing.
 	var notify: Array[Vector3i] = []
 	var steps: int = 0
 	while not queue.is_empty() and steps < _WIRE_WORKLIST_CAP:
@@ -479,10 +487,10 @@ static func update_wire(manager, origin: Vector3i) -> void:
 			# skipping those is a large reduction in update churn.
 			if current == 0 or next == 0:
 				notify.append(pos)
-		# Expand on the first visit (so an update seeded anywhere
-		# reconciles its whole network — chunk load relies on this) and
-		# again on every change (so the fixpoint is reached).
-		if not (first_visit or changed):
+		# Expand on every change (so the fixpoint is reached), and — in
+		# reconcile mode only — on first visit as well, so an update
+		# seeded anywhere still repairs its whole network.
+		if not (changed or (reconcile and first_visit)):
 			continue
 		for neighbor: Vector3i in _wire_neighbors(manager, pos):
 			if queued.has(neighbor):
@@ -519,6 +527,8 @@ static func _wire_neighbors(manager, pos: Vector3i) -> Array[Vector3i]:
 # that goes, the wire pops off as dust.
 static func _check_wire_support(manager, pos: Vector3i) -> void:
 	if is_normal_cube(manager, pos + Vector3i(0, -1, 0)):
+		# Change-driven: this fires for every block update near wire, so
+		# it must be cheap on a settled network.
 		update_wire(manager, pos)
 		return
 	manager.set_world_block_state(pos, Blocks.AIR, 0)
@@ -676,7 +686,19 @@ static func plate_living_only(block_id: int) -> bool:
 # Re-evaluate a plate against whatever is standing on it. Called from
 # entity contact and from the 20-tick scheduled re-check, so a plate
 # releases once the box empties.
-static func update_plate(manager, pos: Vector3i, block_id: int) -> void:
+static func update_plate(manager, pos: Vector3i, block_id: int, from_contact: bool = false) -> void:
+	# ap.java has two entry points with DIFFERENT guards, and they matter:
+	#   :65  entity collision returns early when the plate is already
+	#        pressed — otherwise every footstep of a player standing on a
+	#        plate would queue another 20-tick recheck, and TickScheduler
+	#        permits duplicates, so the queue would grow without bound.
+	#   :57  the scheduled tick returns early when the plate is released,
+	#        since a plate at rest has nothing to re-check.
+	var meta: int = manager.get_world_block_meta(pos)
+	if from_contact and meta > 0:
+		return
+	if not from_contact and meta == 0:
+		return
 	var occupied: bool = false
 	if manager.has_method("entities_overlap_box"):
 		occupied = bool(
@@ -684,7 +706,7 @@ static func update_plate(manager, pos: Vector3i, block_id: int) -> void:
 				"entities_overlap_box", plate_detection_box(pos), plate_living_only(block_id)
 			)
 		)
-	var was_pressed: bool = manager.get_world_block_meta(pos) > 0
+	var was_pressed: bool = meta > 0
 	if occupied and not was_pressed:
 		manager.set_world_block_state(pos, block_id, 1)
 		if manager.has_method("play_redstone_click"):

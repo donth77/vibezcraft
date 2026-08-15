@@ -865,12 +865,12 @@ static func on_entity_walking(manager, pos: Vector3i, _entity: Node = null) -> v
 	# walk-through and occupies the cell the FEET are in, one above its
 	# support. Check both so either convention wakes the plate.
 	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
-		Redstone.update_plate(manager, pos, id)
+		Redstone.update_plate(manager, pos, id, true)
 		return
 	var above: Vector3i = pos + Vector3i(0, 1, 0)
 	var above_id: int = manager.get_world_block(above)
 	if above_id == STONE_PRESSURE_PLATE or above_id == WOODEN_PRESSURE_PLATE:
-		Redstone.update_plate(manager, above, above_id)
+		Redstone.update_plate(manager, above, above_id, true)
 
 
 # One contact event on a redstone ore cell. Returns the number of

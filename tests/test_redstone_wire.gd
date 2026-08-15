@@ -126,7 +126,7 @@ func test_result_is_independent_of_which_cell_seeds_the_update() -> void:
 		_w = FakeWorld.new()
 		_lay_line(16)
 		_attach_lever(true)
-		Redstone.update_wire(_w, Vector3i(seed_index, Y, 0))
+		Redstone.update_wire(_w, Vector3i(seed_index, Y, 0), true)
 		assert_eq(_levels(16), expected, "seeded from cell %d" % seed_index)
 
 

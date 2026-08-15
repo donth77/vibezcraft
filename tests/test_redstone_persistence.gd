@@ -162,7 +162,7 @@ func test_wire_reconciles_when_its_source_changed_while_unloaded() -> void:
 		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, maxi(15 - i, 0))
 	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
 	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL)  # OFF
-	Redstone.update_wire(w, Vector3i(0, Y, 0))
+	Redstone.update_wire(w, Vector3i(0, Y, 0), true)
 	for i in range(6):
 		assert_eq(w.get_world_block_meta(Vector3i(i, Y, 0)), 0, "stale level cleared at %d" % i)
 
@@ -176,7 +176,7 @@ func test_reconciliation_from_a_far_cell_still_fixes_the_line() -> void:
 		w.put(Vector3i(i, Y, 0), Blocks.REDSTONE_WIRE, 0)
 	w.put(Vector3i(-1, Y, 0), Blocks.STONE)
 	w.put(Vector3i(-2, Y, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
-	Redstone.update_wire(w, Vector3i(5, Y, 0))
+	Redstone.update_wire(w, Vector3i(5, Y, 0), true)
 	assert_eq(w.get_world_block_meta(Vector3i(0, Y, 0)), 15, "source end powered")
 	assert_eq(w.get_world_block_meta(Vector3i(5, Y, 0)), 10, "far end correct")
 
