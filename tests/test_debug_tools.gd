@@ -25,7 +25,7 @@ const _BLOCKS_PATH := "res://scripts/world/blocks.gd"
 const _REDSTONE_BLOCK_NAMES: Array[String] = [
 	"REDSTONE_ORE",
 	"GLOWING_REDSTONE_ORE",
-	# "REDSTONE_WIRE",            # 90 — Phase 8c
+	"REDSTONE_WIRE",
 	# "REDSTONE_TORCH",           # 91 — Phase 8d
 	# "REDSTONE_TORCH_OFF",       # 92 — Phase 8d
 	"LEVER",

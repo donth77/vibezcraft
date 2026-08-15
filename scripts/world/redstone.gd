@@ -47,6 +47,21 @@ const MOUNT_FLOOR: int = 5
 const MOUNT_FLOOR_ALT: int = 6
 const POWERED_BIT: int = 8
 
+# Max wire power, and the per-step decay (lu.java:74 `--n9`).
+const WIRE_MAX_POWER: int = 15
+
+# Horizontal neighbour offsets in the order lu.java:h() scans them.
+const _WIRE_HORIZONTALS: Array[Vector3i] = [
+	Vector3i(-1, 0, 0),
+	Vector3i(1, 0, 0),
+	Vector3i(0, 0, -1),
+	Vector3i(0, 0, 1),
+]
+
+# Safety ceiling on a single propagation drain. A 15-decay network can
+# only be so large, but a malformed world shouldn't be able to spin here.
+const _WIRE_WORKLIST_CAP: int = 8192
+
 # Which slot a mounted component strong-powers: the block it is
 # attached to, seen from that block's point of view. A floor-mounted
 # lever (mount 5) sits ABOVE its support, so from the support's
@@ -60,11 +75,22 @@ const _MOUNT_TO_STRONG_SLOT: Dictionary = {
 	MOUNT_FLOOR_ALT: SLOT_ABOVE,
 }
 
+# Vanilla lu.java's `private boolean a = true` recursion guard, hoisted
+# to module scope because our port is static. While a wire recomputes
+# its own level, ALL wire is temporarily removed from the power-source
+# set so `is_block_indirectly_powered` can't feed a wire its own output
+# back as a fresh 15. Wire-to-wire propagation still works: it reads
+# neighbour metadata directly (see _wire_power_at) rather than going
+# through the power queries.
+static var _wire_output_enabled: bool = true
+
 
 # True for blocks that can act as a redstone source — vanilla
 # `Block.e()` / `isPowerSource`. Wire is included: `lu.java:e()` returns
 # its guard flag, which is true outside a wire recomputation.
 static func is_power_source(id: int) -> bool:
+	if id == Blocks.REDSTONE_WIRE:
+		return _wire_output_enabled
 	return id == Blocks.LEVER
 
 
@@ -94,13 +120,50 @@ static func mount_offset(meta: int) -> Vector3i:
 # Unused for the lever (an on lever powers every direction) but part of
 # the signature because wire's weak rule IS directional — §3.2.4 lands
 # in Phase 8c.
-static func provides_weak_power(manager, pos: Vector3i, _slot: int) -> bool:
+static func provides_weak_power(manager, pos: Vector3i, slot: int) -> bool:
 	var id: int = manager.get_world_block(pos)
 	match id:
 		Blocks.LEVER:
 			# pl.java:181 — an on lever weakly powers every direction.
 			return (manager.get_world_block_meta(pos) & POWERED_BIT) > 0
+		Blocks.REDSTONE_WIRE:
+			return _wire_powers_slot(manager, pos, slot)
 	return false
+
+
+# lu.java:c(pk, x, y, z, n5) — what a powered wire feeds outward.
+#
+# Three rules, and the last one surprises people: wire powers the block
+# BELOW it always, powers all four horizontal neighbours when it has no
+# connections at all, and otherwise powers only along a STRAIGHT line.
+# A corner, T or cross feeds nothing horizontally — which is exactly why
+# vanilla circuits run wire straight into whatever they drive.
+static func _wire_powers_slot(manager, pos: Vector3i, slot: int) -> bool:
+	if not _wire_output_enabled:
+		return false
+	if manager.get_world_block_meta(pos) == 0:
+		return false
+	# slot 1 = the wire sits directly above the asking cell.
+	if slot == SLOT_ABOVE:
+		return true
+	if slot < SLOT_NORTH or slot > SLOT_EAST:
+		return false
+	var west: bool = wire_connects_toward(manager, pos, Vector3i(-1, 0, 0))
+	var east: bool = wire_connects_toward(manager, pos, Vector3i(1, 0, 0))
+	var north: bool = wire_connects_toward(manager, pos, Vector3i(0, 0, -1))
+	var south: bool = wire_connects_toward(manager, pos, Vector3i(0, 0, 1))
+	if not (west or east or north or south):
+		return true
+	# slot N names where the WIRE sits relative to the asker, so the
+	# asker lies on the opposite side: a wire connected north powers the
+	# cell to its south, which queries with slot 2.
+	if slot == SLOT_NORTH:
+		return north and not west and not east
+	if slot == SLOT_SOUTH:
+		return south and not west and not east
+	if slot == SLOT_WEST:
+		return west and not north and not south
+	return east and not north and not south
 
 
 # Vanilla cy.j / isBlockProvidingPowerTo.
@@ -113,6 +176,12 @@ static func provides_strong_power(manager, pos: Vector3i, slot: int) -> bool:
 			if (meta & POWERED_BIT) == 0:
 				return false
 			return _MOUNT_TO_STRONG_SLOT.get(meta & 0x7, SLOT_ABOVE) == slot
+		Blocks.REDSTONE_WIRE:
+			# lu.java:224 delegates the World overload straight to the
+			# IBlockAccess one — wire's strong and weak output are the
+			# same, which is how a wire drives a door through the block
+			# it runs across.
+			return _wire_powers_slot(manager, pos, slot)
 	return false
 
 
@@ -168,6 +237,8 @@ static func is_normal_cube(manager, pos: Vector3i) -> bool:
 static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 	var id: int = manager.get_world_block(pos)
 	match id:
+		Blocks.REDSTONE_WIRE:
+			_check_wire_support(manager, pos)
 		Blocks.LEVER:
 			_check_mounted_support(manager, pos, id)
 		Blocks.WOODEN_DOOR, Blocks.IRON_DOOR:
@@ -227,3 +298,163 @@ static func _update_tnt(manager, pos: Vector3i) -> void:
 	manager.set_world_block_state(pos, Blocks.AIR, 0)
 	if manager.has_method("prime_tnt"):
 		manager.call("prime_tnt", pos)
+
+
+# --- Wire propagation (lu.java:h) --------------------------------------
+
+
+# lu.java:299 static c() — what a wire will link to. Wire connects to
+# other wire and to any power source (lever, and later button, plate,
+# lit torch). It does NOT connect to plain solid blocks, which is why
+# a wire run stops dead at a wall instead of wrapping around it.
+static func can_connect_to(manager, pos: Vector3i) -> bool:
+	var id: int = manager.get_world_block(pos)
+	if id == Blocks.REDSTONE_WIRE:
+		# Checked before the source test so wire-to-wire linkage survives
+		# the recomputation guard (vanilla does the same ordering).
+		return true
+	if id == Blocks.AIR:
+		return false
+	return is_power_source(id)
+
+
+# Whether the wire at `pos` links toward `offset`, including the two
+# vertical cases: up the side of a solid neighbour when this wire isn't
+# roofed, and down onto a lower neighbour when the side is open
+# (bk.java:437-455 uses the identical predicate for rendering).
+static func wire_connects_toward(manager, pos: Vector3i, offset: Vector3i) -> bool:
+	var side: Vector3i = pos + offset
+	if can_connect_to(manager, side):
+		return true
+	if not is_normal_cube(manager, side):
+		# Open side — a wire one level down is reachable.
+		return can_connect_to(manager, side + Vector3i(0, -1, 0))
+	# Solid side — a wire on top of it is reachable only if this cell
+	# isn't roofed over.
+	if is_normal_cube(manager, pos + Vector3i(0, 1, 0)):
+		return false
+	return can_connect_to(manager, side + Vector3i(0, 1, 0))
+
+
+# Power level of a wire cell, or -1 when the cell isn't wire.
+static func _wire_power_at(manager, pos: Vector3i) -> int:
+	if manager.get_world_block(pos) != Blocks.REDSTONE_WIRE:
+		return -1
+	return manager.get_world_block_meta(pos)
+
+
+# The level a wire cell SHOULD hold, given its surroundings.
+# Direct port of the calculation half of lu.java:h().
+static func computed_wire_power(manager, pos: Vector3i) -> int:
+	# Suppress every wire's output while asking "am I powered by a real
+	# source?", so a wire can't read its own contribution (or one it
+	# already fed into an adjacent solid block) as a fresh 15.
+	_wire_output_enabled = false
+	var externally_powered: bool = is_block_indirectly_powered(manager, pos)
+	_wire_output_enabled = true
+	if externally_powered:
+		return WIRE_MAX_POWER
+	var best: int = 0
+	var roofed: bool = is_normal_cube(manager, pos + Vector3i(0, 1, 0))
+	for offset: Vector3i in _WIRE_HORIZONTALS:
+		var side: Vector3i = pos + offset
+		best = maxi(best, _wire_power_at(manager, side))
+		# The vertical rules are ASYMMETRIC (lu.java:64-70): climb up the
+		# side of a solid neighbour only when this cell is open above,
+		# but drop down to a lower neighbour only when the side is open.
+		if is_normal_cube(manager, side):
+			if not roofed:
+				best = maxi(best, _wire_power_at(manager, side + Vector3i(0, 1, 0)))
+		else:
+			best = maxi(best, _wire_power_at(manager, side + Vector3i(0, -1, 0)))
+	return maxi(best - 1, 0)
+
+
+# Recompute `origin` and everything its change reaches, then hand the
+# affected cells to the world's block-update fanout.
+#
+# Vanilla recurses (h() calls h()); GDScript stack depth on a large net
+# makes that a real hazard, so this is an explicit worklist. The result
+# is identical because wire power is a max-minus-decay fixpoint. The
+# dedup set means CURRENTLY QUEUED, not "already seen" — a cell whose
+# input changes again must be re-eligible or the net can settle on a
+# stale value.
+static func update_wire(manager, origin: Vector3i) -> void:
+	if manager.get_world_block(origin) != Blocks.REDSTONE_WIRE:
+		return
+	var queue: Array[Vector3i] = [origin]
+	var queued := {origin: true}
+	# `visited` bounds the outward SCAN so an already-correct network
+	# terminates; `queued` alone can't, because a cell must stay
+	# re-enqueueable after its inputs move. A cell is re-examined
+	# whenever a neighbour actually changes, regardless of visited.
+	var visited := {}
+	var notify: Array[Vector3i] = []
+	var steps: int = 0
+	while not queue.is_empty() and steps < _WIRE_WORKLIST_CAP:
+		steps += 1
+		var pos: Vector3i = queue.pop_front()
+		queued.erase(pos)
+		if manager.get_world_block(pos) != Blocks.REDSTONE_WIRE:
+			continue
+		var first_visit: bool = not visited.has(pos)
+		visited[pos] = true
+		var current: int = manager.get_world_block_meta(pos)
+		var next: int = computed_wire_power(manager, pos)
+		var changed: bool = next != current
+		if changed:
+			# Metadata-only write: no id change, so this depends on the
+			# atomic state path notifying and re-meshing (§7.2). The
+			# fanout is collected and issued once the whole net settles,
+			# so consumers never observe a half-propagated line.
+			manager.set_world_block_state(pos, Blocks.REDSTONE_WIRE, next, false)
+			# Vanilla only fires block updates when the level crosses
+			# zero (lu.java:104). 12 → 11 changes nothing downstream, and
+			# skipping those is a large reduction in update churn.
+			if current == 0 or next == 0:
+				notify.append(pos)
+		# Expand on the first visit (so an update seeded anywhere
+		# reconciles its whole network — chunk load relies on this) and
+		# again on every change (so the fixpoint is reached).
+		if not (first_visit or changed):
+			continue
+		for neighbor: Vector3i in _wire_neighbors(manager, pos):
+			if queued.has(neighbor):
+				continue
+			if not changed and visited.has(neighbor):
+				continue
+			queued[neighbor] = true
+			queue.append(neighbor)
+	if steps >= _WIRE_WORKLIST_CAP:
+		push_warning("[Redstone] wire worklist hit its cap at %s" % origin)
+	if manager.has_method("enqueue_block_notification"):
+		for pos: Vector3i in notify:
+			manager.call("enqueue_block_notification", pos)
+
+
+# Every wire cell this one can exchange power with: the four horizontal
+# neighbours at the same level and one step up or down, plus straight
+# up and down (a wire stack shares power through the support block).
+static func _wire_neighbors(manager, pos: Vector3i) -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	for offset: Vector3i in _WIRE_HORIZONTALS:
+		for vertical: int in [0, 1, -1]:
+			var neighbor: Vector3i = pos + offset + Vector3i(0, vertical, 0)
+			if manager.get_world_block(neighbor) == Blocks.REDSTONE_WIRE:
+				out.append(neighbor)
+	for vertical: Vector3i in [Vector3i(0, 1, 0), Vector3i(0, -1, 0)]:
+		var neighbor: Vector3i = pos + vertical
+		if manager.get_world_block(neighbor) == Blocks.REDSTONE_WIRE:
+			out.append(neighbor)
+	return out
+
+
+# Wire needs a normal solid cube directly beneath it (lu.java:a). When
+# that goes, the wire pops off as dust.
+static func _check_wire_support(manager, pos: Vector3i) -> void:
+	if is_normal_cube(manager, pos + Vector3i(0, -1, 0)):
+		update_wire(manager, pos)
+		return
+	manager.set_world_block_state(pos, Blocks.AIR, 0)
+	if manager.has_method("spawn_block_drop"):
+		manager.call("spawn_block_drop", pos, Blocks.drops(Blocks.REDSTONE_WIRE))

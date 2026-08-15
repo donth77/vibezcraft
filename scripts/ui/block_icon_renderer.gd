@@ -42,6 +42,10 @@ const _ICONIFIED_BLOCKS: Array = [
 	# the iso bake of its real two-box mesh would be nearly invisible at
 	# icon size.
 	Blocks.LEVER,
+	# Wire's in-world form is a flat film; the cube bake reads as a solid
+	# red-dust block, which is clear enough for a debug-grid button. The
+	# dust ITEM keeps its own flat sprite via the normal item path.
+	Blocks.REDSTONE_WIRE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FARMLAND,
 	Blocks.GRAVEL,

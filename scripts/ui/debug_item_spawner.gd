@@ -56,6 +56,10 @@ const _BLOCKS: Array = [
 	# Lever (Phase 8b) — Alpha's latching power source. Place it on any
 	# wall or floor, right-click to toggle.
 	Blocks.LEVER,
+	# Redstone wire (Phase 8c). Normally placed from the dust ITEM (which
+	# is in the items list below); the block form is here so a tester can
+	# drop a pre-powered run in directly.
+	Blocks.REDSTONE_WIRE,
 	Blocks.CRAFTING_TABLE,
 	Blocks.FURNACE,
 	Blocks.TORCH,

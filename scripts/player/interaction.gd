@@ -1996,6 +1996,23 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5
 	# encoding which neighbor is the support. Without this, torches just
 	# float in mid-air when the player aims at a wall.
+	# Redstone dust places WIRE — vanilla ey.java (ItemRedstone) is a
+	# dedicated item class whose use handler checks canPlaceAt then sets
+	# the block, exactly like the Items.SIGN → SIGN_STANDING case below.
+	# Needs a normal solid cube underneath.
+	if stack.item_id == Items.REDSTONE:
+		if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
+			return false
+		var displaced_for_wire: int = _chunk_manager.get_world_block(place)
+		if displaced_for_wire != Blocks.AIR:
+			var wd: int = Blocks.drops(displaced_for_wire)
+			if wd != Blocks.AIR:
+				_spawn_dropped_item(place, wd)
+		_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_WIRE, 0)
+		Redstone.update_wire(_chunk_manager, place)
+		SFX.play_place(Blocks.REDSTONE_WIRE)
+		inv.consume_one_selected()
+		return true
 	# Lever — same mount rules as the torch (4 walls + floor, no ceiling),
 	# so it reuses _torch_meta_from_face. Vanilla pl.java:47 then picks
 	# `5 + nextInt(2)` for a floor lever, giving the two ground rotations

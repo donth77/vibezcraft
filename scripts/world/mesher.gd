@@ -308,6 +308,8 @@ static func _emit_special_cell(
 		_emit_sign_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_RAIL:
 		_emit_rail_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
+	elif ms == Blocks.MESH_SHAPE_REDSTONE_WIRE:
+		_emit_wire_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_LEVER:
 		_emit_lever_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_BED:
@@ -3625,3 +3627,195 @@ static func _emit_lever_geometry(
 	_emit_box(verts, norms, uvs, colors, indices, o + h_min, o + h_max, handle_rect, face_light)
 	# No collision faces emitted — vanilla pl.java d() returns null, so
 	# the player walks straight through a lever.
+
+
+# Redstone wire (lu.java render type 5, drawn by bk.java:420-547).
+#
+# A flat film 1/32 above the supporting block's top face. Two things
+# decide the look: connectivity (which of the four horizontal neighbours
+# this wire links to, including the up/down step cases) selects the
+# CROSS or LINE tile and its rotation, and the power level selects
+# between the unpowered and powered tile.
+#
+# Alpha does NOT tint wire by power level — bk.java:427 sets a plain
+# grey brightness and swaps the texture via `bg + (meta > 0 ? 16 : 0)`.
+# The familiar dark-to-bright red gradient is a Beta addition; adding it
+# here would be the single most obvious "this isn't Alpha" tell.
+static func _emit_wire_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	_plant_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var powered: bool = meta > 0
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
+	# Connectivity, evaluated against the CHUNK (edge slices give us the
+	# neighbouring chunk's blocks + meta, so a wire on a seam links up
+	# correctly instead of rendering as an isolated cross).
+	var west: bool = _wire_links(chunk, x, y, z, -1, 0)
+	var east: bool = _wire_links(chunk, x, y, z, 1, 0)
+	var north: bool = _wire_links(chunk, x, y, z, 0, -1)
+	var south: bool = _wire_links(chunk, x, y, z, 0, 1)
+	var ns: bool = north or south
+	var ew: bool = west or east
+	# Straight run along exactly one axis → the line tile, rotated to
+	# suit. Everything else (isolated, corner, T, cross) uses the cross
+	# tile, matching bk.java's n8 selection.
+	var straight_ns: bool = ns and not ew
+	var straight_ew: bool = ew and not ns
+	var tex_name: String
+	if straight_ns or straight_ew:
+		tex_name = "redstone_dust_line_powered" if powered else "redstone_dust_line"
+	else:
+		tex_name = "redstone_dust_cross_powered" if powered else "redstone_dust_cross"
+	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
+	# 1/32 lift, same trick the rail path uses to avoid z-fighting the
+	# supporting block's top face.
+	var wy: float = float(y) + 1.0 / 32.0
+	var x0: float = float(x)
+	var z0: float = float(z)
+	var x1: float = x0 + 1.0
+	var z1: float = z0 + 1.0
+	var quads: Array = []
+	# The line tile's strip runs along Z in the atlas; for an east-west
+	# run we swap the corner order to rotate the UVs 90°.
+	if straight_ew:
+		(
+			quads
+			. append(
+				[
+					Vector3(x0, wy, z1),
+					Vector3(x1, wy, z1),
+					Vector3(x1, wy, z0),
+					Vector3(x0, wy, z0),
+					Vector3.UP,
+				]
+			)
+		)
+	else:
+		(
+			quads
+			. append(
+				[
+					Vector3(x0, wy, z0),
+					Vector3(x0, wy, z1),
+					Vector3(x1, wy, z1),
+					Vector3(x1, wy, z0),
+					Vector3.UP,
+				]
+			)
+		)
+	_emit_rotated_quads(verts, norms, uvs, colors, indices, quads, rect, face_light)
+	# Wall-climb quads — where a neighbouring cell is a solid cube with
+	# wire sitting on top of it, vanilla draws the dust running up that
+	# block's near face (bk.java:523-546).
+	var climb_rect: Rect2 = BlockAtlas.uv_rect(
+		"redstone_dust_line_powered" if powered else "redstone_dust_line"
+	)
+	var inset: float = 1.0 / 32.0
+	var climbs: Array = []
+	if _wire_climbs(chunk, x, y, z, -1, 0):
+		(
+			climbs
+			. append(
+				[
+					Vector3(x0 + inset, float(y + 1), z1),
+					Vector3(x0 + inset, float(y), z1),
+					Vector3(x0 + inset, float(y), z0),
+					Vector3(x0 + inset, float(y + 1), z0),
+					Vector3.RIGHT,
+				]
+			)
+		)
+	if _wire_climbs(chunk, x, y, z, 1, 0):
+		(
+			climbs
+			. append(
+				[
+					Vector3(x1 - inset, float(y + 1), z0),
+					Vector3(x1 - inset, float(y), z0),
+					Vector3(x1 - inset, float(y), z1),
+					Vector3(x1 - inset, float(y + 1), z1),
+					Vector3.LEFT,
+				]
+			)
+		)
+	if _wire_climbs(chunk, x, y, z, 0, -1):
+		(
+			climbs
+			. append(
+				[
+					Vector3(x0, float(y + 1), z0 + inset),
+					Vector3(x0, float(y), z0 + inset),
+					Vector3(x1, float(y), z0 + inset),
+					Vector3(x1, float(y + 1), z0 + inset),
+					Vector3.BACK,
+				]
+			)
+		)
+	if _wire_climbs(chunk, x, y, z, 0, 1):
+		(
+			climbs
+			. append(
+				[
+					Vector3(x1, float(y + 1), z1 - inset),
+					Vector3(x1, float(y), z1 - inset),
+					Vector3(x0, float(y), z1 - inset),
+					Vector3(x0, float(y + 1), z1 - inset),
+					Vector3.FORWARD,
+				]
+			)
+		)
+	if not climbs.is_empty():
+		_emit_rotated_quads(verts, norms, uvs, colors, indices, climbs, climb_rect, face_light)
+
+
+# Chunk-local mirror of Redstone.can_connect_to. The mesher runs on a
+# worker thread against a Chunk snapshot, so it can't call through the
+# ChunkManager — but edge slices give it the neighbouring chunk's
+# blocks + meta, which is what keeps seam wire connected.
+static func _wire_connectable(chunk: Chunk, x: int, y: int, z: int) -> bool:
+	var id: int = chunk.get_block(x, y, z)
+	if id == Blocks.REDSTONE_WIRE:
+		return true
+	if id == Blocks.AIR:
+		return false
+	return Redstone.is_power_source(id)
+
+
+static func _wire_solid(chunk: Chunk, x: int, y: int, z: int) -> bool:
+	var id: int = chunk.get_block(x, y, z)
+	if id == Blocks.AIR or not Blocks.is_opaque(id):
+		return false
+	return Blocks.mesh_shape(id) == Blocks.MESH_SHAPE_CUBE
+
+
+# Same predicate as Redstone.wire_connects_toward, including the
+# asymmetric vertical rules.
+static func _wire_links(chunk: Chunk, x: int, y: int, z: int, dx: int, dz: int) -> bool:
+	if _wire_connectable(chunk, x + dx, y, z + dz):
+		return true
+	if not _wire_solid(chunk, x + dx, y, z + dz):
+		return _wire_connectable(chunk, x + dx, y - 1, z + dz)
+	if _wire_solid(chunk, x, y + 1, z):
+		return false
+	return _wire_connectable(chunk, x + dx, y + 1, z + dz)
+
+
+# A climb quad is drawn when the neighbour is solid AND carries wire on
+# top of it (and this cell isn't roofed over).
+static func _wire_climbs(chunk: Chunk, x: int, y: int, z: int, dx: int, dz: int) -> bool:
+	if not _wire_solid(chunk, x + dx, y, z + dz):
+		return false
+	if _wire_solid(chunk, x, y + 1, z):
+		return false
+	return chunk.get_block(x + dx, y + 1, z + dz) == Blocks.REDSTONE_WIRE

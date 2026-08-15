@@ -436,7 +436,7 @@ const SLIME_BLOCK := 87
 # unreserved budget after this block: 97-99 (three IDs).
 #   88 redstone_ore            (defined below)
 #   89 glowing_redstone_ore    (defined below)
-#   90 redstone_wire           (Phase 8c)
+#   90 redstone_wire           (defined below)
 #   91 redstone_torch          (lit — Phase 8d)
 #   92 redstone_torch_off      (Phase 8d)
 #   93 lever                   (defined below)
@@ -458,6 +458,13 @@ const REDSTONE_ORE := 88
 # random-tick sweep, but our 24/chunk budget would stretch the ~20 s
 # glow to ~68 s).
 const GLOWING_REDSTONE_ORE := 89
+
+# Redstone wire — vanilla lu.java via nq.av (id 55, tex 84/85 with the
+# powered variants at +16). Hardness 0, no collision box, needs a normal
+# solid cube directly below. Metadata is the POWER LEVEL 0-15 and uses
+# the whole nibble, so connectivity is derived from neighbours at mesh
+# time rather than stored. Drops redstone dust.
+const REDSTONE_WIRE := 90
 
 # Lever — vanilla pl.java via nq.aJ (id 69, tex 96). Hardness 0.5, no
 # collision box, mounts on the 4 walls or a floor. Metadata packs the
@@ -537,6 +544,10 @@ const MESH_SHAPE_BED: int = 14
 # Lever — small cobble base box flush against its mount face plus a
 # handle box that tilts with the on/off bit (pl.java render type 12).
 const MESH_SHAPE_LEVER: int = 15
+# Redstone wire — flat film on the supporting block's top face, with
+# cross/line texture selection from neighbour connectivity and optional
+# quads climbing the side of an adjacent solid block (lu render type 5).
+const MESH_SHAPE_REDSTONE_WIRE: int = 16
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -945,6 +956,11 @@ static func is_opaque(id: int) -> bool:
 		# Neighbor cubes (especially the support below) must keep
 		# emitting their faces, since the rail doesn't fill its cell.
 		and id != RAIL
+		# Wire is a flat 1/16 film on the floor — the block below and all
+		# four neighbours must keep emitting their faces. It must also
+		# never conduct: Redstone.is_normal_cube keys off is_opaque, and
+		# a conducting wire would relay its own power.
+		and id != REDSTONE_WIRE
 		# Lever is a small cobble base + handle occupying a fraction of
 		# its cell (pl.java a() returns false for isOpaqueCube). It also
 		# must never conduct redstone — Redstone.is_normal_cube keys off
@@ -1105,6 +1121,8 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[RAIL] = 0
 	# Lever — small non-cube attachment, passes light like the torch.
 	_light_opacity_lut[LEVER] = 0
+	# Wire is a flat film; light passes straight through it.
+	_light_opacity_lut[REDSTONE_WIRE] = 0
 	# Bed: 9/16 tall, light passes through the open top. Vanilla
 	# bd.java doesn't override isOpaqueCube either.
 	_light_opacity_lut[BED_FOOT] = 0
@@ -1247,6 +1265,10 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
 		# — full-width slab, 2/16 tall.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
+	if id == REDSTONE_WIRE:
+		# lu.java ctor: setBlockBounds(0, 0, 0, 1, 0.0625, 1) — a film
+		# one pixel thick across the whole cell.
+		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0625, 1.0))
 	if id == LEVER:
 		# pl.java:118-129 — f2 = 0.1875 for the four wall mounts, 0.25
 		# for the floor variants (meta 5 and 6 share one box).
@@ -1459,6 +1481,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_BED
 	if id == LEVER:
 		return MESH_SHAPE_LEVER
+	if id == REDSTONE_WIRE:
+		return MESH_SHAPE_REDSTONE_WIRE
 	return MESH_SHAPE_CUBE
 
 
@@ -1626,6 +1650,9 @@ static func hardness(id: int) -> float:
 			# pl.java via nq.aJ `c(0.5f)`. No tool affinity in vanilla —
 			# breaks fast bare-handed.
 			return 0.5
+		REDSTONE_WIRE:
+			# lu.java via nq.av `c(0.0f)` — instant break, any tool.
+			return 0.0
 		BED_FOOT, BED_HEAD:
 			# bd.java::c(0.2f) — wool material, snaps quickly. Vanilla
 			# doesn't gate on tool; bare-hand breaks in under a second.
@@ -1932,6 +1959,10 @@ static func drops(id: int) -> int:
 			return Items.COAL
 		DIAMOND_ORE:
 			return Items.DIAMOND
+		REDSTONE_WIRE:
+			# lu.java::a(int, Random) returns dx.aA — breaking wire hands
+			# back the dust that placed it.
+			return Items.REDSTONE
 		REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			# an.java::a(int, Random) returns dx.aA (redstone dust) for
 			# BOTH ore ids — a lit ore mined mid-glow still pays out.
@@ -2186,6 +2217,8 @@ static func name_of(id: int) -> String:
 			return "glowing_redstone_ore"
 		LEVER:
 			return "lever"
+		REDSTONE_WIRE:
+			return "redstone_wire"
 		# Pre-existing gaps found by tests/test_debug_tools.gd: all four
 		# are spawnable and were falling through to "unknown", which the
 		# item spawner capitalizes into an "Unknown" button label and the
@@ -2266,6 +2299,10 @@ static func get_face_texture(id: int, face: String) -> String:
 		# nq.aO both register texture index 51) — the glow is the light
 		# emission + reddust particles, not a texture swap.
 		return "redstone_ore"
+	if id == REDSTONE_WIRE:
+		# Default tile; the mesher picks cross vs line and the powered
+		# variant from neighbour connectivity + meta (lu.java:16).
+		return "redstone_dust_cross"
 	if id == LEVER:
 		# The handle tile. The mesher pulls the cobblestone tile
 		# separately for the base box (pl.java renders the base with
