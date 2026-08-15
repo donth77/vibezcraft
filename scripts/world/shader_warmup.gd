@@ -13,20 +13,34 @@ extends Node3D
 # it runs on every platform rather than web-gating.
 
 const _LIFETIME_FRAMES: int = 8
-const _WARM_SHADERS: Array[String] = [
-	"res://shaders/crack.gdshader",
-	"res://shaders/held_item.gdshader",
-	"res://shaders/held_item_world.gdshader",
-]
 
 var _frames: int = 0
 
 
 func _ready() -> void:
-	for path: String in _WARM_SHADERS:
+	# crack.gdshader draws on ordinary chunk geometry — a quad's vertex
+	# format is representative, so keep it on the cheap quad path.
+	var crack_mat := ShaderMaterial.new()
+	crack_mat.shader = load("res://shaders/crack.gdshader") as Shader
+	_add_warm_mesh(crack_mat, _make_quad())
+	# held_item / held_item_world draw a SpriteExtruder ArrayMesh, whose
+	# vertex format differs from a QuadMesh — and GLES3 (the web renderer)
+	# compiles a SEPARATE program per vertex format. Warming these with a
+	# quad left the REAL extruded-mesh variant to compile on the first
+	# item equip: a barely-visible hitch on desktop, a 1-2 s freeze on a
+	# slow mobile GPU (issue #5 "scrolling onto sugarcane freezes"). Warm
+	# them with an actual tiny extruded mesh + a bound item_texture so the
+	# exact program is ready before the first hold.
+	var warm_tex: Texture2D = _make_warm_item_texture()
+	var warm_mesh: ArrayMesh = SpriteExtruder.build(warm_tex)
+	for path: String in [
+		"res://shaders/held_item.gdshader", "res://shaders/held_item_world.gdshader"
+	]:
 		var mat := ShaderMaterial.new()
 		mat.shader = load(path) as Shader
-		_add_warm_quad(mat)
+		mat.set_shader_parameter("item_texture", warm_tex)
+		mat.render_priority = 100
+		_add_warm_mesh(mat, warm_mesh)
 	# Shared block materials — the first dropped item / falling block /
 	# first-person held block would otherwise compile these mid-gameplay.
 	_add_warm_quad(BlockAtlas.entity_material())
@@ -59,19 +73,47 @@ func _process(_delta: float) -> void:
 		# the warmed emitter from the pool. Hidden behind the loading UI.
 		var scene_root: Node = get_tree().current_scene
 		if scene_root != null:
-			BlockFx.spawn_break(scene_root, Vector3i(global_position.floor()), Blocks.STONE)
+			# BlockFx samples voxel lighting from its parent. The scene root
+			# owns no light-query API, so pass the real manager just as
+			# gameplay break bursts do. Falling back keeps isolated shader
+			# preview scenes functional without turning warmup into an error.
+			var manager: Node = scene_root.get_node_or_null("ChunkManager")
+			BlockFx.spawn_break(
+				manager if manager != null else scene_root,
+				Vector3i(global_position.floor()),
+				Blocks.STONE
+			)
 	_frames += 1
 	if _frames >= _LIFETIME_FRAMES:
 		queue_free()
 
 
 func _add_warm_quad(mat: Material) -> void:
-	if mat == null:
-		return
-	var mi := MeshInstance3D.new()
+	_add_warm_mesh(mat, _make_quad())
+
+
+func _make_quad() -> Mesh:
 	var quad := QuadMesh.new()
 	quad.size = Vector2(0.05, 0.05)
-	mi.mesh = quad
+	return quad
+
+
+# Tiny RGBA texture with a couple of opaque pixels — enough for
+# SpriteExtruder to emit a real extruded ArrayMesh (the vertex FORMAT,
+# which selects the GL program, is independent of pixel content).
+func _make_warm_item_texture() -> Texture2D:
+	var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	img.set_pixel(1, 1, Color(1, 0, 0, 1))
+	img.set_pixel(2, 2, Color(0, 1, 0, 1))
+	return ImageTexture.create_from_image(img)
+
+
+func _add_warm_mesh(mat: Material, mesh: Mesh) -> void:
+	if mat == null or mesh == null:
+		return
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
 	mi.material_override = mat
 	# Inside the frustum on purpose — GL only compiles at an actual draw,
 	# so a frustum-culled mesh warms nothing. The loading UI hides it.
