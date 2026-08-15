@@ -70,6 +70,19 @@ static inline bool is_lava_id(int id) {
 	return id == MesherNative::LAVA_FLOWING || id == MesherNative::LAVA_STILL;
 }
 
+// Full-cube textures whose transparent/cutout texels genuinely require the
+// chunk shader's discard path. Opaque cubes encode COLOR.a=0 so MSAA edge
+// samples cannot discard after UV extrapolation reaches a neighboring atlas
+// slot. Must mirror Blocks.is_opaque() for cube-shaped IDs.
+static inline bool cube_needs_alpha_test(int id) {
+	return id == MesherNative::LEAVES
+			|| id == MesherNative::GLASS
+			|| id == MesherNative::ICE
+			|| id == MesherNative::CACTUS
+			|| id == MesherNative::MOB_SPAWNER
+			|| id == MesherNative::SLIME_BLOCK;
+}
+
 // Vanilla BlockFluids.d() cull rule: emit a fluid face if the neighbor
 // isn't the same fluid family AND isn't opaque. Opaque excludes AIR,
 // LEAVES, GLASS, SAPLING, and the other fluid family — those all let
@@ -107,7 +120,7 @@ struct EdgeSlices {
 	int64_t meta_south_size;
 	// Neighbor LIGHT planes (mesh_chunk_data_lit3 only). Default null =
 	// slice absent, so existing brace-inits (lit / lit2 / non-lit paths)
-	// keep the legacy OOB light defaults (sky=15, block=0) untouched.
+	// keep the OOB light defaults (horizontal sky=15, block=0) untouched.
 	// Mirror of Chunk.edge_sky_light_* / edge_block_light_*.
 	const uint8_t *sky_west = nullptr;
 	int64_t sky_west_size = 0;
@@ -188,11 +201,15 @@ static inline int read_meta(
 
 // Light reads with the same edge-slice fallthrough as read_block.
 // Empty slice (unloaded neighbor / pre-lit3 caller) keeps the vanilla
-// defaults: sky=15 (EnumSkyBlock.SKY), block=0 (EnumSkyBlock.BLOCK) —
-// mirrors Chunk.get_sky_light / get_block_light exactly.
+// horizontal defaults: sky=15 (EnumSkyBlock.SKY), block=0
+// (EnumSkyBlock.BLOCK). Vertically, below-world sky is 0 and above-world
+// sky is 15. Mirrors Chunk.get_sky_light / get_block_light exactly.
 static inline int read_sky_light(
 		const uint8_t *sky_ptr, const EdgeSlices &edges, int x, int y, int z) {
-	if (y < 0 || y >= MesherNative::SIZE_Y) {
+	if (y < 0) {
+		return 0;
+	}
+	if (y >= MesherNative::SIZE_Y) {
 		return 15;
 	}
 	if (x >= 0 && x < MesherNative::SIZE_X && z >= 0 && z < MesherNative::SIZE_Z) {
@@ -640,7 +657,7 @@ Dictionary MesherNative::mesh_chunk_data(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD
 									&& !neighbor_is_water && !neighbor_is_lava);
@@ -891,6 +908,7 @@ Dictionary MesherNative::mesh_lit_core(
 				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD) {
 					continue;
 				}
+				const float block_alpha_test = cube_needs_alpha_test(id) ? 1.0f : 0.0f;
 				for (int face = 0; face < 6; face++) {
 					const int nx = x + FACE_NEIGHBOR[face][0];
 					const int ny = y + FACE_NEIGHBOR[face][1];
@@ -918,7 +936,7 @@ Dictionary MesherNative::mesh_lit_core(
 					// it's mounted on and the sky background shows through.
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
-									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING
+									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD
 									&& !neighbor_is_water && !neighbor_is_lava);
@@ -985,7 +1003,11 @@ Dictionary MesherNative::mesh_lit_core(
 					// Beta 1.6); all 4 verts get the same value.
 					const float sky_n = float(double(neighbor_sky) * light_scale);
 					const float blk_n = float(double(neighbor_block) * light_scale);
-					const Color face_light(sky_n, blk_n, 0.0f, 1.0f);
+					// COLOR.a is a flat alpha-test classification. Keeping
+					// discard disabled for opaque faces prevents covered MSAA
+					// edge samples from exposing the framebuffer when their
+					// interpolated UV lands just outside the intended tile.
+					const Color face_light(sky_n, blk_n, 0.0f, block_alpha_test);
 					colors.append(face_light);
 					colors.append(face_light);
 					colors.append(face_light);
@@ -1142,6 +1164,7 @@ void MesherNative::emit_cross_cell(int x, int y, int z, int id,
 	// cell, there's no "neighbor adjacent to face" concept.
 	const float sky_n = float(double(sky) * light_scale);
 	const float blk_n = float(double(blk) * light_scale);
+	// Crossed sprites contain transparent texels by design.
 	const Color face_light(sky_n, blk_n, 0.0f, 1.0f);
 	const Vector3 normal(0, 1, 0);
 	const float ox = float(x);
@@ -1229,7 +1252,8 @@ void MesherNative::emit_snow_cell(int x, int y, int z,
 	// replicate the exact operation or parity drifts a ULP.
 	const float sky_n = float(double(sky) / 15.0);
 	const float blk_n = float(double(blk) / 15.0);
-	const Color face_light(sky_n, blk_n, 0.0f, 1.0f);
+	// Snow uses a fully opaque atlas tile mapped onto tight box geometry.
+	const Color face_light(sky_n, blk_n, 0.0f, 0.0f);
 	emit_box_faces(mn, mx, uv_x, uv_y, uv_w, uv_h, face_light,
 			verts, norms, uvs, colors, indices);
 	// Selection collision so the raycast can target the slab — without

@@ -51,6 +51,7 @@ var _spawn_time: float = 0.0
 var _thrower: Node = null
 var _chunk_manager: Node = null
 var _sprite: Sprite3D = null
+var _last_light_brightness: float = -1.0
 
 
 # interaction.gd::_throw_snowball calls this immediately after
@@ -71,10 +72,15 @@ func _ready() -> void:
 # always faces the camera (vanilla renders 2D snowballs in 3D space
 # via the same billboarded-sprite path used for thrown items).
 func _build_sprite() -> void:
-	var tex: Texture2D = load("res://assets/textures/items/snowball.png") as Texture2D
+	var primary_path := "res://assets/textures/items/snowball.png"
+	var tex: Texture2D = (
+		load(primary_path) as Texture2D if ResourceLoader.exists(primary_path) else null
+	)
 	if tex == null:
 		# Pack path fallback — alpha_vanilla extracted texture.
-		tex = (load("res://assets/textures/packs/alpha_vanilla/items/snowball.png") as Texture2D)
+		var fallback_path := "res://assets/textures/packs/alpha_vanilla/items/snowball.png"
+		if ResourceLoader.exists(fallback_path):
+			tex = load(fallback_path) as Texture2D
 	if tex == null:
 		return
 	_sprite = Sprite3D.new()
@@ -85,11 +91,13 @@ func _build_sprite() -> void:
 	_sprite.shaded = false
 	_sprite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_sprite)
+	_update_entity_lighting()
 
 
 func _physics_process(delta: float) -> void:
 	if _tick_lifetime():
 		return
+	_update_entity_lighting()
 	# Per-tick gravity + drag → per-second integration. Same math the
 	# arrow uses (see arrow.gd:160-173 for the derivation).
 	var gravity_accel: float = GRAVITY_PER_TICK * TICKS_PER_SEC * TICKS_PER_SEC
@@ -109,6 +117,19 @@ func _physics_process(delta: float) -> void:
 	if _sweep_entity_hit(global_position, new_pos):
 		return
 	global_position = new_pos
+
+
+func _update_entity_lighting() -> void:
+	if _sprite == null or _chunk_manager == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_sprite.modulate = Color(brightness, brightness, brightness, 1.0)
 
 
 func _tick_lifetime() -> bool:

@@ -56,6 +56,7 @@ var _mesh: MeshInstance3D
 # White-flash overlay child — see file-level comment. Created in setup()
 # alongside the body mesh; visibility pulsed in _apply_visual_flash.
 var _flash_mesh: MeshInstance3D
+var _last_light_brightness: float = -1.0
 
 
 # fuse_seconds: optional override. Chain-reaction primings pass a
@@ -65,6 +66,7 @@ func setup(fuse_seconds: float = _DEFAULT_FUSE_SEC) -> void:
 	_fuse_remaining = fuse_seconds
 	_mesh = MeshInstance3D.new()
 	_mesh.mesh = BlockMesh.get_cube_mesh(Blocks.TNT, _MESH_SIZE)
+	_mesh.material_override = BlockAtlas.entity_material()
 	add_child(_mesh)
 	# White-flash overlay — slightly larger cube with an unshaded white
 	# material that obscures the body mesh during flash frames. Hidden
@@ -125,6 +127,7 @@ func _ready() -> void:
 	# on top of the explosion's own boom.
 	var loud: bool = _fuse_remaining >= _DEFAULT_FUSE_SEC * 0.5
 	SFX.play_fuse(loud)
+	_update_entity_lighting()
 
 
 func _process(delta: float) -> void:
@@ -136,6 +139,7 @@ func _process(delta: float) -> void:
 		_detonate()
 		return
 	_apply_physics(delta)
+	_update_entity_lighting()
 	_apply_visual_flash()
 	# Smoke disabled — could never get the particles to render correctly
 	# (squished sprite look on TNT/fire smoke even via lava-fizz pool
@@ -191,6 +195,19 @@ func _apply_visual_flash() -> void:
 	# 5-tick toggle pattern at 20 TPS.
 	var flash_t: float = _DEFAULT_FUSE_SEC - _fuse_remaining
 	_flash_mesh.visible = sin(flash_t * TAU * _FLASH_HZ) > 0.0
+
+
+func _update_entity_lighting() -> void:
+	if _mesh == null or _chunk_manager == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_mesh.set_instance_shader_parameter("entity_brightness", brightness)
 
 
 func _detonate() -> void:

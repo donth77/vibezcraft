@@ -111,6 +111,11 @@ var _pending_relight_dispatch_set: Dictionary = {}  # dedupe
 # max_y, pending_ticks }, all FastLZ-compressed; ~50:1 on above-ground edits.
 var _saved_chunks: Dictionary = {}
 var _dirty_loaded: Dictionary = {}  # loaded edited chunks awaiting persist-on-unload
+# Nodes outside the active ring whose last uploaded mesh remains briefly as a
+# visual backing shell while surviving neighbors rebuild exposed edge faces.
+# Retirees are absent from `_chunks`, so gameplay and lighting already treat
+# them as unloaded. Shape: coord → {node, gates:[{coord,node,apply_revision}]}.
+var _retiring_chunks: Dictionary = {}
 # Orphaned leaves / saplings awaiting a timed callback. Entries:
 #   _decaying_leaves: { pos, decay_at } — exponential delay; logs within
 #     the grace window abort decay. Alpha random-tick approximation.
@@ -126,9 +131,8 @@ var _growing_canes: Array = []
 # Guard: prevents recursive STILL-water cell cascades via set_world_block
 # from inside on_neighbor_changed. See BlockFluids for the fanout shape.
 var _inside_fluid_notify: bool = false
-# Deferred sky-light seeds + fizz during a fluid fanout — prevents
-# per-cell BFS + particle alloc on water-on-lava cascades. Flushed on
-# unwind via FluidFx.flush_deferred.
+# Deferred sky/block-light seeds + fizz during batch edits and fluid
+# fanouts. The outermost unwind performs one multi-source pass per channel.
 var _light_defer_depth: int = 0
 var _deferred_sky_seeds: Dictionary = {}  # Vector3i → true
 var _deferred_block_seeds: Dictionary = {}  # Vector3i → true
@@ -315,6 +319,7 @@ func _process(_delta: float) -> void:
 	# write is ~50 ns. Total overhead ~1-2 µs per frame.
 	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
+	_drain_retiring_chunks()
 	PerfProbe.end("chunk_mgr.tick.update_chunk_set", t_set)
 	var t_coll := PerfProbe.begin("chunk_mgr.tick.collision_activity")
 	_update_collision_activity()
@@ -405,6 +410,33 @@ func _update_chunk_set() -> void:
 	for dx in range(-render_distance, render_distance + 1):
 		for dz in range(-render_distance, render_distance + 1):
 			needed[Vector2i(pc.x + dx, pc.y + dz)] = true
+	# A quick direction reversal can make a not-yet-freed backing shell active
+	# again. Restore that exact node instead of generating an overlapping
+	# duplicate, then re-handshake its seams because neighbors may already be
+	# rebuilding for the brief absent state.
+	for coord: Vector2i in _retiring_chunks.keys():
+		if not needed.has(coord):
+			continue
+		var record: Dictionary = _retiring_chunks[coord]
+		var returning: Node3D = record.get("node") as Node3D
+		_retiring_chunks.erase(coord)
+		if not is_instance_valid(returning):
+			continue
+		returning.process_mode = Node.PROCESS_MODE_INHERIT
+		_chunks[coord] = returning
+		var returning_chunk: Chunk = returning.get("chunk") as Chunk
+		if returning_chunk != null:
+			returning_chunk.dirty = true
+		returning.set("_priority_apply", true)
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var neighbor_coord: Vector2i = coord + offset
+			if not _chunks.has(neighbor_coord):
+				continue
+			var neighbor: Node3D = _chunks[neighbor_coord]
+			var neighbor_chunk: Chunk = neighbor.get("chunk") as Chunk
+			if neighbor_chunk != null:
+				neighbor_chunk.dirty = true
+			neighbor.set("_priority_apply", true)
 	# Rebuild spiral offsets only when render_distance changes. At FAR
 	# the raw build + sort_custom is ~1 ms per call — 60 fps × 1 ms =
 	# 60 ms/s of pure waste when the value is stable.
@@ -437,9 +469,40 @@ func _update_chunk_set() -> void:
 		if _dirty_loaded.has(coord):
 			_persist_chunk(coord, _chunks[coord].chunk)
 			_dirty_loaded.erase(coord)
-		_chunks[coord].cancel_remesh_task()
-		_chunks[coord].queue_free()
+		# Faces previously culled against this chunk must reappear on every
+		# surviving cardinal neighbor. Keep the outgoing rendered mesh as a
+		# backing shell until those newer meshes actually APPLY; freeing here
+		# exposed the skybox while their asynchronous workers were rebuilding.
+		var retire_gates: Array = []
+		for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var survivor_coord: Vector2i = coord + offset
+			if not _chunks.has(survivor_coord):
+				continue
+			var survivor: Node3D = _chunks[survivor_coord]
+			(
+				retire_gates
+				. append(
+					{
+						"coord": survivor_coord,
+						"node": survivor,
+						"apply_revision": int(survivor.get("_mesh_apply_revision")),
+					}
+				)
+			)
+			var survivor_chunk: Chunk = survivor.get("chunk") as Chunk
+			if survivor_chunk != null:
+				survivor_chunk.dirty = true
+			survivor.set("_priority_apply", true)
+		var outgoing: Node3D = _chunks[coord]
+		outgoing.cancel_remesh_task()
 		_chunks.erase(coord)
+		if retire_gates.is_empty():
+			outgoing.queue_free()
+		else:
+			# Stop simulation/remesh work on the shell. PROCESS_MODE_DISABLED
+			# leaves its last GPU mesh visible while removing all update cost.
+			outgoing.process_mode = Node.PROCESS_MODE_DISABLED
+			_retiring_chunks[coord] = {"node": outgoing, "gates": retire_gates}
 		evicted += 1
 	# Drop queued chunks that are no longer needed. In-place reverse-loop
 	# removal avoids allocating a fresh Array + Callable every frame.
@@ -469,6 +532,37 @@ func _update_chunk_set() -> void:
 # decompress inline here (`_restore_saved_chunk` with 5 PackedByteArray
 # decompresses + a 32 KB linear scan), which caused 80+ ms main-thread
 # freezes when several saved chunks respawned in a single dispatch loop.
+# Release backing shells once every neighbor that still survives in the active
+# dictionary has presented a post-unload mesh. A neighbor that was itself
+# evicted no longer gates anything—its own retirement protects its next live
+# seam. Typical lifetime is one or two frames; there is no timer, synchronous
+# meshing, or steady-state retained outer ring.
+func _drain_retiring_chunks() -> void:
+	if _retiring_chunks.is_empty():
+		return
+	var completed: Array[Vector2i] = []
+	for coord: Vector2i in _retiring_chunks:
+		var record: Dictionary = _retiring_chunks[coord]
+		var ready: bool = true
+		for gate: Dictionary in record.get("gates", []) as Array:
+			var survivor_coord: Vector2i = gate["coord"]
+			var survivor: Node3D = gate["node"] as Node3D
+			if not is_instance_valid(survivor):
+				continue
+			if not _chunks.has(survivor_coord) or _chunks[survivor_coord] != survivor:
+				continue
+			if int(survivor.get("_mesh_apply_revision")) <= int(gate["apply_revision"]):
+				ready = false
+				break
+		if ready:
+			var outgoing: Node3D = record.get("node") as Node3D
+			if is_instance_valid(outgoing):
+				outgoing.queue_free()
+			completed.append(coord)
+	for coord: Vector2i in completed:
+		_retiring_chunks.erase(coord)
+
+
 func _reap_stale_pending() -> void:
 	var now_ms: int = Time.get_ticks_msec()
 	var stale: Array[Vector2i] = []
@@ -482,6 +576,48 @@ func _reap_stale_pending() -> void:
 		if not _spawn_queue_set.has(coord):
 			_spawn_queue.append(coord)
 			_spawn_queue_set[coord] = true
+
+
+# Main-thread snapshot of every loaded neighbor's complete edge state, handed
+# to the worker so a chunk's FIRST mesh both culls internal seam faces and
+# lights surviving faces from real neighbor data. Every slice is a fresh
+# PackedByteArray; workers never alias live chunks.
+func _snapshot_neighbor_edge_planes(coord: Vector2i) -> Dictionary:
+	var planes: Dictionary = {}
+	var signature: Dictionary = {}
+	var west: Chunk = get_chunk_at_coord(coord + Vector2i(-1, 0))
+	if west != null:
+		planes["west"] = west.east_edge_slices()
+		signature["west"] = [west.get_instance_id(), west.lighting_revision]
+	var east: Chunk = get_chunk_at_coord(coord + Vector2i(1, 0))
+	if east != null:
+		planes["east"] = east.west_edge_slices()
+		signature["east"] = [east.get_instance_id(), east.lighting_revision]
+	var north: Chunk = get_chunk_at_coord(coord + Vector2i(0, -1))
+	if north != null:
+		planes["north"] = north.south_edge_slices()
+		signature["north"] = [north.get_instance_id(), north.lighting_revision]
+	var south: Chunk = get_chunk_at_coord(coord + Vector2i(0, 1))
+	if south != null:
+		planes["south"] = south.north_edge_slices()
+		signature["south"] = [south.get_instance_id(), south.lighting_revision]
+	# Metadata only; _set_edge_planes iterates the four canonical side names
+	# and ignores this key. The ready-result gate uses it to catch a neighbor
+	# arriving, unloading, being replaced, or changing while worldgen/meshing
+	# was in flight.
+	planes["_signature"] = signature
+	return planes
+
+
+# Bind (or, with an empty dict, unbind) snapshotted neighbor edge planes.
+static func _set_edge_planes(chunk: Chunk, planes: Dictionary) -> void:
+	var none := PackedByteArray()
+	for side: String in ["west", "east", "north", "south"]:
+		var edge: Array = planes.get(side, []) as Array
+		chunk.set("edge_blocks_" + side, edge[0] if edge.size() >= 4 else none)
+		chunk.set("edge_meta_" + side, edge[1] if edge.size() >= 4 else none)
+		chunk.set("edge_sky_light_" + side, edge[2] if edge.size() >= 4 else none)
+		chunk.set("edge_block_light_" + side, edge[3] if edge.size() >= 4 else none)
 
 
 func _dispatch_workers() -> void:
@@ -503,7 +639,11 @@ func _dispatch_workers() -> void:
 			_saved_chunks.erase(coord)
 		else:
 			saved_entry = _SAVE_LOAD.load_chunk(coord)
-		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_entry))
+		# Snapshot the loaded neighbors' light planes HERE, on the main
+		# thread, so the worker's first mesh lights its seam faces from real
+		# data instead of the OOB sky=15 default.
+		var edge_planes: Dictionary = _snapshot_neighbor_edge_planes(coord)
+		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_entry, edge_planes))
 
 
 # Worker-thread function — runs off the main thread. Uses the supplied
@@ -517,7 +657,7 @@ func _dispatch_workers() -> void:
 # shipped (everything reads as default 15 and caves render lit). With
 # the C++ port this costs ~30-50ms per chunk vs the old 380ms, so the
 # wasted-work argument no longer holds and correctness wins.
-func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary) -> void:
+func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary, edge_planes: Dictionary) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.worker_total")
 	var chunk: Chunk
 	var sapling_positions: Array[Vector3i] = []
@@ -537,7 +677,14 @@ func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary) -> void:
 	# × Blocks.light_opacity lookup). Forcing it here moves the cost off
 	# the main-thread frame budget.
 	chunk.is_sky_exposed(0, 0, 0)
+	# Neighbor light for the seam faces. Attached AFTER the fill (so the
+	# lighting BFS keeps today's OOB semantics) and cleared immediately
+	# after the mesh bakes, so the chunk this worker publishes is
+	# byte-identical to what it publishes today — relight, later re-meshes
+	# and save all keep seeing empty planes.
+	_set_edge_planes(chunk, edge_planes)
 	var mesh_data := Mesher.mesh_chunk_fast(chunk)
+	_set_edge_planes(chunk, {})
 	_result_mutex.lock()
 	_ready_results[coord] = {
 		"chunk": chunk,
@@ -546,6 +693,7 @@ func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary) -> void:
 		"saplings": sapling_positions,
 		"pending_ticks": saved_entry.get("pending_ticks", []),
 		"tile_entities": saved_entry.get("tile_entities", {}),
+		"edge_signature": edge_planes.get("_signature", {}),
 	}
 	_result_mutex.unlock()
 	PerfProbe.end("chunk_mgr.worker_total", probe_token)
@@ -568,14 +716,45 @@ func _materialize_one_ready_chunk() -> void:
 	_result_mutex.unlock()
 	if not has_one:
 		return
-	_pending.erase(coord)
 	# Player may have moved away while the worker was running — drop the result.
 	var pc := _cached_player_chunk
 	if absi(coord.x - pc.x) > render_distance or absi(coord.y - pc.y) > render_distance:
+		_pending.erase(coord)
 		return
 	if _chunks.has(coord):
+		_pending.erase(coord)
 		return
+	# A mesh can spend tens of milliseconds in a worker while adjacent chunks
+	# materialize on the main thread. Never present that now-stale boundary
+	# geometry: re-mesh the already-generated Chunk off-thread with the current
+	# edge snapshot, then run this same gate again. This removes the one-frame
+	# cave/skybox crack without adding a synchronous mesher call or draw work.
+	var current_edges: Dictionary = _snapshot_neighbor_edge_planes(coord)
+	var current_signature: Dictionary = current_edges.get("_signature", {}) as Dictionary
+	var meshed_signature: Dictionary = data.get("edge_signature", {}) as Dictionary
+	if meshed_signature != current_signature:
+		_pending[coord] = Time.get_ticks_msec()
+		WorkerThreadPool.add_task(_remesh_ready_chunk.bind(coord, data, current_edges))
+		return
+	_pending.erase(coord)
 	_materialize_chunk(coord, data)
+
+
+# Worker-only correction for a generated/restored chunk whose neighbor set
+# changed before presentation. The Chunk is not live yet, so it has no main-
+# thread writers. Reuse it instead of regenerating or re-decoding, and publish
+# the refreshed result through the same mutex-protected ready queue.
+func _remesh_ready_chunk(coord: Vector2i, data: Dictionary, edge_planes: Dictionary) -> void:
+	var chunk: Chunk = data.get("chunk") as Chunk
+	if chunk == null:
+		return
+	_set_edge_planes(chunk, edge_planes)
+	data["mesh"] = Mesher.mesh_chunk_fast(chunk)
+	_set_edge_planes(chunk, {})
+	data["edge_signature"] = edge_planes.get("_signature", {})
+	_result_mutex.lock()
+	_ready_results[coord] = data
+	_result_mutex.unlock()
 
 
 func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
@@ -689,21 +868,16 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	# get_world_block so we must call it AFTER the chunk is in `_chunks`.
 	if not data.get("from_save", false):
 		_passive_spawner.populate_chunk_at_gen(self, coord)
-	# Re-dirty loaded neighbors AND this new chunk so the edge-snapshot
-	# re-mesh path (chunk_node._dispatch_remesh → _attach_neighbor_edges)
-	# runs once per seam. The worker's initial mesh (_compute_chunk_data
-	# → mesh_chunk_fast) sees empty neighbor slices because workers can't
-	# safely read main-thread data; the first correct mesh happens on the
-	# next frame via chunk_node._process.
+	# Re-dirty loaded neighbors AND this new chunk so later changes to
+	# either side of a seam converge in both meshes. The ready-result gate
+	# above has already guaranteed this chunk's FIRST presented mesh used
+	# the current complete edge snapshot; this handshake now covers the
+	# reciprocal neighbor mesh and any change after that snapshot.
 	#
-	# Seam heals ride the PRIORITY apply lane. Until the heal lands, the
-	# un-culled boundary walls from the initial mesh render fully lit
-	# (empty light slices keep the sky=15 default) — the pale seam grid
-	# at grazing angles. Behind the 1-per-frame background budget, a
-	# render-distance ring enqueues minutes of stale seams; priority
-	# applies are bounded (once per seam, both sides) and the initial
-	# world load happens behind the loading cover, so the spike is
-	# invisible. See docs/lighting-chunk-seams.md Phase 3.
+	# Reciprocal seam heals ride the PRIORITY apply lane. They are bounded
+	# (once per arrival, both sides) and correct an older neighbor whose mesh
+	# predates this chunk; the new chunk itself never presents stale boundary
+	# geometry. See docs/lighting-chunk-seams.md Phase 3.
 	var had_neighbor: bool = false
 	for offset: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
 		var neighbor_coord: Vector2i = coord + offset
@@ -805,7 +979,10 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 	# Warm the heightmap (same reason as _compute_chunk_data — avoids the
 	# 15 ms is_sky_exposed rebuild firing on the next main-thread tick).
 	chunk.is_sky_exposed(0, 0, 0)
+	var edge_planes: Dictionary = _snapshot_neighbor_edge_planes(coord)
+	_set_edge_planes(chunk, edge_planes)
 	var mesh_data := Mesher.mesh_chunk_fast(chunk)
+	_set_edge_planes(chunk, {})
 	_materialize_chunk(
 		coord,
 		{
@@ -815,6 +992,7 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 			"saplings": saplings,
 			"pending_ticks": saved_entry.get("pending_ticks", []),
 			"tile_entities": saved_entry.get("tile_entities", {}),
+			"edge_signature": edge_planes.get("_signature", {}),
 		}
 	)
 
@@ -826,13 +1004,10 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 # `Lighting.apply_relight_result`.
 #
 # Race handling:
-#   * `_pending_relights[coord]` blocks double-dispatch while a worker is
-#     in flight for the same coord.
-#   * `apply_relight_result` skips chunks that were unloaded mid-flight.
-#   * Player edits to a chunk between dispatch and apply will get
-#     overwritten by the stale worker result. The next edit triggers
-#     `update_*_light_around_world` which repairs the affected cells.
-#     Walking-only (the reported lag-spike case) has no edits.
+#   * `_pending_relights[coord]` blocks double-dispatch for the same target.
+#   * every participating chunk carries a captured lighting revision;
+#   * apply validates the complete revision set before replacing any array;
+#   * stale/overlapping/unloaded results are discarded and the target requeued.
 # Pop one queued relight per frame from `_pending_relight_dispatch` and
 # run the snapshot + worker dispatch. Chunks that unloaded between
 # materialize and drain are skipped (get_chunk_at_coord returns null).
@@ -863,16 +1038,17 @@ func _dispatch_relight(coord: Vector2i) -> void:
 	# Heightmap rebuild + array snapshot happens here on main (single-digit
 	# µs per chunk; the height_map cache is a main-thread mutation).
 	var chunk_data: Array = Lighting.prepare_relight_data(coord, target, neighbors, self)
+	var revisions: Dictionary = Lighting.relight_revisions(chunk_data)
 	_pending_relights[coord] = true
-	WorkerThreadPool.add_task(_relight_worker.bind(coord, chunk_data))
+	WorkerThreadPool.add_task(_relight_worker.bind(coord, chunk_data, revisions))
 
 
 # Worker-thread entry — runs the native BFS on the snapshotted slabs and
 # stashes the result for the main thread to apply.
-func _relight_worker(coord: Vector2i, chunk_data: Array) -> void:
+func _relight_worker(coord: Vector2i, chunk_data: Array, revisions: Dictionary) -> void:
 	var result: Dictionary = Lighting.compute_relight_borders_native(coord, chunk_data)
 	_result_mutex.lock()
-	_relight_results[coord] = result
+	_relight_results[coord] = {"lighting": result, "revisions": revisions}
 	_result_mutex.unlock()
 
 
@@ -892,11 +1068,11 @@ func _drain_relight_results() -> void:
 func _drain_one_relight_result() -> bool:
 	_result_mutex.lock()
 	var coord: Vector2i = Vector2i.ZERO
-	var result: Dictionary = {}
+	var job_result: Dictionary = {}
 	var has_one: bool = false
 	for c: Vector2i in _relight_results:
 		coord = c
-		result = _relight_results[c]
+		job_result = _relight_results[c]
 		has_one = true
 		break
 	if has_one:
@@ -905,7 +1081,15 @@ func _drain_one_relight_result() -> bool:
 	if not has_one:
 		return false
 	_pending_relights.erase(coord)
-	Lighting.apply_relight_result(result, self)
+	var result: Dictionary = job_result.get("lighting", {}) as Dictionary
+	var revisions: Dictionary = job_result.get("revisions", {}) as Dictionary
+	var accepted: bool = Lighting.apply_relight_result(result, self, revisions)
+	if not accepted and get_chunk_at_coord(coord) != null:
+		# Re-snapshot on a later frame. Dedupe against an already queued
+		# neighbor-arrival retry.
+		if not _pending_relight_dispatch_set.has(coord):
+			_pending_relight_dispatch.append(coord)
+			_pending_relight_dispatch_set[coord] = true
 	return true
 
 
@@ -1266,28 +1450,44 @@ func find_chest_node_at(world_pos: Vector3i) -> ChestNode:
 	return null
 
 
-# Batch begin — defers per-edit lighting BFS updates so a multi-block
-# operation (explosion, future area-fill commands) runs ONE BFS per unique
-# seed at end_batch() instead of N inline BFS calls. Pair with end_batch().
-# Calls nest safely: only the outermost flush drains the seeds.
+# Batch begin — defers per-edit lighting so a multi-block operation
+# (explosion, fluid cascade, future area-fill commands) converges through
+# one shared multi-source queue per channel. Calls nest safely: only the
+# outermost flush drains the seeds.
 func begin_batch() -> void:
 	_light_defer_depth += 1
 
 
-# Batch end — drains accumulated sky/block-light seeds via one BFS each.
-# A typical TNT explosion affects ~100 cells; this turns 200 inline BFS
-# calls into ~100 batched ones (often fewer after dedup by world_pos),
-# eliminating the per-detonation frame spike.
+# Batch end — drains accumulated sky/block-light seeds through exactly one
+# multi-source convergence pass per non-empty channel.
 func end_batch() -> void:
+	if _light_defer_depth <= 0:
+		push_error("ChunkManager.end_batch called without matching begin_batch")
+		_light_defer_depth = 0
+		return
 	_light_defer_depth -= 1
 	if _light_defer_depth > 0:
 		return
+	_flush_deferred_updates()
+
+
+# Snapshot and clear deferred state before propagation. Clearing first keeps
+# nested callbacks safe: any new edits triggered during the flush become a
+# fresh batch instead of mutating the dictionaries being iterated.
+func _flush_deferred_updates() -> void:
+	var sky_positions: Array[Vector3i] = []
+	var block_positions: Array[Vector3i] = []
 	for world_pos: Vector3i in _deferred_sky_seeds:
-		Lighting.update_sky_light_around_world(world_pos, self)
+		sky_positions.append(world_pos)
 	for world_pos: Vector3i in _deferred_block_seeds:
-		Lighting.update_block_light_around_world(world_pos, self)
+		block_positions.append(world_pos)
+	var fizz_positions: Array = _deferred_fizz.duplicate()
 	_deferred_sky_seeds.clear()
 	_deferred_block_seeds.clear()
+	_deferred_fizz.clear()
+	Lighting.update_sky_light_around_world_many(sky_positions, self)
+	Lighting.update_block_light_around_world_many(block_positions, self)
+	FluidFx.flush_deferred_fizz(self, fizz_positions)
 
 
 # World-coord block edit. Looks up the right chunk, converts to local coords,
@@ -1686,9 +1886,9 @@ func _enqueue_sapling_growth(pos: Vector3i) -> void:
 
 
 # Drain expired sapling-growth entries. For each one, re-check that the
-# cell still holds a sapling, the support is still valid, and there's
-# sky exposure (proxy for vanilla light >= 9 until lighting propagation
-# lands). On success: place an oak tree centered at the sapling's cell.
+# cell still holds a sapling, the support is still valid, and Alpha's
+# combined light above the sapling is at least 9 (ej.java). On success:
+# place an oak tree centered at the sapling's cell.
 # On a "blocked but still a sapling" outcome: re-queue with retry delay
 # — vanilla just no-ops the random tick and rolls again later. Per-tick
 # cap so a million simultaneous growths don't stall the main thread.
@@ -1712,7 +1912,7 @@ func _tick_sapling_growth() -> void:
 			continue
 		var support_id: int = get_world_block(pos + Vector3i(0, -1, 0))
 		var support_ok: bool = Blocks.is_valid_plant_support(support_id)
-		var sky_ok: bool = _is_sky_exposed(pos)
+		var light_ok: bool = get_world_effective_light(pos + Vector3i(0, 1, 0)) >= 9
 		if not support_ok:
 			# Detach hook will (or did) fire from set_world_block; nothing
 			# more to do here — let the sapling drop normally.
@@ -1720,8 +1920,8 @@ func _tick_sapling_growth() -> void:
 			if processed >= _SAPLING_GROW_MAX_PER_TICK:
 				return
 			continue
-		if not sky_ok:
-			# Sheltered — no growth this round, try again later.
+		if not light_ok:
+			# Too dark — no growth this round, try again later.
 			_growing_saplings.append({"pos": pos, "grow_at": now + _SAPLING_GROW_RETRY_SEC})
 			processed += 1
 			if processed >= _SAPLING_GROW_MAX_PER_TICK:
@@ -1842,23 +2042,6 @@ func grow_tree_at(pos: Vector3i) -> void:
 	Worldgen.place_oak_tree(pos, trunk_height, t_hash, get_cb, set_cb)
 
 
-# Vanilla growth requires light >= 9. We don't have lighting propagation
-# yet, so use sky exposure as a proxy: walk up from pos+1 to SIZE_Y-1;
-# if any opaque non-leaf block is in the way, the sapling is sheltered
-# and shouldn't grow. Leaves count as transparent so a sapling under a
-# tree's own canopy still reads as exposed (vanilla's BlockLeaves passes
-# light through with a small attenuation; our sky-only proxy can't model
-# that, so leaves stay non-blocking).
-func _is_sky_exposed(pos: Vector3i) -> bool:
-	for y in range(pos.y + 1, Chunk.SIZE_Y):
-		var id: int = get_world_block(Vector3i(pos.x, y, pos.z))
-		if id == Blocks.AIR or id == Blocks.LEAVES:
-			continue
-		if Blocks.is_opaque(id):
-			return false
-	return true
-
-
 # World-coord block read. Returns AIR if the chunk isn't loaded.
 func get_world_block(world_pos: Vector3i) -> int:
 	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
@@ -1931,12 +2114,12 @@ func is_chunk_loaded(chunk_coord: Vector2i) -> bool:
 	return _chunks.has(chunk_coord)
 
 
-# World-coord sky-light read. Returns 15 (`Chunk.get_sky_light`'s OOB
-# convention; vanilla EnumSkyBlock.SKY default) when the chunk is
-# unloaded or y is out of range. Used by Lighting's bounded BFS so it
-# can read across chunk borders without crashing.
+# World-coord raw sky-light read. Horizontal unloaded chunks retain vanilla's
+# sky=15 default; below the world is dark and above it is open sky.
 func get_world_sky_light(world_pos: Vector3i) -> int:
-	if world_pos.y < 0 or world_pos.y >= Chunk.SIZE_Y:
+	if world_pos.y < 0:
+		return 0
+	if world_pos.y >= Chunk.SIZE_Y:
 		return 15
 	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
 	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
@@ -1989,6 +2172,14 @@ func get_world_block_light(world_pos: Vector3i) -> int:
 	var local_x: int = world_pos.x - chunk_x * Chunk.SIZE_X
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	return _chunks[coord].chunk.get_block_light(local_x, world_pos.y, local_z)
+
+
+# Time-adjusted combined light for gameplay and entity rendering. Raw sky and
+# block accessors remain public for propagation and direct-sky mechanics.
+func get_world_effective_light(world_pos: Vector3i, sky_subtraction: int = -1) -> int:
+	return WorldTime.effective_light_level(
+		get_world_sky_light(world_pos), get_world_block_light(world_pos), sky_subtraction
+	)
 
 
 # World-coord block-light write. Same plumbing as set_world_sky_light:
@@ -2162,13 +2353,11 @@ func _notify_fluid_neighbors(pos: Vector3i) -> void:
 		BlockFluids.on_neighbor_changed(self, pos + offset)
 	_light_defer_depth -= 1
 	_inside_fluid_notify = false
-	# Drain at depth 0: dedup sky-light BFS seeds, coalesce fizz cluster.
+	# Drain at depth 0: converge both channels once, coalesce fizz cluster.
 	# Vanilla's ld.java:256-261 `i()` fires per-cell, but collapsed into
 	# one applyPhysics frame the audible result is one fizz anyway.
 	if _light_defer_depth == 0:
-		FluidFx.flush_deferred(self, _deferred_sky_seeds, _deferred_fizz)
-		_deferred_sky_seeds.clear()
-		_deferred_fizz.clear()
+		_flush_deferred_updates()
 
 
 # Settings → Alpha 1.1.2 foliage toggled. Tints are material-level

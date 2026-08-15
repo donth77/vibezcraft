@@ -593,7 +593,7 @@ func _pick_wander_target() -> bool:
 			continue
 		# Score = sky_light at the cell. Spider has no biome preference,
 		# but slight bias toward open ground keeps wander visible.
-		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		var score: float = float(_chunk_manager.get_world_effective_light(cell))
 		if score > best_score:
 			best_score = score
 			best_cell = cell
@@ -618,11 +618,9 @@ func _find_player() -> Node3D:
 	return _ai_player_cache
 
 
-# Sample the cell light at the spider's eye position. Returns true if
-# the cell is "bright" by Alpha standards (vanilla compares World
-# .getBrightness < 0.5; our analogue is sky_light × time-of-day vs
-# block_light, with the threshold at level 8 ≈ 0.45 brightness in
-# the standard LUT).
+# Sample the shared effective cell light at the spider's eye position.
+# The threshold remains the existing gameplay tuning, but the value now
+# agrees with terrain, spawning, and every other time-of-day consumer.
 func _is_brightly_lit() -> bool:
 	if _chunk_manager == null:
 		return false  # treat as dark when CM not available (test envs)
@@ -631,14 +629,7 @@ func _is_brightly_lit() -> bool:
 		int(floor(global_position.y + _EYE_HEIGHT)),
 		int(floor(global_position.z))
 	)
-	var sky: int = 15
-	var block: int = 0
-	if _chunk_manager.has_method("get_world_sky_light"):
-		sky = _chunk_manager.get_world_sky_light(eye_cell)
-	if _chunk_manager.has_method("get_world_block_light"):
-		block = _chunk_manager.get_world_block_light(eye_cell)
-	var sky_factor: float = WorldTime.sky_factor() if WorldTime != null else 1.0
-	var effective: int = maxi(int(round(float(sky) * sky_factor)), block)
+	var effective: int = _chunk_manager.get_world_effective_light(eye_cell)
 	return effective >= _AI_BRIGHTNESS_THRESHOLD
 
 

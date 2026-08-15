@@ -2,7 +2,7 @@ shader_type spatial;
 // Translucent, no back-face cull — the player swims inside water so both
 // sides of each face need to draw. depth_draw_opaque keeps water from
 // sorting over other translucent effects in the future (sun flares, etc).
-render_mode cull_disabled, blend_mix, depth_draw_opaque;
+render_mode cull_disabled, blend_mix, depth_draw_opaque, unshaded;
 
 // Alpha's water was synthesised at runtime by TextureWaterFX (oe.java in
 // the CFR-decompiled source — client-side; not in Bukkit/mc-dev which is
@@ -48,11 +48,8 @@ uniform vec3 shallow_color : source_color = vec3(0.20, 0.48, 0.80);
 // had. Tunable via the editor inspector.
 uniform float alpha_strength : hint_range(0.0, 1.0) = 0.7;
 uniform float scroll_speed : hint_range(0.0, 2.0) = 0.12;
-// Day/night driver pushes this every frame (day_night_driver.gd).
-// Range 0.10 (midnight) .. 1.0 (noon). Multiplied with per-vertex
-// sky_light to produce effective brightness; same convention as
-// chunk.gdshader.
-uniform float sky_factor = 1.0;
+// Alpha's integer skyLightSubtracted, shared with the terrain shader.
+uniform float sky_subtraction : hint_range(0.0, 11.0, 1.0) = 0.0;
 
 varying vec3 v_normal;
 varying float v_sky;
@@ -148,24 +145,13 @@ void fragment() {
     } else {
         b = 0.80;
     }
-    // Effective per-vertex brightness — vanilla samples this from the
-    // open neighbor cell at mesh time. max() of sun-attenuated sky vs.
-    // raw block_light so torches dominate at night. Matches the formula
-    // chunk.gdshader uses for opaque blocks.
-    float light = max(v_sky * sky_factor, v_block);
-    // Water keeps its blue identity at every time-of-day. Opaque blocks
-    // can fade to near-black at midnight (chunk.gdshader LUT ≈ 0.076
-    // floor); water can't — ALPHA stays at 0.7, so a near-black ALBEDO
-    // composites to background-with-a-faint-dark-tint, which reads as
-    // "the water turned transparent / black" rather than dim blue.
-    // Remap [0..1] → [0.6..1.0]. deep_color = (0.05, 0.18, 0.42) sRGB
-    // is already dark in linear space (~0.002, 0.026, 0.155); the
-    // floor needs to be high enough that the deepest cave / midnight
-    // water still reads as a recognizable blue against the background,
-    // not just slightly-tinted darkness. 0.6 keeps night/underground
-    // water visibly blue while still dimming dusk and torch-lit caves
-    // below daylight.
-    light = mix(0.7, 1.0, light);
-    ALBEDO = col * b * light;
+    // Same integer effective-light contract and Alpha brightness LUT as
+    // terrain. This removes the old 70% cave-brightness floor.
+    float light_level = max(v_sky * 15.0 - sky_subtraction, v_block * 15.0);
+    float light = clamp(light_level / 15.0, 0.0, 1.0);
+    float f2 = 0.05;
+    float f3 = 1.0 - light;
+    float lit = (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - f2) + f2;
+    ALBEDO = col * b * lit;
     ALPHA = alpha_strength;
 }

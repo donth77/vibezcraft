@@ -201,7 +201,7 @@ func _build_sprite_mesh(id: int) -> void:
 
 # Vanilla af.java RenderItem tints dropped items by world brightness via
 # the same lightmap path mobs/boats use. We mirror that with the shared
-# EntityLighting helper (0.25 floor — see EntityLighting._FLOOR).
+# EntityLighting helper (Alpha 0.05 floor — see EntityLighting._FLOOR).
 # Sprite items push into their per-instance `world_brightness` uniform on
 # the held-item shader (each gets its own material). Cube-block drops
 # share BlockAtlas.entity_material (chunk.gdshader), so we use
@@ -218,7 +218,7 @@ func _update_world_brightness() -> void:
 	# next tick too). Visual tint is non-critical — bail silently.
 	if _chunk_manager == null:
 		var parent: Node = get_parent()
-		if parent != null and parent.has_method("get_world_sky_light"):
+		if parent != null and parent.has_method("get_world_effective_light"):
 			_chunk_manager = parent
 	if _chunk_manager == null:
 		return

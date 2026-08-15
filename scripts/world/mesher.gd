@@ -141,6 +141,16 @@ static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
 	if _native_mesher == null:
 		var result: Dictionary = mesh_chunk(chunk)
 		return result
+	# A stale native binary (pre-lit3) cannot sample the attached neighbor
+	# light planes. Once a neighbor is loaded, using lit2/lit here would
+	# regress border faces to the OOB defaults (sky=15, block=0), producing
+	# bright seam stripes in caves and at night. Preserve correctness by
+	# using the GDScript reference for these seam-heal meshes. Initial meshes
+	# still have empty planes and may use the older native path; current
+	# binaries expose lit3 and never pay this fallback cost.
+	if not _native_has_lit3 and _has_attached_edge_light(chunk):
+		var result: Dictionary = mesh_chunk(chunk)
+		return result
 	var probe_token := PerfProbe.begin("mesher.mesh_chunk")
 	var result: Dictionary
 	if _native_has_lit3:
@@ -231,6 +241,22 @@ static func mesh_chunk_fast(chunk: Chunk) -> Dictionary:
 			_append_non_cube_geometry(chunk, result)
 	PerfProbe.end("mesher.mesh_chunk", probe_token)
 	return result
+
+
+# True when a remesh snapshot carries at least one loaded neighbor's light
+# plane. Plane contents may legitimately be all zero in a sealed cave, so
+# size—not brightness—is the presence signal.
+static func _has_attached_edge_light(chunk: Chunk) -> bool:
+	return (
+		not chunk.edge_sky_light_west.is_empty()
+		or not chunk.edge_sky_light_east.is_empty()
+		or not chunk.edge_sky_light_north.is_empty()
+		or not chunk.edge_sky_light_south.is_empty()
+		or not chunk.edge_block_light_west.is_empty()
+		or not chunk.edge_block_light_east.is_empty()
+		or not chunk.edge_block_light_north.is_empty()
+		or not chunk.edge_block_light_south.is_empty()
+	)
 
 
 # Per-cell non-cube dispatch shared by every appendix below. The chain
@@ -451,7 +477,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 	# packing sky_light/15 in R and block_light/15 in G (sampled from the
 	# cell adjacent to the face — the "open" side it looks at for cube
 	# faces, or self for cross-quad plants). chunk.gdshader reads COLOR.r
-	# scaled by sky_factor uniform + COLOR.g for block-light. Flat
+	# with integer sky subtraction plus COLOR.g for block light. Flat
 	# per-face matches Alpha 1.2.6 — smooth lighting was added Beta 1.6.
 	var colors := PackedColorArray()
 	# Collision face soup (3 verts per triangle, flat). Cube faces contribute;
@@ -581,6 +607,10 @@ static func _emit_block_faces(
 	collision_faces: PackedVector3Array
 ) -> void:
 	var origin := Vector3(x, y, z)
+	# Block classification is invariant across all emitted faces. Hoist it
+	# out of the six-face loop so the GDScript fallback pays one registry
+	# lookup per block, not one per visible face.
+	var block_alpha_test: float = 0.0 if Blocks.is_opaque(id) else 1.0
 	for face_idx in range(6):
 		# CPU-side neighbor culling: skip the face between two adjacent
 		# blocks whenever the neighbor fully hides it. Two exceptions:
@@ -660,7 +690,13 @@ static func _emit_block_faces(
 		# multiply-by-reciprocal can disagree at 1 ULP in float32.
 		var sky_n: float = float(chunk.get_sky_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
 		var blk_n: float = float(chunk.get_block_light(x + no.x, y + no.y, z + no.z)) * _LIGHT_SCALE
-		var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+		# COLOR.a is a flat alpha-test classification consumed by the chunk
+		# shader. Opaque cube faces must not run texture-alpha discard:
+		# under MSAA, edge-sample UV extrapolation can otherwise reach an
+		# adjacent transparent atlas texel and expose the sky between two
+		# perfectly touching floor quads. Non-opaque/cutout cubes retain
+		# the existing discard behavior.
+		var face_light := Color(sky_n, blk_n, 0.0, block_alpha_test)
 		colors.append(face_light)
 		colors.append(face_light)
 		colors.append(face_light)
@@ -753,7 +789,8 @@ static func _emit_fence_geometry(
 	# (bk.java:1010 reads `nq2.b(this.a, n2, n3, n4)` — own cell brightness).
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	# Tight box geometry uses only the opaque planks tile.
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
 	# Post — 6/16 × 16/16 × 6/16, always rendered. Texture wraps onto every
 	# face from the planks tile (Blocks.get_face_texture(FENCE, ...) → "planks").
 	var rect: Rect2 = BlockAtlas.uv_rect("planks")
@@ -868,7 +905,7 @@ static func _emit_stair_geometry(
 			box_b_max = Vector3(fx + 1.0, fy + 0.5, fz + 1.0)
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
 	var tex_name: String = Blocks.get_face_texture(block_id, "side")
 	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
 	_emit_box(verts, norms, uvs, colors, indices, box_a_min, box_a_max, rect, face_light)
@@ -1033,7 +1070,7 @@ static func _emit_fence_gate_geometry(
 	var fz: float = float(z)
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
 	var rect: Rect2 = BlockAtlas.uv_rect("planks")
 	for box: Array in _fence_gate_boxes(facing, is_open):
 		var mn: Vector3 = (box[0] as Vector3) + Vector3(fx, fy, fz)
@@ -1164,6 +1201,7 @@ static func _emit_door_geometry(
 			mx = Vector3(fx + f, fy + 1.0, fz + 1.0)
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	# Door sprites contain transparent window/cutout texels by design.
 	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
 	var tex_name: String = Blocks.door_texture(block_id, meta)
 	var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
@@ -1226,7 +1264,7 @@ static func _emit_slab_geometry(
 		side_rect = BlockAtlas.uv_rect("stone_slab_side")
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
-	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 0.0)
 	# Per-face: [v0, v1, v2, v3, normal, uv_rect]
 	var c000 := Vector3(mn.x, mn.y, mn.z)
 	var c100 := Vector3(mx.x, mn.y, mn.z)
@@ -1309,7 +1347,7 @@ static func _emit_sign_geometry(
 	var rect: Rect2 = BlockAtlas.uv_rect("planks")
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
-	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 0.0)
 	if id == Blocks.SIGN_STANDING:
 		# Detect fence support — if the cell directly below is a fence,
 		# the standing sign should render with a shorter post so it
@@ -1597,7 +1635,7 @@ static func _emit_snow_layer_geometry(
 	var rect: Rect2 = BlockAtlas.uv_rect("snow")
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
-	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
+	var face_color := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 0.0)
 	_emit_box(verts, norms, uvs, colors, indices, mn, mx, rect, face_color)
 	# Selection collision so the player's raycast can target this slab.
 	# Without this, the raycast falls through to the support block below
@@ -1974,6 +2012,7 @@ static func _emit_cross_quads(
 	# instead of /15.0 for ULP-exact float parity with C++ MesherNative.
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	# Crossed sprites contain transparent texels by design.
 	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
 	for quad: Array in _CROSS_QUADS:
 		var base := verts.size()
@@ -2375,7 +2414,9 @@ static func _emit_torch_quads(
 	var top_normal := Vector3(0, 1, 0)
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
+	# _emit_torch_box maps only the opaque torch strip onto tight geometry;
+	# unlike crossed sprites, it must never enter the atlas discard path.
+	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
 	var meta: int = chunk.get_block_meta(x, y, z)
 	# Vanilla MC (both Alpha 1.2.6 bk.java:142-185 and Beta Bukkit/mc-dev
 	# RenderBlocks.renderBlockTorch) renders ALL torches as a closed
@@ -3347,6 +3388,8 @@ static func _emit_bed_geometry(
 	var c111 := Vector3(mx.x, mx.y, mx.z)
 	var sky: int = chunk.get_sky_light(x, y, z)
 	var blk: int = chunk.get_block_light(x, y, z)
+	# Bed side/end textures retain transparent pixels around the legs even
+	# after V is cropped to the visible 9-row silhouette.
 	var face_light := Color(float(sky) / 15.0, float(blk) / 15.0, 0.0, 1.0)
 	# Face table — index matches the dir convention 0=+Y..5=-Z.
 	var face_geom: Array = [

@@ -653,11 +653,10 @@ static func on_random_tick(manager, pos: Vector3i, block_id: int) -> void:
 #     well-lit cells, but accepts low-light neighbors.
 static func _tick_grass(manager, pos: Vector3i) -> void:
 	var above: Vector3i = pos + Vector3i(0, 1, 0)
-	# `manager.get_world_block_light` returns the COMBINED max of sky
-	# + block light at the cell — same as vanilla `cy.j(...)`.
-	var above_light: int = maxi(
-		manager.get_world_sky_light(above), manager.get_world_block_light(above)
-	)
+	# Alpha os.java queries cy.j(...): max(block, sky - skyLightSubtracted).
+	# Use the shared contract so night, caves, and torch-lit areas agree
+	# with rendering and every other gameplay caller.
+	var above_light: int = manager.get_world_effective_light(above)
 	var above_id: int = manager.get_world_block(above)
 	# Decay path — dim AND covered.
 	if above_light < 4 and is_opaque(above_id):
@@ -679,9 +678,7 @@ static func _tick_grass(manager, pos: Vector3i) -> void:
 	if manager.get_world_block(target) != DIRT:
 		return
 	var target_above: Vector3i = target + Vector3i(0, 1, 0)
-	var target_above_light: int = maxi(
-		manager.get_world_sky_light(target_above), manager.get_world_block_light(target_above)
-	)
+	var target_above_light: int = manager.get_world_effective_light(target_above)
 	if target_above_light < 4:
 		return
 	if is_opaque(manager.get_world_block(target_above)):
@@ -689,12 +686,10 @@ static func _tick_grass(manager, pos: Vector3i) -> void:
 	manager.set_world_block(target, GRASS)
 
 
-# Crops growth tick. Advances meta by 1 each fire if conditions hold,
-# then reschedules itself for the next stage. Vanilla BlockCrops.b
-# checks light level (>= 9 in older versions; relaxed in Alpha — any
-# sky-exposed cell works) and hydration. We mirror the relaxed Alpha
-# behavior: any sky-lit cell over farmland grows, with a 200-tick
-# interval (~10s) per stage. Mature (meta=7) stops rescheduling.
+# Crops growth tick. Alpha ig.java requires combined light >= 9 above
+# the crop before advancing. A failed light roll is rescheduled, just as
+# another future random tick would revisit the crop in the original.
+# Hydration/growth-rate detail remains outside this scheduler's scope.
 static func _tick_crops(manager, pos: Vector3i) -> void:
 	var support_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 	if support_id != FARMLAND:
@@ -704,10 +699,13 @@ static func _tick_crops(manager, pos: Vector3i) -> void:
 	var meta: int = manager.get_world_block_meta(pos)
 	if meta >= 7:
 		return  # mature; no more growth ticks
-	manager.set_world_block(pos, CROPS, meta + 1)
+	var light_ok: bool = manager.get_world_effective_light(pos + Vector3i(0, 1, 0)) >= 9
+	if light_ok:
+		manager.set_world_block(pos, CROPS, meta + 1)
 	# Reschedule. Random ±50% jitter so multiple crops planted at once
 	# don't all mature on the same tick (visual variety + spreads the
-	# remesh cost).
+	# remesh cost). Dark crops also retry rather than losing their growth
+	# schedule permanently.
 	var jitter: int = 100 + randi() % 200  # [100, 300] ticks
 	TickScheduler.schedule(pos, CROPS, jitter)
 
@@ -941,17 +939,16 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[SNOW_LAYER] = 0
 	_light_opacity_lut[SAPLING] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
-	# Alpha 1.2.6 BlockFluids: nq.q[water]=nq.q[lava]=0 (nq.java:139 defaults
-	# `q` to `a() ? 255 : 0`, and BlockFluids.a() returns false — ld.java:53).
-	# The sky-light column pass (ha.java:199-200) bumps 0 → 1, so fluids
-	# attenuate 1 per step. Bukkit/Beta later raised water to 3 (`.g(3)`),
-	# which we originally used — that made ocean floors pitch-black at ~5
-	# blocks deep, not authentic Alpha. Lava block-light emission (15) is
-	# carried separately via light_emission().
-	_light_opacity_lut[WATER_FLOWING] = 0
-	_light_opacity_lut[WATER_STILL] = 0
-	_light_opacity_lut[LAVA_FLOWING] = 0
-	_light_opacity_lut[LAVA_STILL] = 0
+	# Alpha 1.2.6 explicitly overrides the non-opaque constructor default:
+	# nq.java registers water IDs 8/9 with `.d(3)` and lava IDs 10/11 with
+	# `.d(255)`. Our channel is only 0..15, so opacity 15 is equivalent to
+	# Alpha's 255 for lava: one cell consumes every possible light level.
+	# These values also make fluids participate in the heightmap, preventing
+	# an arbitrarily deep ocean from remaining sky-light 15 throughout.
+	_light_opacity_lut[WATER_FLOWING] = 3
+	_light_opacity_lut[WATER_STILL] = 3
+	_light_opacity_lut[LAVA_FLOWING] = 15
+	_light_opacity_lut[LAVA_STILL] = 15
 	# Vanilla qh.java (BlockFire) has no opacity override → inherits the
 	# default 0 because fire is non-solid. Keep it transparent so fire
 	# doesn't cast a sky-light shadow on blocks below it.
@@ -1011,6 +1008,11 @@ static func _build_light_opacity_lut() -> void:
 	# Mob spawner cage — light passes through bars (vanilla eb.java
 	# inherits getOpacity=0 from BlockContainer when isOpaqueCube=false).
 	_light_opacity_lut[MOB_SPAWNER] = 0
+	# Slime blocks are rendered as translucent non-opaque cubes. Make their
+	# light contract match that silhouette instead of inheriting the LUT's
+	# fully-opaque default (SLIME_BLOCK is post-Alpha, so this is an explicit
+	# project policy rather than a 1.2.6 registry port).
+	_light_opacity_lut[SLIME_BLOCK] = 0
 
 
 static func light_opacity(id: int) -> int:
@@ -1021,23 +1023,24 @@ static func light_opacity(id: int) -> int:
 	return _light_opacity_lut[id]
 
 
-# Block-light emission on the 0..15 scale (torches, lava, glowstone). Base
+# Block-light emission on the 0..15 scale (torches, lava, lit furnace). Base
 # for block-light BFS — each source seeds its cell with this value and
-# neighbors decay by max(opacity, 1) per step. Sourced from Alpha Block.d()
-# overrides; lava returns 30 on Alpha's 0-30 internal scale (ld.java:168)
-# which maps to 15 on our scale. Not yet consumed by Lighting (block-light
-# channel lands in a later pass) but wiring it here keeps block metadata
-# complete so the lighting port flips on without revisiting every block.
+# neighbors decay by max(opacity, 1) per step. Alpha nq.java's chained
+# `.a(float)` registration writes `int(15 * value)` into the emission table.
 static func light_emission(id: int) -> int:
 	match id:
 		LAVA_FLOWING, LAVA_STILL:
 			return 15
 		FIRE:
-			return 15  # qh.java:47 `d() return 10` on Alpha 0-30 → 15 on our 0-15 scale
+			return 15  # nq.java registers fire with .a(1.0f)
 		TORCH:
-			return 14  # vanilla nq.aE BlockTorch `d() return 14`
+			return 14  # nq.java registers torch with .a(0.9375f)
+		LIT_FURNACE:
+			return 13  # int(15 * 0.875), nq.java active furnace
+		MUSHROOM_BROWN:
+			return 1  # int(15 * 0.125), nq.java brown mushroom
 		JACK_O_LANTERN:
-			return 15  # vanilla BlockPumpkinLantern.lightEmission = 15
+			return 15  # nq.java registers jack o'lantern with .a(1.0f)
 	return 0
 
 
@@ -1074,6 +1077,16 @@ static func can_place_at(id: int, support_id: int) -> bool:
 		# Nothing else accepted (not grass / dirt) so the player has to
 		# till first.
 		return support_id == FARMLAND
+	return true
+
+
+# Light-only half of placement validation. Kept separate from support checks
+# because most blocks have no light restriction and callers already have the
+# effective cell value available through ChunkManager.
+static func light_allows_placement(id: int, effective_light: int) -> bool:
+	if id == MUSHROOM_BROWN or id == MUSHROOM_RED:
+		# Alpha mr.java:17 — combined light must be at most 13.
+		return effective_light <= 13
 	return true
 
 

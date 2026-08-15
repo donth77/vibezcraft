@@ -744,7 +744,7 @@ func _build_textured_box(
 # materials. Uses the shared EntityLighting helper so the player model
 # matches the same 0.25 floor used by boats / carts / mobs (vanilla's
 # 0.05 floor renders entities near-black at night in our linear-space
-# pipeline — read EntityLighting._FLOOR for the reasoning).
+# pipeline — read EntityLighting._FLOOR for the shared Alpha LUT).
 func _update_world_brightness() -> void:
 	if _chunk_manager_ref == null:
 		return

@@ -1,7 +1,7 @@
 extends GutTest
 
-# Lighting slice 2: WorldTime autoload covering day cycle math, sky_factor
-# (slice-1 effective_light hook), sun direction, sky/ambient color stops.
+# WorldTime covers artistic sky state plus Alpha's integer effective-light
+# contract used by terrain, entities, and gameplay.
 
 
 func before_each() -> void:
@@ -86,6 +86,27 @@ func test_sky_factor_intermediate_at_dawn_and_dusk() -> void:
 	assert_almost_eq(dawn, dusk, 0.001)
 	assert_gt(dawn, WorldTime.SKY_FACTOR_MIN)
 	assert_lt(dawn, WorldTime.SKY_FACTOR_MAX)
+
+
+# --- Alpha celestial angle + skyLightSubtracted ---
+
+
+func test_sky_light_subtracted_matches_alpha_at_canonical_ticks() -> void:
+	WorldTime.set_time_ticks(6000)
+	assert_eq(WorldTime.sky_light_subtracted(), 0, "noon has no subtraction")
+	WorldTime.set_time_ticks(18000)
+	assert_eq(WorldTime.sky_light_subtracted(), 11, "midnight subtracts eleven levels")
+	WorldTime.set_time_ticks(14000)
+	assert_eq(WorldTime.sky_light_subtracted(), 11, "night plateau begins after dusk")
+	WorldTime.set_time_ticks(23000)
+	assert_eq(WorldTime.sky_light_subtracted(), 6, "pre-dawn transition is stepped")
+
+
+func test_effective_light_subtracts_sky_but_not_block_light() -> void:
+	assert_eq(WorldTime.effective_light_level(15, 0, 11), 4)
+	assert_eq(WorldTime.effective_light_level(15, 12, 11), 12)
+	assert_eq(WorldTime.effective_light_level(3, 0, 11), 0)
+	assert_eq(WorldTime.effective_light_level(99, -4, 0), 15)
 
 
 # --- Color stops ---

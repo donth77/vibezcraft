@@ -144,6 +144,9 @@ public:
 	// neighbor-opacity check below + special-cased to always emit
 	// faces when meshing the spawner itself.
 	static constexpr int MOB_SPAWNER = 51;
+	// Modern QoL translucent cube. Must mirror Blocks.SLIME_BLOCK so
+	// native opacity/alpha-test classification matches GDScript.
+	static constexpr int SLIME_BLOCK = 87;
 
 	MesherNative();
 	~MesherNative();
@@ -176,7 +179,8 @@ public:
 
 	// Slice-5 lighting-aware variant. Same as mesh_chunk_data but also
 	// emits per-vertex COLOR (rgb = sky_light/15, block_light/15, 0;
-	// alpha = 1) so the chunk shader can sample lighting per face.
+	// alpha = alpha-test flag) so the chunk shader can sample lighting
+	// per face without running atlas-alpha discard on opaque MSAA edges.
 	// Sky/block light arrays match `Chunk.sky_light` / `Chunk.block_light`
 	// (PackedByteArray of CHUNK_VOLUME, each entry 0..15). Each face's
 	// vertex color samples the cell ADJACENT to the face (the cell the

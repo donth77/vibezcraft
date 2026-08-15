@@ -79,6 +79,10 @@ var _pending_apply: Dictionary = {}
 # seconds at FAR render distance with active chunk streaming. Cleared
 # automatically on apply.
 var _priority_apply: bool = false
+# Monotonic presentation serial. ChunkManager's unload handshake records this
+# before requesting newly exposed boundary faces and keeps the outgoing chunk
+# visible until every surviving neighbor has applied a newer mesh.
+var _mesh_apply_revision: int = 0
 
 # CHEST cells in this chunk get a separate ChestNode entity (see
 # scripts/entities/chest_node.gd) for animated lid rendering. The chunk
@@ -474,7 +478,7 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		warrs[Mesh.ARRAY_NORMAL] = data.water_normals
 		warrs[Mesh.ARRAY_TEX_UV] = data.water_uvs
 		# Per-vertex sky/block light — water shader multiplies its color by
-		# max(sky·sky_factor, block) so caves / night dim water like cubes.
+		# max(sky - integer subtraction, block), then uses the terrain LUT.
 		# Native paths emit `water_colors`; GDScript path always does.
 		# Missing key means stale extension before the lighting wiring; fall
 		# back to `null` and the shader skips the multiply (constant tint).
@@ -511,6 +515,7 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		_sync_chest_entities()
 	if chunk.has_sign_blocks or not _sign_nodes.is_empty():
 		_sync_sign_entities()
+	_mesh_apply_revision += 1
 	PerfProbe.end("chunk_node.apply", probe_token)
 
 

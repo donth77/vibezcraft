@@ -37,12 +37,16 @@ var _lid_pivot: Node3D
 var _lid: MeshInstance3D
 var _open_tween: Tween
 var _is_open: bool = false
+var _chunk_manager: Node = null
+var _last_light_brightness: float = -1.0
+var _light_sample_accum: float = 0.0
 
 
 func _ready() -> void:
+	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 	_body = MeshInstance3D.new()
 	_body.mesh = _build_body_mesh()
-	_body.material_override = BlockAtlas.material()
+	_body.material_override = BlockAtlas.entity_material()
 	add_child(_body)
 	_lid_pivot = Node3D.new()
 	# Position the pivot at the back-top edge of the body. Mesh coords
@@ -53,8 +57,37 @@ func _ready() -> void:
 	add_child(_lid_pivot)
 	_lid = MeshInstance3D.new()
 	_lid.mesh = _build_lid_mesh()
-	_lid.material_override = BlockAtlas.material()
+	_lid.material_override = BlockAtlas.entity_material()
 	_lid_pivot.add_child(_lid)
+	_update_entity_lighting()
+
+
+func _process(delta: float) -> void:
+	# Chests are stationary, so a 10 Hz sample is more than enough for the
+	# slow day/night transition while avoiding one chunk lookup per render
+	# frame per chest. Chest-minecart payloads reuse this node and still track
+	# movement with at most 100 ms of latency.
+	_light_sample_accum += delta
+	if _light_sample_accum < 0.1:
+		return
+	_light_sample_accum = 0.0
+	_update_entity_lighting()
+
+
+func _update_entity_lighting() -> void:
+	if _chunk_manager == null or _body == null or _lid == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + 0.5)),
+		int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_body.set_instance_shader_parameter("entity_brightness", brightness)
+	_lid.set_instance_shader_parameter("entity_brightness", brightness)
 
 
 # Vanilla c.java places the chest's "front" face based on the player's

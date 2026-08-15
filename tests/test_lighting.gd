@@ -34,14 +34,14 @@ func test_leaves_have_opacity_one() -> void:
 	assert_eq(Blocks.light_opacity(Blocks.LEAVES), 1)
 
 
-func test_water_has_alpha_opacity_zero() -> void:
-	# Alpha 1.2.6 BlockFluids doesn't override Block.q, so q[water]=q[lava]=0
-	# (nq.java:139 + ld.java:53). The column pass bumps 0 → 1 (ha.java:199),
-	# so fluids attenuate 1/step — NOT the Bukkit/Beta value of 3.
-	assert_eq(Blocks.light_opacity(Blocks.WATER_STILL), 0)
-	assert_eq(Blocks.light_opacity(Blocks.WATER_FLOWING), 0)
-	assert_eq(Blocks.light_opacity(Blocks.LAVA_STILL), 0)
-	assert_eq(Blocks.light_opacity(Blocks.LAVA_FLOWING), 0)
+func test_fluids_have_alpha_registered_opacity() -> void:
+	# nq.java's chained registrations override the non-opaque constructor
+	# default: water IDs 8/9 call .d(3), lava IDs 10/11 call .d(255).
+	# Opacity 15 is equivalent to 255 on this engine's 0..15 channel.
+	assert_eq(Blocks.light_opacity(Blocks.WATER_STILL), 3)
+	assert_eq(Blocks.light_opacity(Blocks.WATER_FLOWING), 3)
+	assert_eq(Blocks.light_opacity(Blocks.LAVA_STILL), 15)
+	assert_eq(Blocks.light_opacity(Blocks.LAVA_FLOWING), 15)
 
 
 func test_solid_blocks_are_fully_opaque() -> void:
@@ -97,13 +97,9 @@ func test_full_solid_floor_kills_sky_light_below() -> void:
 	assert_eq(chunk.get_sky_light(8, 0, 8), 0)
 
 
-func test_water_does_not_attenuate_sky_light() -> void:
-	# Alpha column pass: q=0 cells above the heightmap stay at 15 (the
-	# attenuating loop in ha.java:197 only runs once we hit an opacity > 0
-	# cell). Water has q=0, so a water column stays fully lit at 15; the
-	# first opaque cell below the water is where sky-light drops. This is
-	# why underwater dirt/sand is visible — the face ABOVE samples the
-	# water cell's light (full daylight), not 0.
+func test_water_attenuates_sky_light_by_three_per_cell() -> void:
+	# Alpha water opacity is 3. The isolated column therefore descends
+	# 15 -> 12 -> 9 -> 6 before the opaque floor consumes the remainder.
 	var chunk := Chunk.new()
 	for wy: int in [58, 59, 60]:
 		chunk.set_block(8, wy, 8, Blocks.WATER_STILL)
@@ -114,9 +110,9 @@ func test_water_does_not_attenuate_sky_light() -> void:
 	chunk.set_block(8, 57, 8, Blocks.STONE)  # floor
 	Lighting.fill_sky_light(chunk)
 	assert_eq(chunk.get_sky_light(8, 61, 8), 15, "above water is full daylight")
-	assert_eq(chunk.get_sky_light(8, 60, 8), 15, "water is transparent to sky-light")
-	assert_eq(chunk.get_sky_light(8, 59, 8), 15, "water is transparent to sky-light")
-	assert_eq(chunk.get_sky_light(8, 58, 8), 15, "water is transparent to sky-light")
+	assert_eq(chunk.get_sky_light(8, 60, 8), 12, "first water cell consumes 3")
+	assert_eq(chunk.get_sky_light(8, 59, 8), 9, "second water cell consumes 3")
+	assert_eq(chunk.get_sky_light(8, 58, 8), 6, "third water cell consumes 3")
 	assert_eq(chunk.get_sky_light(8, 57, 8), 0, "stone floor below water is opaque → 0")
 
 
@@ -286,6 +282,46 @@ func test_bounded_update_matches_full_refill_after_cap_removed() -> void:
 	)
 
 
+func _make_tall_sealed_shaft(capped: bool) -> Chunk:
+	var c := Chunk.new()
+	# Four solid walls isolate the center column from lateral daylight.
+	for y in range(1, Chunk.SIZE_Y):
+		c.set_block(7, y, 8, Blocks.STONE)
+		c.set_block(9, y, 8, Blocks.STONE)
+		c.set_block(8, y, 7, Blocks.STONE)
+		c.set_block(8, y, 9, Blocks.STONE)
+	c.set_block(8, 0, 8, Blocks.STONE)
+	if capped:
+		c.set_block(8, 100, 8, Blocks.STONE)
+	return c
+
+
+func test_incremental_sky_update_relights_full_tall_column_after_cap_removed() -> void:
+	var bounded := _make_tall_sealed_shaft(true)
+	var full := _make_tall_sealed_shaft(true)
+	Lighting.fill_sky_light(bounded)
+	Lighting.fill_sky_light(full)
+	bounded.set_block(8, 100, 8, Blocks.AIR)
+	full.set_block(8, 100, 8, Blocks.AIR)
+	Lighting.update_sky_light_around(bounded, 8, 100, 8)
+	Lighting.fill_sky_light(full)
+	assert_eq(bounded.get_sky_light(8, 50, 8), 15, "deep shaft relights below old radius")
+	assert_true(_sky_light_arrays_equal(bounded, full), "tall removal matches full refill")
+
+
+func test_incremental_sky_update_darkens_full_tall_column_after_cap_added() -> void:
+	var bounded := _make_tall_sealed_shaft(false)
+	var full := _make_tall_sealed_shaft(false)
+	Lighting.fill_sky_light(bounded)
+	Lighting.fill_sky_light(full)
+	bounded.set_block(8, 100, 8, Blocks.STONE)
+	full.set_block(8, 100, 8, Blocks.STONE)
+	Lighting.update_sky_light_around(bounded, 8, 100, 8)
+	Lighting.fill_sky_light(full)
+	assert_eq(bounded.get_sky_light(8, 50, 8), 0, "deep shaft darkens below old radius")
+	assert_true(_sky_light_arrays_equal(bounded, full), "tall placement matches full refill")
+
+
 func test_fill_sky_light_is_idempotent() -> void:
 	# Sanity: fill_sky_light run twice on the same chunk should give the
 	# same result as run once. If this fails, there's an order-dependence
@@ -344,7 +380,9 @@ class _StubManager:
 		return (chunks[coord] as Chunk).get_block(lx, world_pos.y, lz)
 
 	func get_world_sky_light(world_pos: Vector3i) -> int:
-		if world_pos.y < 0 or world_pos.y >= Chunk.SIZE_Y:
+		if world_pos.y < 0:
+			return 0
+		if world_pos.y >= Chunk.SIZE_Y:
 			return 15
 		var cx: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
 		var cz: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
@@ -499,6 +537,29 @@ func test_lava_seeds_block_light_at_15() -> void:
 	assert_eq(chunk.get_block_light(8, 64, 8), 15)
 
 
+func test_alpha_emission_registry_values() -> void:
+	assert_eq(Blocks.light_emission(Blocks.TORCH), 14)
+	assert_eq(Blocks.light_emission(Blocks.FIRE), 15)
+	assert_eq(Blocks.light_emission(Blocks.LAVA_STILL), 15)
+	assert_eq(Blocks.light_emission(Blocks.LIT_FURNACE), 13)
+	assert_eq(Blocks.light_emission(Blocks.MUSHROOM_BROWN), 1)
+	assert_eq(Blocks.light_emission(Blocks.JACK_O_LANTERN), 15)
+
+
+func test_gdscript_block_refill_clears_removed_emitter_light() -> void:
+	var native_was: RefCounted = Lighting._native_lighting
+	Lighting._native_lighting = null
+	var chunk := Chunk.new()
+	chunk.set_block(8, 64, 8, Blocks.TORCH)
+	Lighting.fill_block_light(chunk)
+	assert_eq(chunk.get_block_light(9, 64, 8), 13, "torch initially lights neighbor")
+	chunk.set_block(8, 64, 8, Blocks.AIR)
+	Lighting.fill_block_light(chunk)
+	var after: int = chunk.get_block_light(9, 64, 8)
+	Lighting._native_lighting = native_was
+	assert_eq(after, 0, "from-scratch fallback refill removes ghost light")
+
+
 func test_block_light_decays_in_air() -> void:
 	# Air (opacity 0) decays by max(1, 0) = 1 per step. 15-cell reach.
 	var chunk := Chunk.new()
@@ -570,6 +631,58 @@ func test_update_block_light_around_world_darkens_after_emitter_removed() -> voi
 	Lighting.update_block_light_around_world(Vector3i(8, 64, 8), manager)
 	assert_eq(chunk.get_block_light(8, 64, 8), 0, "removed-emitter cell drops to 0")
 	assert_eq(chunk.get_block_light(9, 64, 8), 0, "previously-lit neighbor drops to 0")
+
+
+func test_batched_block_light_matches_fresh_fill_for_multiple_emitters() -> void:
+	var manager := _StubManager.new()
+	var actual := Chunk.new()
+	var expected := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = actual
+	Lighting.fill_block_light(actual)
+	for p: Vector3i in [Vector3i(4, 64, 4), Vector3i(11, 67, 11)]:
+		actual.set_block(p.x, p.y, p.z, Blocks.LAVA_STILL)
+		expected.set_block(p.x, p.y, p.z, Blocks.LAVA_STILL)
+	Lighting.update_block_light_around_world_many(
+		[Vector3i(4, 64, 4), Vector3i(11, 67, 11)], manager
+	)
+	Lighting.fill_block_light(expected)
+	assert_eq(actual.block_light, expected.block_light)
+
+
+func test_batched_block_light_removes_overlapping_ghost_light() -> void:
+	var manager := _StubManager.new()
+	var chunk := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = chunk
+	var positions: Array[Vector3i] = [Vector3i(6, 64, 8), Vector3i(10, 64, 8)]
+	for p: Vector3i in positions:
+		chunk.set_block(p.x, p.y, p.z, Blocks.LAVA_STILL)
+	Lighting.fill_block_light(chunk)
+	for p: Vector3i in positions:
+		chunk.set_block(p.x, p.y, p.z, Blocks.AIR)
+	Lighting.update_block_light_around_world_many(positions, manager)
+	assert_eq(chunk.block_light.count(0), chunk.block_light.size())
+	assert_eq(chunk.get_block_light(8, 64, 8), 0)
+
+
+func test_batched_sky_light_matches_fresh_fill_for_multiple_roof_edits() -> void:
+	var manager := _StubManager.new()
+	var actual := Chunk.new()
+	var expected := Chunk.new()
+	var openings: Array[Vector2i] = [Vector2i(4, 4), Vector2i(11, 11)]
+	for x in range(Chunk.SIZE_X):
+		for z in range(Chunk.SIZE_Z):
+			if Vector2i(x, z) in openings:
+				continue
+			actual.set_block(x, 96, z, Blocks.STONE)
+			expected.set_block(x, 96, z, Blocks.STONE)
+	manager.chunks[Vector2i(0, 0)] = actual
+	Lighting.fill_sky_light(actual)
+	for opening: Vector2i in openings:
+		actual.set_block(opening.x, 96, opening.y, Blocks.STONE)
+		expected.set_block(opening.x, 96, opening.y, Blocks.STONE)
+	Lighting.update_sky_light_around_world_many([Vector3i(4, 96, 4), Vector3i(11, 96, 11)], manager)
+	Lighting.fill_sky_light(expected)
+	assert_eq(actual.sky_light, expected.sky_light)
 
 
 func test_update_block_light_around_world_crosses_chunk_seam() -> void:
@@ -818,3 +931,46 @@ func test_light_accessors_consult_edge_slices() -> void:
 	# In-chunk reads are untouched by attached slices.
 	c.set_sky_light(3, 5, 3, 4)
 	assert_eq(c.get_sky_light(3, 5, 3), 4, "in-chunk read ignores edge slices")
+
+
+func test_async_relight_rejects_result_after_participant_edit() -> void:
+	var manager := _StubManager.new()
+	var target := Chunk.new()
+	var neighbor := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = target
+	manager.chunks[Vector2i(1, 0)] = neighbor
+	var snapshot: Array = Lighting.prepare_relight_data(
+		Vector2i(0, 0), target, [Vector2i(1, 0)], manager
+	)
+	var revisions: Dictionary = Lighting.relight_revisions(snapshot)
+	var stale_sky := target.sky_light.duplicate()
+	stale_sky[Chunk.index(8, 64, 8)] = 0
+	var result: Dictionary = {
+		Vector2i(0, 0): {"sky_light": stale_sky, "block_light": target.block_light.duplicate()}
+	}
+	target.set_block(8, 64, 8, Blocks.STONE)
+	var live_before: int = target.get_sky_light(8, 64, 8)
+	assert_false(
+		Lighting.apply_relight_result(result, manager, revisions),
+		"participant revision mismatch rejects the complete job"
+	)
+	assert_eq(
+		target.get_sky_light(8, 64, 8), live_before, "stale worker array never replaces live light"
+	)
+
+
+func test_async_relight_accepts_matching_revisions_and_advances_revision() -> void:
+	var manager := _StubManager.new()
+	var target := Chunk.new()
+	manager.chunks[Vector2i(0, 0)] = target
+	var snapshot: Array = Lighting.prepare_relight_data(Vector2i(0, 0), target, [], manager)
+	var revisions: Dictionary = Lighting.relight_revisions(snapshot)
+	var next_sky := target.sky_light.duplicate()
+	next_sky[Chunk.index(8, 64, 8)] = 7
+	var result: Dictionary = {
+		Vector2i(0, 0): {"sky_light": next_sky, "block_light": target.block_light.duplicate()}
+	}
+	var before_revision: int = target.lighting_revision
+	assert_true(Lighting.apply_relight_result(result, manager, revisions))
+	assert_eq(target.get_sky_light(8, 64, 8), 7)
+	assert_eq(target.lighting_revision, before_revision + 1)

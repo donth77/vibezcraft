@@ -13,13 +13,14 @@ extends Node
 #
 # Rules (Alpha-faithful):
 #   * Only zombies for now (mob types Stage 1).
-#   * Skylight ≤ 7 at the candidate cell (vanilla `World.getBlockLightValue`
-#     comparison — Alpha used <=7 for hostile spawning).
+#   * Effective combined light ≤ 7 at the candidate cell (Alpha's
+#     time-adjusted `World.getBlockLightValue`).
 #   * Target cell + cell-above are AIR; cell-below is opaque (real floor).
 #   * Range 24..128 m XZ from the player (vanilla SPAWN_DISTANCE band).
 #   * Hostile cap = 70 total active mobs (vanilla constant).
-#   * Time-gate: only spawn during night (WorldTime.sky_factor() < 0.5)
-#     when ambient sky-light at any candidate cell is naturally ≤ 7.
+# There is intentionally no coarse global night gate: Alpha applies the
+# per-cell combined-light rule, allowing dark caves to spawn hostiles by day
+# while rejecting bright surface cells.
 
 const _MOB_REGISTRY: GDScript = preload("res://scripts/entities/mob_registry.gd")
 const _MOB_BASE: GDScript = preload("res://scripts/entities/mob_base.gd")
@@ -170,11 +171,8 @@ func _run_spawn_pass() -> void:
 	# because they're deep underground anyway.
 	for _i in range(_SLIME_ATTEMPTS_PER_TICK):
 		_try_spawn_slime(manager, player)
-	# Normal hostile pass — gated by night (vanilla `spawnHostileMobs`
-	# from gameDifficulty + the per-cell light check). Sunset crosses
-	# sky_factor ≤ 0.5.
-	if WorldTime.sky_factor() > 0.5:
-		return
+	# Normal hostile pass. The per-cell effective-light check below is the
+	# time-of-day gate for exposed cells and still permits dark daytime caves.
 	if pool.is_empty():
 		return
 	_spawns_this_tick = 0
@@ -292,18 +290,10 @@ func _is_valid_hostile_spawn_cell(manager: Node, pos: Vector3i) -> bool:
 	var floor_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 	if not Blocks.is_opaque(floor_id):
 		return false
-	# Vanilla light check — both sky AND block light contribute, but the
-	# SKY component is scaled by the current sun position (vanilla's
-	# `skyLightSubtracted`). Without the scale, surface cells still
-	# read sky=15 at midnight (the chunk stores raw daylight max), so
-	# `max(15, 0) > 7` rejected every surface spawn and hostiles only
-	# appeared in caves. WorldTime.sky_factor() gives 0..1 (0.05 at
-	# midnight, 1.0 at noon) — perfect attenuator. Same formula chunk
-	# shader uses for terrain brightness.
-	var sky_raw: int = manager.get_world_sky_light(pos)
-	var sky_eff: int = int(round(float(sky_raw) * WorldTime.sky_factor()))
-	var blk: int = manager.get_world_block_light(pos)
-	var lit: int = maxi(sky_eff, blk)
+	# Alpha combines block light with raw sky minus the world's integer
+	# skyLightSubtracted value. The manager helper is shared with shaders,
+	# plants, AI, and entity rendering.
+	var lit: int = manager.get_world_effective_light(pos)
 	if lit > 7:
 		return false
 	return true

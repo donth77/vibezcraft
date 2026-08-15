@@ -20,6 +20,7 @@ class FakeManager:
 	var blocks: Dictionary = {}  # Vector3i → block_id
 	var sky_light: Dictionary = {}  # Vector3i → 0..15
 	var block_light: Dictionary = {}  # Vector3i → 0..15
+	var effective_light: Dictionary = {}  # optional centralized-value override
 	var writes: Array = []  # log of [pos, id] tuples
 
 	func set_cell(pos: Vector3i, id: int, sky: int = 0, blk: int = 0) -> void:
@@ -35,6 +36,11 @@ class FakeManager:
 
 	func get_world_block_light(pos: Vector3i) -> int:
 		return block_light.get(pos, 0)
+
+	func get_world_effective_light(pos: Vector3i) -> int:
+		if effective_light.has(pos):
+			return effective_light[pos]
+		return maxi(get_world_sky_light(pos), get_world_block_light(pos))
 
 	func set_world_block(pos: Vector3i, id: int) -> void:
 		blocks[pos] = id
@@ -115,6 +121,23 @@ func test_grass_under_opaque_but_lit_does_not_decay() -> void:
 	assert_eq(_mgr.blocks[pos], Blocks.GRASS, "lit grass should NOT decay")
 
 
+func test_grass_uses_effective_not_raw_sky_light() -> void:
+	var pos := Vector3i(0, 64, 0)
+	var above: Vector3i = pos + Vector3i(0, 1, 0)
+	_mgr.set_cell(pos, Blocks.GRASS, 15, 0)
+	_mgr.set_cell(above, Blocks.STONE, 15, 0)
+	_mgr.effective_light[above] = 0
+	for _i in range(100):
+		Blocks.on_random_tick(_mgr, pos, Blocks.GRASS)
+		if _mgr.blocks[pos] == Blocks.DIRT:
+			break
+	assert_eq(
+		_mgr.blocks[pos],
+		Blocks.DIRT,
+		"raw sky 15 must not keep grass alive when time-adjusted light is 0"
+	)
+
+
 # --- Spread: well-lit grass → adjacent lit dirt becomes grass ---
 
 
@@ -128,11 +151,11 @@ func test_grass_spreads_to_adjacent_lit_dirt() -> void:
 	_mgr.set_cell(grass_pos + Vector3i(0, 1, 0), Blocks.AIR, 15, 0)  # well-lit + non-opaque
 	_mgr.set_cell(dirt_pos, Blocks.DIRT, 15, 0)
 	_mgr.set_cell(dirt_pos + Vector3i(0, 1, 0), Blocks.AIR, 15, 0)  # well-lit + non-opaque
-	# The spread sample picks a random offset in ±1 X, ±3 Y, ±1 Z (27
-	# cells). Only ONE of those 27 hits our dirt cell. 200 trials gives
-	# >99.9% probability of at least one hit AND a successful promotion
-	# (since the dirt + light conditions are met).
-	for _i in range(200):
+	# The spread sample has 3×5×3 = 45 offsets. Only one hits our dirt
+	# cell, so 200 trials still has a ~1.1% miss rate and made the full suite
+	# flaky depending on earlier RNG consumption. 1,000 trials lowers that
+	# to ~1.7e-10 without affecting production randomness.
+	for _i in range(1000):
 		Blocks.on_random_tick(_mgr, grass_pos, Blocks.GRASS)
 		if _mgr.blocks.get(dirt_pos, Blocks.AIR) == Blocks.GRASS:
 			break

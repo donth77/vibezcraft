@@ -61,6 +61,8 @@ var _stuck_check_accum: float = 0.0
 var _chunk_manager: Node = null
 var _player: Node = null
 var _mesh: MeshInstance3D
+var _light_materials: Array = []
+var _last_light_brightness: float = -1.0
 
 
 # Caller (interaction.gd._fire_bow) sets initial velocity from
@@ -78,6 +80,7 @@ func _ready() -> void:
 	_player = get_tree().root.get_node_or_null("Main/Player")
 	_build_mesh()
 	_update_orientation()
+	_update_entity_lighting()
 
 
 # Vanilla-faithful arrow visual — pixel-extruded from arrow.png via
@@ -119,7 +122,9 @@ func _build_mesh() -> void:
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = Color.WHITE
 	arrow_mi.material_override = mat
+	_light_materials.append([mat, Color.WHITE])
 	_mesh.add_child(arrow_mi)
 
 
@@ -136,6 +141,7 @@ func _build_fallback_mesh() -> void:
 	shaft_mat.albedo_color = Color(0.55, 0.40, 0.25)
 	shaft_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	shaft_mi.material_override = shaft_mat
+	_light_materials.append([shaft_mat, shaft_mat.albedo_color])
 	_mesh.add_child(shaft_mi)
 	var head_mi := MeshInstance3D.new()
 	var head := BoxMesh.new()
@@ -146,6 +152,7 @@ func _build_fallback_mesh() -> void:
 	head_mat.albedo_color = Color(0.65, 0.65, 0.70)
 	head_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	head_mi.material_override = head_mat
+	_light_materials.append([head_mat, head_mat.albedo_color])
 	_mesh.add_child(head_mi)
 
 
@@ -175,11 +182,13 @@ func _physics_process(delta: float) -> void:
 		_stuck_check_accum += delta
 		if _stuck_check_accum >= 0.1:
 			_stuck_check_accum = 0.0
+			_update_entity_lighting()
 			_check_pickup()
 			_tick_lifetime()
 		return
 	if _tick_lifetime():
 		return
+	_update_entity_lighting()
 	# Per-tick constants → per-second: drag^(ticks/sec*delta) is
 	# Godot's correct continuous form, and gravity becomes (per-tick *
 	# ticks/sec²) m/s².
@@ -201,6 +210,24 @@ func _physics_process(delta: float) -> void:
 		return
 	global_position = new_pos
 	_update_orientation()
+
+
+func _update_entity_lighting() -> void:
+	if _chunk_manager == null or _light_materials.is_empty():
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	for entry: Array in _light_materials:
+		var material: StandardMaterial3D = entry[0]
+		var base: Color = entry[1]
+		material.albedo_color = Color(
+			base.r * brightness, base.g * brightness, base.b * brightness, base.a
+		)
 
 
 # Returns true if despawned (caller stops further processing).

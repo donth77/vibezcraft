@@ -53,6 +53,24 @@ static var _mining_pool: Array = []
 static var _pool_parent: Node = null
 
 
+# Apply one Alpha-LUT voxel-light sample to an emitter before restart().
+# CPUParticles3D.color is copied into each spawned particle and multiplied by
+# the cached material's canonical 0.6 digging tint. Keeping light on the
+# emitter avoids both failure modes of material mutation:
+#   * all active bursts for a block id share one cached material, so changing
+#     its albedo color would recolor older particles in another light level;
+#   * duplicating a material per burst would allocate on the mining hot path.
+# Vanilla pp/ki samples world brightness while rendering each particle. A
+# short-lived burst cannot cross a meaningful light boundary, so one sample
+# at spawn is visually equivalent and strictly cheaper.
+static func _apply_voxel_light(
+	particles: CPUParticles3D, parent: Node, sample_pos: Vector3i
+) -> float:
+	var brightness: float = EntityLighting.sample_brightness(parent, sample_pos)
+	particles.color = Color(brightness, brightness, brightness, 1.0)
+	return brightness
+
+
 # Returns / builds the cached material for `block_id`. Atlas region comes
 # from BlockAtlas.uv_rect_for(block_id, FACE_TOP) — matches the dig sound's
 # top-face-as-canonical convention.
@@ -148,6 +166,10 @@ static func spawn_break(parent: Node, world_pos: Vector3i, block_id: int, meta: 
 	if mat == null:
 		return
 	var particles: CPUParticles3D = _acquire(parent)
+	# The replacement block has already been written by interaction.gd, so
+	# sampling the broken cell reads the newly exposed cave/air light—the
+	# same open-cell channel terrain faces around the hole consume.
+	_apply_voxel_light(particles, parent, world_pos)
 	# Swap in the per-block material on the cached QuadMesh draw pass.
 	# Pool entries share one mesh; only the albedo texture varies per block.
 	var draw: QuadMesh = particles.mesh as QuadMesh
@@ -308,6 +330,12 @@ static func spawn_mining(
 	if mat == null:
 		return
 	var particles: CPUParticles3D = _acquire_mining(parent)
+	# The mined block is still opaque. Sample just outside the struck face,
+	# exactly where that face's terrain vertices sample their light.
+	var light_cell := (
+		world_pos + Vector3i(roundi(face_normal.x), roundi(face_normal.y), roundi(face_normal.z))
+	)
+	_apply_voxel_light(particles, parent, light_cell)
 	var draw: QuadMesh = particles.mesh as QuadMesh
 	if draw != null:
 		draw.material = mat

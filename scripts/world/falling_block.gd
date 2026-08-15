@@ -17,6 +17,8 @@ var _velocity_y: float = 0.0
 var _spawn_time: float = 0.0
 var _ray_query: PhysicsRayQueryParameters3D
 var _chunk_manager: Node
+var _mesh: MeshInstance3D
+var _last_light_brightness: float = -1.0
 
 
 # Vanilla BlockSand.canFallBelow: a falling block passes through air,
@@ -37,9 +39,10 @@ static func is_passable_for_fall(id: int) -> bool:
 func setup(p_block_id: int) -> void:
 	block_id = p_block_id
 	_spawn_time = Time.get_ticks_msec() / 1000.0
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = BlockMesh.get_cube_mesh(p_block_id, MESH_SIZE)
-	add_child(mesh)
+	_mesh = MeshInstance3D.new()
+	_mesh.mesh = BlockMesh.get_cube_mesh(p_block_id, MESH_SIZE)
+	_mesh.material_override = BlockAtlas.entity_material()
+	add_child(_mesh)
 	_ray_query = PhysicsRayQueryParameters3D.new()
 
 
@@ -54,6 +57,7 @@ func _ready() -> void:
 	var player: CharacterBody3D = get_tree().root.get_node_or_null("Main/Player") as CharacterBody3D
 	if player != null:
 		_ray_query.exclude = [player.get_rid()]
+	_update_entity_lighting()
 
 
 func _process(delta: float) -> void:
@@ -64,6 +68,7 @@ func _process(delta: float) -> void:
 	if elapsed > SAFETY_LIFETIME_SEC:
 		_land_at(int(floor(global_position.y)))
 		return
+	_update_entity_lighting()
 
 	var x: int = int(floor(global_position.x))
 	var z: int = int(floor(global_position.z))
@@ -98,6 +103,19 @@ func _process(delta: float) -> void:
 	if new_y < -10.0:
 		# Fell off the world; just disappear.
 		queue_free()
+
+
+func _update_entity_lighting() -> void:
+	if _mesh == null or _chunk_manager == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_mesh.set_instance_shader_parameter("entity_brightness", brightness)
 
 
 # Place the block at the landing cell, but if that cell isn't passable

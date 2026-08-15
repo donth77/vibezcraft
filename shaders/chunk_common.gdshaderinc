@@ -16,17 +16,15 @@ uniform vec4 fire_uv = vec4(-1.0);  // (x, y, w, h) in atlas space; (-1,-1,-1,-1
 const float FIRE_FRAMES = 32.0;
 const float FIRE_FPS = 24.0;
 
-// Sky-light multiplier driven by WorldTime.sky_factor() (0.05 midnight,
-// 1.0 noon). Applied to the per-vertex sky_light value packed in COLOR.r.
-// Default 1.0 keeps the shader functional when no driver is attached
-// (tests, editor preview).
-uniform float sky_factor : hint_range(0.0, 1.0) = 1.0;
+// Alpha's integer skyLightSubtracted value, driven by WorldTime (0 by day,
+// 11 at night). Default 0 keeps editor/test previews at full daylight.
+uniform float sky_subtraction : hint_range(0.0, 11.0, 1.0) = 0.0;
 
 // Debug visualization, cycled at runtime via F8 (see debug_stats.gd).
 //   0 = normal (Alpha lighting model)
 //   1 = sky_light heatmap (red→green = 0→15, what the mesher packed)
 //   2 = block_light heatmap
-//   3 = combined-light heatmap (after sky_factor + max-of-both)
+//   3 = combined-light heatmap (after sky subtraction + max-of-both)
 // Default 0 keeps shipping behavior identical when no key is pressed.
 uniform int debug_view = 0;
 
@@ -120,6 +118,15 @@ const float entity_brightness = -1.0;
 varying vec3 v_normal;
 varying vec2 v_light;
 varying float v_savanna;
+// Per-face alpha-test classification packed by the mesher in COLOR.a.
+// Opaque cube faces set 0; leaves/glass/cutout geometry set 1. This gate is
+// required with MSAA: edge samples interpolate built-in UV at the pixel
+// center, which may lie outside a covered primitive. On distant block faces
+// that extrapolation can reach an adjacent transparent atlas texel. Testing
+// texture alpha on every face then discards a covered MSAA sample and exposes
+// the sky as a one-pixel cave seam. A flat flag prevents interpolation and
+// keeps the discard path completely inactive for opaque terrain.
+varying flat float v_alpha_test;
 
 
 void vertex() {
@@ -130,6 +137,7 @@ void vertex() {
 	// savanna tint factor (see savanna_from_vertex above).
 	v_light = COLOR.rg;
 	v_savanna = COLOR.b;
+	v_alpha_test = COLOR.a;
 }
 
 
@@ -148,14 +156,14 @@ void fragment() {
 	} else {
 		c = texture(atlas_texture, UV);
 	}
-	if (c.a < 0.5) {
+	if (v_alpha_test > 0.5 && c.a < 0.5) {
 		discard;
 	}
-	// Effective per-cell brightness = max(sky * sky_factor, block).
-	// Mirrors the slice-1 Chunk.effective_light formula and vanilla's
-	// World.j(time) sun-brightness scaler (vendor/alpha-1.2.6-src/cy.java
-	// World.h(int, int, int) renderer-side combine).
-	float light = max(v_light.x * sky_factor, v_light.y);
+	// Alpha combines the stored channels as:
+	// max(blockLight, skyLight - skyLightSubtracted). Work in the original
+	// 0..15 domain so integer levels land on the same brightness-LUT steps.
+	float light_level = max(v_light.x * 15.0 - sky_subtraction, v_light.y * 15.0);
+	float light = clamp(light_level / 15.0, 0.0, 1.0);
 	// Vanilla Alpha 1.2.6 brightness LUT (vendor/alpha-1.2.6-src/oz.java:22-28):
 	//     float f2 = 0.05;  // floor
 	//     float f3 = 1 - i/15;

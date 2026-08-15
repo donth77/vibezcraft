@@ -25,7 +25,7 @@ extends RefCounted
 #           `ak.a()` line 29: `as.a(x, y-1, z) == nq.u.bh`)
 #         - block at feet is empty + non-opaque
 #         - block at head is empty
-#         - sky light > 8 at spawn cell (daylight, not cave)
+#         - effective combined light > 8 at spawn cell
 #         - no player within 24 m (576 m² distance check)
 #      e. On success: instantiate, set global_position + yaw, add to
 #         the chunk-manager's children (so save/load picks them up
@@ -86,7 +86,7 @@ const _PLAYER_EXCLUSION_SQ: float = 24.0 * 24.0
 # Sky-light threshold — vanilla `ak.a()` line 29: `as.j(x, y, z) > 8`.
 # Passive mobs only spawn in daylit (≥9) cells. At night this gates
 # the spawn loop off everywhere except torch-lit overlap (rare).
-const _MIN_SKY_LIGHT: int = 9
+const _MIN_EFFECTIVE_LIGHT: int = 9
 
 # Spawn-class list per Alpha 1.2.6 `gg.java:33`:
 #   `this.s = new Class[]{bx, op, ou, as}` =
@@ -219,7 +219,7 @@ func _attempt_spawn_in_chunk(chunk_mgr: Node, player: Node3D, chunk_coord: Vecto
 #   - block below is GRASS
 #   - block at (x, y, z) is empty (and feet are non-opaque)
 #   - block at (x, y+1, z) is empty (head clearance)
-#   - sky light > 8 (daytime, surface-y)
+#   - effective combined light > 8
 #   - distance to nearest player > 24 m
 func _can_spawn_at(chunk_mgr: Node, player: Node3D, x: int, y: int, z: int) -> bool:
 	if y < 1 or y >= 127:
@@ -233,7 +233,7 @@ func _can_spawn_at(chunk_mgr: Node, player: Node3D, x: int, y: int, z: int) -> b
 	var grass_below: bool = chunk_mgr.get_world_block(Vector3i(x, y - 1, z)) == Blocks.GRASS
 	var feet_clear: bool = chunk_mgr.get_world_block(Vector3i(x, y, z)) == Blocks.AIR
 	var head_clear: bool = chunk_mgr.get_world_block(Vector3i(x, y + 1, z)) == Blocks.AIR
-	var lit: bool = chunk_mgr.get_world_sky_light(Vector3i(x, y, z)) >= _MIN_SKY_LIGHT
+	var lit: bool = chunk_mgr.get_world_effective_light(Vector3i(x, y, z)) >= _MIN_EFFECTIVE_LIGHT
 	return grass_below and feet_clear and head_clear and lit
 
 

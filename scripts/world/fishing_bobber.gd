@@ -50,6 +50,7 @@ var _in_water: bool = false
 var _splash_played: bool = false
 var _sprite: Sprite3D
 var _tick_accum: float = 0.0
+var _last_light_brightness: float = -1.0
 
 
 # Vanilla bj.java::a spawns hj at player camera pos with velocity
@@ -79,9 +80,11 @@ func setup(player: Node3D, chunk_manager: Node, camera_pos: Vector3, look_dir: V
 	# clobbers depth ordering against water/terrain.
 	_sprite.transparent = true
 	_sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+	_sprite.shaded = false
 	# No shadow casting — bobbers are visual-only.
 	_sprite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_sprite)
+	_update_entity_lighting()
 
 
 # Returns true when reeling-in produced a successful catch (i.e. the
@@ -101,6 +104,7 @@ func get_bobber_position() -> Vector3:
 
 
 func _physics_process(delta: float) -> void:
+	_update_entity_lighting()
 	# Accumulate sub-tick wallclock and advance bite logic at 20 Hz
 	# (vanilla tick rate) instead of per render-frame. Without this the
 	# 1/500 bite roll fires 3-6× faster on high-refresh monitors.
@@ -123,6 +127,19 @@ func _physics_process(delta: float) -> void:
 	# Sanity: despawn if we fall through the world.
 	if global_position.y < -20.0:
 		queue_free()
+
+
+func _update_entity_lighting() -> void:
+	if _sprite == null or _chunk_manager == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_sprite.modulate = Color(brightness, brightness, brightness, 1.0)
 
 
 # Sample the cell at the bobber's current XYZ. Updates _in_water flag

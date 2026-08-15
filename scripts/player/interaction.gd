@@ -1970,6 +1970,13 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	var support_id: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
 	if _block_overlaps_player(place) or not Blocks.can_place_at(stack.item_id, support_id):
 		return false
+	# Alpha mr.java only permits mushrooms at combined light <= 13.
+	# Query before replacing the target so brown mushroom's own level-1
+	# emission cannot affect its placement decision.
+	if not Blocks.light_allows_placement(
+		stack.item_id, _chunk_manager.get_world_effective_light(place)
+	):
+		return false
 	# Vanilla BlockTorch (ob.java:30-64) requires AT LEAST ONE solid neighbor
 	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5
 	# encoding which neighbor is the support. Without this, torches just

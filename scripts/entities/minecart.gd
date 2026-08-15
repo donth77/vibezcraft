@@ -295,7 +295,7 @@ func _build_chest_mesh() -> void:
 func _build_furnace_mesh() -> void:
 	_furnace_mi = MeshInstance3D.new()
 	_furnace_mi.mesh = BlockMesh.get_cube_mesh(_active_furnace_block_id(), 1.0)
-	_furnace_mi.material_override = BlockAtlas.material()
+	_furnace_mi.material_override = BlockAtlas.entity_material()
 	# BlockMesh.get_cube_mesh emits a cube centred on its own origin and
 	# spanning ±size/2 per axis. After scaling by `s`, the cube spans
 	# ±(s/2). Position the mesh so the cube's BOTTOM rests on the cart
@@ -706,6 +706,8 @@ func _update_entity_lighting() -> void:
 	var c := Color(b, b, b)
 	_floor_mat.albedo_color = c
 	_wall_mat.albedo_color = c
+	if _furnace_mi != null:
+		_furnace_mi.set_instance_shader_parameter("entity_brightness", b)
 
 
 # Find the rail block under the cart. Returns {cell: Vector3i, meta:

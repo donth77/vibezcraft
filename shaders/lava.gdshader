@@ -3,7 +3,7 @@ shader_type spatial;
 // blend so it sorts into the regular opaque pass. cull_back is correct —
 // the player can't safely enter the volume, so we never see a back face
 // (damage kicks in before they'd see the inside).
-render_mode cull_back, depth_draw_opaque;
+render_mode cull_back, depth_draw_opaque, unshaded;
 
 // Alpha 1.2.6 animated lava via TextureLavaFX — client-side cellular
 // automata on a 16×16 buffer drove 20 frames packed in terrain.png. We

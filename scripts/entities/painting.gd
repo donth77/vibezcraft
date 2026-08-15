@@ -96,6 +96,10 @@ static var _variant_particle_materials: Dictionary = {}
 @export var center_pos: Vector3 = Vector3.ZERO
 
 var _chunk_manager: Node = null
+var _front_material: StandardMaterial3D = null
+var _frame_material: StandardMaterial3D = null
+var _front_base_color: Color = Color.WHITE
+var _last_light_brightness: float = -1.0
 
 
 # Called by the spawner before adding the painting to the tree.
@@ -109,6 +113,7 @@ func _ready() -> void:
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 	_build_mesh()
 	_build_collision()
+	_update_entity_lighting()
 	# Selection-only collision layer (== 2 across the project — same as
 	# `plant_faces` / sapling cross-quads). The player's CharacterBody3D
 	# moves on layer 1 only, so they walk THROUGH the painting (vanilla
@@ -164,6 +169,7 @@ func _wall_check() -> void:
 		break_painting()
 		# Don't reschedule — break_painting queue_frees us.
 		return
+	_update_entity_lighting()
 	_schedule_wall_check()
 
 
@@ -189,7 +195,11 @@ func _build_mesh() -> void:
 	# the camera moves. The 2 mm bias is below visible-pixel resolution
 	# at any sane view distance.
 	front_mi.position = Vector3(0.0, 0.0, _THICKNESS * 0.5 + 0.002)
-	front_mi.material_override = _get_variant_material(variant)
+	# The cached material is immutable and shared by every painting using
+	# this art. Duplicate it before applying per-instance voxel brightness.
+	_front_material = _get_variant_material(variant).duplicate() as StandardMaterial3D
+	_front_base_color = _front_material.albedo_color
+	front_mi.material_override = _front_material
 	add_child(front_mi)
 	# Back + sides as a slim BoxMesh in the planks-brown wood tone so
 	# the painting reads as a 3D object from the side (vanilla has a
@@ -198,12 +208,33 @@ func _build_mesh() -> void:
 	var frame_box := BoxMesh.new()
 	frame_box.size = Vector3(w, h, _THICKNESS)
 	frame_mi.mesh = frame_box
-	var frame_mat := StandardMaterial3D.new()
-	frame_mat.albedo_color = Color(0.45, 0.32, 0.22)
-	frame_mat.roughness = 1.0
-	frame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	frame_mi.material_override = frame_mat
+	_frame_material = StandardMaterial3D.new()
+	_frame_material.albedo_color = Color(0.45, 0.32, 0.22)
+	_frame_material.roughness = 1.0
+	_frame_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	frame_mi.material_override = _frame_material
 	add_child(frame_mi)
+
+
+func _update_entity_lighting() -> void:
+	if _chunk_manager == null or _front_material == null or _frame_material == null:
+		return
+	var cell := Vector3i(
+		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
+	)
+	var brightness: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	if absf(brightness - _last_light_brightness) < 0.01:
+		return
+	_last_light_brightness = brightness
+	_front_material.albedo_color = Color(
+		_front_base_color.r * brightness,
+		_front_base_color.g * brightness,
+		_front_base_color.b * brightness,
+		_front_base_color.a
+	)
+	_frame_material.albedo_color = Color(
+		0.45 * brightness, 0.32 * brightness, 0.22 * brightness, 1.0
+	)
 
 
 # Pack-aware atlas lookup. Tries the active texture pack's directory

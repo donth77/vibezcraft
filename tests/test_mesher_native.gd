@@ -93,7 +93,7 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 	assert_eq(nat.water_uvs, gds.water_uvs, "%s: water uvs byte-equal" % label)
 	# Water per-vertex COLOR (sky/15 in R, block/15 in G) — emitted only on
 	# the lit path. Byte-equal across native and GDScript so the day/night
-	# driver's sky_factor uniform produces the same brightness.
+	# driver's sky-subtraction uniform produces the same brightness.
 	assert_eq(
 		nat.get("water_colors", PackedColorArray()),
 		gds.water_colors,
@@ -417,3 +417,31 @@ func test_parity_lit3_seam_light() -> void:
 			seam_faces += 1
 		i += 4
 	assert_eq(seam_faces, 12, "exactly the 3x4 room wall survives at the seam")
+
+
+# Release artifacts can temporarily carry an older native library (for
+# example, a local export made before the C++ side module was rebuilt).
+# Such a library has lit2 but not lit3, so it cannot consume neighbor light
+# planes. Production must choose the byte-correct GDScript reference for a
+# seam-heal mesh instead of restoring full-bright cave borders.
+func test_stale_native_falls_back_when_edge_light_is_attached() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(Chunk.SIZE_X - 1, 20, 8, Blocks.STONE)
+	chunk.edge_sky_light_east.resize(Chunk.SIZE_Y * Chunk.SIZE_Z)
+	chunk.edge_sky_light_east.fill(0)
+	chunk.edge_block_light_east.resize(Chunk.SIZE_Y * Chunk.SIZE_Z)
+	chunk.edge_block_light_east.fill(0)
+	var expected: Dictionary = Mesher.mesh_chunk(chunk)
+
+	var saved_native: RefCounted = Mesher._native_mesher
+	var saved_lit2: bool = Mesher._native_has_lit2
+	var saved_lit3: bool = Mesher._native_has_lit3
+	Mesher._native_mesher = ClassDB.instantiate("MesherNative")
+	Mesher._native_has_lit2 = true
+	Mesher._native_has_lit3 = false
+	var actual: Dictionary = Mesher.mesh_chunk_fast(chunk)
+	Mesher._native_mesher = saved_native
+	Mesher._native_has_lit2 = saved_lit2
+	Mesher._native_has_lit3 = saved_lit3
+
+	_assert_parity(expected, actual, "stale-native edge-light fallback")

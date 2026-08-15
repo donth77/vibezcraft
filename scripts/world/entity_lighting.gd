@@ -7,17 +7,11 @@ class_name EntityLighting
 #
 # Vanilla refs:
 #   oz.java:22-28  — World.brightness LUT (per light level 0..15)
-#   cy.java        — World.j(time) sun-brightness scaler (we use WorldTime)
+#   cy.java:846-854 — integer skyLightSubtracted
 
-# Brightness floor for entity rendering. Vanilla used 0.05 (matches the
-# chunk LUT's f2 floor), but in our linear-space pipeline that produced
-# entities at ~5-8% of texture albedo at midnight — boats, minecarts,
-# mobs, paintings, etc. all read as pitch-black silhouettes against
-# the already-dim terrain. Bumped to 0.25 (deliberate vanilla deviation)
-# so entities stay clearly readable as objects at all times of day.
-# Chunks keep the vanilla 0.05 floor in chunk.gdshader so the world
-# itself still looks properly dark.
-const _FLOOR: float = 0.25
+# Entity and terrain consumers share Alpha's brightness floor so an entity
+# cannot glow against a level-0 cave wall.
+const _FLOOR: float = 0.05
 
 
 # Vanilla LUT formula. Returns 0.05..1.0 — matches the LUT baked into
@@ -33,8 +27,11 @@ static func brightness_for_level(level: int) -> float:
 static func sample_brightness(chunk_manager: Node, world_pos: Vector3i) -> float:
 	if chunk_manager == null:
 		return 1.0
-	var sky: int = chunk_manager.get_world_sky_light(world_pos)
-	var block: int = chunk_manager.get_world_block_light(world_pos)
-	var sky_factor: float = WorldTime.sky_factor()
-	var effective: int = maxi(int(round(float(sky) * sky_factor)), block)
+	var effective: int
+	if chunk_manager.has_method("get_world_effective_light"):
+		effective = chunk_manager.get_world_effective_light(world_pos)
+	else:
+		var sky: int = chunk_manager.get_world_sky_light(world_pos)
+		var block: int = chunk_manager.get_world_block_light(world_pos)
+		effective = WorldTime.effective_light_level(sky, block)
 	return brightness_for_level(effective)

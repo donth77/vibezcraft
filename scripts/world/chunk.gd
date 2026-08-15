@@ -30,6 +30,11 @@ var sky_light: PackedByteArray
 # Default 0 (no emitters). Same byte-per-cell rationale as sky_light.
 # Vanilla EnumSkyBlock.BLOCK declares default 0 for the same reason.
 var block_light: PackedByteArray
+# Monotonic version for asynchronous lighting jobs. Every block-state change
+# advances it; accepted worker relights advance it once more. A worker result
+# may replace live light arrays only when all captured revisions still match.
+# This is runtime-only derived state and deliberately is not persisted.
+var lighting_revision: int = 0
 var dirty: bool = true
 # Highest Y at which a non-AIR block exists. Lets the mesher skip the empty
 # upper layers entirely. Monotonically increases — a player breaking the
@@ -97,7 +102,7 @@ var edge_meta_south: PackedByteArray
 # they actually look into. Without these, every boundary face lit
 # itself with the OOB default (sky=15) and seams glowed full-bright in
 # caves / at night (docs/lighting-chunk-seams.md). Empty = neighbor
-# unloaded; the accessors keep the 15 / 0 defaults in that case.
+# unloaded; the accessors keep the horizontal 15 / 0 defaults in that case.
 var edge_sky_light_west: PackedByteArray
 var edge_sky_light_east: PackedByteArray
 var edge_sky_light_north: PackedByteArray
@@ -247,7 +252,10 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
 		return
 	var idx: int = index(x, y, z)
+	var old_id: int = blocks[idx]
 	blocks[idx] = id
+	if old_id != id:
+		lighting_revision += 1
 	# Vanilla World.setBlockWithNotify resets metadata on block change —
 	# the new block starts in its default state (meta=0). Callers that
 	# need a non-default meta use set_block_with_meta.
@@ -273,7 +281,10 @@ func set_block_with_meta(x: int, y: int, z: int, id: int, meta: int) -> void:
 	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
 		return
 	var idx: int = index(x, y, z)
+	var old_id: int = blocks[idx]
 	blocks[idx] = id
+	if old_id != id:
+		lighting_revision += 1
 	block_meta[idx] = meta & 0xF
 	if id != Blocks.AIR and y > max_y:
 		max_y = y
@@ -298,7 +309,10 @@ func get_block_unchecked(x: int, y: int, z: int) -> int:
 
 func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
 	var idx: int = index(x, y, z)
+	var old_id: int = blocks[idx]
 	blocks[idx] = id
+	if old_id != id:
+		lighting_revision += 1
 	# Reset meta to 0 on block change (vanilla parity — see set_block).
 	block_meta[idx] = 0
 	if id != Blocks.AIR and y > max_y:
@@ -326,7 +340,9 @@ func set_block_unchecked(x: int, y: int, z: int, id: int) -> void:
 # so world-edge behavior and the lighting BFS are unchanged.
 # gdlint: disable=max-returns
 func get_sky_light(x: int, y: int, z: int) -> int:
-	if y < 0 or y >= SIZE_Y:
+	if y < 0:
+		return 0
+	if y >= SIZE_Y:
 		return 15
 	if x >= 0 and x < SIZE_X and z >= 0 and z < SIZE_Z:
 		return sky_light[index(x, y, z)]
@@ -478,14 +494,19 @@ func _rebuild_height_map() -> void:
 	_height_map_dirty = false
 
 
-# Combined effective light for shading. Vanilla's renderer computes
-# `max(sky_light * sky_factor, block_light)` per vertex where sky_factor
-# scales 0..1 with the sun's position (1.0 high noon, ~0.05 midnight floor
-# so caves stay slightly visible without torches). `sky_factor` is supplied
-# by the caller — slice 2 (day/night cycle) will route WorldTime's value
-# in; until then callers pass 1.0 for "full daylight" which preserves the
-# pre-lighting visuals.
+# Compatibility helper retained for callers that explicitly need the former
+# multiplier behavior. New rendering/gameplay code uses
+# effective_light_level(), which implements Alpha's integer sky subtraction.
 func effective_light(x: int, y: int, z: int, sky_factor: float) -> int:
 	var sky: int = int(round(float(get_sky_light(x, y, z)) * sky_factor))
 	var block: int = get_block_light(x, y, z)
 	return maxi(sky, block)
+
+
+# Combined light without changing either stored channel. Passing an explicit
+# subtraction makes this usable in deterministic tests and worker-side code;
+# the default follows the live WorldTime autoload.
+func effective_light_level(x: int, y: int, z: int, sky_subtraction: int = -1) -> int:
+	return WorldTime.effective_light_level(
+		get_sky_light(x, y, z), get_block_light(x, y, z), sky_subtraction
+	)

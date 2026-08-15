@@ -557,7 +557,7 @@ func _pick_wander_target() -> bool:
 		var cell: Vector3i = Vector3i(x, y, z)
 		if not Pathfinder.is_walkable(_chunk_manager, cell):
 			continue
-		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		var score: float = float(_chunk_manager.get_world_effective_light(cell))
 		if score > best_score:
 			best_score = score
 			best_cell = cell
@@ -746,8 +746,6 @@ func _check_daylight_burn() -> void:
 		return
 	if _on_fire_ticks > 0:
 		return
-	if not _is_world_daytime():
-		return
 	var eye_cell := Vector3i(
 		int(floor(global_position.x)),
 		int(floor(global_position.y + _get_eye_height())),
@@ -755,13 +753,11 @@ func _check_daylight_burn() -> void:
 	)
 	if _chunk_manager.get_chunk_at_coord(Vector2i(eye_cell.x >> 4, eye_cell.z >> 4)) == null:
 		return
-	var sky: int = _chunk_manager.get_world_sky_light(eye_cell)
-	if sky >= 15:
+	if not _chunk_manager.is_sky_exposed_at_world(eye_cell):
+		return
+	var effective: int = _chunk_manager.get_world_effective_light(eye_cell)
+	if EntityLighting.brightness_for_level(effective) > 0.5:
 		_on_fire_ticks = int(_AI_BURN_DURATION_SEC * 20.0)
-
-
-func _is_world_daytime() -> bool:
-	return WorldTime.sky_factor() > 0.5
 
 
 # --- Walk animation ---

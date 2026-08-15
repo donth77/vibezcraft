@@ -19,16 +19,20 @@ uniform vec4 leaves_uv = vec4(0.0);
 uniform vec3 leaves_tint = vec3(0.16, 1.57, 0.10);
 
 varying vec3 v_normal;
+// Same MSAA-safe cutout classification as chunk_common.gdshaderinc.
+// BlockMesh packs this in COLOR.a for first-person held block meshes.
+varying flat float v_alpha_test;
 
 
 void vertex() {
 	v_normal = NORMAL;
+	v_alpha_test = COLOR.a;
 }
 
 
 void fragment() {
 	vec4 c = texture(atlas_texture, UV);
-	if (c.a < 0.5) {
+	if (v_alpha_test > 0.5 && c.a < 0.5) {
 		discard;
 	}
 	float b = 0.7;

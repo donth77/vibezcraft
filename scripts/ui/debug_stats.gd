@@ -500,8 +500,14 @@ func _log_light_probe() -> void:
 		var id: int = _chunk_manager.get_world_block(pos)
 		var sky: int = _chunk_manager.get_world_sky_light(pos)
 		var blk: int = _chunk_manager.get_world_block_light(pos)
+		var effective: int = _chunk_manager.get_world_effective_light(pos)
 		var name: String = Blocks.name_of(id)
-		lines.append("  %s %-22s id=%-3d sky=%-3d block=%-3d" % [labels[i], str(pos), id, sky, blk])
+		lines.append(
+			(
+				"  %s %-22s id=%-3d sky=%-3d block=%-3d effective=%-3d"
+				% [labels[i], str(pos), id, sky, blk, effective]
+			)
+		)
 		# Suffix name on a continuation indent to keep columns aligned.
 		lines.append("                                   (%s)" % name)
 	for line in lines:

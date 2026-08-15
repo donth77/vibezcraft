@@ -538,7 +538,7 @@ func _pick_wander_target() -> bool:
 		var cell: Vector3i = Vector3i(x, y, z)
 		if not Pathfinder.is_walkable(_chunk_manager, cell):
 			continue
-		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		var score: float = float(_chunk_manager.get_world_effective_light(cell))
 		if score > best_score:
 			best_score = score
 			best_cell = cell
@@ -581,18 +581,16 @@ func _face_walk_direction() -> void:
 # --- Daylight burn ---
 
 
-# Vanilla EntityZombie.B() (Beta): if it's daytime + no rain + the
-# entity is exposed to sky (skylight reaches 15 at the entity's head)
-# + not in water → setFire(8). We approximate via WorldTime.is_day()
-# (no rain modeled yet) + sky-light read at the eye cell.
+# Alpha nt.java: if entity brightness is > 0.5, the cell can see sky,
+# and the random ignition roll passes, set fire. This project retains its
+# deterministic interval check but now uses the same effective-light/LUT
+# contract plus direct sky exposure instead of a coarse global day gate.
 func _check_daylight_burn() -> void:
 	if _chunk_manager == null:
 		return
 	if _in_water or _in_lava:
 		return
 	if _on_fire_ticks > 0:
-		return
-	if not _is_world_daytime():
 		return
 	var eye_cell := Vector3i(
 		int(floor(global_position.x)),
@@ -601,17 +599,11 @@ func _check_daylight_burn() -> void:
 	)
 	if _chunk_manager.get_chunk_at_coord(Vector2i(eye_cell.x >> 4, eye_cell.z >> 4)) == null:
 		return
-	var sky: int = _chunk_manager.get_world_sky_light(eye_cell)
-	if sky >= 15:
+	if not _chunk_manager.is_sky_exposed_at_world(eye_cell):
+		return
+	var effective: int = _chunk_manager.get_world_effective_light(eye_cell)
+	if EntityLighting.brightness_for_level(effective) > 0.5:
 		_on_fire_ticks = int(_AI_BURN_DURATION_SEC * 20.0)
-
-
-# Vanilla `oz.java::j(time)` sun-curve maxes out at noon (tick 6000)
-# and is "day" roughly between tick 0 (sunrise) and 12000 (sunset).
-# WorldTime.sky_factor() gives us 0.1 (midnight) .. 1.0 (noon) — use
-# 0.5 as the "is day" threshold.
-func _is_world_daytime() -> bool:
-	return WorldTime.sky_factor() > 0.5
 
 
 # --- Walk animation ---

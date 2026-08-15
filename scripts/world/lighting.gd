@@ -1,3 +1,4 @@
+# gdlint: disable=max-file-lines
 class_name Lighting
 extends RefCounted
 
@@ -157,6 +158,10 @@ static func fill_block_light(chunk: Chunk) -> void:
 		)
 		PerfProbe.end("lighting.fill_block", probe_token)
 		return
+	# A refill is a from-scratch operation. The monotone propagation below
+	# only raises values, so retaining the prior array would preserve light
+	# from emitters that have since been removed.
+	chunk.block_light.fill(0)
 	var queue: Array[Vector3i] = []
 	# Seed from every cell that emits light. Non-emitters start at 0; the
 	# BFS doesn't need to visit them until a neighbor pushes a value in.
@@ -276,8 +281,11 @@ static func _lateral_pass(chunk: Chunk) -> void:
 
 
 # Incremental sky-light update after a single block change at chunk-local
-# (lx, ly, lz). Bounded to a 15-cell radius — light dies in 15 steps so
-# a change can't propagate further. Mirrors vanilla mc.a() (vendor/alpha-
+# (lx, ly, lz). Horizontal spread is bounded to a 15-cell radius — light
+# dies in 15 steps so a change can't propagate farther in X/Z. Y is the
+# full world height: changing the topmost opaque block can flip sky exposure
+# for an arbitrarily tall column, which is a source-topology change rather
+# than propagation from a fixed source. Mirrors vanilla mc.a() (vendor/alpha-
 # 1.2.6-src/src/mc.java): for every cell in the box, recompute as
 # `max(emission, max(6_neighbors) - opacity)`. If the value changed,
 # re-queue neighbors. Handles BOTH brightening (block removed → light
@@ -292,15 +300,13 @@ static func update_sky_light_around(chunk: Chunk, lx: int, ly: int, lz: int) -> 
 	var probe_token := PerfProbe.begin("lighting.update_sky")
 	var x_lo: int = maxi(0, lx - _LIGHT_DECAY_RADIUS)
 	var x_hi: int = mini(Chunk.SIZE_X - 1, lx + _LIGHT_DECAY_RADIUS)
-	var y_lo: int = maxi(0, ly - _LIGHT_DECAY_RADIUS)
-	var y_hi: int = mini(Chunk.SIZE_Y - 1, ly + _LIGHT_DECAY_RADIUS)
+	var y_lo: int = 0
+	var y_hi: int = Chunk.SIZE_Y - 1
 	var z_lo: int = maxi(0, lz - _LIGHT_DECAY_RADIUS)
 	var z_hi: int = mini(Chunk.SIZE_Z - 1, lz + _LIGHT_DECAY_RADIUS)
-	# Seed with the edit cell plus the column above (heightmap might have
-	# moved up/down — every cell whose sky_exposed status could've flipped
-	# needs a recompute) plus the 6 immediate neighbors. BFS expansion
-	# fans out from there, naturally bounded by the box. Cuts the seed
-	# from ~30K cells to ~SIZE_Y + 7 (≤135).
+	# Seed the complete edited column (heightmap movement may flip any
+	# vertical band) plus the edit's immediate neighbors. LIFO processing
+	# visits the column top-down, matching the initial column pass.
 	var queue: Array[Vector3i] = []
 	for y in range(y_lo, y_hi + 1):
 		queue.append(Vector3i(lx, y, lz))
@@ -358,14 +364,12 @@ static func update_sky_light_around_world(world_pos: Vector3i, manager) -> void:
 		return
 	var x_lo: int = world_pos.x - _LIGHT_DECAY_RADIUS
 	var x_hi: int = world_pos.x + _LIGHT_DECAY_RADIUS
-	var y_lo: int = maxi(0, world_pos.y - _LIGHT_DECAY_RADIUS)
-	var y_hi: int = mini(Chunk.SIZE_Y - 1, world_pos.y + _LIGHT_DECAY_RADIUS)
+	var y_lo: int = 0
+	var y_hi: int = Chunk.SIZE_Y - 1
 	var z_lo: int = world_pos.z - _LIGHT_DECAY_RADIUS
 	var z_hi: int = world_pos.z + _LIGHT_DECAY_RADIUS
-	# Seed with the edit cell, its column (heightmap shift), and 6
-	# neighbors — same shape as the chunk-local variant. BFS expansion
-	# fans out naturally; ~30× fewer initial recomputes than the previous
-	# every-cell-in-box seed.
+	# Seed the complete edited column plus the edit's 6 neighbors — same
+	# source-topology rule as the chunk-local variant.
 	var queue: Array[Vector3i] = []
 	for y in range(y_lo, y_hi + 1):
 		queue.append(Vector3i(world_pos.x, y, world_pos.z))
@@ -405,6 +409,51 @@ static func update_sky_light_around_world(world_pos: Vector3i, manager) -> void:
 			):
 				queue.append(Vector3i(nx, ny, nz))
 	PerfProbe.end("lighting.update_sky_world", probe_token)
+
+
+# True multi-source edit-time sky relight. A batch shares one work queue and
+# one convergence pass instead of invoking a complete overlapping BFS for
+# every changed block. Every edited X/Z column is seeded through the full
+# world height because an opacity change can move its heightmap boundary by
+# more than the normal 15-cell light-decay radius.
+static func update_sky_light_around_world_many(world_positions: Array[Vector3i], manager) -> void:
+	if world_positions.is_empty():
+		return
+	var probe_token := PerfProbe.begin("lighting.update_sky_world_batch")
+	var x_lo: int = world_positions[0].x - _LIGHT_DECAY_RADIUS
+	var x_hi: int = world_positions[0].x + _LIGHT_DECAY_RADIUS
+	var z_lo: int = world_positions[0].z - _LIGHT_DECAY_RADIUS
+	var z_hi: int = world_positions[0].z + _LIGHT_DECAY_RADIUS
+	for world_pos: Vector3i in world_positions:
+		x_lo = mini(x_lo, world_pos.x - _LIGHT_DECAY_RADIUS)
+		x_hi = maxi(x_hi, world_pos.x + _LIGHT_DECAY_RADIUS)
+		z_lo = mini(z_lo, world_pos.z - _LIGHT_DECAY_RADIUS)
+		z_hi = maxi(z_hi, world_pos.z + _LIGHT_DECAY_RADIUS)
+	var y_lo: int = 0
+	var y_hi: int = Chunk.SIZE_Y - 1
+	var queue: Array[Vector3i] = []
+	var queued: Dictionary = {}
+	for world_pos: Vector3i in world_positions:
+		for y in range(y_lo, y_hi + 1):
+			_enqueue_world_relight(
+				queue,
+				queued,
+				Vector3i(world_pos.x, y, world_pos.z),
+				x_lo,
+				x_hi,
+				y_lo,
+				y_hi,
+				z_lo,
+				z_hi
+			)
+		for offset: Vector3i in _NEIGHBORS:
+			_enqueue_world_relight(
+				queue, queued, world_pos + offset, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
+			)
+	_drain_unique_world_relight_bfs(
+		queue, queued, manager, true, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
+	)
+	PerfProbe.end("lighting.update_sky_world_batch", probe_token)
 
 
 # World-coord variant of _recompute_sky_light_at. Reads neighbor block /
@@ -611,6 +660,40 @@ static func update_block_light_around_world(world_pos: Vector3i, manager) -> voi
 	PerfProbe.end("lighting.update_block_world", probe_token)
 
 
+# True multi-source block-light counterpart. The union AABB covers the
+# 15-cell influence volume of every edit while the unique pending set avoids
+# the duplicate queue explosion produced by overlapping individual passes.
+static func update_block_light_around_world_many(world_positions: Array[Vector3i], manager) -> void:
+	if world_positions.is_empty():
+		return
+	var probe_token := PerfProbe.begin("lighting.update_block_world_batch")
+	var x_lo: int = world_positions[0].x - _LIGHT_DECAY_RADIUS
+	var x_hi: int = world_positions[0].x + _LIGHT_DECAY_RADIUS
+	var y_lo: int = maxi(0, world_positions[0].y - _LIGHT_DECAY_RADIUS)
+	var y_hi: int = mini(Chunk.SIZE_Y - 1, world_positions[0].y + _LIGHT_DECAY_RADIUS)
+	var z_lo: int = world_positions[0].z - _LIGHT_DECAY_RADIUS
+	var z_hi: int = world_positions[0].z + _LIGHT_DECAY_RADIUS
+	for world_pos: Vector3i in world_positions:
+		x_lo = mini(x_lo, world_pos.x - _LIGHT_DECAY_RADIUS)
+		x_hi = maxi(x_hi, world_pos.x + _LIGHT_DECAY_RADIUS)
+		y_lo = mini(y_lo, maxi(0, world_pos.y - _LIGHT_DECAY_RADIUS))
+		y_hi = maxi(y_hi, mini(Chunk.SIZE_Y - 1, world_pos.y + _LIGHT_DECAY_RADIUS))
+		z_lo = mini(z_lo, world_pos.z - _LIGHT_DECAY_RADIUS)
+		z_hi = maxi(z_hi, world_pos.z + _LIGHT_DECAY_RADIUS)
+	var queue: Array[Vector3i] = []
+	var queued: Dictionary = {}
+	for world_pos: Vector3i in world_positions:
+		_enqueue_world_relight(queue, queued, world_pos, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+		for offset: Vector3i in _NEIGHBORS:
+			_enqueue_world_relight(
+				queue, queued, world_pos + offset, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
+			)
+	_drain_unique_world_relight_bfs(
+		queue, queued, manager, false, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
+	)
+	PerfProbe.end("lighting.update_block_world_batch", probe_token)
+
+
 # Native fast-path for update_block_light_around_world. Same chunk-data
 # marshalling shape as the sky variant, plus an emission_lut. Only
 # requires `block_light` per chunk (no height_map needed for the block
@@ -747,8 +830,9 @@ static func _relight_chunk_borders_native(
 # array so the worker reads a stable buffer even if the player edits a
 # block in one of these chunks before the worker finishes.
 #
-# Output shape (matches what _native_lighting.relight_chunk_borders expects):
-#   [[chunk_x, chunk_z, blocks, sky_light, block_light, height_map], ...]
+# Output shape (native consumes the first six values; the seventh is retained
+# by the caller for stale-result validation):
+#   [[chunk_x, chunk_z, blocks, sky_light, block_light, height_map, revision], ...]
 # with target listed first; neighbors that don't exist are skipped.
 static func prepare_relight_data(
 	coord: Vector2i, target: Chunk, neighbors: Array[Vector2i], manager
@@ -765,6 +849,7 @@ static func prepare_relight_data(
 			target.sky_light.duplicate(),
 			target.block_light.duplicate(),
 			target.height_map.duplicate(),
+			target.lighting_revision,
 		]
 	]
 	PerfProbe.end("lighting.prepare_relight.dup", t_dup)
@@ -786,11 +871,23 @@ static func prepare_relight_data(
 					n.sky_light.duplicate(),
 					n.block_light.duplicate(),
 					n.height_map.duplicate(),
+					n.lighting_revision,
 				]
 			)
 		)
 		PerfProbe.end("lighting.prepare_relight.dup", t_ndup)
 	return chunk_data
+
+
+# Extract the immutable revision stamp carried by prepare_relight_data.
+static func relight_revisions(chunk_data: Array) -> Dictionary:
+	var revisions: Dictionary = {}
+	for raw_entry: Variant in chunk_data:
+		var entry: Array = raw_entry as Array
+		if entry.size() < 7:
+			continue
+		revisions[Vector2i(int(entry[0]), int(entry[1]))] = int(entry[6])
+	return revisions
 
 
 # Worker-thread-safe wrapper around the native relight call. Reads only the
@@ -805,22 +902,29 @@ static func compute_relight_borders_native(coord: Vector2i, chunk_data: Array) -
 	)
 
 
-# Main-thread apply of a relight result. Skips chunks that were unloaded
-# while the worker was running. Edits to chunks in the result window after
-# dispatch will get overwritten here — accepted because (a) the typical
-# walking case has no edits, and (b) the next edit triggers
-# `update_*_light_around_world` which repairs the affected cell.
-static func apply_relight_result(result: Dictionary, manager) -> void:
+# Main-thread apply of a relight result. The complete participating snapshot
+# is validated before any array is replaced: output for one chunk may depend
+# on every neighbor, so partially applying a stale job is not safe. Returns
+# false when the caller must discard/requeue the target job.
+static func apply_relight_result(
+	result: Dictionary, manager, expected_revisions: Dictionary = {}
+) -> bool:
+	for k: Vector2i in expected_revisions:
+		var live: Chunk = manager.get_chunk_at_coord(k)
+		if live == null or live.lighting_revision != int(expected_revisions[k]):
+			return false
 	for k: Vector2i in result:
 		var c: Chunk = manager.get_chunk_at_coord(k)
 		if c == null:
-			continue
+			return false
 		var entry: Dictionary = result[k]
 		if entry.has("sky_light"):
 			c.sky_light = entry["sky_light"]
 		if entry.has("block_light"):
 			c.block_light = entry["block_light"]
+		c.lighting_revision += 1
 		manager.notify_chunk_lighting_updated(k)
+	return true
 
 
 # Walk the shared seam plane between target_coord and n_coord. For each
@@ -928,3 +1032,65 @@ static func _drain_world_relight_bfs(
 				and nz <= z_hi
 			):
 				queue.append(Vector3i(nx, ny, nz))
+
+
+# Add a cell to a bounded relight queue only if it is not already waiting.
+# A cell is removed from `queued` when popped, so a later neighbor change can
+# legitimately schedule it again until the fixed point is reached.
+static func _enqueue_world_relight(
+	queue: Array[Vector3i],
+	queued: Dictionary,
+	p: Vector3i,
+	x_lo: int,
+	x_hi: int,
+	y_lo: int,
+	y_hi: int,
+	z_lo: int,
+	z_hi: int
+) -> void:
+	if p.x < x_lo or p.x > x_hi or p.y < y_lo or p.y > y_hi or p.z < z_lo or p.z > z_hi:
+		return
+	if queued.has(p):
+		return
+	queued[p] = true
+	queue.append(p)
+
+
+# Shared convergent drain for the multi-source edit APIs. It intentionally
+# uses the GDScript world access contract even when the single-seed native
+# accelerator is available: one shared pass is the performance property the
+# batch API guarantees, and the recompute functions are the same source of
+# truth used by border relighting and fallback operation.
+static func _drain_unique_world_relight_bfs(
+	queue: Array[Vector3i],
+	queued: Dictionary,
+	manager,
+	is_sky: bool,
+	x_lo: int,
+	x_hi: int,
+	y_lo: int,
+	y_hi: int,
+	z_lo: int,
+	z_hi: int
+) -> void:
+	while not queue.is_empty():
+		var p: Vector3i = queue.pop_back()
+		queued.erase(p)
+		if not _world_pos_in_loaded_chunk(p, manager):
+			continue
+		var current: int
+		var new_light: int
+		if is_sky:
+			current = manager.get_world_sky_light(p)
+			new_light = _recompute_sky_light_at_world(p, manager)
+		else:
+			current = manager.get_world_block_light(p)
+			new_light = _recompute_block_light_at_world(p, manager)
+		if new_light == current:
+			continue
+		if is_sky:
+			manager.set_world_sky_light(p, new_light)
+		else:
+			manager.set_world_block_light(p, new_light)
+		for offset: Vector3i in _NEIGHBORS:
+			_enqueue_world_relight(queue, queued, p + offset, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)

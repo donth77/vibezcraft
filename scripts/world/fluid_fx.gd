@@ -123,14 +123,19 @@ static func spawn_smoke(parent: Node, pos: Vector3) -> void:
 	_schedule_return(parent, particles)
 
 
-# Drain deferred sky-light seeds + fizz positions collected during a
-# fluid neighbor-notify fanout. Called from ChunkManager when its
-# `_light_defer_depth` unwinds to zero. `sky_seeds` is a Dictionary
-# keyed by Vector3i (dedup by position); `fizz_positions` is the raw
-# list of solidified cells for coalesced burst.
+# Compatibility wrapper for callers that defer only sky seeds. ChunkManager's
+# general batch path now drains both light channels itself.
 static func flush_deferred(manager, sky_seeds: Dictionary, fizz_positions: Array) -> void:
+	var positions: Array[Vector3i] = []
 	for world_pos: Vector3i in sky_seeds:
-		Lighting.update_sky_light_around_world(world_pos, manager)
+		positions.append(world_pos)
+	Lighting.update_sky_light_around_world_many(positions, manager)
+	flush_deferred_fizz(manager, fizz_positions)
+
+
+# Coalesce only the visual/audio part of a deferred fluid fanout. Lighting
+# has already converged through ChunkManager's shared multi-source pass.
+static func flush_deferred_fizz(manager, fizz_positions: Array) -> void:
 	var n: int = fizz_positions.size()
 	if n == 0:
 		return

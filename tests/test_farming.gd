@@ -11,6 +11,37 @@ extends GutTest
 # players got them via creative-mode item spawn (now: debug spawner J).
 
 
+class CropManager:
+	extends RefCounted
+	var support_id: int = Blocks.FARMLAND
+	var crop_meta: int = 0
+	var effective_light: int = 15
+	var writes: Array = []
+
+	func get_world_block(pos: Vector3i) -> int:
+		if pos.y == 63:
+			return support_id
+		return Blocks.CROPS
+
+	func get_world_block_meta(_pos: Vector3i) -> int:
+		return crop_meta
+
+	func get_world_effective_light(_pos: Vector3i) -> int:
+		return effective_light
+
+	func set_world_block(pos: Vector3i, id: int, meta: int = 0) -> void:
+		writes.append([pos, id, meta])
+		crop_meta = meta
+
+
+func before_each() -> void:
+	TickScheduler._pending.clear()
+
+
+func after_each() -> void:
+	TickScheduler._pending.clear()
+
+
 func test_crops_require_farmland_support() -> void:
 	assert_true(Blocks.can_place_at(Blocks.CROPS, Blocks.FARMLAND))
 	# Not on grass / dirt — vanilla forces tilling first.
@@ -39,3 +70,26 @@ func test_crops_break_instantly() -> void:
 # it. Vanilla treats plant cells as replaceable.
 func test_crops_are_replaceable() -> void:
 	assert_true(Blocks.is_replaceable(Blocks.CROPS))
+
+
+func test_crop_growth_requires_effective_light_nine() -> void:
+	var manager := CropManager.new()
+	manager.effective_light = 8
+	Blocks._tick_crops(manager, Vector3i(0, 64, 0))
+	assert_eq(manager.writes.size(), 0, "dark crop must not advance")
+	assert_eq(TickScheduler._pending.size(), 1, "dark crop should retry later")
+
+
+func test_crop_growth_advances_at_effective_light_nine() -> void:
+	var manager := CropManager.new()
+	manager.effective_light = 9
+	Blocks._tick_crops(manager, Vector3i(0, 64, 0))
+	assert_eq(manager.writes, [[Vector3i(0, 64, 0), Blocks.CROPS, 1]])
+	assert_eq(TickScheduler._pending.size(), 1)
+
+
+func test_mushroom_placement_rejects_only_light_above_thirteen() -> void:
+	for mushroom_id: int in [Blocks.MUSHROOM_BROWN, Blocks.MUSHROOM_RED]:
+		assert_true(Blocks.light_allows_placement(mushroom_id, 13))
+		assert_false(Blocks.light_allows_placement(mushroom_id, 14))
+	assert_true(Blocks.light_allows_placement(Blocks.SAPLING, 15))

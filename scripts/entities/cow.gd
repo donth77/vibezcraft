@@ -426,7 +426,7 @@ func _score_cell(x: int, y: int, z: int) -> float:
 	var below: int = _chunk_manager.get_world_block(Vector3i(x, y - 1, z))
 	if below == Blocks.GRASS:
 		return _AI_SCORE_GRASS
-	var light: int = _chunk_manager.get_world_sky_light(Vector3i(x, y, z))
+	var light: int = _chunk_manager.get_world_effective_light(Vector3i(x, y, z))
 	return float(light) + _AI_SCORE_LIGHT_OFFSET
 
 

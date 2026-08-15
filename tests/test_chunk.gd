@@ -1,5 +1,7 @@
 extends GutTest
 
+const _CHUNK_SCENE := preload("res://scenes/world/chunk.tscn")
+
 
 func test_new_chunk_is_all_air() -> void:
 	var chunk := Chunk.new()
@@ -44,6 +46,30 @@ func test_set_marks_dirty() -> void:
 	assert_true(chunk.dirty)
 
 
+func test_remesh_keeps_old_collision_live_until_replacement_is_cooked() -> void:
+	var original := Chunk.new()
+	original.set_block(1, 10, 1, Blocks.STONE)
+	var node: Node3D = _CHUNK_SCENE.instantiate()
+	node.chunk_data = original
+	add_child_autofree(node)
+	assert_true(node.has_live_collision(), "initial chunk has cooked collision")
+	var collision_shape: CollisionShape3D = node.get("_collision_shape")
+	var old_shape: Shape3D = collision_shape.shape
+
+	var replacement := Chunk.new()
+	replacement.set_block(1, 10, 1, Blocks.STONE)
+	replacement.set_block(2, 10, 1, Blocks.STONE)
+	node._apply_mesh_data(Mesher.mesh_chunk_fast(replacement))
+	assert_same(
+		collision_shape.shape,
+		old_shape,
+		"mesh apply preserves the old live shape during deferred physics cooking"
+	)
+	assert_true(node._cook_pending_collision(), "replacement collision was pending")
+	assert_not_same(collision_shape.shape, old_shape, "cook atomically installs a new shape")
+	assert_true(node.has_live_collision(), "replacement never leaves collision null")
+
+
 # --- Lighting (slice 1: storage + accessors only) ---
 
 
@@ -80,12 +106,13 @@ func test_block_light_set_get_roundtrip() -> void:
 	assert_eq(chunk.get_block_light(1, 1, 1), 14)
 
 
-func test_oob_sky_light_reads_as_full_daylight() -> void:
-	# Mesher's per-face neighbor sample at chunk borders depends on this —
-	# returning 0 for OOB would erroneously darken outward-facing faces.
+func test_oob_sky_light_uses_horizontal_and_vertical_defaults() -> void:
+	# Horizontal unloaded neighbors read as daylight. Vertical bounds are
+	# asymmetric: below-world is dark and above-world is open sky.
 	var chunk := Chunk.new()
 	assert_eq(chunk.get_sky_light(-1, 0, 0), 15)
 	assert_eq(chunk.get_sky_light(16, 0, 0), 15)
+	assert_eq(chunk.get_sky_light(0, -1, 0), 0)
 	assert_eq(chunk.get_sky_light(0, 128, 0), 15)
 
 

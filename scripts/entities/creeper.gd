@@ -590,7 +590,7 @@ func _pick_wander_target() -> bool:
 		var cell: Vector3i = Vector3i(x, y, z)
 		if not Pathfinder.is_walkable(_chunk_manager, cell):
 			continue
-		var score: float = float(_chunk_manager.get_world_sky_light(cell))
+		var score: float = float(_chunk_manager.get_world_effective_light(cell))
 		if score > best_score:
 			best_score = score
 			best_cell = cell

@@ -105,13 +105,9 @@ func _process(_delta: float) -> void:
 		# midnight (sub-horizon directional lights still cast shadows in
 		# Godot — the shading would invert).
 		_sun.visible = WorldTime.sun_elevation() > 0.0
-	# Push WorldTime.sky_factor into the chunk shader uniform so per-vertex
-	# sky_light scales with the day cycle. Single shared ShaderMaterial
-	# (BlockAtlas._material) — one set call covers every chunk in the world.
-	# Water + lava share the same lighting convention now that their meshes
-	# carry per-vertex COLOR (water_colors / lava_colors); push to those
-	# materials too so they dim at night / in caves like cube blocks.
-	var sf: float = WorldTime.sky_factor()
-	BlockAtlas.material().set_shader_parameter("sky_factor", sf)
-	BlockAtlas.water_material().set_shader_parameter("sky_factor", sf)
-	BlockAtlas.lava_material().set_shader_parameter("sky_factor", sf)
+	# Push Alpha's integer skyLightSubtracted onto the shared terrain and
+	# water materials. Lava is deliberately self-emissive and has no daylight
+	# uniform. One write per shared material covers every loaded chunk.
+	var sky_subtraction: float = float(WorldTime.sky_light_subtracted())
+	BlockAtlas.material().set_shader_parameter("sky_subtraction", sky_subtraction)
+	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", sky_subtraction)

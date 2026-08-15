@@ -206,8 +206,10 @@ Dictionary LightingNative::update_sky_light_around_world(
 	// SIZE_Y bounds.
 	const int x_lo = p_world_x - 15;
 	const int x_hi = p_world_x + 15;
-	const int y_lo = std::max(0, p_world_y - 15);
-	const int y_hi = std::min(SIZE_Y - 1, p_world_y + 15);
+	// Heightmap movement can change sky-source status anywhere in the
+	// vertical column. Only horizontal propagation is decay-bounded.
+	const int y_lo = 0;
+	const int y_hi = SIZE_Y - 1;
 	const int z_lo = p_world_z - 15;
 	const int z_hi = p_world_z + 15;
 
@@ -227,8 +229,11 @@ Dictionary LightingNative::update_sky_light_around_world(
 		return it->second.blocks[idx_local(lx, wy, lz)];
 	};
 	auto get_sky = [&](int wx, int wy, int wz) -> int {
-		if (wy < 0 || wy >= SIZE_Y) {
-			return MAX_LIGHT; // OOB-y reads as full daylight (slice-1 invariant)
+		if (wy < 0) {
+			return 0; // below the world is dark (Alpha cy.a combined-light rule)
+		}
+		if (wy >= SIZE_Y) {
+			return MAX_LIGHT; // above the world is open sky
 		}
 		int cx = floor_div_size(wx, SIZE_X);
 		int cz = floor_div_size(wz, SIZE_Z);
@@ -767,7 +772,10 @@ Dictionary LightingNative::relight_chunk_borders(
 		return it->second.blocks[idx_local(lx, wy, lz)];
 	};
 	auto get_sky = [&](int wx, int wy, int wz) -> int {
-		if (wy < 0 || wy >= SIZE_Y) {
+		if (wy < 0) {
+			return 0;
+		}
+		if (wy >= SIZE_Y) {
 			return MAX_LIGHT;
 		}
 		int cx = floor_div_size(wx, SIZE_X);

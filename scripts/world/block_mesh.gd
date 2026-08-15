@@ -30,6 +30,18 @@ const _HELD_FENCE_GATE_BOXES: Array = [
 static var _cache: Dictionary = {}  # block_id → ArrayMesh
 
 
+# BlockMesh vertices do not carry voxel light—the entity shader uses its
+# per-instance brightness override and the overlay shader is intentionally
+# full-bright—but both shaders consume COLOR.a as the atlas alpha-test gate.
+# Preserve the previous default-white RGB values while explicitly classifying
+# opaque versus cutout geometry. Built once into cached meshes, never per frame.
+static func _vertex_colors(vertex_count: int, needs_alpha_test: bool) -> PackedColorArray:
+	var colors := PackedColorArray()
+	colors.resize(vertex_count)
+	colors.fill(Color(1.0, 1.0, 1.0, 1.0 if needs_alpha_test else 0.0))
+	return colors
+
+
 static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 	var key: String = "%d_%.4f" % [block_id, size]
 	if not _cache.has(key):
@@ -154,6 +166,7 @@ static func _build(block_id: int, size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), not Blocks.is_opaque(block_id))
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -253,6 +266,7 @@ static func _build_slab(block_id: int, size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), false)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -281,6 +295,7 @@ static func _build_fence_gate(size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), false)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -372,6 +387,7 @@ static func _build_fence_post(size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), false)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -525,6 +541,7 @@ static func _build_stair(block_id: int, size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), false)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -555,6 +572,7 @@ static func _build_door(block_id: int, size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), true)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -700,6 +718,7 @@ static func _build_torch(
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), false)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -786,6 +805,7 @@ static func _build_ladder(size: float) -> ArrayMesh:
 	arrays[Mesh.ARRAY_VERTEX] = verts
 	arrays[Mesh.ARRAY_NORMAL] = norms
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_COLOR] = _vertex_colors(verts.size(), true)
 	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)

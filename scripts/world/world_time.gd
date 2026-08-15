@@ -6,16 +6,19 @@ extends Node
 #   • `time_ticks` (0..23999) — current cycle position, wraps.
 #   • `phase()` — normalized 0..1 around the day.
 #   • `sun_elevation()` — -1 (nadir) .. +1 (zenith).
-#   • `sky_factor()` — 0.05 (midnight) .. 1.0 (noon). Slice-1's
-#     `Chunk.effective_light(...)` consumes this to scale sky_light.
+#   • `sky_light_subtracted()` — Alpha's integer daylight attenuation
+#     (0 by day, 11 at night), used by every voxel-light consumer.
+#   • `sky_factor()` — a smooth artistic multiplier for sky/background art.
 #   • `sky_color()` / `ambient_color()` / `sun_direction()` — driven by
 #     phase, used by the WorldEnvironment + DirectionalLight in main.tscn.
 #
-# Vanilla reference (Bukkit/mc-dev `WorldProvider.a` and `World.j`): vanilla
-# uses a smoothstep'd celestial angle and a 0.2 sky-floor. We use a simpler
-# elevation = sin(2π·phase) and a 0.05 floor — caves stay dark enough that
-# torches will matter once they ship in slice 6, while vanilla's 0.2 floor
-# made caves "indoor visible" (designed for the food/hunger era, not Alpha).
+# Vanilla references:
+#   oz.java::a(long,float) — smoothed celestial angle
+#   cy.java::a(float)      — integer skyLightSubtracted (0..11)
+#   oz.java::b()           — brightness lookup table
+#
+# The existing simple phase/elevation/color helpers remain for sky art. Voxel
+# and gameplay light use the exact integer subtraction path below.
 
 # Vanilla constants. Day length is the standard "20 ticks per second × 24000
 # ticks per day = 1200s real time". Set DAY_LENGTH_SEC at runtime via
@@ -115,6 +118,35 @@ func sun_elevation() -> float:
 func sky_factor() -> float:
 	var t: float = clampf(sin(phase() * TAU) * 2.0 + 0.5, 0.0, 1.0)
 	return lerpf(SKY_FACTOR_MIN, SKY_FACTOR_MAX, t)
+
+
+# Alpha's smoothed celestial angle (`oz.java::a(long,float)`). This is kept
+# separate from phase(): phase is a convenient linear/artistic clock, while
+# this curve is the source of truth for voxel daylight attenuation.
+func celestial_angle(partial_ticks: float = 0.0) -> float:
+	var angle: float = fmod((_time_ticks + partial_ticks) / float(TICKS_PER_DAY) - 0.25, 1.0)
+	if angle < 0.0:
+		angle += 1.0
+	var original: float = angle
+	angle = 1.0 - (cos(angle * PI) + 1.0) * 0.5
+	return original + (angle - original) / 3.0
+
+
+# Alpha `World.skyLightSubtracted`: 0 through the bright part of the day,
+# rising at dusk, and clamped to 11 through the night. Sky and block light
+# remain independent stored channels; the subtraction happens only when a
+# consumer asks for effective light.
+func sky_light_subtracted(partial_ticks: float = 0.0) -> int:
+	var angle: float = celestial_angle(partial_ticks)
+	var darkness: float = 1.0 - (cos(angle * TAU) * 2.0 + 0.5)
+	return int(clampf(darkness, 0.0, 1.0) * 11.0)
+
+
+# Central combined-light contract used by rendering and gameplay. Mirrors
+# Alpha's `max(blockLight, skyLight - skyLightSubtracted)` behavior.
+func effective_light_level(sky_light: int, block_light: int, subtraction: int = -1) -> int:
+	var sky_subtraction: int = sky_light_subtracted() if subtraction < 0 else subtraction
+	return maxi(clampi(block_light, 0, 15), clampi(sky_light - sky_subtraction, 0, 15))
 
 
 # Sky background color. 4-stop gradient (night → dawn → day → dusk → night)
