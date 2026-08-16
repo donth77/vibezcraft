@@ -1669,3 +1669,71 @@ contract, a light level, a hardness, an atlas slot and full exclusion
 from every item-facing path — but no mesh, animation, particles, sound or
 travel behaviour.
 
+### 17.4 Batch 3 (2026-08-16)
+
+**The oracle now runs the real generator.** Batch 0 left `kj.java`'s
+compile closure as a hypothesis; it holds. With six hand-written stubs
+(`cy`, `ha`, `pu`, `dw`, `nq`, and the five population decorators) the
+actual `kj.java`, `ju.java`, `dl.java` and Alpha's `fi.java` compile and
+run unmodified, driven through `kj`'s own `b(int,int)` entry point. The
+driver reaches `kj`'s private Random by reflection rather than editing
+it. The `nq` stub's ids are re-derived from vendor `nq.java` on every
+build and the emitter refuses to run if any disagrees, so the one stub
+that carries real data cannot drift.
+
+**Density, interpolation, lava sea, surface replacement and both bedrock
+bands matched bit-exactly on the first run** across 5 seeds × 8 chunks.
+The RNG consumption in the surface pass — one `nextInt(5)` per Y always,
+a second only when the first test fails — is the fragile part and it was
+right first time.
+
+**Three real defects the oracle caught**, none of which a shape-level
+test would have found:
+
+1. `ju.java`'s carve loop initialises its write index at `n13` while the
+   loop counter starts at `n13 - 1`, and decrements the index at the END
+   of the body. It therefore **clears the block one Y above the cell it
+   ellipsoid-tested**. That reads like a bug in Alpha and probably is,
+   but it is shipped behaviour and reproducing the test and write at the
+   same Y carves visibly different caves.
+2. The recursive branch call is `this.a(...)`, whose first act is
+   `new Random(this.b.nextLong())` — `this.b` being MapGenBase's
+   class-level Random, not the `random` local that shadows it inside the
+   worm loop. Threading the worm's own RNG into the recursion sends both
+   sub-tunnels somewhere else entirely.
+3. `10430.378f` is a FLOAT literal, so the sine table's index scale is
+   10430.3779296875. Using the double shifts the lookup near the ends of
+   the range.
+
+**Nether caves are bit-exact; Overworld caves deliberately are not.**
+This port carries Alpha's 65536-entry float sine TABLE (`fi.java`) and
+rounds after every float operation via `_fmul`/`_fadd`/`_fdiv`/`_fsub`,
+because the plan gates Nether terrain on full-chunk hashes. The Overworld
+port in `worldgen_caves.gd` uses double-precision `sin`/`cos` and matches
+the algorithm's shape rather than its bytes, consistent with this
+project's standing "look and feel over bit-exact" position for dimension
+0. The two are not expected to converge.
+
+**Two dead fields in `kj`'s density method.** `this.f` (the 10-octave
+field) and `this.g` (the 16-octave field) are sampled, clamped and
+rescaled into locals the source then never reads; `d6` is fixed at 0.0,
+which makes the lower-bound blend branch unreachable, exactly as §6.2
+predicted. The port keeps the sampling — it costs nothing and does not
+touch the shared Random — and says so in a comment.
+
+**The worker-safety test earned its place immediately.** The first
+implementation kept `kj`'s per-chunk Random as a static field, mirroring
+the source's `this.h`. That is correct in a single-threaded Java client
+and corrupt under `WorkerThreadPool`: two overlapping chunk generations
+interleave their surface draws. All eight worker results mismatched. The
+Random is now created per chunk and threaded through, and
+`WorldgenNether.warm()` is called from `Game._ready` alongside the
+existing Overworld warm-up so no worker hits the lazy noise build first.
+
+**A test expectation was wrong, not the code.** The lava-sea test scanned
+five chunks at seed 12345 and found none. The oracle histogram agreed
+with our output — Nether lava is genuinely sparse and plenty of chunks
+have none. The test now scans a 3×3 region at a seed the fixture shows
+lava in, and the episode is a reminder that the fixture is the authority
+on what Alpha produces, not intuition about what a Nether should contain.
+

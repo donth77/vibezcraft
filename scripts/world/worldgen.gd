@@ -280,6 +280,9 @@ static func apply_world_seed(seed: int) -> void:
 	# the seed the noise was first built with.
 	_noise = null
 	Worldgen3D.reset()
+	# The Nether generator caches its seven noise generators against the
+	# seed too; without this it would keep serving the previous world's.
+	WorldgenNether.reset()
 	_call_native_set_seed(seed)
 
 

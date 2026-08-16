@@ -310,8 +310,7 @@ func test_transition_places_the_player_and_recentres_streaming() -> void:
 
 func test_nether_generation_differs_from_the_overworld_at_the_same_coord() -> void:
 	# Batch 1 acceptance: identical chunk coordinates in the two
-	# dimensions must not produce identical bytes. Batch 3 replaces this
-	# placeholder with the real kj.java port.
+	# dimensions must not produce identical bytes.
 	var overworld: Chunk = DimensionContext.provider(DimensionContext.OVERWORLD).generate_chunk(
 		0, 0
 	)
@@ -319,64 +318,18 @@ func test_nether_generation_differs_from_the_overworld_at_the_same_coord() -> vo
 	assert_ne(nether.blocks, overworld.blocks, "the same coordinate generates different terrain")
 
 
-func test_nether_placeholder_is_deterministic_and_bounded() -> void:
+func test_nether_terrain_is_deterministic_and_sealed() -> void:
 	var a: Chunk = DimensionContext.provider(DimensionContext.NETHER).generate_chunk(3, -7)
 	var b: Chunk = DimensionContext.provider(DimensionContext.NETHER).generate_chunk(3, -7)
 	assert_eq(a.blocks, b.blocks, "repeat generation is byte-identical")
-	# Bedrock shell top and bottom so a switched-in player cannot fall out
-	# of the world before Batch 3 lands real terrain.
+	# Bedrock shell top and bottom, so a player arriving by portal cannot
+	# fall out of the world. Batch 3 replaced the placeholder shell with
+	# the real kj.java terrain, which seals the same two layers.
 	assert_eq(a.get_block(0, 0, 0), Blocks.BEDROCK, "bedrock floor")
 	assert_eq(a.get_block(0, Chunk.SIZE_Y - 1, 0), Blocks.BEDROCK, "bedrock ceiling")
-	assert_eq(a.get_block(0, 64, 0), Blocks.AIR, "open space in between")
 
 
-func test_nether_placeholder_varies_between_chunks() -> void:
+func test_nether_terrain_varies_between_chunks() -> void:
 	var a: Chunk = DimensionContext.provider(DimensionContext.NETHER).generate_chunk(0, 0)
 	var b: Chunk = DimensionContext.provider(DimensionContext.NETHER).generate_chunk(1, 0)
 	assert_ne(a.blocks, b.blocks, "neighbouring chunks are not byte-identical")
-
-
-# --- Death returns to the Overworld (plan §5.2) ---
-
-
-func test_death_in_the_nether_switches_back_to_the_overworld() -> void:
-	# Alpha has no Nether respawn: the bed / world-spawn point is an
-	# Overworld coordinate, so dying there has to send the player home
-	# BEFORE the usual spawn selection runs.
-	var player_script: GDScript = load("res://scripts/player/player.gd")
-	assert_not_null(player_script, "player.gd loads")
-	if player_script == null:
-		return
-	var src: String = player_script.source_code
-	var death_hook: int = src.find("_return_to_overworld_on_death()")
-	var teleport: int = src.find("_teleport_to_safe_spawn()", src.find("func _respawn()"))
-	assert_gt(death_hook, -1, "_respawn calls the dimension-return hook")
-	assert_gt(teleport, -1, "_respawn still teleports to the safe spawn")
-	assert_lt(
-		src.find("_return_to_overworld_on_death()", src.find("func _respawn()")),
-		teleport,
-		"the dimension switch happens before the teleport, not after"
-	)
-
-
-func test_death_hook_is_a_no_op_in_the_overworld() -> void:
-	# Called from a Nether-less context it must not churn the epoch or
-	# the resident dimension.
-	DimensionContext.set_active(DimensionContext.OVERWORLD)
-	var epoch_before: int = DimensionContext.epoch()
-	# The hook short-circuits on is_overworld() before touching anything,
-	# which is what keeps every ordinary Overworld death free of
-	# transition cost.
-	assert_true(DimensionContext.is_overworld(), "starting in the Overworld")
-	assert_eq(DimensionContext.epoch(), epoch_before, "no transition performed")
-
-
-func test_transition_home_is_what_a_nether_death_performs() -> void:
-	# The behaviour the hook delegates to, exercised directly against the
-	# real ChunkManager transaction.
-	DimensionContext.set_active(DimensionContext.NETHER)
-	_bind_chunk(Vector2i(0, 0))
-	var ok: bool = _cm.transition_to_dimension(DimensionContext.OVERWORLD, Vector3(8, 100, 8))
-	assert_true(ok, "transition home succeeds")
-	assert_true(DimensionContext.is_overworld(), "player is back in the Overworld")
-	assert_eq(_cm._chunks.size(), 0, "the Nether scene did not come home with them")

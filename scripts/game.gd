@@ -380,6 +380,10 @@ func _ready() -> void:
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
+	# Same reason, for the Nether: WorldgenNether builds seven octave
+	# generators from a shared JavaRandom on first use, and a chunk worker
+	# reaching that lazy step first would race another worker.
+	WorldgenNether.warm(Worldgen.WORLD_SEED)
 	# Opt in to the native mesher + worldgen base-terrain fill (GDExtension).
 	# Silently falls back to GDScript if the extension isn't loaded.
 	# Parity enforced by tests/test_mesher_native.gd and
