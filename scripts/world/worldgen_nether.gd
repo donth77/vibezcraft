@@ -57,6 +57,11 @@ const ALPHA_LAVA_STILL: int = 11
 const ALPHA_GRAVEL: int = 13
 const ALPHA_NETHERRACK: int = 87
 const ALPHA_SOUL_SAND: int = 88
+# Written only by population (Batch 4), never by terrain.
+const ALPHA_MUSHROOM_BROWN: int = 39
+const ALPHA_MUSHROOM_RED: int = 40
+const ALPHA_FIRE: int = 51
+const ALPHA_GLOWSTONE: int = 89
 
 const _CHUNK_VOLUME: int = 32768
 
@@ -73,6 +78,11 @@ const _ID_REMAP: Dictionary = {
 	ALPHA_GRAVEL: 18,  # Blocks.GRAVEL
 	ALPHA_NETHERRACK: 97,  # Blocks.NETHERRACK
 	ALPHA_SOUL_SAND: 98,  # Blocks.SOUL_SAND
+	# Population-only ids (Batch 4).
+	ALPHA_FIRE: 27,  # Blocks.FIRE
+	ALPHA_GLOWSTONE: 99,  # Blocks.GLOWSTONE
+	ALPHA_MUSHROOM_BROWN: 39,  # Blocks.MUSHROOM_BROWN
+	ALPHA_MUSHROOM_RED: 40,  # Blocks.MUSHROOM_RED
 }
 
 # The seven octave generators, drawn from ONE shared JavaRandom in
@@ -125,6 +135,7 @@ static func density_index(gx: int, gy: int, gz: int) -> int:
 
 static func reset() -> void:
 	_built = false
+	WorldgenNetherPopulation.reset()
 
 
 # Build the noise generators up front. Called from Game._ready for the
@@ -411,12 +422,41 @@ static func chunk_rng(chunk_x: int, chunk_z: int) -> JavaRandom:
 	return JavaRandom.new(chunk_x * _SEED_MUL_X + chunk_z * _SEED_MUL_Z)
 
 
-static func generate_raw(chunk_x: int, chunk_z: int) -> PackedByteArray:
+# Terrain only: density, surface, bedrock and caves, with no decorations.
+# This is what a source chunk's population reads, and what the oracle's
+# `after_caves` stage reports.
+static func generate_terrain_only(chunk_x: int, chunk_z: int) -> PackedByteArray:
 	var blocks: PackedByteArray = new_chunk_buffer()
 	var rng: JavaRandom = chunk_rng(chunk_x, chunk_z)
 	fill_base(blocks, chunk_x, chunk_z)
 	apply_surface(blocks, chunk_x, chunk_z, rng)
 	WorldgenNetherCaves.carve(blocks, chunk_x, chunk_z)
+	return blocks
+
+
+# The RNG state a chunk's population starts from: its own seed, advanced
+# by exactly the draws the surface pass makes.
+#
+# This is the plan's §6.5 canonicalisation in one function. Alpha does not
+# reseed before populating, so its decorations inherit whatever state the
+# previously generated chunk left behind — which is what makes vanilla
+# Nether decoration load-order dependent. Reconstructing the state per
+# source chunk removes that without changing what the decorators do.
+#
+# Running the surface pass into a scratch buffer is deliberate: the draw
+# sequence depends on the terrain it walks, so it cannot be shortcut to a
+# fixed number of advances.
+static func post_surface_rng(chunk_x: int, chunk_z: int) -> JavaRandom:
+	var scratch: PackedByteArray = new_chunk_buffer()
+	var rng: JavaRandom = chunk_rng(chunk_x, chunk_z)
+	fill_base(scratch, chunk_x, chunk_z)
+	apply_surface(scratch, chunk_x, chunk_z, rng)
+	return rng
+
+
+static func generate_raw(chunk_x: int, chunk_z: int) -> PackedByteArray:
+	var blocks: PackedByteArray = generate_terrain_only(chunk_x, chunk_z)
+	WorldgenNetherPopulation.decorate(blocks, chunk_x, chunk_z)
 	return blocks
 
 

@@ -7,7 +7,7 @@
     "double_encoding": "raw IEEE-754 bits via Double.doubleToRawLongBits",
     "driver_sha256": {
       "AlphaOracle.java": "bda25d323023a5ae8d245bdf06cd0511d722345c31394c26686a10f10243a2c0",
-      "NetherOracle.java": "dbf7751a3e45c4d2cd6b795724604b85a5d34b82250c1d8f4eb101dc6370aef3"
+      "NetherOracle.java": "0016f39b486171d50a3f9942aa23d6f1dc1ade203b350c8087fd815827a30e83"
     },
     "drivers": [
       "scripts/dev/internal/alpha_oracle/AlphaOracle.java",
@@ -26,25 +26,27 @@
     "source_chunk_layout": "(x * 16 + z) * 128 + y  (Alpha byte[] order)",
     "stub_rationale": "Classes the terrain path only carries rather than reads (cy/ha/pu/dw), the population decorators Batch 3 never reaches, and nq \u2014 whose ids are re-derived from vendor nq.java on every build and refuse to drift.",
     "stubs": [
-      "aj.java",
       "cy.java",
-      "dt.java",
       "dw.java",
       "ha.java",
-      "kf.java",
-      "lp.java",
       "nq.java",
-      "pm.java",
+      "ok.java",
       "pu.java"
     ],
     "vendor_class_sha256": {
+      "aj.java": "075b5a8f3c5d1a30f39c6c8282e655309f1ddcb2ac5d023fd6b3022cd0da8c3c",
       "bd.java": "dd4c2065c41ce456787f1e4e754b8f9225c9da2917335b8a6d2026c1b67cab9f",
       "bs.java": "a04cde309a93c52d064779dc16acd0d18b8e6ca4f4db1fd6b624cc4aecc1a58d",
       "dl.java": "bb790f4ca3605b5761dad7a9341d6398c03e1e0853a3e1d0b46f6262023fb3c3",
+      "dt.java": "925d95602e0097c9efd99db81d774270fffe85cd7bad1cbe981fbdc35b33a402",
       "fi.java": "b670e11d099f2c7a53eec479d75db374b01ad8f52d597ecadf9b4e09b2fc987e",
+      "js.java": "089e40af1ba8c16a10d32291638d33cfa159f15bdd1d25d3c9be9359f9c8f500",
       "ju.java": "331fb6db8ad6b460b88738f2447f73747b34a95672e1f3c557d64fe8d706b910",
+      "kf.java": "09afa2587e881b1764eb84ae86bcf34da6b649b23bbee82b1f87f7a694df1010",
       "kj.java": "eafdf85fa6f76660f642bb8e8dd72f44d87faf124db318a378a114d1c55a9a31",
+      "lp.java": "a6a03c77a3dd2dd1859f0566297e42898b1f98db0bc832b4b472078742bee7b9",
       "nf.java": "d86ebf11ebb3f0f328c74468d487794ce9bb650e77b9b09db0c121790d8e0430",
+      "pm.java": "b968e7ae564e041ed6c6440e6be99ad282a306e1797ca1d5bfcb45c2cf428c1f",
       "z.java": "b44f186dcc353beebd10503837f854aaa90e7775d80f5fa1b72290b5a3a5dc87"
     },
     "vendor_classes_executed": [
@@ -55,7 +57,13 @@
       "ju.java",
       "dl.java",
       "bd.java",
-      "fi.java"
+      "fi.java",
+      "js.java",
+      "kf.java",
+      "pm.java",
+      "dt.java",
+      "lp.java",
+      "aj.java"
     ]
   },
   "facts": {

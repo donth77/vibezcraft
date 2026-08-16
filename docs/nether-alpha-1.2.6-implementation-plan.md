@@ -1737,3 +1737,55 @@ have none. The test now scans a 3×3 region at a seed the fixture shows
 lava in, and the episode is a reminder that the fixture is the authority
 on what Alpha produces, not intuition about what a Nether should contain.
 
+### 17.5 Batch 4 (2026-08-16)
+
+**`dt.java` and `lp.java` are byte-identical.** §6.5 asked for two named
+glowstone entry points "until parity proves their decompiled behaviour is
+identical". It does — the two files differ in nothing. They are called
+differently (A is a `nextInt(nextInt(10)+1)` count anchored in Y 4..123,
+B is always ten anchored anywhere in the column), and that difference is
+preserved, but one implementation now serves both.
+
+**`if (n8 != true)` is a CFR artifact, not Java.** Both glowstone classes
+count neighbours into an int and then compare it to `true`, which does not
+compile. The bytecode compares against the constant 1; the surrounding
+code and §6.5 agree the rule is "exactly one orthogonal neighbour is
+glowstone". The oracle's emitter now applies a narrow, logged repair to
+its BUILD COPY — the vendor tree is never modified — and refuses to hide
+it.
+
+**A stub silently masked the real decorators for an hour.** Batch 3 left
+no-op stubs for `kf`/`pm`/`dt`/`lp`/`aj` in `stubs/`, and the emitter
+copies vendor classes first and stubs second — so the stubs overwrote the
+real classes and population appeared to place nothing at all. Worth
+remembering when the harness grows: the stub directory is a fallback, and
+anything promoted to real vendor code has to be deleted from it.
+
+**Population write lists match the real decorators exactly** across all
+five seeds and eight source chunks: anchors, attempt counts, draw order
+and every placement predicate.
+
+**Two documented deviations.** `kf` follows its lava placement with a
+block update, which runs Alpha's fluid tick and lets the lava spread
+during generation; this port places the source block only and leaves the
+flow to the project's own fluid system after materialisation.
+`aj`'s placement predicate is `light <= 13 && isOpaqueCube(below)`, and
+during Nether population no light exists yet — no sky, no propagated
+block light — so the light term is trivially true and only the support
+check remains.
+
+**The canonicalisation costs about 5x.** A target chunk merges the write
+lists of the four sources that can reach it, and each source decorates
+into its own 2x2 window of finished terrain, so a cold target needs nine
+chunks of terrain. Bounded, mutex-guarded caches for terrain and write
+lists bring a warm 5x5 region to ~590 ms per decorated chunk against
+~125 ms for bare terrain. That is the clarity-first reference path
+behaving as the plan intends; Batch 5's native port is where it gets
+fast. The caches are proven invisible: clearing them mid-run reproduces
+identical chunks, and a seed change invalidates them.
+
+**Nothing depends on load order.** A chunk generated cold, then again
+after its whole neighbourhood exists, is byte-identical — which is the
+property Alpha cannot offer, because it decorates into a live world from
+an RNG it never reseeds.
+

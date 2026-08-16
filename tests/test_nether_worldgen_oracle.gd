@@ -178,7 +178,7 @@ func test_full_terrain_matches_the_oracle() -> void:
 		for chunk_key: String in _chunks_for(seed_key).keys():
 			var facts: Dictionary = _chunks_for(seed_key)[chunk_key]
 			var coord: Vector2i = _coords(chunk_key)
-			var raw: PackedByteArray = WorldgenNether.generate_raw(coord.x, coord.y)
+			var raw: PackedByteArray = WorldgenNether.generate_terrain_only(coord.x, coord.y)
 			assert_eq(
 				_sha256(raw),
 				str(facts.get("full", "")),
@@ -195,7 +195,7 @@ func test_block_histograms_match_the_oracle() -> void:
 			var facts: Dictionary = _chunks_for(seed_key)[chunk_key]
 			var expected: Dictionary = facts.get("histogram", {}) as Dictionary
 			var coord: Vector2i = _coords(chunk_key)
-			var raw: PackedByteArray = WorldgenNether.generate_raw(coord.x, coord.y)
+			var raw: PackedByteArray = WorldgenNether.generate_terrain_only(coord.x, coord.y)
 			var counts: Dictionary = {}
 			for b: int in raw:
 				counts[b] = int(counts.get(b, 0)) + 1
@@ -219,7 +219,7 @@ func test_probe_columns_match_the_oracle() -> void:
 			var facts: Dictionary = _chunks_for(seed_key)[chunk_key]
 			var expected: Dictionary = facts.get("columns", {}) as Dictionary
 			var coord: Vector2i = _coords(chunk_key)
-			var raw: PackedByteArray = WorldgenNether.generate_raw(coord.x, coord.y)
+			var raw: PackedByteArray = WorldgenNether.generate_terrain_only(coord.x, coord.y)
 			for col_key: String in expected.keys():
 				var xz: Vector2i = _coords(col_key)
 				var got: String = ""
@@ -239,7 +239,7 @@ func test_probe_cells_match_the_oracle() -> void:
 			var facts: Dictionary = _chunks_for(seed_key)[chunk_key]
 			var expected: Dictionary = facts.get("cells", {}) as Dictionary
 			var coord: Vector2i = _coords(chunk_key)
-			var raw: PackedByteArray = WorldgenNether.generate_raw(coord.x, coord.y)
+			var raw: PackedByteArray = WorldgenNether.generate_terrain_only(coord.x, coord.y)
 			for cell_key: String in expected.keys():
 				var parts: PackedStringArray = cell_key.split(",")
 				var idx: int = WorldgenNether.alpha_index(
@@ -250,3 +250,45 @@ func test_probe_cells_match_the_oracle() -> void:
 					int(expected[cell_key]),
 					"seed %s chunk %s cell %s" % [seed_key, chunk_key, cell_key]
 				)
+
+
+# --- Population (plan §6.5) ---
+
+
+func test_population_write_lists_match_the_oracle() -> void:
+	# The oracle runs the REAL decorators — kf, pm, dt, lp and aj — over a
+	# 2x2 window of finished terrain, from the same canonical RNG state
+	# this port reconstructs, and records every cell they changed. This is
+	# the strongest available check on the decorators: anchors, attempt
+	# counts, draw order and placement predicates all have to line up or
+	# the cell lists diverge.
+	for seed_key: String in _seed_keys():
+		_use_seed(seed_key)
+		for chunk_key: String in _chunks_for(seed_key).keys():
+			var facts: Dictionary = _chunks_for(seed_key)[chunk_key]
+			var pop: Dictionary = facts.get("population", {}) as Dictionary
+			var coord: Vector2i = _coords(chunk_key)
+			var expected: Array = pop.get("changes", []) as Array
+			var got: Array = WorldgenNetherPopulation.write_list(int(seed_key), coord.x, coord.y)
+			assert_eq(
+				got.size(),
+				int(pop.get("changed_count", -1)),
+				"seed %s source %s: number of cells population writes" % [seed_key, chunk_key]
+			)
+			var expected_set: Dictionary = {}
+			for e: Variant in expected:
+				var a: Array = e as Array
+				expected_set["%d,%d,%d" % [int(a[0]), int(a[1]), int(a[2])]] = int(a[3])
+			for e: Variant in got:
+				var a: Array = e as Array
+				var key: String = "%d,%d,%d" % [int(a[0]), int(a[1]), int(a[2])]
+				assert_true(
+					expected_set.has(key),
+					"seed %s source %s: oracle also writes %s" % [seed_key, chunk_key, key]
+				)
+				if expected_set.has(key):
+					assert_eq(
+						int(a[3]),
+						int(expected_set[key]),
+						"seed %s source %s cell %s: same block" % [seed_key, chunk_key, key]
+					)

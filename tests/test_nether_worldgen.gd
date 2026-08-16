@@ -168,12 +168,19 @@ func test_terrain_contains_only_the_ids_the_nether_defines() -> void:
 	# A stray Overworld id here would mean the port picked up the wrong
 	# block constant somewhere.
 	var allowed: Array[int] = [
+		# Terrain.
 		WorldgenNether.ALPHA_AIR,
 		WorldgenNether.ALPHA_BEDROCK,
 		WorldgenNether.ALPHA_LAVA_STILL,
 		WorldgenNether.ALPHA_GRAVEL,
 		WorldgenNether.ALPHA_NETHERRACK,
 		WorldgenNether.ALPHA_SOUL_SAND,
+		# Population (Batch 4).
+		WorldgenNether.ALPHA_LAVA_FLOWING,
+		WorldgenNether.ALPHA_FIRE,
+		WorldgenNether.ALPHA_GLOWSTONE,
+		WorldgenNether.ALPHA_MUSHROOM_BROWN,
+		WorldgenNether.ALPHA_MUSHROOM_RED,
 	]
 	for world_seed: int in _SEEDS:
 		Worldgen.apply_world_seed(world_seed)
