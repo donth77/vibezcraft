@@ -60,7 +60,9 @@ const _PRIMED_TNT := preload("res://scripts/world/primed_tnt.gd")
 # triggered the blast (used to skip self-damage for primed TNT) and may be
 # null. Returns nothing — block writes and entity damage are applied
 # synchronously via ChunkManager.
-static func detonate(manager: Node, world_pos: Vector3, power: float, source: Node = null) -> void:
+static func detonate(
+	manager: Node, world_pos: Vector3, power: float, source: Node = null, flaming: bool = false
+) -> void:
 	var affected: Dictionary = {}
 	# Boundary-only sample of the 16³ direction grid — cells where at least
 	# one axis is on the edge. Skipping the interior (where all axes ∈
@@ -80,6 +82,8 @@ static func detonate(manager: Node, world_pos: Vector3, power: float, source: No
 				_cast_ray(manager, world_pos, power, n4, n3, n2, affected)
 	_apply_entity_damage(manager, world_pos, power, source)
 	_apply_block_destruction(manager, world_pos, power, affected)
+	if flaming:
+		_apply_flaming_pass(manager, affected)
 
 
 static func _cast_ray(
@@ -229,6 +233,30 @@ static func _apply_block_destruction(
 				_spawn_drop(manager, cell, drop)
 	# Drain the deferred sky/block-light seeds in one pass.
 	manager.end_batch()
+
+
+# Vanilla `ks.java:103-114` — the `isFlaming` half of doExplosionB, which
+# only the ghast fireball passes true for (TNT and creepers do not).
+#
+# For every cell the blast touched, AFTER destruction: if the cell is now
+# air and the block below it is an opaque cube, one roll in three places
+# fire. So a fireball leaves a scatter of flames on whatever floor it
+# exposed, not a solid sheet — and never on a ceiling or in mid-air.
+#
+# The source walks its affected list in reverse, which matters only where
+# two affected cells are vertically adjacent (setting the lower one to
+# fire makes the upper one's floor non-opaque). That list comes out of a
+# HashSet, so its order is not reproducible in the first place; iterating
+# the dictionary here is equally arbitrary and equally correct.
+static func _apply_flaming_pass(manager: Node, affected: Dictionary) -> void:
+	for cell: Vector3i in affected:
+		if manager.get_world_block(cell) != Blocks.AIR:
+			continue
+		if not Blocks.is_opaque(manager.get_world_block(cell + Vector3i(0, -1, 0))):
+			continue
+		if randi() % 3 != 0:
+			continue
+		BlockFire.place(manager, cell)
 
 
 static func _spawn_drop(manager: Node, cell: Vector3i, drop_id: int) -> void:

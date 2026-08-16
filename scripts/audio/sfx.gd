@@ -350,6 +350,19 @@ const _PIGMAN_HURT_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpighur
 const _PIGMAN_DEATH_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigdeath.ogg"
 const _PIGMAN_ANGRY_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigangry.ogg"
 
+# Ghast — `am.java` names five events, all played at `h()` = 10.0f, the
+# loudest volume any entity uses. Absent from the repo like the rest of
+# the Nether sound set.
+const _GHAST_MOAN_SOUND: String = "res://assets/audio/sfx/mob/ghast/moan.ogg"
+const _GHAST_SCREAM_SOUND: String = "res://assets/audio/sfx/mob/ghast/scream.ogg"
+const _GHAST_DEATH_SOUND: String = "res://assets/audio/sfx/mob/ghast/death.ogg"
+const _GHAST_CHARGE_SOUND: String = "res://assets/audio/sfx/mob/ghast/charge.ogg"
+const _GHAST_FIREBALL_SOUND: String = "res://assets/audio/sfx/mob/ghast/fireball.ogg"
+# `am.h()` returns 10.0f against the 1.0f every other mob uses. Twenty dB
+# is that ratio, clamped well below it so a ghast is unmistakably loud
+# without pinning the mixer.
+const _GHAST_VOLUME_DB: float = 8.0
+
 # Vanilla MC plays step.gravel for hoe tilling, soil step events, etc.
 const _GRAVEL_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/step/gravel1.ogg",
@@ -991,6 +1004,30 @@ func play_pigman_step(pos: Vector3) -> void:
 # uniform one `_play_mob_sound_3d` applies.
 func _mob_pitch() -> float:
 	return (randf() - randf()) * 0.2 + 1.0
+
+
+# Ghast. `d()` moan, `f_()` scream, `f()` death, plus the two combat
+# events fired from `b_()` at charge counters 10 and 20. All five use
+# `h()` = 10.0f and the standard `(nextFloat() - nextFloat()) * 0.2 + 1`
+# pitch jitter.
+func play_ghast_moan(pos: Vector3) -> void:
+	_play_optional_3d(_GHAST_MOAN_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+
+
+func play_ghast_scream(pos: Vector3) -> void:
+	_play_optional_3d(_GHAST_SCREAM_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+
+
+func play_ghast_death(pos: Vector3) -> void:
+	_play_optional_3d(_GHAST_DEATH_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+
+
+func play_ghast_charge(pos: Vector3) -> void:
+	_play_optional_3d(_GHAST_CHARGE_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+
+
+func play_ghast_fireball(pos: Vector3) -> void:
+	_play_optional_3d(_GHAST_FIREBALL_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_skeleton_say(pos: Vector3) -> void:

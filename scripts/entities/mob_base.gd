@@ -534,6 +534,57 @@ func _takes_fall_damage() -> bool:
 	return true
 
 
+# Vanilla `ot.java` (EntityFlying). Override to false for a mob that
+# supplies its own vertical motion — gravity and the grounded-friction
+# branch are both skipped, and `c(float)` (fall damage) is a no-op on the
+# flying base, which `_takes_fall_damage` covers separately.
+func _uses_gravity() -> bool:
+	return true
+
+
+# True when this species belongs in open air rather than standing on a
+# floor. The debug spawner and the spawner cage both place mobs one cell
+# above the first opaque block they find, which is right for everything
+# with legs and wrong for a 4x4 ghast — it would be born half inside the
+# ceiling. Flying mobs override this and get lifted instead.
+func spawns_airborne() -> bool:
+	return false
+
+
+# The first position at or above `floor_cell` with a clear pocket big
+# enough for a `size`-cube body, or null within `max_lift` cells.
+#
+# Returned as FEET coordinates (this project's CharacterBody3D
+# convention), cell-centred horizontally, so a caller can assign it to
+# global_position directly.
+static func find_airborne_spawn(
+	chunk_manager: Node, floor_cell: Vector3i, size: float, max_lift: int = 24
+) -> Variant:
+	if chunk_manager == null:
+		return null
+	var span: int = int(ceil(size))
+	var half: int = span / 2
+	for lift: int in range(max_lift):
+		var feet_y: int = floor_cell.y + lift
+		if feet_y + span > Chunk.SIZE_Y:
+			return null
+		if _pocket_is_clear(chunk_manager, floor_cell, feet_y, span, half):
+			return Vector3(float(floor_cell.x) + 0.5, float(feet_y), float(floor_cell.z) + 0.5)
+	return null
+
+
+static func _pocket_is_clear(
+	chunk_manager: Node, floor_cell: Vector3i, feet_y: int, span: int, half: int
+) -> bool:
+	for dx: int in range(-half, span - half):
+		for dz: int in range(-half, span - half):
+			for dy: int in range(span):
+				var cell := Vector3i(floor_cell.x + dx, feet_y + dy, floor_cell.z + dz)
+				if chunk_manager.get_world_block(cell) != Blocks.AIR:
+					return false
+	return true
+
+
 func _cached_player() -> Node3D:
 	if _cached_player_node != null and is_instance_valid(_cached_player_node):
 		return _cached_player_node
@@ -817,6 +868,14 @@ func _physics_process(delta: float) -> void:
 		var k: float = pow(_LAVA_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
 		velocity.y += _FLUID_GRAVITY * delta
+	elif not _uses_gravity():
+		# `ot.java` (EntityFlying) overrides moveEntityWithHeading to drop
+		# the gravity term entirely and damp all three axes equally. The
+		# ghast is Alpha's only subclass, and its AI supplies every bit of
+		# the acceleration it gets — so nothing happens here, and the
+		# ground-friction branch below is skipped too. A flying mob damps
+		# itself.
+		pass
 	elif not _voxel_on_floor:
 		# Gravity. VoxelCollider sets _voxel_on_floor based on whether
 		# a solid cell sits directly below the AABB feet — replaces

@@ -2118,3 +2118,96 @@ needs to answer "is this node the player", and player.gd declares no
 which is why EntitySave already matches Boat and Minecart by script path.
 The check takes the script path first and the group second, and the group
 is a real membership rather than a test-only affordance.
+
+### 17.9 Batch 9 (2026-08-16)
+
+**Confirmed against source.** `am.java` is short and section 8.2
+describes it accurately: `a(4.0f, 4.0f)`, `bm = true`, the waypoint
+reroll outside [1, 60], the 2-6 tick course interval, the 100-block
+search reacquired every 20 ticks, the 64-block engage radius, the charge
+timeline (sound at 10, fire at 20, reset to -40, decrement on lost
+sight), the `> 10` texture swap, the 4-block launch offset, `h()` = 10
+sound volume, and `nextInt(20) == 0` on the spawn predicate. `hc.java`
+confirms nine tentacles from `Random(1660)` with lengths in [8, 14] and
+the `0.2 * sin(age * 0.3 + i) + 0.4` sway; `jz.java` confirms the
+squash/stretch. `az.java` confirms 1x1 size, Gaussian-0.4 aim, 0.1
+acceleration, 0.95/0.8 drag, the 25-tick shooter grace, zero direct
+damage, and the power-1 flaming explosion.
+
+**A ghast has 10 health, not 20.** `am extends ot` (EntityFlying)
+directly, never passing through `ef` (EntityMonster), so it keeps
+`hf.J = 10` rather than the 20 every other hostile gets. Two arrows kill
+one, which is the whole reason fighting one across a lava lake is viable.
+
+**Fire immunity is what suppresses the daylight burn AND the flames.**
+Same mechanism as the pigman: `hf.java:111` forces the burn timer to zero
+each tick for a fireproof living entity. Nothing ghast-specific is
+needed.
+
+**The tentacle sequence was verified independently, and the first guess
+was wrong.** `new Random(1660L).nextInt(7) + 8` produces
+`[8, 13, 9, 11, 11, 10, 12, 9, 12]`, computed from a reference
+implementation of `java.util.Random`'s LCG rather than read off this
+project's own output — so the pinned fixture states the SOURCE sequence,
+not merely current behaviour.
+
+**The course counter is post-decrement and it is observable.**
+`if (this.a-- <= 0)` tests the value BEFORE the tick's subtraction and
+decrements either way, so firing from a counter of 0 lands at -1 before
+the reroll is added. The stored value right after a course change is
+therefore [1, 5] while the INTERVAL between changes is [2, 6]. A
+pre-decrement version gets the interval right and the stored value wrong;
+both are tested, the interval by measurement rather than by field.
+
+**Measurements, and one real optimisation.** The naive transcription of
+`am.a(...)` (isCourseTraversable) rescans the ghast's full 5x5x5 cell
+neighbourhood at every one-block step, which measured **6.47 ms** for a
+50-block sweep — a frame-killer for a single mob, and the dominant cost
+by two orders of magnitude (everything else in the AI tick totalled
+0.25 ms across 200 iterations). Consecutive steps overlap by about four
+fifths, so the walk now remembers the previous cell range and tests only
+the newly covered cells. Identical result — the world does not change
+mid-walk, so a cell found clear stays clear — at **0.744 ms** for the
+same 50-block sweep and **0.238 ms** at a realistic 16-block waypoint.
+Across the suite's stress case that is 0.593 ms down to **0.069 ms** per
+ghast AI tick.
+
+**Deliberate deviations.**
+
+- `Game.difficulty` is new. Alpha reads `as.k` all over, and section 8.2
+  requires "immediately despawn/kill itself on Peaceful"; modelling that
+  as always-Normal would silently drop the behaviour. Constants plus a
+  field defaulting to Normal, no UI — Batch 10's spawn predicate needs
+  the same value.
+- `Explosion.detonate` gained a `flaming` parameter, defaulting to false
+  so TNT and creepers are untouched. It reproduces `ks.java:103-114`: for
+  each affected cell, if the cell is now air and the block below is an
+  opaque cube, one roll in three places fire. The source walks its
+  affected list in reverse, which matters only where two affected cells
+  are vertically adjacent — and that list comes out of a HashSet, so its
+  order is not reproducible in the first place.
+- The render scale is normalised by its resting value. `jz.java` scales
+  the model 4.5x at rest, on top of MC's 1/16 model units; this project's
+  model is already built in metres, so applying 4.5 directly would give a
+  4.5 m ghast inside a 4 m hitbox. Normalising keeps the SHAPE change —
+  which is the entire point of the effect — at the collision size.
+- The fireball's smoke is one persistent emitter per projectile rather
+  than a pooled one-shot per tick. `e_()` emits every tick, which is 20
+  spawns a second per fireball against FluidFx's six-emitter pool. Same
+  reasoning as the portal particles, and it makes §8.3's bounded-particle
+  requirement true by construction. The four per-tick water bubbles
+  retint that same emitter rather than adding nodes.
+- `MobBase.spawns_airborne` and `find_airborne_spawn` are new. Both
+  spawners place mobs one cell above the first opaque block, which is
+  right for anything with legs and would bury a 4x4 ghast in the ceiling
+  of most Nether caverns. Flying species get lifted into a clear pocket
+  instead, and the hook defaults to false so nothing else moves.
+- `Ghast._voxel_half_extents` is overridden rather than fixing the base,
+  which hardcodes a 0.6-wide box for every mob regardless of
+  `_get_body_width`. Correcting that globally would change spider and
+  cow collision, which is an Overworld behaviour change this batch is not
+  entitled to make. Noted as a latent inconsistency.
+- The five `mob.ghast.*` events are registered at their source volume
+  (`h()` = 10, capped at +8 dB rather than the literal 20x ratio) and
+  resolve to silence — the OGGs are not in the repo, as with the portal
+  and pigman sets. Section 11's silent-safe fallback.

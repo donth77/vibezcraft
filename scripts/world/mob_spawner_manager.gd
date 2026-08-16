@@ -267,5 +267,17 @@ static func _try_spawn_at_random(manager: Node, pos: Vector3i, mob_script: Scrip
 	if mob == null:
 		return
 	manager.add_child(mob)
+	# Flying species need a clear pocket, not a floor — the two-cell gap
+	# checked above is the right test for a biped and far too small for a
+	# 4x4 ghast. See MobBase.find_airborne_spawn.
+	if mob.has_method("spawns_airborne") and mob.call("spawns_airborne"):
+		var lifted: Variant = MobBase.find_airborne_spawn(
+			manager, target, mob.call("_get_body_height")
+		)
+		if lifted == null:
+			mob.queue_free()
+			return
+		mob.global_position = lifted as Vector3
+		return
 	# Cell-center + tiny y nudge so the mob doesn't z-fight the floor.
 	mob.global_position = Vector3(target) + Vector3(0.5, 0.05, 0.5)

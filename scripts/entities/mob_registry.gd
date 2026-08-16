@@ -66,6 +66,15 @@ const _ENTRIES: Dictionary = {
 	# persists the entity as "PigZombie". EntitySave stores this key, not
 	# the vanilla string, which is consistent with every other entry here.
 	"zombie_pigman": "res://scripts/entities/zombie_pigman.gd",
+	# N2 — vanilla am.java (EntityGhast). The Nether's flying hostile.
+	# 10 HP, fire-immune, no gravity, drifts toward a random waypoint
+	# within 16 blocks and only engages a player inside 64 with line of
+	# sight. Charge counter climbs to 20, fires a fireball, resets to -40.
+	# Drops 0-2 gunpowder; ghast tears do not exist in Alpha.
+	#
+	# `k.java` — the Hell biome's spawn list is exactly this and the
+	# zombie pigman, which Batch 10 consumes.
+	"ghast": "res://scripts/entities/ghast.gd",
 }
 
 

@@ -210,6 +210,19 @@ func _spawn_one_mob(cm: Node, mob_name: String, pos: Vector3i) -> void:
 	if mob_name == "slime" and mob.has_method("setup_size"):
 		mob.call("setup_size", 1 << randi_range(0, 2))
 	cm.add_child(mob)
+	# Flying species get lifted into a clear pocket instead of stood on
+	# the floor cell. A 4x4 ghast placed one cell above the ground is a
+	# 4x4 ghast embedded in the ceiling of most Nether caverns, and it
+	# would spend its life fighting the collider.
+	if mob.has_method("spawns_airborne") and mob.call("spawns_airborne"):
+		var size: float = mob.call("_get_body_height")
+		var lifted: Variant = MobBase.find_airborne_spawn(cm, pos, size)
+		if lifted == null:
+			push_warning("[debug_mob_spawner] no open air above target for '%s'" % mob_name)
+			mob.queue_free()
+			return
+		mob.global_position = lifted as Vector3
+		return
 	mob.global_position = Vector3(pos) + Vector3(0.5, 0.05, 0.5)
 
 
