@@ -1949,6 +1949,17 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# then places nq.az (BlockCrops) at meta=0 above the farmland.
 	if stack.item_id == Items.WHEAT_SEEDS:
 		return _try_place_wheat_seeds(hit)
+	# Redstone dust places WIRE — vanilla ey.java (ItemRedstone) is a
+	# dedicated item class whose use handler checks canPlaceAt then sets
+	# the block, exactly like Items.SIGN → SIGN_STANDING and Items.RAIL
+	# above.
+	#
+	# It has to be dispatched HERE, with the other item-placed blocks,
+	# because the `stack.item_id >= 100` guard a few lines below rejects
+	# every item id outright. Sitting after that guard made this branch
+	# unreachable, so right-clicking with redstone did nothing at all.
+	if stack.item_id == Items.REDSTONE:
+		return _try_place_redstone_dust(hit)
 	# Slab combine — vanilla qj.java::e(). Placing a half-slab onto a
 	# cell that already holds the SAME half-slab variant (from the top
 	# face) upgrades the cell to the matching double-slab and consumes
@@ -2002,23 +2013,6 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# among (-X, +X, -Z, +Z, -Y) and stores orientation in metadata 1..5
 	# encoding which neighbor is the support. Without this, torches just
 	# float in mid-air when the player aims at a wall.
-	# Redstone dust places WIRE — vanilla ey.java (ItemRedstone) is a
-	# dedicated item class whose use handler checks canPlaceAt then sets
-	# the block, exactly like the Items.SIGN → SIGN_STANDING case below.
-	# Needs a normal solid cube underneath.
-	if stack.item_id == Items.REDSTONE:
-		if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
-			return false
-		var displaced_for_wire: int = _chunk_manager.get_world_block(place)
-		if displaced_for_wire != Blocks.AIR:
-			var wd: int = Blocks.drops(displaced_for_wire)
-			if wd != Blocks.AIR:
-				_spawn_dropped_item(place, wd)
-		_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_WIRE, 0)
-		Redstone.update_wire(_chunk_manager, place)
-		SFX.play_place(Blocks.REDSTONE_WIRE)
-		inv.consume_one_selected()
-		return true
 	# Lever — same mount rules as the torch (4 walls + floor, no ceiling),
 	# so it reuses _torch_meta_from_face. Vanilla pl.java:47 then picks
 	# `5 + nextInt(2)` for a floor lever, giving the two ground rotations
@@ -2432,120 +2426,18 @@ func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
 	return true
 
 
-# Pick the rail meta (0..9) for the rail being placed at `pos` based
-# on its surrounding rails. Mirrors vanilla qe.java::e() priority:
-#   1. Two opposite same-Y neighbors → straight aligned with them
-#   2. One same-Y horizontal + one higher Y → ascending toward higher
-#   3. Two perpendicular same-Y neighbors → curve wrapping their corner
-#   4. One same-Y neighbor → straight aligned with that neighbor
-#   5. No neighbors → straight aligned with the player's facing axis
+# Pick the rail meta (0..9) for the rail being placed at `pos`.
+# The shape rules live in `RailShape` so placement and the redstone
+# junction re-evaluation (jn.java:89) cannot drift apart; the only thing
+# this wrapper adds is Alpha's isolated-rail fallback, which aligns a
+# neighbourless rail with the axis the player is facing.
 func _compute_rail_meta(pos: Vector3i) -> int:
-	var n: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 0, -1)) == Blocks.RAIL
-	var s: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 0, 1)) == Blocks.RAIL
-	var e: bool = _chunk_manager.get_world_block(pos + Vector3i(1, 0, 0)) == Blocks.RAIL
-	var w: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, 0, 0)) == Blocks.RAIL
-	var n_up: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 1, -1)) == Blocks.RAIL
-	var s_up: bool = _chunk_manager.get_world_block(pos + Vector3i(0, 1, 1)) == Blocks.RAIL
-	var e_up: bool = _chunk_manager.get_world_block(pos + Vector3i(1, 1, 0)) == Blocks.RAIL
-	var w_up: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, 1, 0)) == Blocks.RAIL
-	# Lower-Y horizontal neighbours — required for chained ramps. Vanilla
-	# qe.java::e() checks both above AND below. Without these, a rail
-	# placed on top of a step couldn't auto-orient as ramping down to the
-	# rail at the lower step, so chained staircases broke unless every
-	# other rail was flat.
-	var n_down: bool = _chunk_manager.get_world_block(pos + Vector3i(0, -1, -1)) == Blocks.RAIL
-	var s_down: bool = _chunk_manager.get_world_block(pos + Vector3i(0, -1, 1)) == Blocks.RAIL
-	var e_down: bool = _chunk_manager.get_world_block(pos + Vector3i(1, -1, 0)) == Blocks.RAIL
-	var w_down: bool = _chunk_manager.get_world_block(pos + Vector3i(-1, -1, 0)) == Blocks.RAIL
-	# (0) Three or more connections is genuinely ambiguous, and it's the
-	# one place Alpha consults redstone: oc.java:203+ applies the same
-	# four curve tests in REVERSE order depending on whether the rail is
-	# powered, so a powered junction resolves to the opposite end of the
-	# preference list from an unpowered one. Nothing else in Alpha lets
-	# redstone touch a rail — there are no powered rails.
-	var connections: int = int(n) + int(s) + int(e) + int(w)
-	if connections >= 3:
-		var powered: bool = Redstone.is_block_indirectly_powered(_chunk_manager, pos)
-		var ambiguous: int = _ambiguous_rail_meta(n, s, e, w, powered)
-		if ambiguous == 0:
-			return _ascending_along_z(pos, n_up, s_up)
-		if ambiguous == 1:
-			return _ascending_along_x(pos, e_up, w_up)
-		return ambiguous
-	# (1) Two-opposite straight beats everything — even if there's also
-	# a perpendicular neighbor (vanilla picks the straight in that case
-	# and the perpendicular rail will adjust on its own re-evaluation).
-	if n and s:
-		return _ascending_along_z(pos, n_up, s_up)
-	if e and w:
-		return _ascending_along_x(pos, e_up, w_up)
-	# (2) Curves — exactly 2 perpendicular neighbors, no opposite pair.
-	# RAIL_ENDPOINTS meta layout:
-	#   6 = S + E (wraps SE corner)
-	#   7 = S + W (wraps SW corner)
-	#   8 = N + W (wraps NW corner)
-	#   9 = N + E (wraps NE corner)
-	if n and e:
-		return 9
-	if n and w:
-		return 8
-	if s and e:
-		return 6
-	if s and w:
-		return 7
-	# (3) Single same-Y neighbor → straight aligned with it. Also
-	# considers higher-Y neighbors to make a ramp.
-	if n or s:
-		return _ascending_along_z(pos, n_up, s_up)
-	if e or w:
-		return _ascending_along_x(pos, e_up, w_up)
-	# (4) Higher-Y-only neighbors → ascending toward them.
-	if e_up:
-		return 2
-	if w_up:
-		return 3
-	if n_up:
-		return 4
-	if s_up:
-		return 5
-	# (4b) Lower-Y-only neighbors → ascending AWAY from them (i.e. the
-	# OPPOSITE side of this rail is the high end, the side facing the
-	# lower neighbour is the low end). e_down (rail one step east-and-
-	# down) means this rail should descend east = ascend west (meta 3).
-	# Mirror for the other three axes.
-	if e_down:
-		return 3  # this rail descends east toward the lower rail
-	if w_down:
-		return 2  # this rail descends west
-	if n_down:
-		return 5  # this rail descends north
-	if s_down:
-		return 4  # this rail descends south
-	# (5) Isolated rail → use player facing direction.
 	var yaw: float = _player_yaw()
-	var fx: float = absf(sin(yaw))
-	var fz: float = absf(cos(yaw))
-	return 1 if fx > fz else 0
-
-
-# Helper: a rail straight along Z (meta 0). If one of the Z neighbors
-# is higher, flip to the matching ascending meta (4 = ascending north,
-# 5 = ascending south).
-func _ascending_along_z(_pos: Vector3i, n_up: bool, s_up: bool) -> int:
-	if n_up:
-		return 4
-	if s_up:
-		return 5
-	return 0
-
-
-# Same but for X axis (meta 1, or ascending east 2 / west 3).
-func _ascending_along_x(_pos: Vector3i, e_up: bool, w_up: bool) -> int:
-	if e_up:
-		return 2
-	if w_up:
-		return 3
-	return 1
+	var facing: int = (
+		RailShape.STRAIGHT_EW if absf(sin(yaw)) > absf(cos(yaw)) else RailShape.STRAIGHT_NS
+	)
+	var powered: bool = Redstone.is_block_indirectly_powered(_chunk_manager, pos)
+	return RailShape.compute(_chunk_manager, pos, powered, facing)
 
 
 # Fishing rod — vanilla bj.java::a. Branches on player.fishing_bobber:
@@ -2661,6 +2553,30 @@ func _farm_drops(broken_id: int, pos: Vector3i) -> Array:
 # that to be empty. Places BlockCrops (nq.az) at meta 0 (stage 0),
 # consumes one seed. Players who haven't tilled their dirt first will
 # see no effect — that's Alpha-faithful.
+# Vanilla ey.java (ItemRedstone): dust becomes REDSTONE_WIRE on top of a
+# normal solid cube. Mirrors _try_place_rail's shape — resolve the target
+# cell from the hit face, verify support, commit, seed propagation.
+func _try_place_redstone_dust(hit: Dictionary) -> bool:
+	var place: Vector3i = hit.block_pos + hit.normal_i
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# lu.java:a — wire needs a full opaque cube directly beneath it.
+	if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
+		return false
+	if target_id != Blocks.AIR:
+		var displaced: int = Blocks.drops(target_id)
+		if displaced != Blocks.AIR:
+			_spawn_dropped_item(place, displaced)
+	_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_WIRE, 0)
+	Redstone.update_wire(_chunk_manager, place)
+	SFX.play_place(Blocks.REDSTONE_WIRE)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
 func _try_place_wheat_seeds(hit: Dictionary) -> bool:
 	if hit.is_empty():
 		return false
@@ -3805,38 +3721,9 @@ func _toggle_lever(pos: Vector3i) -> void:
 	# mishandled (no dirty flag, no notification), so it must go through
 	# the atomic state path.
 	_chunk_manager.set_world_block_state(pos, Blocks.LEVER, new_meta)
+	# pl.java:145-157 also notifies around the block the lever is mounted
+	# on. That is what carries strong power out to the mount's other
+	# neighbours — without it, a lever on a wall does nothing to wire
+	# running along the floor beside that wall.
+	Redstone.notify_around_mount(_chunk_manager, pos, Blocks.LEVER)
 	SFX.play_click(0.6 if now_on else 0.5, 0.3)
-
-
-# Junction shape for a rail with 3+ connections — the ambiguous branch
-# of oc.java:203+. Straights are assigned first (E/W overriding N/S),
-# then the four curve tests run; because each test simply overwrites the
-# result, running them in reverse order flips which curve wins. Vanilla
-# uses that ordering difference as its powered/unpowered tie-break.
-#
-# Curve metas: 6 = S+E, 7 = S+W, 8 = N+W, 9 = N+E.
-func _ambiguous_rail_meta(n: bool, s: bool, e: bool, w: bool, powered: bool) -> int:
-	var meta: int = -1
-	if n or s:
-		meta = 0
-	if w or e:
-		meta = 1
-	if powered:
-		if s and e:
-			meta = 6
-		if w and s:
-			meta = 7
-		if e and n:
-			meta = 9
-		if n and w:
-			meta = 8
-	else:
-		if n and w:
-			meta = 8
-		if e and n:
-			meta = 9
-		if w and s:
-			meta = 7
-		if s and e:
-			meta = 6
-	return meta

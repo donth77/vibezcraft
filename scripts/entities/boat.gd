@@ -611,6 +611,12 @@ func _spawn_drop(parent: Node, item_id: int) -> void:
 # Mirrors vanilla dp.java::e_() but on a per-second clock instead of
 # vanilla's 20 Hz fixed tick.
 func _physics_process(delta: float) -> void:
+	# Vanilla Entity.moveEntity fires Block.onEntityCollidedWithBlock for
+	# every cell the bounds touch. Wooden plates (`lg.a`) accept every
+	# entity, so items / arrows / carts / boats all need this route —
+	# without it an unpressed plate has nothing to wake it.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	# Analog water fraction — vanilla samples 5 vertical slices across
 	# the hull and uses `(2 * water_pct - 1)` as the buoyancy sign.
 	# We use 3 slices (bottom, mid, top) which is enough resolution to

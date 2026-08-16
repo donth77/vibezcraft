@@ -119,6 +119,22 @@ public:
 	// top of supporting block. Native skips the cube pass; GDScript
 	// _emit_rail_geometry handles the meta-driven plank quad + UV.
 	static constexpr int RAIL = 78;
+	// Redstone attachments — all non-cube, all owned by GDScript's
+	// _append_non_cube_geometry. REDSTONE_ORE (88) and
+	// GLOWING_REDSTONE_ORE (89) are deliberately absent: they are full
+	// opaque cubes and the native cube pass is correct for them.
+	//
+	// Without these entries the cube pass emits a full 1x1x1 box using
+	// the block's face texture, so a placed torch reads as a solid block
+	// with the torch sprite on every side and a dust line reads as a red
+	// cube — exactly the WOOD_HALF_SLAB failure described above.
+	static constexpr int REDSTONE_WIRE = 90;
+	static constexpr int REDSTONE_TORCH = 91;
+	static constexpr int REDSTONE_TORCH_OFF = 92;
+	static constexpr int LEVER = 93;
+	static constexpr int STONE_BUTTON = 94;
+	static constexpr int STONE_PRESSURE_PLATE = 95;
+	static constexpr int WOODEN_PRESSURE_PLATE = 96;
 	// Beta 1.3 wood + cobblestone slab variants — same half-height
 	// mesh as HALF_SLAB but with planks / cobblestone textures.
 	// Native skips the cube pass so GDScript _emit_slab_geometry owns

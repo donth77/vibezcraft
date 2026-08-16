@@ -47,8 +47,12 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 	if not _cache.has(key):
 		# TORCH gets a tight 8-vert pillar box (same geometry the chunk
 		# mesher emits for in-world torches), not a full cube.
-		if block_id == Blocks.TORCH:
-			_cache[key] = _build_torch(size)
+		# All three torch ids get the tight 8-vert pillar (the same
+		# geometry the chunk mesher emits in-world), textured from their
+		# own tile — a redstone torch through the generic cube path would
+		# smear its sprite across six faces.
+		if Blocks.mesh_shape(block_id) == Blocks.MESH_SHAPE_TORCH:
+			_cache[key] = _build_torch(size, 1.0, 1.0, Blocks.get_face_texture(block_id, "side"))
 		elif block_id == Blocks.FENCE:
 			_cache[key] = _build_fence_post(size)
 		elif block_id == Blocks.WOOD_STAIRS or block_id == Blocks.COBBLESTONE_STAIRS:
@@ -65,6 +69,12 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 			_cache[key] = _build_slab(block_id, size)
 		elif block_id == Blocks.FENCE_GATE:
 			_cache[key] = _build_fence_gate(size)
+		elif (
+			block_id == Blocks.STONE_BUTTON
+			or block_id == Blocks.STONE_PRESSURE_PLATE
+			or block_id == Blocks.WOODEN_PRESSURE_PLATE
+		):
+			_cache[key] = _build_selection_box(block_id, size)
 		else:
 			_cache[key] = _build(block_id, size)
 	return _cache[key] as ArrayMesh
@@ -73,11 +83,40 @@ static func get_cube_mesh(block_id: int, size: float = 1.0) -> ArrayMesh:
 # Held-torch mesh — same proportions as the in-world torch (square
 # cross-section) but built at a larger `size` so it reads at held-item
 # scale. Cached separately from the in-world mesh.
-static func get_held_torch_mesh(size: float) -> ArrayMesh:
-	var key: String = "torch_held_%.4f" % size
+static func get_held_torch_mesh(size: float, block_id: int = Blocks.TORCH) -> ArrayMesh:
+	var key: String = "torch_held_%d_%.4f" % [block_id, size]
 	if not _cache.has(key):
-		_cache[key] = _build_torch(size, 1.0, 2.0)
+		_cache[key] = _build_torch(size, 1.0, 2.0, Blocks.get_face_texture(block_id, "side"))
 	return _cache[key] as ArrayMesh
+
+
+# A box matching the block's own selection AABB, in the same centred
+# local space `_build` uses. Buttons and plates went through the plain
+# cube builder, which made their inventory icon and held model a FULL
+# stone / planks cube — pixel-identical to the STONE and PLANKS icons, so
+# they read as missing when you scan the debug spawner for them.
+#
+# Reuses `_build` and rescales, rather than hand-writing another six-face
+# table, so the winding and per-face UV assignment can't drift from the
+# cube path.
+static func _build_selection_box(block_id: int, size: float) -> ArrayMesh:
+	var mesh: ArrayMesh = _build(block_id, size)
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	# Only the selection box's SIZE is used; the result stays centred on
+	# the origin. Its position is meta-dependent — a button's box hugs
+	# whichever wall it is mounted on — and neither an inventory icon nor
+	# a held model has metadata, so honouring the offset jams the shape
+	# against one edge of the icon frame and it reads as a stray sliver.
+	# Centred, a button reads as a button and a plate as a plate.
+	var sel: AABB = Blocks.selection_aabb(block_id)
+	var scale := Vector3(sel.size.x, sel.size.y, sel.size.z)
+	for i in range(verts.size()):
+		verts[i] = verts[i] * scale
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	var out := ArrayMesh.new()
+	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return out
 
 
 # Six-face textured cube. Face winding mirrors the chunk mesher's
@@ -662,9 +701,9 @@ static func _fence_face(
 # silhouette (flame top, stick body) renders right-side-up from any
 # camera angle.
 static func _build_torch(
-	size: float, width_mult: float = 1.0, depth_mult: float = 1.0
+	size: float, width_mult: float = 1.0, depth_mult: float = 1.0, tile: String = "torch"
 ) -> ArrayMesh:
-	var rect: Rect2 = BlockAtlas.uv_rect("torch")
+	var rect: Rect2 = BlockAtlas.uv_rect(tile)
 	var u0: float = rect.position.x
 	var u1: float = rect.position.x + rect.size.x
 	var v0: float = rect.position.y

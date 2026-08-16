@@ -13,6 +13,19 @@ extends Node
 
 const ICON_PX: int = 64  # output texture size — chunky enough to look crisp at 54px slot scale
 
+# The bake wraps ONE texture around all six faces of a cube, so a block
+# only belongs in the list below if its tile is a full opaque square.
+# Give it a sprite-on-transparency tile instead — a torch, a lever, a
+# dust cross — and you get that sprite floating on three faces of an
+# otherwise invisible cube, which is exactly what it looks like: broken.
+#
+# Those blocks belong in `ItemIcons._BLOCK_ICON_NAMES` instead, which is
+# how plain TORCH, SAPLING, LADDER and the flowers have always worked.
+# It matters in two places at once, because `ItemIcons.icon_for` returns
+# the baked cube if there is one and `player.gd` feeds that same texture
+# to `SpriteExtruder` — so one wrong entry breaks the inventory icon AND
+# the thing in your hand.
+
 # IMPORTANT: this list is BLOCKS ONLY. Non-block items (sticks, tools,
 # ingots) must NOT be added here — vanilla MC renders those as flat 2D
 # sprites, not 3D cubes. Items go through the placeholder/sprite path in
@@ -38,18 +51,9 @@ const _ICONIFIED_BLOCKS: Array = [
 	# an entry here the spawner button and hotbar slot render blank.
 	Blocks.REDSTONE_ORE,
 	Blocks.GLOWING_REDSTONE_ORE,
-	# Lever bakes as a cobblestone-textured cube like FENCE/CHEST above —
-	# the iso bake of its real two-box mesh would be nearly invisible at
-	# icon size.
-	Blocks.LEVER,
-	# Wire's in-world form is a flat film; the cube bake reads as a solid
-	# red-dust block, which is clear enough for a debug-grid button. The
-	# dust ITEM keeps its own flat sprite via the normal item path.
-	Blocks.REDSTONE_WIRE,
-	# Torch variants bake as cubes like the plain TORCH does — the real
-	# pillar mesh is too thin to read at icon size.
-	Blocks.REDSTONE_TORCH,
-	Blocks.REDSTONE_TORCH_OFF,
+	# LEVER, REDSTONE_WIRE and both REDSTONE_TORCH ids are deliberately
+	# ABSENT — see the note under this list. Button and plates stay,
+	# because they texture from opaque `stone` / `planks` tiles.
 	Blocks.STONE_BUTTON,
 	Blocks.STONE_PRESSURE_PLATE,
 	Blocks.WOODEN_PRESSURE_PLATE,

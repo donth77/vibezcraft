@@ -569,6 +569,12 @@ func _drop_stack(parent: Node, stack) -> void:
 #      was placed in open air). Same shape as the boat's on-land
 #      physics.
 func _physics_process(delta: float) -> void:
+	# Vanilla Entity.moveEntity fires Block.onEntityCollidedWithBlock for
+	# every cell the bounds touch. Wooden plates (`lg.a`) accept every
+	# entity, so items / arrows / carts / boats all need this route —
+	# without it an unpressed plate has nothing to wake it.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	var rail_info: Dictionary = _find_rail_under_cart()
 	var on_rail: bool = not rail_info.is_empty()
 	if on_rail:

@@ -61,5 +61,12 @@ build
 *.png
 *.png.import
 test-screenshots/
-docs/
+# `docs/*` rather than `docs/` so the negation below can take effect —
+# git will not re-include a file whose parent DIRECTORY is excluded.
+# Everything in docs/ stays ignored except the redstone documents,
+# which are release artefacts the plan and playtest gate depend on.
+docs/*
+!docs/redstone-*.md
 scripts/dev/internal
+scripts/dev/__pycache__/
+./Library

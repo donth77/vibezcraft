@@ -174,6 +174,12 @@ func _update_orientation() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Vanilla Entity.moveEntity fires Block.onEntityCollidedWithBlock for
+	# every cell the bounds touch. Wooden plates (`lg.a`) accept every
+	# entity, so items / arrows / carts / boats all need this route —
+	# without it an unpressed plate has nothing to wake it.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	if _stuck:
 		# Stuck arrow — only need to check pickup + lifetime occasionally
 		# (no flight physics). 10 Hz is plenty: vanilla pickup happens

@@ -400,15 +400,33 @@ static func _is_below_solid(manager, below_pos: Vector3i) -> bool:
 static func _place_flowing(manager, pos: Vector3i, block_id: int, meta: int) -> void:
 	var existing: int = manager.get_world_block(pos)
 	if existing != Blocks.AIR:
-		# Vanilla calls nq.m[n6].b_(world, x, y, z, meta) which drops the
-		# block as items. We skip item drops for flow-collisions (matches
-		# Alpha behavior for plants — they just vanish into the flow).
-		# Lava: don't drop items either; TODO set fire once fire ticks exist.
-		pass
+		wash_away(manager, pos, existing, block_id)
 	manager.set_world_block_with_meta(pos, block_id, meta)
 	# Newly-placed flowing cell must tick so it can continue spreading.
 	var rate: int = WATER_TICK_RATE if Blocks.is_water(block_id) else LAVA_TICK_RATE
 	TickScheduler.schedule(pos, block_id, rate)
+
+
+# The one place a fluid destroys a block, so the drop rule lives here
+# rather than at each of `_place_flowing`'s call sites.
+#
+# ja.java:104-110 — WATER hands the displaced block to
+# `Block.dropBlockAsItems`, LAVA plays the mix effect and drops nothing.
+# That distinction is the whole reason redstone dust washed off a wall by
+# a water stream comes back as an item you can pick up, while the same
+# dust under a lava flow is simply gone.
+#
+# Returns the id that was dropped (AIR when nothing was), so a headless
+# test can assert the matrix without a scene tree.
+static func wash_away(manager, pos: Vector3i, existing: int, fluid_id: int) -> int:
+	if not Blocks.is_water(fluid_id):
+		return Blocks.AIR
+	var dropped: int = Blocks.drops(existing)
+	if dropped == Blocks.AIR:
+		return Blocks.AIR
+	if manager.has_method("spawn_block_drop"):
+		manager.call("spawn_block_drop", pos, dropped)
+	return dropped
 
 
 # ir.java pattern — when a neighbor change happens near a STILL cell,

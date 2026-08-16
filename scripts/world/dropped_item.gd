@@ -75,12 +75,7 @@ func setup(
 	# like sapling/fire, and torches). MESH_SHAPE_EXTERNAL blocks (chest)
 	# read as cubes in inventory and on the ground — same fix as the
 	# held-item routing in player.gd::_update_held_item.
-	var shape: int = Blocks.mesh_shape(p_item_id) if p_item_id < 100 else -1
-	_is_sprite_item = (
-		p_item_id >= Items.STICK
-		or shape == Blocks.MESH_SHAPE_CROSS
-		or shape == Blocks.MESH_SHAPE_TORCH
-	)
+	_is_sprite_item = p_item_id >= Items.STICK or Blocks.has_sprite_tile(p_item_id)
 	if _is_sprite_item:
 		_build_sprite_mesh(p_item_id)
 	else:
@@ -108,6 +103,12 @@ func _process(delta: float) -> void:
 		rotate_y(delta * SPIN_SPEED)
 		_update_world_brightness()
 
+	# Vanilla Entity.moveEntity fires Block.onEntityCollidedWithBlock for
+	# every cell the bounds touch. Wooden plates (`lg.a`) accept every
+	# entity, so items / arrows / carts / boats all need this route —
+	# without it an unpressed plate has nothing to wake it.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	if _player == null:
 		_player = _find_player()
 	var elapsed: float = Time.get_ticks_msec() / 1000.0 - _spawn_time

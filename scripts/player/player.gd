@@ -526,8 +526,7 @@ func _ready() -> void:
 	if hotbar != null:
 		hotbar.bind(inventory)
 	# Vanilla Alpha draws the version string top-left on the HUD every
-	# frame (nl.java:156 — "Minecraft Alpha v1.2.6" at (2,2), white with
-	# a 1px shadow). We keep the play HUD clean and only surface it while
+	# frame. We keep the play HUD clean and only surface it while
 	# the pause / game menu is up. The label still lives at the hotbar's
 	# index — above the damage/water tint rects, below the UI screens and
 	# pause menu — so the pause dim darkens it like vanilla's overlay; its
@@ -695,14 +694,14 @@ func _update_held_item() -> void:
 		# native scale and balloon to fill the screen. Cube path keeps it
 		# the same size as any other held block.
 		var shape: int = Blocks.mesh_shape(id)
-		# Non-block items and cross-quad blocks (sapling/fire) take the
-		# sprite-extruder path. Everything else goes through the held-block
-		# path — BlockMesh.get_cube_mesh special-cases TORCH (pillar),
-		# FENCE (post), and STAIRS (step shape) so they render correctly.
+		# Non-block items, and any block whose tile is a sprite on
+		# transparency, take the sprite-extruder path — the cube path
+		# would smear that sprite across six faces (see
+		# Blocks.has_sprite_tile). Torches are the one exception: they
+		# have a bespoke pillar mesh that reads far better in the hand
+		# than a flat sprite, so they stay on the block path.
 		var as_sprite: bool = (
-			id >= Items.STICK
-			or shape == Blocks.MESH_SHAPE_CROSS
-			or shape == Blocks.MESH_SHAPE_LADDER
+			id >= Items.STICK or (Blocks.has_sprite_tile(id) and shape != Blocks.MESH_SHAPE_TORCH)
 		)
 		if as_sprite:
 			_build_held_tool(id)
@@ -716,8 +715,9 @@ func _update_held_item() -> void:
 
 func _build_held_block(id: int) -> void:
 	_held_block = MeshInstance3D.new()
-	if id == Blocks.TORCH:
-		_held_block.mesh = BlockMesh.get_held_torch_mesh(_HELD_BLOCK_SIZE * 2.0)
+	var is_torch: bool = Blocks.mesh_shape(id) == Blocks.MESH_SHAPE_TORCH
+	if is_torch:
+		_held_block.mesh = BlockMesh.get_held_torch_mesh(_HELD_BLOCK_SIZE * 2.0, id)
 	else:
 		_held_block.mesh = BlockMesh.get_cube_mesh(id, _HELD_BLOCK_SIZE)
 	# Force the FP held block to draw on top of world geometry — same
@@ -736,8 +736,8 @@ func _build_held_block(id: int) -> void:
 		arm_r = _character_model.get("arm_r") as Node3D
 	if arm_r != null:
 		_held_block_tp = MeshInstance3D.new()
-		if id == Blocks.TORCH:
-			_held_block_tp.mesh = BlockMesh.get_cube_mesh(Blocks.TORCH, _TP_HELD_BLOCK_SIZE * 2.0)
+		if is_torch:
+			_held_block_tp.mesh = BlockMesh.get_cube_mesh(id, _TP_HELD_BLOCK_SIZE * 2.0)
 			_held_block_tp.position = _TP_HELD_TORCH_POSITION
 			_held_block_tp.rotation = _TP_HELD_TORCH_ROTATION
 		elif id == Blocks.FENCE:

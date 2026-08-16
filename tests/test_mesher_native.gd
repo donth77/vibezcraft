@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends GutTest
 
 # Integration + parity tests for the MesherNative GDExtension.
@@ -128,6 +129,71 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 		gds.lava_indices,
 		"%s: lava indices byte-equal" % label
 	)
+
+
+# --- Redstone attachments -----------------------------------------------
+#
+# The native mesher carries its own hardcoded list of non-cube block ids;
+# anything missing from it silently falls through to the full-cube pass.
+# The redstone set was never added, so in-game a placed torch rendered as
+# a solid block with the torch sprite on every face and a dust line
+# rendered as a red cube — while every GDScript-only test passed, because
+# `Mesher.mesh_chunk` (the reference) handled them correctly all along.
+#
+# Parity is the assertion that catches this. "Produces geometry" does
+# not: a wrong-shaped cube produces plenty.
+
+
+func test_parity_every_redstone_attachment() -> void:
+	for id: int in [
+		Blocks.REDSTONE_WIRE,
+		Blocks.REDSTONE_TORCH,
+		Blocks.REDSTONE_TORCH_OFF,
+		Blocks.LEVER,
+		Blocks.STONE_BUTTON,
+		Blocks.STONE_PRESSURE_PLATE,
+		Blocks.WOODEN_PRESSURE_PLATE,
+	]:
+		var chunk := Chunk.new()
+		chunk.set_block(8, 63, 8, Blocks.STONE)
+		chunk.set_block(9, 64, 8, Blocks.STONE)  # wall for the wall-mounted ones
+		chunk.set_block(8, 64, 8, id)
+		chunk.set_block_meta(8, 64, 8, Redstone.MOUNT_EAST_WALL)
+		var both := _mesh_both(chunk)
+		_assert_parity(both[0], both[1], "placed %s" % Blocks.name_of(id))
+
+
+func test_parity_redstone_ore_stays_a_full_cube() -> void:
+	# The other half: ore IS an ordinary opaque cube, so the native pass
+	# is right to own it. Skipping it would be its own bug.
+	for id: int in [Blocks.REDSTONE_ORE, Blocks.GLOWING_REDSTONE_ORE]:
+		var chunk := Chunk.new()
+		chunk.set_block(8, 64, 8, id)
+		var both := _mesh_both(chunk)
+		_assert_parity(both[0], both[1], Blocks.name_of(id))
+		assert_eq(both[1].vertices.size(), 24, "%s is a full cube" % Blocks.name_of(id))
+
+
+func test_parity_wire_at_every_power_level() -> void:
+	for power: int in [0, 1, 8, 15]:
+		var chunk := Chunk.new()
+		chunk.set_block(8, 63, 8, Blocks.STONE)
+		chunk.set_block(8, 64, 8, Blocks.REDSTONE_WIRE)
+		chunk.set_block_meta(8, 64, 8, power)
+		var both := _mesh_both(chunk)
+		_assert_parity(both[0], both[1], "wire at power %d" % power)
+
+
+func test_parity_a_wire_run_with_neighbours() -> void:
+	# Wire topology depends on its neighbours, so a straight run and a
+	# cross exercise different tiles and different quad counts.
+	var chunk := Chunk.new()
+	for offset: Vector2i in [Vector2i(0, 0), Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, 1)]:
+		chunk.set_block(8 + offset.x, 63, 8 + offset.y, Blocks.STONE)
+		chunk.set_block(8 + offset.x, 64, 8 + offset.y, Blocks.REDSTONE_WIRE)
+		chunk.set_block_meta(8 + offset.x, 64, 8 + offset.y, 12)
+	var both := _mesh_both(chunk)
+	_assert_parity(both[0], both[1], "wire T-junction")
 
 
 func test_parity_empty_chunk() -> void:

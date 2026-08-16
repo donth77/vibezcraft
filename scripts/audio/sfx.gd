@@ -1136,6 +1136,33 @@ func _material_for(block_id: int) -> String:
 			# Vanilla BlockJukebox inherits Material.wood (hb.e) — same
 			# wood-knock SFX as planks / log / fence_gate.
 			return "wood"
+		Blocks.REDSTONE_ORE, Blocks.GLOWING_REDSTONE_ORE:
+			# nq.java:96-97 — `new an(73/74, 51, …).a(h)`, and `h` is the
+			# stone sound (nq.java:12). Same as the other ores.
+			return "stone"
+		Blocks.REDSTONE_WIRE:
+			# nq.java:78 — `new lu(55, 84).c(0.0f).a(d)`, and `d` is
+			# "stone" (nq.java:8). Counterintuitive for something that
+			# looks like powder, but dust really does break with a stone
+			# tick in Alpha.
+			return "stone"
+		Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
+			# nq.java:98-99 — `new bo(75/76, …).a(e)`, `e` = "wood"
+			# (nq.java:9). Same as the plain torch above.
+			return "wood"
+		Blocks.LEVER:
+			# nq.java:92 — `new pl(69, 96).c(0.5f).a(e)` → wood.
+			return "wood"
+		Blocks.STONE_BUTTON:
+			# nq.java:100 — `new iy(77, nq.t.bg).c(0.5f).a(h)` → stone.
+			return "stone"
+		Blocks.STONE_PRESSURE_PLATE:
+			# nq.java:93 — `new ap(70, …, lg.b).c(0.5f).a(h)` → stone.
+			return "stone"
+		Blocks.WOODEN_PRESSURE_PLATE:
+			# nq.java:95 — `new ap(72, …, lg.a).c(0.5f).a(e)` → wood.
+			# The plates differ in sound as well as in what trips them.
+			return "wood"
 		Blocks.SLIME_BLOCK:
 			# Modern MC BlockSlime uses Block.soundSlimeFootstep — a
 			# dedicated slime-squish material distinct from cloth/wood.

@@ -143,7 +143,7 @@ func test_powered_tnt_primes_and_clears_its_cell() -> void:
 	var tnt := Vector3i(0, 64, 0)
 	_w.put(tnt, Blocks.TNT)
 	_w.put(tnt + Vector3i(-1, 0, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
-	Redstone.on_neighbor_changed(_w, tnt)
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.LEVER)
 	assert_eq(_w.get_world_block(tnt), Blocks.AIR, "block consumed")
 	assert_eq(_w.primed.size(), 1, "one primed entity spawned")
 	assert_eq(_w.primed[0], tnt, "at the TNT's cell")
@@ -153,7 +153,7 @@ func test_unpowered_tnt_stays_put() -> void:
 	var tnt := Vector3i(0, 64, 0)
 	_w.put(tnt, Blocks.TNT)
 	_w.put(tnt + Vector3i(-1, 0, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL)
-	Redstone.on_neighbor_changed(_w, tnt)
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.LEVER)
 	assert_eq(_w.get_world_block(tnt), Blocks.TNT, "not primed")
 	assert_eq(_w.primed.size(), 0, "no entity")
 
@@ -163,8 +163,45 @@ func test_tnt_primes_through_a_relay_block() -> void:
 	_w.put(tnt, Blocks.TNT)
 	_w.put(RELAY, Blocks.STONE)
 	_w.put(LEVER_POS, Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
-	Redstone.on_neighbor_changed(_w, tnt)
+	# The changed neighbour here is the STONE relay, which is not itself a
+	# power source — but vanilla still primes, because the notification
+	# that reaches the TNT carries the id of the block that changed at the
+	# ORIGIN of the fanout (the lever), not the relay in between.
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.LEVER)
 	assert_eq(_w.primed.size(), 1, "strong power relayed through stone reaches TNT")
+
+
+func test_already_powered_tnt_ignores_an_unrelated_neighbour_change() -> void:
+	# v.java:23 guards on `nq.m[n5].e()` — the block that CHANGED has to
+	# be able to provide power. Without that clause, TNT sitting in an
+	# already-powered cell detonates the moment anything at all is edited
+	# next to it: place a torch two cells away, walk a chunk boundary,
+	# reload a region. The power state is identical in both calls below;
+	# only the changed-neighbour id differs.
+	var tnt := Vector3i(0, 64, 0)
+	_w.put(tnt, Blocks.TNT)
+	_w.put(tnt + Vector3i(-1, 0, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	assert_true(Redstone.is_block_indirectly_powered(_w, tnt), "TNT cell is powered")
+	# Someone stacks a dirt block on top. Dirt cannot provide power.
+	_w.put(tnt + Vector3i(0, 1, 0), Blocks.DIRT)
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.DIRT)
+	assert_eq(_w.get_world_block(tnt), Blocks.TNT, "unrelated neighbour does not ignite")
+	assert_eq(_w.primed.size(), 0, "no primed entity")
+	# A source-capable neighbour change on the same powered cell still does.
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.LEVER)
+	assert_eq(_w.primed.size(), 1, "a power-source change still primes")
+
+
+func test_breaking_a_source_reports_air_and_cannot_ignite_tnt() -> void:
+	# Removing a block notifies with AIR (vanilla passes the new id), and
+	# `n5 > 0` rejects it. Prevents the "break the lever, blow up the TNT"
+	# inversion.
+	var tnt := Vector3i(0, 64, 0)
+	_w.put(tnt, Blocks.TNT)
+	_w.put(tnt + Vector3i(-1, 0, 0), Blocks.LEVER, Redstone.MOUNT_EAST_WALL | Redstone.POWERED_BIT)
+	Redstone.on_neighbor_changed(_w, tnt, Blocks.AIR)
+	assert_eq(_w.get_world_block(tnt), Blocks.TNT, "AIR origin never primes")
+	assert_eq(_w.primed.size(), 0, "no primed entity")
 
 
 # --- Mounted-component support loss (pl.java:h) ---

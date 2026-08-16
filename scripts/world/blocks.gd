@@ -846,6 +846,35 @@ static func _tick_crops(manager, pos: Vector3i) -> void:
 # (gdlint definitions-order).
 
 
+# True when a block's atlas tile is a SPRITE ON TRANSPARENCY rather than a
+# solid square — vanilla's `Block.renderAsNormalBlock()` returning false.
+#
+# The cube path wraps one tile around all six faces of a box, which only
+# reads correctly for a solid tile. Hand it a torch, a lever or a dust
+# cross and you get the sprite floating on three faces of an otherwise
+# invisible cube. Measured opaque coverage says it plainly: these tiles
+# run 8-27%, while the thinnest legitimate cube (glass) is 44%.
+#
+# Three renderers need the same answer — the held item (`player.gd`), the
+# dropped entity (`dropped_item.gd`) and the inventory icon
+# (`block_icon_renderer.gd`) — and each of them used to carry its own
+# slightly different hand-maintained list. That is exactly how the
+# redstone attachments ended up correct in the inventory and wrong in the
+# player's hand at the same time. One predicate, three callers.
+#
+# Buttons and plates are deliberately absent: they texture from `stone`
+# and `planks`, which are fully opaque, so a cube reads fine.
+static func has_sprite_tile(id: int) -> bool:
+	if id >= 100:
+		return false  # item ids have no mesh shape
+	match mesh_shape(id):
+		MESH_SHAPE_CROSS, MESH_SHAPE_TORCH, MESH_SHAPE_LADDER:
+			return true
+		MESH_SHAPE_LEVER, MESH_SHAPE_REDSTONE_WIRE:
+			return true
+	return false
+
+
 # Shared entity-contact hook (redstone-plan.md §7.3). Vanilla Entity.move
 # fires Block.b(world, x, y, z, entity) for the cell under ANY entity's
 # feet — players and mobs both route here, and pressure plates (Phase

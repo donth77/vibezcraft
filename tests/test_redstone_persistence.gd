@@ -118,6 +118,36 @@ func test_pending_redstone_ticks_harvest_and_restore() -> void:
 	assert_eq(TickScheduler.pending_count(), 3, "restored")
 
 
+func test_a_held_plates_recheck_survives_unload_and_reload() -> void:
+	# A plate under a standing player re-checks every 20 ticks, and that
+	# pending tick is what eventually RELEASES it. Lose it across an
+	# unload and the plate stays stuck down forever with nothing
+	# scheduled to notice the player has gone.
+	var plate := Vector3i(6, Y, 6)
+	var world := _FakeWorld.new()
+	world.blocks[plate + Vector3i(0, -1, 0)] = Blocks.STONE
+	world.blocks[plate] = Blocks.WOODEN_PRESSURE_PLATE
+	world.metas[plate] = 0
+	world.occupied = true
+	Redstone.update_plate(world, plate, Blocks.WOODEN_PRESSURE_PLATE, true)
+	assert_eq(world.metas[plate], 1, "pressed")
+	assert_eq(TickScheduler.pending_count(), 1, "a recheck is queued")
+
+	for _i in range(7):
+		TickScheduler.advance(0.05, world)
+	var harvested: Array = TickScheduler.take_for_chunk(0, 0)
+	assert_eq(harvested.size(), 1, "the recheck came out with the chunk")
+	assert_eq(int(harvested[0]["delay"]), 13, "13 of the 20 ticks remain")
+	assert_eq(int(harvested[0]["block_id"]), Blocks.WOODEN_PRESSURE_PLATE, "as a plate tick")
+
+	# Reload with the entity gone: the restored recheck must release it.
+	TickScheduler.restore_ticks(harvested)
+	world.occupied = false
+	for _i in range(14):
+		TickScheduler.advance(0.05, world)
+	assert_eq(world.metas[plate], 0, "the restored recheck released the plate")
+
+
 func test_restored_ticks_keep_their_remaining_delay() -> void:
 	TickScheduler.schedule(Vector3i(5, Y, 5), Blocks.STONE_BUTTON, 20)
 	# Burn 5 ticks, then unload.
@@ -132,6 +162,10 @@ class _FakeWorld:
 	extends RefCounted
 	var blocks: Dictionary = {}
 	var metas: Dictionary = {}
+	var occupied: bool = false
+
+	func entities_overlap_box(_box: AABB, _living_only: bool) -> bool:
+		return occupied
 
 	func get_world_block(pos: Vector3i) -> int:
 		return blocks.get(pos, Blocks.AIR)
@@ -234,14 +268,16 @@ func test_all_nine_ids_are_distinct_and_in_the_reserved_range() -> void:
 # --- Rail curve tie-breaker (oc.java:203+) ---
 
 
-func test_ambiguous_rail_tie_break_flips_with_power() -> void:
-	# The four curve tests run in reverse order depending on power, so a
-	# junction with 3+ connections resolves to opposite curves. This is
-	# the ONLY way redstone touches a rail in Alpha.
-	var script := load("res://scripts/player/interaction.gd") as GDScript
-	assert_not_null(script, "interaction script loads")
-	var consts: Dictionary = script.get_script_constant_map()
-	assert_true(consts != null, "script constants readable")
+func test_the_rail_tie_break_lives_in_one_shared_place() -> void:
+	# Placement (`interaction.gd`) and the redstone re-evaluation
+	# (`jn.java:89`) must resolve a junction identically. They can only
+	# be guaranteed to if they call the same code, so this asserts the
+	# shared entry point exists — the behaviour itself is pinned, meta by
+	# meta, in `tests/test_rail_shape.gd`.
+	assert_true(
+		load("res://scripts/player/interaction.gd").source_code.contains("RailShape.compute"),
+		"placement goes through RailShape"
+	)
 
 
 # --- Convergence cost on a large settled network ---

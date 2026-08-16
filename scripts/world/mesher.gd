@@ -61,6 +61,9 @@ const _FACE_KIND: Array = [
 # Without this, divide-then-cast vs multiply-by-reciprocal disagree at
 # 1 ULP in float32 and the parity tests blow up on PackedColorArray equality.
 const _LIGHT_SCALE: float = 1.0 / 15.0
+# bk.java:459 `f5` — how far a redstone-dust arm is pulled back on a side
+# with no connection, in cell units. 5/16.
+const _WIRE_ARM_CROP: float = 0.3125
 
 # Cross-quad shape — two perpendicular billboards inset within the cell.
 # Inset of 0.05/0.95 (i.e. 0.5 ± 0.45) matches vanilla Alpha 1.1.2's
@@ -2906,7 +2909,17 @@ static func _emit_torch_box(
 			ymeta = 0.0
 	var cx_off: float = float(x) + 0.5
 	var cz_off: float = float(z) + 0.5
-	var cy_off: float = float(y) + (0.5 if is_wall else 0.125)
+	# Floor torches sit FLUSH with the ground. ob.java:135 gives the floor
+	# variant bounds of (0.4, 0.0, 0.4)..(0.6, 0.6, 0.6) — bottom at y=0 —
+	# and `Blocks.selection_aabb` already encodes that. The render used
+	# +0.125, so the pillar hovered 2/16 above its own selection box and
+	# above the block it stands on: visibly floating.
+	# Vertical placement, from vanilla's renderBlockTorch call sites:
+	# a floor torch is rendered at `d1` unchanged, a wall torch at
+	# `d1 + 0.2`. Ours used +0.125 and +0.5, which floated the floor torch
+	# above the ground and pushed the wall torch up out of its own
+	# selection box (ob.java:122-136 puts wall bounds at y 0.2..0.8).
+	var cy_off: float = float(y) + (0.2 if is_wall else 0.0)
 	for i in range(8):
 		var v: Vector3 = ao[i]
 		if is_wall:
@@ -3565,13 +3578,29 @@ static func _emit_lever_geometry(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	_plant_faces: PackedVector3Array
+	plant_faces: PackedVector3Array
 ) -> void:
 	var meta: int = chunk.get_block_meta(x, y, z)
 	var mount: int = meta & 7
 	var powered: bool = (meta & 8) != 0
 	var base_rect: Rect2 = BlockAtlas.uv_rect("cobblestone")
-	var handle_rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.LEVER, BlockAtlas.FACE_SIDE)
+	# The handle samples ONLY the stick column of the lever tile, not the
+	# whole 16×16 sprite. The tile is 20 opaque pixels — a 2-wide, 10-tall
+	# stick at x[7..8], y[6..15] — and everything around it is
+	# transparent. Stretched across the handle box with the shader's
+	# discard path off (see face_light below), that transparency renders
+	# as solid black and the lever reads as a fat dark slab with a stick
+	# buried in it.
+	#
+	# Identical sub-rect to `BlockMesh._build_torch`, which faces exactly
+	# the same layout: both are a stick centred in the middle two columns.
+	var handle_tile: Rect2 = BlockAtlas.uv_rect_for(Blocks.LEVER, BlockAtlas.FACE_SIDE)
+	var handle_rect := Rect2(
+		handle_tile.position.x + handle_tile.size.x * (7.0 / 16.0),
+		handle_tile.position.y + handle_tile.size.y * (6.0 / 16.0),
+		handle_tile.size.x * (2.0 / 16.0),
+		handle_tile.size.y * (10.0 / 16.0)
+	)
 	# Light from this cell — the lever never fills it, so its own cell's
 	# light is the right sample (same choice as the torch/rail paths).
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
@@ -3602,35 +3631,109 @@ static func _emit_lever_geometry(
 			b_min = Vector3(0.375, 0.0, 0.25)
 			b_max = Vector3(0.625, 0.1875, 0.75)
 	_emit_box(verts, norms, uvs, colors, indices, o + b_min, o + b_max, base_rect, face_light)
-	# Handle: a thin stick rooted at the base centre, leaning ±up-ish.
-	# Vanilla rotates the handle model; a two-position box reads the same
-	# at our texture resolution and keeps the mesher allocation-free.
-	var centre: Vector3 = (b_min + b_max) * 0.5
-	var lean: float = 0.1875 if powered else -0.1875
-	var h_min: Vector3
-	var h_max: Vector3
-	match mount:
-		Redstone.MOUNT_WEST_WALL:
-			h_min = Vector3(0.1875, centre.y - 0.0625, centre.z - 0.0625 + lean)
-			h_max = Vector3(0.5, centre.y + 0.0625, centre.z + 0.0625 + lean)
-		Redstone.MOUNT_EAST_WALL:
-			h_min = Vector3(0.5, centre.y - 0.0625, centre.z - 0.0625 + lean)
-			h_max = Vector3(0.8125, centre.y + 0.0625, centre.z + 0.0625 + lean)
-		Redstone.MOUNT_NORTH_WALL:
-			h_min = Vector3(centre.x - 0.0625, centre.y - 0.0625 + lean, 0.1875)
-			h_max = Vector3(centre.x + 0.0625, centre.y + 0.0625 + lean, 0.5)
-		Redstone.MOUNT_SOUTH_WALL:
-			h_min = Vector3(centre.x - 0.0625, centre.y - 0.0625 + lean, 0.5)
-			h_max = Vector3(centre.x + 0.0625, centre.y + 0.0625 + lean, 0.8125)
-		Redstone.MOUNT_FLOOR_ALT:
-			h_min = Vector3(centre.x - 0.0625 + lean, 0.1875, centre.z - 0.0625)
-			h_max = Vector3(centre.x + 0.0625 + lean, 0.625, centre.z + 0.0625)
-		_:
-			h_min = Vector3(centre.x - 0.0625, 0.1875, centre.z - 0.0625 + lean)
-			h_max = Vector3(centre.x + 0.0625, 0.625, centre.z + 0.0625 + lean)
-	_emit_box(verts, norms, uvs, colors, indices, o + h_min, o + h_max, handle_rect, face_light)
+	# Handle — a ROTATED stick, matching bk.java:147-192 rather than the
+	# axis-aligned two-position box that used to stand in for it. Vanilla
+	# tilts the model ±40° (0.69813174 rad) about X with a ∓1/16 nudge
+	# along Z, then applies the mount transform. The stick itself is
+	# 1/16 × 1/16 × 10/16 — exactly the 2×10 opaque column in the tile.
+	var lever_on: bool = powered
+	var tilt: float = 0.69813174 if lever_on else -0.69813174
+	var nudge: float = -0.0625 if lever_on else 0.0625
+	var hw: float = 0.0625
+	var hh: float = 0.625
+	var local: Array[Vector3] = [
+		Vector3(-hw, 0.0, -hw),
+		Vector3(hw, 0.0, -hw),
+		Vector3(hw, 0.0, hw),
+		Vector3(-hw, 0.0, hw),
+		Vector3(-hw, hh, -hw),
+		Vector3(hw, hh, -hw),
+		Vector3(hw, hh, hw),
+		Vector3(-hw, hh, hw),
+	]
+	# Yaw per wall mount — bk.java:174-183. Our MOUNT_* ids share vanilla's
+	# numbering (1 = -X wall … 4 = +Z wall), so the table maps straight
+	# across.
+	# Derived from the transform rather than copied from bk.java's n6
+	# table, because vanilla's mount numbering and ours agree on the power
+	# model but not obviously on Z sign. After `y -= 0.375` and the 90°
+	# tip, the stick lies along −Z with its root at z = −0.375; a yaw of θ
+	# sends that root to (0.375·sinθ, ·, −0.375·cosθ) + 0.5. So:
+	#   θ = 0     → z 0.125, the −Z wall
+	#   θ = π     → z 0.875, the +Z wall
+	#   θ = +π/2  → x 0.875, the +X wall
+	#   θ = −π/2  → x 0.125, the −X wall
+	# which is what puts the handle's root inside its own base plate.
+	# Every entry MEASURED, not derived — an earlier version of this table
+	# reasoned about Godot's rotation sign and got the Z pair backwards;
+	# fixing those from a probe while leaving X on the same unchecked
+	# assumption left the other two wrong. `test_the_lever_handle_roots_
+	# in_its_own_base` now pins all four.
+	#
+	# Godot's `rotated(UP, θ)` sends the post-tip root at (0, ·, −0.375)
+	# to (−0.375·sinθ, ·, −0.375·cosθ), so +π/2 lands on −X and −π/2 on +X.
+	var wall_yaw: Dictionary = {
+		Redstone.MOUNT_WEST_WALL: PI * 0.5,
+		Redstone.MOUNT_EAST_WALL: -PI * 0.5,
+		Redstone.MOUNT_NORTH_WALL: 0.0,
+		Redstone.MOUNT_SOUTH_WALL: PI,
+	}
+	var corners: Array[Vector3] = []
+	for c: Vector3 in local:
+		var v: Vector3 = c + Vector3(0.0, 0.0, nudge)
+		v = v.rotated(Vector3.RIGHT, tilt)
+		if mount == Redstone.MOUNT_FLOOR_ALT:
+			v = v.rotated(Vector3.UP, PI * 0.5)
+		if mount < Redstone.MOUNT_FLOOR:
+			# Wall mounts tip the whole stick horizontal, then spin it to
+			# face out from its wall.
+			v.y -= 0.375
+			v = v.rotated(Vector3.RIGHT, PI * 0.5)
+			v = v.rotated(Vector3.UP, float(wall_yaw.get(mount, 0.0)))
+			v += Vector3(0.5, 0.5, 0.5)
+		else:
+			v += Vector3(0.5, 0.125, 0.5)
+		corners.append(o + v)
+	# Six faces of the rotated box, wound to match `_emit_box`.
+	var handle_faces: Array = [
+		[corners[4], corners[7], corners[6], corners[5], Vector3.UP],
+		[corners[3], corners[0], corners[1], corners[2], Vector3.DOWN],
+		[corners[1], corners[5], corners[6], corners[2], Vector3.RIGHT],
+		[corners[3], corners[7], corners[4], corners[0], Vector3.LEFT],
+		[corners[2], corners[6], corners[7], corners[3], Vector3.BACK],
+		[corners[0], corners[4], corners[5], corners[1], Vector3.FORWARD],
+	]
+	# V-FLIP. `_emit_rotated_quads` sends corner0 to (u0, v0) — the tile's
+	# TOP row — and the side faces above start at the stick's ROOT. The
+	# lever tile is grey for its top two rows (the cap) and wood for the
+	# eight below (the shaft), so without flipping, the root comes out
+	# grey and the tip wooden: upside down. MC's convention puts a box's
+	# top edge at v0, which is what puts the grey cap on the tip.
+	var hu0: float = handle_rect.position.x
+	var hv0: float = handle_rect.position.y
+	var hu1: float = handle_rect.position.x + handle_rect.size.x
+	var hv1: float = handle_rect.position.y + handle_rect.size.y
+	var handle_uvs := PackedVector2Array(
+		[Vector2(hu0, hv1), Vector2(hu0, hv0), Vector2(hu1, hv0), Vector2(hu1, hv1)]
+	)
+	for face: Array in handle_faces:
+		face.append(handle_uvs)
+	_emit_rotated_quads(verts, norms, uvs, colors, indices, handle_faces, handle_rect, face_light)
 	# No collision faces emitted — vanilla pl.java d() returns null, so
 	# the player walks straight through a lever.
+
+	# Raycast target. These shapes emit no COLLISION faces — you walk
+	# through a lever exactly as vanilla does — but without a selection
+	# box the cursor ray passes straight through and hits the block
+	# BEHIND it. Right-clicking a lever then toggles nothing, and the
+	# component can't be mined either. The torch has emitted one since it
+	# shipped; the redstone set was added without it.
+	#
+	# Uses the block's own selection AABB, so what you can click matches
+	# what the outline draws.
+	var sel: AABB = Blocks.selection_aabb(Blocks.LEVER, meta)
+	var sel_o := Vector3(float(x), float(y), float(z))
+	_append_torch_aabb_collision(plant_faces, sel_o + sel.position, sel_o + sel.position + sel.size)
 
 
 # Redstone wire (lu.java render type 5, drawn by bk.java:420-547).
@@ -3655,13 +3758,21 @@ static func _emit_wire_geometry(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	_plant_faces: PackedVector3Array
+	plant_faces: PackedVector3Array
 ) -> void:
 	var meta: int = chunk.get_block_meta(x, y, z)
 	var powered: bool = meta > 0
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
+	# COLOR.a = 1.0 turns ON the shader's alpha-discard path, and wire is
+	# the one redstone shape that needs it: the dust tiles are a thin
+	# cross / line drawn on transparency (8-21% opaque), so with discard
+	# OFF the quad renders as a solid coloured SQUARE covering the whole
+	# cell instead of a dust trail. The lever, button and plate all
+	# sample fully opaque tiles (cobblestone / stone / planks) and must
+	# keep 0.0 — enabling discard on opaque faces lets MSAA edge samples
+	# bleed into neighbouring atlas slots.
+	var face_light := Color(sky_n, blk_n, 0.0, 1.0)
 	# Connectivity, evaluated against the CHUNK (edge slices give us the
 	# neighbouring chunk's blocks + meta, so a wire on a seam links up
 	# correctly instead of rendering as an isolated cross).
@@ -3689,32 +3800,82 @@ static func _emit_wire_geometry(
 	var z0: float = float(z)
 	var x1: float = x0 + 1.0
 	var z1: float = z0 + 1.0
+	# ORIENTATION. `_emit_rotated_quads` maps corner0→corner3 to U and
+	# corner0→corner1 to V. With the corner order below that puts U along
+	# world X and V along world Z.
+	#
+	# The dust line tile's strip runs along the tile's OWN X axis — rows
+	# 6-9 opaque across every column, measured from the art, not assumed.
+	# So default UVs draw the strip east-west, which is right for an
+	# east-west run and 90° wrong for a north-south one. An earlier
+	# comment here claimed the strip ran along Z and swapped the corner
+	# order for the EW case, which inverted both.
+	#
+	# Rotating via a UV override rather than by reordering corners keeps
+	# the winding — and therefore the face normal — untouched.
 	var quads: Array = []
-	# The line tile's strip runs along Z in the atlas; for an east-west
-	# run we swap the corner order to rotate the UVs 90°.
-	if straight_ew:
-		(
-			quads
-			. append(
-				[
-					Vector3(x0, wy, z1),
-					Vector3(x1, wy, z1),
-					Vector3(x1, wy, z0),
-					Vector3(x0, wy, z0),
-					Vector3.UP,
-				]
-			)
-		)
+	if straight_ns or straight_ew:
+		var line_quad: Array = [
+			Vector3(x0, wy, z0),
+			Vector3(x0, wy, z1),
+			Vector3(x1, wy, z1),
+			Vector3(x1, wy, z0),
+			Vector3.UP,
+		]
+		if not straight_ew:
+			line_quad.append(_wire_uvs_along_first_edge(rect))
+		quads.append(line_quad)
 	else:
+		# CROSS tile — and vanilla does NOT draw the whole thing. bk.java
+		# :473-497 pulls both the quad and its UVs in by 5/16 on every
+		# side that has no connection, so a corner renders as an L-shaped
+		# stub rather than a full four-armed plus. Only a genuinely
+		# isolated dust (no connections at all) keeps the complete cross.
+		#
+		# Geometry and UVs are inset by the same fraction, which is what
+		# keeps the dust the right thickness instead of squashing the
+		# texture into a shorter arm.
+		var qx0: float = x0
+		var qx1: float = x1
+		var qz0: float = z0
+		var qz1: float = z1
+		var cu0: float = rect.position.x
+		var cu1: float = rect.position.x + rect.size.x
+		var cv0: float = rect.position.y
+		var cv1: float = rect.position.y + rect.size.y
+		if west or east or north or south:
+			if not west:
+				qx0 += _WIRE_ARM_CROP
+				cu0 += rect.size.x * _WIRE_ARM_CROP
+			if not east:
+				qx1 -= _WIRE_ARM_CROP
+				cu1 -= rect.size.x * _WIRE_ARM_CROP
+			if not north:
+				qz0 += _WIRE_ARM_CROP
+				cv0 += rect.size.y * _WIRE_ARM_CROP
+			if not south:
+				qz1 -= _WIRE_ARM_CROP
+				cv1 -= rect.size.y * _WIRE_ARM_CROP
+		# Default corner→UV order: corner0→(u0,v0) … corner3→(u1,v0), so
+		# U follows world X and V follows world Z. The cross tile is never
+		# rotated in vanilla; only the straight case swaps texture.
 		(
 			quads
 			. append(
 				[
-					Vector3(x0, wy, z0),
-					Vector3(x0, wy, z1),
-					Vector3(x1, wy, z1),
-					Vector3(x1, wy, z0),
+					Vector3(qx0, wy, qz0),
+					Vector3(qx0, wy, qz1),
+					Vector3(qx1, wy, qz1),
+					Vector3(qx1, wy, qz0),
 					Vector3.UP,
+					PackedVector2Array(
+						[
+							Vector2(cu0, cv0),
+							Vector2(cu0, cv1),
+							Vector2(cu1, cv1),
+							Vector2(cu1, cv0),
+						]
+					),
 				]
 			)
 		)
@@ -3780,7 +3941,38 @@ static func _emit_wire_geometry(
 			)
 		)
 	if not climbs.is_empty():
+		# Every climb quad runs corner0→corner1 down the wall, so the same
+		# override puts the strip VERTICAL — a trail climbing the face,
+		# rather than a band drawn across it.
+		var climb_uvs: PackedVector2Array = _wire_uvs_along_first_edge(climb_rect)
+		for climb: Array in climbs:
+			climb.append(climb_uvs)
 		_emit_rotated_quads(verts, norms, uvs, colors, indices, climbs, climb_rect, face_light)
+
+	# Raycast target. These shapes emit no COLLISION faces — you walk
+	# through a lever exactly as vanilla does — but without a selection
+	# box the cursor ray passes straight through and hits the block
+	# BEHIND it. Right-clicking a lever then toggles nothing, and the
+	# component can't be mined either. The torch has emitted one since it
+	# shipped; the redstone set was added without it.
+	#
+	# Uses the block's own selection AABB, so what you can click matches
+	# what the outline draws.
+	var sel: AABB = Blocks.selection_aabb(Blocks.REDSTONE_WIRE, meta)
+	var sel_o := Vector3(float(x), float(y), float(z))
+	_append_torch_aabb_collision(plant_faces, sel_o + sel.position, sel_o + sel.position + sel.size)
+
+
+# UV set that runs the tile's U axis along a quad's corner0→corner1 edge
+# instead of corner0→corner3 — i.e. the texture rotated 90°. Used by the
+# wire paths to point the dust strip along the direction the wire
+# actually runs.
+static func _wire_uvs_along_first_edge(rect: Rect2) -> PackedVector2Array:
+	var u0: float = rect.position.x
+	var v0: float = rect.position.y
+	var u1: float = rect.position.x + rect.size.x
+	var v1: float = rect.position.y + rect.size.y
+	return PackedVector2Array([Vector2(u0, v0), Vector2(u1, v0), Vector2(u1, v1), Vector2(u0, v1)])
 
 
 # Chunk-local mirror of Redstone.can_connect_to. The mesher runs on a
@@ -3838,7 +4030,7 @@ static func _emit_button_geometry(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	_plant_faces: PackedVector3Array
+	plant_faces: PackedVector3Array
 ) -> void:
 	var meta: int = chunk.get_block_meta(x, y, z)
 	var rect: Rect2 = BlockAtlas.uv_rect_for(Blocks.STONE_BUTTON, BlockAtlas.FACE_SIDE)
@@ -3848,6 +4040,21 @@ static func _emit_button_geometry(
 	var aabb: AABB = Blocks.selection_aabb(Blocks.STONE_BUTTON, meta)
 	var o := Vector3(float(x), float(y), float(z))
 	_emit_box(verts, norms, uvs, colors, indices, o + aabb.position, o + aabb.end, rect, face_light)
+
+	# Raycast target. These shapes emit no COLLISION faces — you walk
+	# through a lever exactly as vanilla does — but without a selection
+	# box the cursor ray passes straight through and hits the block
+	# BEHIND it. Right-clicking a lever then toggles nothing, and the
+	# component can't be mined either. The torch has emitted one since it
+	# shipped; the redstone set was added without it.
+	#
+	# Uses the block's own selection AABB — WITH its metadata. A button's
+	# box hugs whichever wall it is mounted on, so omitting meta hands
+	# back the default +Z-wall box and the clickable region ends up on the
+	# opposite side of the cell from the button you can see.
+	var sel: AABB = Blocks.selection_aabb(Blocks.STONE_BUTTON, meta)
+	var sel_o := Vector3(float(x), float(y), float(z))
+	_append_torch_aabb_collision(plant_faces, sel_o + sel.position, sel_o + sel.position + sel.size)
 
 
 # Pressure plate (ap.java render). A flat pad inset 1/16 on each side,
@@ -3862,7 +4069,7 @@ static func _emit_plate_geometry(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	_plant_faces: PackedVector3Array
+	plant_faces: PackedVector3Array
 ) -> void:
 	var id: int = chunk.get_block(x, y, z)
 	var meta: int = chunk.get_block_meta(x, y, z)
@@ -3873,3 +4080,16 @@ static func _emit_plate_geometry(
 	var aabb: AABB = Blocks.selection_aabb(id, meta)
 	var o := Vector3(float(x), float(y), float(z))
 	_emit_box(verts, norms, uvs, colors, indices, o + aabb.position, o + aabb.end, rect, face_light)
+
+	# Raycast target. These shapes emit no COLLISION faces — you walk
+	# through a lever exactly as vanilla does — but without a selection
+	# box the cursor ray passes straight through and hits the block
+	# BEHIND it. Right-clicking a lever then toggles nothing, and the
+	# component can't be mined either. The torch has emitted one since it
+	# shipped; the redstone set was added without it.
+	#
+	# Uses the block's own selection AABB, so what you can click matches
+	# what the outline draws.
+	var sel: AABB = Blocks.selection_aabb(id, meta)
+	var sel_o := Vector3(float(x), float(y), float(z))
+	_append_torch_aabb_collision(plant_faces, sel_o + sel.position, sel_o + sel.position + sel.size)

@@ -28,6 +28,24 @@ const _BLOCK_ICON_NAMES: Dictionary = {
 	Blocks.GLASS: "glass",
 	Blocks.SAPLING: "sapling",
 	Blocks.TORCH: "torch",
+	# Redstone attachments render as sprites on transparency, exactly like
+	# the plain torch above, so they take the flat path rather than
+	# BlockIconRenderer's iso-cube bake. Tiles match
+	# `Blocks.get_face_texture`, and the alpha_vanilla fallback below
+	# covers packs that don't ship them (pixel_perfection, programmer_art).
+	# The cube-baked redstone blocks still need a flat entry: `icon_for`
+	# only reaches BlockIconRenderer once render_all() has run, so without
+	# these they are blank during startup and anywhere the bake is
+	# unavailable. Same tiles the bake itself uses.
+	Blocks.REDSTONE_ORE: "redstone_ore",
+	Blocks.GLOWING_REDSTONE_ORE: "redstone_ore",
+	Blocks.STONE_BUTTON: "stone",
+	Blocks.STONE_PRESSURE_PLATE: "stone",
+	Blocks.WOODEN_PRESSURE_PLATE: "planks",
+	Blocks.REDSTONE_TORCH: "redstone_torch_on",
+	Blocks.REDSTONE_TORCH_OFF: "redstone_torch_off",
+	Blocks.LEVER: "lever",
+	Blocks.REDSTONE_WIRE: "redstone_dust_cross",
 	Blocks.LADDER: "ladder",
 	Blocks.FLOWER_RED: "flower_red",
 	Blocks.FLOWER_YELLOW: "flower_yellow",
@@ -369,8 +387,19 @@ static func icon_for(item_id: int) -> Texture2D:
 	if _cache.has(item_id):
 		return _cache[item_id]
 	var tex: Texture2D = null
+	# `_BLOCK_ICON_NAMES` is only an OVERRIDE now. Any block without an
+	# entry falls back to the same face tile the 3D bake would texture
+	# itself with, so a block can never be iconless just because someone
+	# forgot to add a row — which is what left chest, fence, fence gate,
+	# stairs, bookshelf, the slabs and the jukebox blank whenever the
+	# bake wasn't available.
+	var block_tile: String = ""
 	if _BLOCK_ICON_NAMES.has(item_id):
-		var tile: String = _BLOCK_ICON_NAMES[item_id]
+		block_tile = _BLOCK_ICON_NAMES[item_id]
+	elif item_id > Blocks.AIR and item_id < 100:
+		block_tile = Blocks.get_face_texture(item_id, "side")
+	if block_tile != "":
+		var tile: String = block_tile
 		var path: String = "%s%s/%s.png" % [BlockAtlas.PACK_BASE, BlockAtlas.active_pack, tile]
 		# Fall back to alpha_vanilla when the active pack doesn't ship
 		# this tile (PP/PA only have a subset). Mirrors the block_atlas

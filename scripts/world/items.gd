@@ -983,7 +983,10 @@ static func display_name(item_id: int) -> String:
 		CLOCK:
 			return "Clock"
 		REDSTONE:
-			return "Redstone"
+			# Alpha called this simply "Redstone"; the modern name is
+			# clearer about what it is, and this is a deliberate QoL
+			# deviation rather than a fidelity slip.
+			return "Redstone Dust"
 		BONE:
 			return "Bone"
 		SLIMEBALL:

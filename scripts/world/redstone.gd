@@ -79,9 +79,27 @@ const PLATE_RECHECK_TICKS: int = 20
 const PLATE_BOX_INSET: float = 0.125
 const PLATE_BOX_HEIGHT: float = 0.25
 
-# Safety ceiling on a single propagation drain. A 15-decay network can
-# only be so large, but a malformed world shouldn't be able to spin here.
-const _WIRE_WORKLIST_CAP: int = 8192
+# Per-pump ceilings for an in-flight wire burst. Hitting either PAUSES
+# the burst; the queue, membership sets and pending notifications all
+# survive to the next frame (see the burst block below).
+#
+# The real bound is the TIME one. A relaxation costs ~33 µs here
+# (measured, `tests/test_redstone_performance.gd`), but that figure is a
+# desktop debug-build number and mobile web runs several times slower, so
+# a fixed step count would mean something different on every host. The
+# step ceiling is only a backstop for the pathological case where each
+# relaxation is somehow free.
+const WIRE_STEPS_PER_DRAIN: int = 4096
+const WIRE_USEC_PER_DRAIN: int = 2000
+# How often the clock is consulted. Checking every step would put a
+# syscall next to a ~33 µs body; every 16 keeps that overhead under 1%
+# while capping the overshoot at roughly half a millisecond.
+const _WIRE_TIME_CHECK_INTERVAL: int = 16
+# Absolute ceiling for a manager that never pumps (bare test doubles):
+# such a caller gets the whole fixpoint synchronously, and this only
+# exists so a malformed world can't spin forever. Far above the ~15×N
+# relaxations a real depower needs.
+const _WIRE_SYNC_STEP_CEILING: int = 1 << 20
 
 # Which slot a mounted component strong-powers: the block it is
 # attached to, seen from that block's point of view. A floor-mounted
@@ -109,16 +127,123 @@ static var _wire_output_enabled: bool = true
 # _burnout_log). Only reached by bare test doubles.
 static var _fallback_burnout_log: Array = []
 
+# --- In-flight wire burst ----------------------------------------------
+#
+# One "burst" is one run to the wire fixpoint. It is a static rather than
+# a local because it OUTLIVES A FRAME: a large network needs more
+# relaxations than fit in a frame budget, and truncating the worklist
+# would leave the network permanently half-powered. So the burst pauses
+# with all of its state intact and the manager resumes it next frame,
+# exactly like the block-notification queue in ChunkManager.
+#
+# Nothing downstream may observe a paused burst as settled, so the
+# zero-crossing notifications ride along in `_burst_notify` and are only
+# handed to the world once the queue actually empties.
+static var _burst_owner: WeakRef = null
+# Ring-style queue: a head INDEX rather than `pop_front()`, which is O(n)
+# in Godot and turned a 15,000-relaxation depower into quadratic work —
+# most of the measured per-step cost was the shift, not the physics.
+# The tail is reclaimed by `_compact_burst_queue` once the dead prefix is
+# both large and the majority of the array.
+static var _burst_queue: Array[Vector3i] = []
+static var _burst_head: int = 0
+static var _burst_queued: Dictionary = {}
+static var _burst_visited: Dictionary = {}
+static var _burst_notify: Array[Vector3i] = []
+static var _burst_notify_set: Dictionary = {}
+static var _burst_reconcile: bool = false
+# Cumulative counters for the whole burst, read by the perf fixture and
+# the debug overlay. Reset when a burst settles, not per drain.
+static var _burst_steps: int = 0
+static var _burst_writes: int = 0
+static var _burst_drains: int = 0
+static var _last_burst_stats: Dictionary = {"steps": 0, "writes": 0, "drains": 0}
+
 
 # True for blocks that can act as a redstone source — vanilla
 # `Block.e()` / `isPowerSource`. Wire is included: `lu.java:e()` returns
 # its guard flag, which is true outside a wire recomputation.
+#
+# This is a CAPABILITY question, not a state question: every id whose
+# vanilla class overrides `e()` to return true belongs here whether or
+# not it is currently switched on (pl.java:205, iy.java:206, ap.java:139,
+# bo.java, lu.java:282). Three consumers read it and all three break if
+# the set is short — wire connectivity (lu.java:295 `c()`), the mesher's
+# wire topology, and the changed-neighbour guard TNT and rails share.
 static func is_power_source(id: int) -> bool:
 	if id == Blocks.REDSTONE_WIRE:
 		return _wire_output_enabled
-	# bo.java:e() returns true for BOTH torch variants, so wire links to
-	# an unlit torch as well as a lit one.
-	return id == Blocks.LEVER or id == Blocks.REDSTONE_TORCH or id == Blocks.REDSTONE_TORCH_OFF
+	match id:
+		# bo.java:e() returns true for BOTH torch variants, so wire links
+		# to an unlit torch as well as a lit one.
+		Blocks.LEVER, Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
+			return true
+		Blocks.STONE_BUTTON, Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
+			return true
+	return false
+
+
+# Every switchable component notifies TWICE when it changes: once around
+# itself, and once around the block it is mounted on (pl.java:145-157 for
+# the lever, iy.java for the button, ap.java:92-93 for plates). A torch
+# goes further and notifies around all six of its neighbours
+# (bo.java:48-53).
+#
+# That second fanout is not redundancy — it is the entire mechanism by
+# which STRONG power leaves a component. A lever on a wall energises the
+# wall; the cells that need to hear about it are the wall's neighbours,
+# which are two steps from the lever and therefore outside its own
+# 7-cell fanout. Without this, the most common circuit in the game — a
+# lever on a block with wire running along the ground beside it — does
+# nothing at all.
+static func notify_around_mount(manager, pos: Vector3i, source_id: int) -> void:
+	notify_around(manager, pos + mount_offset(manager.get_world_block_meta(pos)), source_id)
+
+
+# The same second fanout for a component whose mount is FIXED rather than
+# encoded in its metadata. Plates always sit on the block below them, and
+# their metadata is the pressed flag — running it through `mount_offset`
+# would read a pressed plate (meta 1) as west-wall-mounted and notify the
+# wrong cell entirely.
+static func notify_around_support(manager, pos: Vector3i, source_id: int) -> void:
+	notify_around(manager, pos + Vector3i(0, -1, 0), source_id)
+
+
+static func notify_around(manager, cell: Vector3i, source_id: int) -> void:
+	if not manager.has_method("enqueue_block_notification"):
+		return
+	manager.call("enqueue_block_notification", cell, source_id)
+
+
+# The torch variant: bo.java pushes an update around each of its six
+# neighbours, so a torch can drive the block above it AND the wire beside
+# whatever it is mounted to.
+static func notify_around_all_neighbours(manager, pos: Vector3i, source_id: int) -> void:
+	for offset: Vector3i in SLOT_OFFSETS:
+		notify_around(manager, pos + offset, source_id)
+
+
+# vanilla `Block.onBlockRemoval` for the switchable components
+# (pl.java:160-175, and the same shape in iy.java / ap.java): a component
+# that disappears while still ON pushes one last update around its mount.
+#
+# `set_world_block` already fans out around the cell that changed, which
+# covers the component's own neighbours. This covers the MOUNT's — the
+# cells its strong power was actually reaching, two steps away — so
+# blowing up or washing away a powered lever de-powers the door it was
+# driving through the wall.
+static func on_block_removed(manager, pos: Vector3i, old_id: int, old_meta: int) -> void:
+	match old_id:
+		Blocks.LEVER, Blocks.STONE_BUTTON:
+			if (old_meta & POWERED_BIT) == 0:
+				return
+			notify_around(manager, pos + mount_offset(old_meta), old_id)
+		Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
+			if old_meta == 0:
+				return
+			notify_around(manager, pos + Vector3i(0, -1, 0), old_id)
+		Blocks.REDSTONE_TORCH:
+			notify_around_all_neighbours(manager, pos, old_id)
 
 
 # Offset from a mounted component to the block it is attached to.
@@ -294,7 +419,14 @@ static func is_normal_cube(manager, pos: Vector3i) -> bool:
 # notification drain). Vanilla routes this through each Block's
 # onNeighborBlockChange; we branch on id here so the dispatch cost for
 # the overwhelmingly common "not a redstone cell" case is one match.
-static func on_neighbor_changed(manager, pos: Vector3i) -> void:
+#
+# `source_id` is the id of the block whose change triggered this fanout
+# — vanilla's `n5` argument. Two consumers genuinely need it (TNT
+# v.java:23 and rail junctions jn.java:89, both of which demand the
+# changed neighbour BE a power source), so it is threaded through rather
+# than inferred. AIR means "unknown origin"; both guards then decline,
+# which is the safe direction.
+static func on_neighbor_changed(manager, pos: Vector3i, source_id: int = Blocks.AIR) -> void:
 	var id: int = manager.get_world_block(pos)
 	match id:
 		Blocks.REDSTONE_WIRE:
@@ -310,7 +442,9 @@ static func on_neighbor_changed(manager, pos: Vector3i) -> void:
 		Blocks.WOODEN_DOOR, Blocks.IRON_DOOR:
 			_update_door(manager, pos, id)
 		Blocks.TNT:
-			_update_tnt(manager, pos)
+			_update_tnt(manager, pos, source_id)
+		Blocks.RAIL:
+			_update_rail(manager, pos, source_id)
 
 
 # Mounted components pop off as an item when their support goes away
@@ -353,17 +487,35 @@ static func _update_door(manager, pos: Vector3i, id: int) -> void:
 		manager.call("play_door_sound", lower)
 
 
-# v.java:23 — powered TNT primes and clears its cell. Vanilla also
-# requires the CHANGED neighbour to be a power source; our fanout
-# doesn't carry which neighbour moved, so the indirect-power check
-# alone decides. Same observable behaviour for every Alpha circuit,
-# since nothing else can power a TNT cell.
-static func _update_tnt(manager, pos: Vector3i) -> void:
+# v.java:23 — `if (n5 > 0 && nq.m[n5].e() && cy.o(x,y,z))`. All THREE
+# clauses matter: TNT that is already sitting in a powered cell must not
+# re-prime every time some unrelated neighbour is edited, so the block
+# that actually changed has to be capable of providing power.
+static func _update_tnt(manager, pos: Vector3i, source_id: int) -> void:
+	if source_id == Blocks.AIR or not is_power_source(source_id):
+		return
 	if not is_block_indirectly_powered(manager, pos):
 		return
 	manager.set_world_block_state(pos, Blocks.AIR, 0)
 	if manager.has_method("prime_tnt"):
 		manager.call("prime_tnt", pos)
+
+
+# jn.java:89 — the one place Alpha lets redstone touch a rail. A rail
+# with EXACTLY three connections is shape-ambiguous, and vanilla re-runs
+# the track logic with the current power state, which flips the curve
+# tie-break (oc.java:227-260). Same changed-neighbour guard as TNT, and
+# the same `== 3` exactness: a four-way junction is left alone.
+static func _update_rail(manager, pos: Vector3i, source_id: int) -> void:
+	if source_id == Blocks.AIR or not is_power_source(source_id):
+		return
+	if RailShape.connection_count(manager, pos) != 3:
+		return
+	var powered: bool = is_block_indirectly_powered(manager, pos)
+	var meta: int = RailShape.compute(manager, pos, powered, manager.get_world_block_meta(pos))
+	if meta == manager.get_world_block_meta(pos):
+		return
+	manager.set_world_block_state(pos, Blocks.RAIL, meta)
 
 
 # --- Wire propagation (lu.java:h) --------------------------------------
@@ -441,38 +593,87 @@ static func computed_wire_power(manager, pos: Vector3i) -> int:
 #
 # Vanilla recurses (h() calls h()); GDScript stack depth on a large net
 # makes that a real hazard, so this is an explicit worklist. The result
-# is identical because wire power is a max-minus-decay fixpoint. The
-# dedup set means CURRENTLY QUEUED, not "already seen" — a cell whose
-# input changes again must be re-eligible or the net can settle on a
-# stale value.
+# is identical because wire power is a max-minus-decay fixpoint.
+#
+# The worklist is a resumable BURST (see the static block above), not a
+# local: a manager that advertises `redstone_defers_wire_bursts()` gets
+# one drain now and pumps the rest from its own frame loop. Anything
+# else — bare test doubles — runs the whole fixpoint synchronously.
 static func update_wire(manager, origin: Vector3i, reconcile: bool = false) -> void:
 	if manager.get_world_block(origin) != Blocks.REDSTONE_WIRE:
 		return
-	var queue: Array[Vector3i] = [origin]
-	var queued := {origin: true}
-	# `visited` bounds the outward SCAN so an already-correct network
-	# terminates; `queued` alone can't, because a cell must stay
-	# re-enqueueable after its inputs move. A cell is re-examined
-	# whenever a neighbour actually changes, regardless of visited.
-	var visited := {}
-	# RECONCILE mode walks the entire connected network even where
-	# nothing changes — needed when metadata may be stale (chunk load),
-	# and only then. The default CHANGE-DRIVEN mode expands only from
-	# cells that actually moved, which is what keeps the common path
-	# cheap: a neighbour notification on a settled net costs one cell
-	# evaluation instead of a full traversal. Getting this wrong made a
-	# 16-cell run cost 22 ms — more than a frame — because every one of
-	# the run's notifications re-walked the whole thing.
-	var notify: Array[Vector3i] = []
+	_seed_burst(manager, origin, reconcile)
+	if manager.has_method("redstone_defers_wire_bursts"):
+		drain_wire_work(manager, WIRE_STEPS_PER_DRAIN, WIRE_USEC_PER_DRAIN)
+		return
+	drain_wire_work(manager, _WIRE_SYNC_STEP_CEILING)
+
+
+# Add `origin` to the in-flight burst, starting one if there isn't a
+# live burst for this world. RECONCILE mode walks the entire connected
+# network even where nothing changes — needed when metadata may be stale
+# (chunk load), and only then. The default CHANGE-DRIVEN mode expands
+# only from cells that actually moved, which is what keeps the common
+# path cheap: a neighbour notification on a settled net costs one cell
+# evaluation instead of a full traversal. Getting this wrong made a
+# 16-cell run cost 22 ms — more than a frame — because every one of the
+# run's notifications re-walked the whole thing.
+static func _seed_burst(manager, origin: Vector3i, reconcile: bool) -> void:
+	var owner: Object = null if _burst_owner == null else _burst_owner.get_ref()
+	if owner != manager:
+		# A different world (or a freed one) owned the last burst. Its
+		# cells mean nothing here, and there is no correct way to finish
+		# them against this manager, so start clean.
+		_clear_burst()
+		_burst_owner = weakref(manager)
+	if _burst_queued.has(origin):
+		# Already pending: merging the reconcile flag below is all that
+		# is left to do.
+		_burst_reconcile = _burst_reconcile or reconcile
+		return
+	_burst_queued[origin] = true
+	_burst_queue.append(origin)
+	# Reconcile is a strict superset of change-driven expansion, so OR-ing
+	# it into a burst already in flight can only add work, never lose any.
+	_burst_reconcile = _burst_reconcile or reconcile
+
+
+# Advance the in-flight burst by at most `budget` relaxations, and — when
+# `usec_budget` is positive — for at most that long. Returns true while
+# work remains. The caller owns the cadence; `_process` on ChunkManager
+# pumps once per frame. Tests pass a step budget alone so a fixture's
+# frame count doesn't depend on how fast the machine running it is.
+static func drain_wire_work(manager, budget: int, usec_budget: int = 0) -> bool:
+	if _burst_head >= _burst_queue.size():
+		return false
+	var owner: Object = null if _burst_owner == null else _burst_owner.get_ref()
+	if owner != manager:
+		return false
+	_burst_drains += 1
+	var started: int = Time.get_ticks_usec() if usec_budget > 0 else 0
 	var steps: int = 0
-	while not queue.is_empty() and steps < _WIRE_WORKLIST_CAP:
+	while _burst_head < _burst_queue.size() and steps < budget:
 		steps += 1
-		var pos: Vector3i = queue.pop_front()
-		queued.erase(pos)
+		if (
+			usec_budget > 0
+			and steps % _WIRE_TIME_CHECK_INTERVAL == 0
+			and Time.get_ticks_usec() - started >= usec_budget
+		):
+			_compact_burst_queue()
+			return true
+		_burst_steps += 1
+		var pos: Vector3i = _burst_queue[_burst_head]
+		_burst_head += 1
+		_burst_queued.erase(pos)
 		if manager.get_world_block(pos) != Blocks.REDSTONE_WIRE:
 			continue
-		var first_visit: bool = not visited.has(pos)
-		visited[pos] = true
+		# `_burst_visited` bounds the outward SCAN so an already-correct
+		# network terminates; `_burst_queued` alone can't, because a cell
+		# must stay re-enqueueable after its inputs move. A cell is
+		# re-examined whenever a neighbour actually changes, regardless
+		# of visited.
+		var first_visit: bool = not _burst_visited.has(pos)
+		_burst_visited[pos] = true
 		var current: int = manager.get_world_block_meta(pos)
 		var next: int = computed_wire_power(manager, pos)
 		var changed: bool = next != current
@@ -480,30 +681,88 @@ static func update_wire(manager, origin: Vector3i, reconcile: bool = false) -> v
 			# Metadata-only write: no id change, so this depends on the
 			# atomic state path notifying and re-meshing (§7.2). The
 			# fanout is collected and issued once the whole net settles,
-			# so consumers never observe a half-propagated line.
+			# so consumers never observe a half-propagated line — not
+			# even one paused across a frame boundary.
 			manager.set_world_block_state(pos, Blocks.REDSTONE_WIRE, next, false)
+			_burst_writes += 1
 			# Vanilla only fires block updates when the level crosses
 			# zero (lu.java:104). 12 → 11 changes nothing downstream, and
 			# skipping those is a large reduction in update churn.
-			if current == 0 or next == 0:
-				notify.append(pos)
+			if (current == 0 or next == 0) and not _burst_notify_set.has(pos):
+				_burst_notify_set[pos] = true
+				_burst_notify.append(pos)
 		# Expand on every change (so the fixpoint is reached), and — in
 		# reconcile mode only — on first visit as well, so an update
 		# seeded anywhere still repairs its whole network.
-		if not (changed or (reconcile and first_visit)):
+		if not (changed or (_burst_reconcile and first_visit)):
 			continue
 		for neighbor: Vector3i in _wire_neighbors(manager, pos):
-			if queued.has(neighbor):
+			if _burst_queued.has(neighbor):
 				continue
-			if not changed and visited.has(neighbor):
+			if not changed and _burst_visited.has(neighbor):
 				continue
-			queued[neighbor] = true
-			queue.append(neighbor)
-	if steps >= _WIRE_WORKLIST_CAP:
-		push_warning("[Redstone] wire worklist hit its cap at %s" % origin)
-	if manager.has_method("enqueue_block_notification"):
-		for pos: Vector3i in notify:
-			manager.call("enqueue_block_notification", pos)
+			_burst_queued[neighbor] = true
+			_burst_queue.append(neighbor)
+	if _burst_head < _burst_queue.size():
+		_compact_burst_queue()
+		return true
+	_settle_burst(manager)
+	return false
+
+
+# Drop the consumed prefix once it is both sizeable and the majority of
+# the array, so a long burst's memory stays proportional to the work
+# still outstanding rather than to everything it has ever queued.
+static func _compact_burst_queue() -> void:
+	if _burst_head < 1024 or _burst_head * 2 < _burst_queue.size():
+		return
+	_burst_queue = _burst_queue.slice(_burst_head)
+	_burst_head = 0
+
+
+# The burst reached its fixpoint: publish the deferred zero-crossings.
+# Order matters — the burst is cleared BEFORE the fanout, because
+# `enqueue_block_notification` drains synchronously on a real manager and
+# that drain can seed a fresh burst through `_check_wire_support`.
+static func _settle_burst(manager) -> void:
+	var notify: Array[Vector3i] = _burst_notify
+	_last_burst_stats = {"steps": _burst_steps, "writes": _burst_writes, "drains": _burst_drains}
+	_clear_burst()
+	if not manager.has_method("enqueue_block_notification"):
+		return
+	for pos: Vector3i in notify:
+		manager.call("enqueue_block_notification", pos)
+
+
+static func _clear_burst() -> void:
+	_burst_queue = []
+	_burst_head = 0
+	_burst_queued = {}
+	_burst_visited = {}
+	_burst_notify = []
+	_burst_notify_set = {}
+	_burst_reconcile = false
+	_burst_steps = 0
+	_burst_writes = 0
+	_burst_drains = 0
+	_burst_owner = null
+
+
+# True while a paused burst is waiting for its next pump. Consumers use
+# this to know the network has NOT settled yet.
+static func has_pending_wire_work() -> bool:
+	return _burst_head < _burst_queue.size()
+
+
+# Cells still queued in the in-flight burst — instrumentation for the
+# debug overlay and the performance fixture.
+static func pending_wire_cells() -> int:
+	return _burst_queue.size() - _burst_head
+
+
+# {steps, writes, drains} for the most recently SETTLED burst.
+static func last_burst_stats() -> Dictionary:
+	return _last_burst_stats.duplicate()
 
 
 # Every wire cell this one can exchange power with: the four horizontal
@@ -598,6 +857,7 @@ static func torch_tick(manager, pos: Vector3i, block_id: int) -> void:
 		if not mount_powered:
 			return
 		manager.set_world_block_state(pos, Blocks.REDSTONE_TORCH_OFF, meta)
+		notify_around_all_neighbours(manager, pos, Blocks.REDSTONE_TORCH_OFF)
 		if _torch_burned_out(manager, pos, true):
 			# Vanilla plays random.fizz at volume 0.5 with a wide pitch
 			# jitter and puffs five smoke particles.
@@ -609,6 +869,7 @@ static func torch_tick(manager, pos: Vector3i, block_id: int) -> void:
 	if _torch_burned_out(manager, pos, false):
 		return
 	manager.set_world_block_state(pos, Blocks.REDSTONE_TORCH, meta)
+	notify_around_all_neighbours(manager, pos, Blocks.REDSTONE_TORCH)
 
 
 # Neighbour-change entry: schedule the 2-tick re-evaluation, and pop the
@@ -630,14 +891,16 @@ static func _update_torch(manager, pos: Vector3i, block_id: int) -> void:
 
 
 # Resets the transient module state. Burnout history is per-world and
-# lives on the manager, so this only clears the fallback log and the
-# wire recomputation guard.
+# lives on the manager, so this only clears the fallback log, the wire
+# recomputation guard, and any burst left in flight by the old world.
 static func reset_state() -> void:
 	# Reassign rather than clear(): a plain in-place clear on this static
 	# did NOT propagate to readers outside the class (verified by probe),
 	# leaving burnout history alive across worlds and test cases.
 	_fallback_burnout_log.clear()
 	_wire_output_enabled = true
+	_clear_burst()
+	_last_burst_stats = {"steps": 0, "writes": 0, "drains": 0}
 
 
 # --- Stone button (iy.java) --------------------------------------------
@@ -650,6 +913,7 @@ static func press_button(manager, pos: Vector3i) -> bool:
 	if (meta & POWERED_BIT) != 0:
 		return false
 	manager.set_world_block_state(pos, Blocks.STONE_BUTTON, meta | POWERED_BIT)
+	notify_around_mount(manager, pos, Blocks.STONE_BUTTON)
 	TickScheduler.schedule(pos, Blocks.STONE_BUTTON, BUTTON_PULSE_TICKS)
 	if manager.has_method("play_redstone_click"):
 		manager.call("play_redstone_click", pos, true)
@@ -662,6 +926,7 @@ static func button_tick(manager, pos: Vector3i) -> void:
 	if (meta & POWERED_BIT) == 0:
 		return
 	manager.set_world_block_state(pos, Blocks.STONE_BUTTON, meta & 0x7)
+	notify_around_mount(manager, pos, Blocks.STONE_BUTTON)
 	if manager.has_method("play_redstone_click"):
 		manager.call("play_redstone_click", pos, false)
 
@@ -709,10 +974,12 @@ static func update_plate(manager, pos: Vector3i, block_id: int, from_contact: bo
 	var was_pressed: bool = meta > 0
 	if occupied and not was_pressed:
 		manager.set_world_block_state(pos, block_id, 1)
+		notify_around_support(manager, pos, block_id)
 		if manager.has_method("play_redstone_click"):
 			manager.call("play_redstone_click", pos, true)
 	elif not occupied and was_pressed:
 		manager.set_world_block_state(pos, block_id, 0)
+		notify_around_support(manager, pos, block_id)
 		if manager.has_method("play_redstone_click"):
 			manager.call("play_redstone_click", pos, false)
 	# While held down, keep re-checking so the plate can notice the

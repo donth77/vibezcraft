@@ -37,6 +37,11 @@ const _NOTIFY_OFFSETS: Array[Vector3i] = [
 # well above any hand-built Alpha circuit (there are no repeaters or
 # pistons to build a large clock out of).
 const _NOTIFY_BUDGET_PER_DRAIN: int = 4096
+# Key under which an entity's last contact cell is cached, so
+# `report_entity_contact` fires only on arrival. Node metadata rather
+# than a member on each entity script: four unrelated entity types need
+# it and none of them share a base class.
+const _CONTACT_CELL_META: StringName = &"_block_contact_cell"
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
 # World-entry drain-boost window (see _entry_boost_until_msec).
 const _ENTRY_BOOST_WINDOW_MSEC: int = 12000
@@ -156,7 +161,14 @@ var _inside_fluid_notify: bool = false
 # --- Block-update notification queue (redstone-plan.md §7.2) ---
 # Queue + membership set (see _NOTIFY_OFFSETS above) so a cascade
 # (lever → wire → wire → …) converges without recursion or lost events.
-var _notify_queue: Array[Vector3i] = []
+#
+# Entries are Vector4i(x, y, z, source_id): the cell to notify plus the
+# id of the block whose change caused it, which is vanilla's `n5`
+# argument to onNeighborBlockChange. TNT (v.java:23) and rail junctions
+# (jn.java:89) both refuse to act unless that source can provide power,
+# so the id has to survive the queue. Dedup is on the whole pair — two
+# different sources touching one cell are two different events.
+var _notify_queue: Array[Vector4i] = []
 var _notify_queued: Dictionary = {}
 var _notify_draining: bool = false
 
@@ -354,6 +366,15 @@ func _process(_delta: float) -> void:
 	# the case for every frame that isn't mid-cascade.
 	if not _notify_queue.is_empty():
 		drain_block_notifications()
+	# Same deal one level down: a wire burst too large for a single frame
+	# pauses with its worklist intact and resumes here. Its deferred
+	# zero-crossing notifications only reach the queue above once the
+	# network has actually settled, so no consumer sees a half-lit line.
+	if Redstone.has_pending_wire_work():
+		var t_wire := PerfProbe.begin("redstone.update")
+		Redstone.drain_wire_work(self, Redstone.WIRE_STEPS_PER_DRAIN, Redstone.WIRE_USEC_PER_DRAIN)
+		PerfProbe.end("redstone.update", t_wire)
+	_sweep_player_block_contact()
 	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
 	_drain_retiring_chunks()
@@ -455,10 +476,13 @@ func _update_chunk_set() -> void:
 		if not needed.has(coord):
 			continue
 		var record: Dictionary = _retiring_chunks[coord]
-		var returning: Node3D = record.get("node") as Node3D
+		# Validate before casting (see _drain_retiring_chunks) — a shell that
+		# was freed while retired must not raise on the way back in.
+		var returning_ref: Variant = record.get("node")
 		_retiring_chunks.erase(coord)
-		if not is_instance_valid(returning):
+		if not is_instance_valid(returning_ref):
 			continue
+		var returning: Node3D = returning_ref
 		returning.process_mode = Node.PROCESS_MODE_INHERIT
 		_chunks[coord] = returning
 		var returning_chunk: Chunk = returning.get("chunk") as Chunk
@@ -583,18 +607,28 @@ func _drain_retiring_chunks() -> void:
 		var ready: bool = true
 		for gate: Dictionary in record.get("gates", []) as Array:
 			var survivor_coord: Vector2i = gate["coord"]
-			var survivor: Node3D = gate["node"] as Node3D
-			if not is_instance_valid(survivor):
+			# is_instance_valid() BEFORE the cast. `as` on a freed instance
+			# raises "Trying to cast a freed object" — the check has to run
+			# on the raw Variant, which is the only form that tolerates a
+			# dangling reference. A gate's survivor is freed out from under
+			# us whenever that neighbor is itself evicted with no gates of
+			# its own (see the queue_free below).
+			var survivor_ref: Variant = gate["node"]
+			if not is_instance_valid(survivor_ref):
 				continue
+			var survivor: Node3D = survivor_ref
 			if not _chunks.has(survivor_coord) or _chunks[survivor_coord] != survivor:
 				continue
 			if int(survivor.get("_mesh_apply_revision")) <= int(gate["apply_revision"]):
 				ready = false
 				break
 		if ready:
-			var outgoing: Node3D = record.get("node") as Node3D
-			if is_instance_valid(outgoing):
-				outgoing.queue_free()
+			# Same rule as the gate loop above — validate the raw Variant
+			# before casting. The shell can already be gone here: scene
+			# teardown frees our children while _process is still draining.
+			var outgoing_ref: Variant = record.get("node")
+			if is_instance_valid(outgoing_ref):
+				(outgoing_ref as Node3D).queue_free()
 			completed.append(coord)
 	for coord: Vector2i in completed:
 		_retiring_chunks.erase(coord)
@@ -1548,6 +1582,7 @@ func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 	var local_z: int = world_pos.z - chunk_z * Chunk.SIZE_Z
 	var chunk_node: Node3D = _chunks[coord]
 	var old_id: int = chunk_node.chunk.get_block(local_x, world_pos.y, local_z)
+	var old_meta: int = chunk_node.chunk.get_block_meta(local_x, world_pos.y, local_z)
 	chunk_node.chunk.set_block(local_x, world_pos.y, local_z, id)
 	# `meta >= 0` commits metadata in the SAME step as the id, before any
 	# side effect below runs. Chunk.set_block zeros meta by vanilla
@@ -1671,6 +1706,14 @@ func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 	# stuck open. Cheap when no redstone is nearby: the drain dispatches
 	# one match per cell.
 	if old_id != id:
+		# A switch that goes away while still ON has to push one last
+		# update around the block it was mounted on — vanilla's
+		# Block.onBlockRemoval (pl.java:160-175). The seven cells above
+		# cover its own neighbourhood; this covers the mount's, which is
+		# where its strong power was actually going. Without it, blowing
+		# up or washing away a lever leaves whatever it drove THROUGH its
+		# mount stuck in the powered state.
+		Redstone.on_block_removed(self, world_pos, old_id, old_meta)
 		enqueue_block_notification(world_pos)
 	if old_id != id:
 		_notify_fluid_neighbors(world_pos)
@@ -2220,13 +2263,19 @@ func _dirty_seam_neighbors(coord: Vector2i, local_x: int, local_z: int) -> void:
 # network can settle on a stale value. Unlike the fluid guard, a nested
 # write during the drain does not drop its fanout — it lands in the same
 # queue and the outer loop keeps going to a fixpoint.
-func enqueue_block_notification(world_pos: Vector3i) -> void:
+# `source_id` defaults to whatever now occupies the changed cell, which
+# is what vanilla passes (setBlockWithNotify → notifyBlockChange with the
+# new id). Breaking a component therefore reports AIR, and the consumers
+# that demand a power-capable source correctly decline.
+func enqueue_block_notification(world_pos: Vector3i, source_id: int = -1) -> void:
+	var source: int = get_world_block(world_pos) if source_id < 0 else source_id
 	for offset: Vector3i in _NOTIFY_OFFSETS:
 		var cell: Vector3i = world_pos + offset
-		if _notify_queued.has(cell):
+		var event := Vector4i(cell.x, cell.y, cell.z, source)
+		if _notify_queued.has(event):
 			continue
-		_notify_queued[cell] = true
-		_notify_queue.append(cell)
+		_notify_queued[event] = true
+		_notify_queue.append(event)
 	if not _notify_draining:
 		drain_block_notifications()
 
@@ -2241,15 +2290,22 @@ func drain_block_notifications() -> void:
 	_notify_draining = true
 	var budget: int = _NOTIFY_BUDGET_PER_DRAIN
 	while not _notify_queue.is_empty() and budget > 0:
-		var cell: Vector3i = _notify_queue.pop_front()
-		_notify_queued.erase(cell)
+		var event: Vector4i = _notify_queue.pop_front()
+		_notify_queued.erase(event)
 		budget -= 1
-		Redstone.on_neighbor_changed(self, cell)
+		Redstone.on_neighbor_changed(self, Vector3i(event.x, event.y, event.z), event.w)
 	_notify_draining = false
 
 
 func pending_notification_count() -> int:
 	return _notify_queue.size()
+
+
+# Redstone's contract check: this manager pumps paused wire bursts from
+# `_process`, so `Redstone.update_wire` may hand back a partially drained
+# network instead of blocking the frame until it settles.
+func redstone_defers_wire_bursts() -> bool:
+	return true
 
 
 # Re-run wire propagation for every wire cell on a freshly materialised
@@ -2331,24 +2387,80 @@ func redstone_burnout_log() -> Array:
 # runs on contact or a 20-tick recheck), so a direct scan beats keeping
 # another spatial index in sync.
 func entities_overlap_box(box: AABB, living_only: bool) -> bool:
+	# Vanilla asks `entity.boundingBox.intersectsWith(plateBox)`
+	# (ap.java:110). Sampling an origin POINT instead is not a rounding
+	# difference, it is a different test: the player's `global_position`
+	# is the centre of a 1.8 m capsule, roughly 0.9 m above the feet,
+	# while a plate's detection box is 0.25 m tall — so a normally
+	# standing player never has their origin inside it, and no plate
+	# would ever fire.
 	if _player != null and is_instance_valid(_player):
-		if box.has_point(_player.global_position):
+		if EntityBounds.overlaps(box, _player):
 			return true
 	for mob: Variant in MobBase._active_mobs.keys():
 		if not is_instance_valid(mob):
 			continue
-		if box.has_point((mob as Node3D).global_position):
+		if EntityBounds.overlaps(box, mob as Node3D):
 			return true
 	if living_only:
 		return false
+	# `lg.a` (wooden) takes EVERY entity; `lg.b` (stone) only living
+	# ones. Scanning our children is O(loaded chunk nodes), but this only
+	# runs on a wooden plate's arrival event and its 1 Hz recheck.
 	for child: Node in get_children():
-		if not (child is Node3D):
-			continue
 		if not (child is DroppedItem or child is Arrow or child is Minecart or child is Boat):
 			continue
-		if box.has_point((child as Node3D).global_position):
+		if EntityBounds.overlaps(box, child as Node3D):
 			return true
 	return false
+
+
+# World-space collision bounds for any entity — see `EntityBounds`, which
+# owns the derivation so it can be tested against real node conventions.
+func entity_world_aabb(node: Node3D) -> AABB:
+	return EntityBounds.world_aabb(node)
+
+
+# The player's own contact sweep. `player.gd` already fires the hook on
+# its footstep cadence, but that only covers WALKING onto a cell —
+# falling, jumping or riding onto a plate and then standing still fires
+# no footstep, and the plate would never wake. Keyed on the occupied
+# cell so a stationary player costs one Vector3i compare per frame, and
+# so lit redstone ore still reverts underfoot exactly as vanilla.
+func _sweep_player_block_contact() -> void:
+	if _player == null or not is_instance_valid(_player):
+		return
+	report_entity_contact(_player)
+
+
+# Contact hook for entities that are not the player and not mobs —
+# dropped items, arrows, minecarts and boats all call this from their
+# own step. Fires only when the entity's bounds move into a new cell,
+# because that is the event a plate actually needs: arrival wakes it,
+# and its own 20-tick recheck notices the departure.
+func report_entity_contact(node: Node3D) -> void:
+	var box: AABB = EntityBounds.world_aabb(node)
+	var cell: Vector3i = EntityBounds.contact_cell(box)
+	if node.get_meta(_CONTACT_CELL_META, Vector3i(0, -9999, 0)) == cell:
+		return
+	node.set_meta(_CONTACT_CELL_META, cell)
+	notify_entity_block_contact(node)
+
+
+# Fire the shared block-contact hook for every cell this entity's bounds
+# touch — vanilla `Entity.moveEntity` does the same sweep before running
+# `Block.onEntityCollidedWithBlock`. Callers throttle to cell CHANGES,
+# which is all a plate needs: arrival wakes it, and its own 20-tick
+# recheck handles the release.
+func notify_entity_block_contact(node: Node3D) -> void:
+	var box: AABB = EntityBounds.world_aabb(node)
+	var lo := Vector3i(floori(box.position.x), floori(box.position.y), floori(box.position.z))
+	var end: Vector3 = box.position + box.size
+	var hi := Vector3i(floori(end.x), floori(end.y), floori(end.z))
+	for y in range(lo.y, hi.y + 1):
+		for z in range(lo.z, hi.z + 1):
+			for x in range(lo.x, hi.x + 1):
+				Blocks.on_entity_walking(self, Vector3i(x, y, z), node)
 
 
 # Vanilla plays `random.click` at volume 0.3 for every redstone
