@@ -361,3 +361,42 @@ func test_unload_backing_shell_does_not_wait_for_an_evicted_survivor() -> void:
 	manager._drain_retiring_chunks()
 	assert_true(outgoing.is_queued_for_deletion())
 	assert_true(manager._retiring_chunks.is_empty())
+
+
+# --- retiring-chunk shells hold references that can go stale -----------
+# chunk_manager keeps evicted chunk shells in _retiring_chunks until every
+# surviving neighbor has presented a post-unload mesh. Those records — and
+# the per-gate survivor references inside them — can be freed out from
+# under the drain: a neighbor evicted with no gates of its own is
+# queue_free'd immediately, and scene teardown frees our children while
+# _process is still draining. `as Node3D` on a dangling reference raises
+# "Trying to cast a freed object" every frame, so validity has to be
+# checked on the raw Variant first.
+
+
+func test_drain_retiring_chunks_survives_a_freed_shell() -> void:
+	var manager: Node = ChunkManagerScript.new()
+	autofree(manager)
+	var shell := Node3D.new()
+	manager._retiring_chunks[Vector2i(0, 0)] = {"node": shell, "gates": []}
+	shell.free()
+	manager._drain_retiring_chunks()
+	assert_true(
+		manager._retiring_chunks.is_empty(), "a freed shell still retires instead of raising"
+	)
+
+
+func test_drain_retiring_chunks_survives_a_freed_gate_survivor() -> void:
+	var manager: Node = ChunkManagerScript.new()
+	autofree(manager)
+	var shell := Node3D.new()
+	autofree(shell)
+	var survivor := Node3D.new()
+	manager._retiring_chunks[Vector2i(1, 0)] = {
+		"node": shell,
+		"gates": [{"coord": Vector2i(2, 0), "node": survivor, "apply_revision": 0}],
+	}
+	survivor.free()
+	manager._drain_retiring_chunks()
+	# A dead gate cannot hold the shell hostage — it retires.
+	assert_true(manager._retiring_chunks.is_empty(), "dead gate does not block retirement")
