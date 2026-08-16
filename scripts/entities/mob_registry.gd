@@ -56,6 +56,16 @@ const _ENTRIES: Dictionary = {
 	# at 3 m proximity, detonates 30 ticks later at power 3.0. Drops
 	# 0-2 gunpowder. Iconic + dangerous; standard hostile spawn.
 	"creeper": "res://scripts/entities/creeper.gd",
+	# N1 — vanilla pt.java (EntityPigZombie), the Nether's neutral
+	# hostile. 20 HP, 5-damage melee, fire-immune, holds a gold sword,
+	# drops 0-2 cooked porkchop. Neutral until a PLAYER hits it, which
+	# also angers every pigman within 32 blocks on each axis; Alpha never
+	# decrements the anger, so that is permanent.
+	#
+	# The registry key is "zombie_pigman" but vanilla `fq.java:92`
+	# persists the entity as "PigZombie". EntitySave stores this key, not
+	# the vanilla string, which is consistent with every other entry here.
+	"zombie_pigman": "res://scripts/entities/zombie_pigman.gd",
 }
 
 

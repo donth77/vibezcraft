@@ -1111,6 +1111,17 @@ func _env_tick(in_fire: bool) -> void:
 	if _in_water and _on_fire_ticks > 0:
 		_on_fire_ticks = 0
 		_fire_dmg_accum_ticks = 0
+	# hf.java:111 — a fireproof LIVING entity has its burn timer forced to
+	# zero every tick, after whatever set it. That ordering is why a
+	# zombie pigman never burns in daylight despite inheriting the
+	# zombie's ignition unchanged: the ignite lands and is cancelled on
+	# the same tick, so no damage and no flames.
+	if _is_fire_immune():
+		_on_fire_ticks = 0
+		_fire_dmg_accum_ticks = 0
+		if _fire_pivot != null:
+			_fire_pivot.visible = false
+		return
 	# Contact damage — lava deals 4 HP per 20 ticks while standing in
 	# lava. Otherwise the on-fire timer (set by lava OR fire-block
 	# contact) deals 1 HP per 20 ticks until it counts down to 0.
@@ -1199,6 +1210,117 @@ func _get_body_height() -> float:
 
 func _get_eye_height() -> float:
 	return 0.35
+
+
+# Vanilla `lw.bm` (fireProof). Override to true for species that ignore
+# fire entirely — in Alpha 1.2.6 that is the zombie pigman and the ghast.
+#
+# The flag does three separate things in the source, and all three are
+# reproduced in _env_tick:
+#   * lw.java:216 `K()` — lava contact deals no damage and does not set
+#     the burn timer;
+#   * lw.java:433 `a(int)` — fire-block contact deals no damage;
+#   * hf.java:111 — for a LIVING entity the burn timer is forced to 0
+#     every tick, so a fireproof mob never renders flames at all.
+#
+# That last one is why a zombie pigman does not burn in daylight even
+# though `pt` inherits `nt.k()`'s daylight ignition unchanged: the
+# ignition happens and is cancelled on the same tick.
+func _is_fire_immune() -> bool:
+	return false
+
+
+# Attach an extruded item sprite to a mob's arm pivot — the shared
+# mechanic behind the skeleton's bow and the zombie pigman's gold sword.
+#
+# Vanilla's equivalent is `m.java::b(EntityLiving, float)` (RenderBiped
+# .renderEquippedItems), which calls `this.a.d.b(0.0625f)` to apply the
+# RIGHT ARM's transform before drawing. Parenting to the arm pivot is the
+# scene-graph way of saying the same thing: the item inherits the arm's
+# pose for free, including the walk swing and any attack animation.
+#
+# `item_basis` must have its scale BAKED INTO the column lengths — Godot 4
+# `node.basis = ...` wipes a separately-assigned `node.scale`, and this
+# was a real bug in the skeleton's bow. See held_item_basis_full_3d.
+#
+# Returns the MeshInstance3D, or null when the item has no icon (headless
+# tests, or an id with no sprite).
+func attach_held_item(
+	arm_pivot: Node3D, item_id: int, item_basis: Basis, hand_offset: Vector3
+) -> MeshInstance3D:
+	if arm_pivot == null:
+		return null
+	var tex: Texture2D = ItemIcons.icon_for(item_id)
+	if tex == null:
+		return null
+	var mesh: ArrayMesh = SpriteExtruder.build(tex)
+	if mesh == null:
+		return null
+	var node := MeshInstance3D.new()
+	node.mesh = mesh
+	arm_pivot.add_child(node)
+	node.basis = item_basis
+	node.position = hand_offset
+	node.material_override = held_item_material(tex)
+	return node
+
+
+# Material for an extruded held item. Alpha-scissor rather than the mob's
+# shared unshaded material: item sprites have transparent corners, and
+# they are a different albedo from the body texture.
+static func held_item_material(tex: Texture2D) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	mat.alpha_scissor_threshold = 0.5
+	return mat
+
+
+# The pose `m.java` uses for a FULL-3D item — swords and tools, the
+# branch guarded by `dx.c[id].a()` (Item.isFull3D, which `kg.java`
+# ItemSword returns true from):
+#
+#     glTranslatef(0, 0.1875, 0); glScalef(f, -f, f);
+#     glRotatef(-100, 1,0,0); glRotatef(45, 0,1,0);   // f = 0.625
+#
+# Rather than transcribe that GL stack through two coordinate-system
+# flips (MC's limb-local +Y points DOWN the limb; Godot's points up, and
+# mob forward is local -Z), this states the resulting pose directly in
+# ARM-LOCAL space, which is what the mesh is parented to:
+#
+#   * grip→tip runs FORWARD out of the hand, tilted `tilt_degrees` up —
+#     with the arm locked horizontal, arm-local -Y is mob forward and
+#     arm-local -Z is mob up;
+#   * the blade is then rolled 45° about its own long axis, which is what
+#     vanilla's `glRotatef(45, 0,1,0)` achieves and what stops the sprite
+#     reading as a flat cutout edge-on to the camera.
+#
+# `diagonal` is the grip→tip vector in the 16x16 sprite, measured after
+# SpriteExtruder's Y flip. The default suits the shared MC tool diagonal
+# (lower-left grip, upper-right tip).
+static func held_item_basis_full_3d(
+	pixel_scale: float, tilt_degrees: float = 10.0, diagonal := Vector2(11.0, 13.0)
+) -> Basis:
+	# Orthonormal frame in MESH space: `long` down the blade, `flat`
+	# perpendicular to it inside the sprite plane, `normal` out of it.
+	var long_mesh := Vector3(diagonal.x, diagonal.y, 0.0).normalized()
+	var flat_mesh := Vector3(diagonal.y, -diagonal.x, 0.0).normalized()
+	var normal_mesh := Vector3(0.0, 0.0, 1.0)
+	# The same frame's destination in ARM-LOCAL space.
+	var tilt: float = deg_to_rad(tilt_degrees)
+	var long_arm := Vector3(0.0, -cos(tilt), -sin(tilt))
+	var normal_arm := Vector3(1.0, 0.0, 0.0)
+	var flat_arm: Vector3 = long_arm.cross(normal_arm)
+	# Map mesh frame → arm frame, then roll about the blade.
+	var to_frame := Basis(long_mesh, flat_mesh, normal_mesh).transposed()
+	var from_frame := Basis(long_arm, flat_arm, normal_arm)
+	var rotated: Basis = from_frame.rotated(long_arm, deg_to_rad(45.0))
+	var combined: Basis = rotated * to_frame
+	# Bake the scale into the column lengths — assigning `node.scale`
+	# separately would be silently discarded by the basis write.
+	return Basis(combined.x * pixel_scale, combined.y * pixel_scale, combined.z * pixel_scale)
 
 
 # Public damage entry — called by player (melee), arrows (projectile),

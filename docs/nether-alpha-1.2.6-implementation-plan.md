@@ -2026,3 +2026,95 @@ skipped, would vanish on the way back. Staleness is `validate`'s job.
 World isolation now comes from an explicit `PortalIndex.reset()` at world
 entry in `ChunkManager._ready`, which is a different question and was
 being conflated with the load.
+
+### 17.8 Batch 8 (2026-08-16)
+
+**Confirmed against source, in full.** `pt.java` is short enough to
+verify line by line, and section 8.1 describes it accurately: texture
+`/mob/pigzombie.png`, `am = 0.5f` / `0.95f` with a target, `f = 5`,
+`bm = true`, `Anger = 400 + nextInt(400)`, angry-sound countdown
+`nextInt(40)`, `c_()` returning null while `Anger == 0`, the 32-block
+group alert, and no decrement of `Anger` anywhere in the class. Held item
+`new fp(dx.E, 1)` resolves through `dx.java:36` to item 27 + 256 = 283,
+the gold sword; the drop `dx.ap.aW` through `dx.java:73` to 64 + 256 =
+320, cooked porkchop, dropped `nextInt(3)` times by `hf.b(lw)`.
+
+**Its model and held-item pose come from the ZOMBIE's renderer entry.**
+`mn.java` has no `pt.class` key. The renderer lookup walks superclasses,
+so `pt` lands on `nt.class → new m(new ck(), 0.5f)` — RenderBiped with
+ModelZombie. That settles two things at once: the pigman uses the
+zombie's locked-horizontal arms, and `m.java::b` (renderEquippedItems) is
+what draws its sword. `m.java` has three branches keyed on the item type,
+and a sword takes the middle one (`dx.c[id].a()` — `kg.java` ItemSword
+returns true from `isFull3D`):
+
+    glTranslatef(0, 0.1875, 0); glScalef(0.625, -0.625, 0.625);
+    glRotatef(-100, 1,0,0); glRotatef(45, 0,1,0);
+
+`MobBase.held_item_basis_full_3d` states that pose directly in arm-local
+space rather than transcribing the GL stack, because MC's limb-local +Y
+points DOWN the limb while Godot's points up and mob forward is local -Z
+— two flips to get wrong. The resulting basis is pinned by tests on its
+determinant and on where the grip→tip diagonal ends up.
+
+**Fire immunity is what cancels the daylight burn.** `pt.k()` is an empty
+override that calls `super.k()`, so a pigman DOES inherit the zombie's
+daylight ignition unchanged and does set its burn timer. `hf.java:111`
+then forces that timer to zero on the same tick for any fireproof living
+entity. The ignite happens and is cancelled before it can do anything —
+which is why no explicit "pigmen do not burn" code exists in the source,
+and why `MobBase._env_tick` reproduces the ordering rather than
+short-circuiting earlier.
+
+**The group alert is a BOX and the distinction is observable.**
+`this.aG.b(32.0, 32.0, 32.0)` grows the pigman's own bounding box 32
+blocks on each axis. A pigman at the far corner of that box is 55 blocks
+away in a straight line and IS alerted; one 34 blocks away along a single
+axis is NOT. A radius check gets both cases wrong, so the implementation
+uses `AABB.grow` and `AABB.intersects` against the other mob's own box —
+`World.getEntities` returns anything whose box intersects, so a touching
+box counts as inside.
+
+**One in forty angered pigmen never shouts.** `c()` sets the countdown to
+`nextInt(40)`, which includes zero, and `e_()` guards with
+`if (this.b > 0 && --this.b == 0)`. A countdown that starts at zero never
+enters the branch. Section 8.1 flagged this and it is reproduced exactly;
+a test asserts zero is reachable.
+
+**Measurements.** 70 pigmen (vanilla's hostile cap) × 20 group alerts:
+0.82 ms total, 0.041 ms per alert. 70 pigmen × 20 neutral AI ticks:
+1.51 ms total, 0.0011 ms per mob-tick. Both are far below a frame budget;
+the alert scan is linear in the active-mob count and only runs on a
+player hit.
+
+**Deliberate deviations.**
+
+- Walk speeds are the source RATIO, not the source numbers. Alpha's `am`
+  is a per-tick movement scalar (0.5 neutral, 0.95 hunting); this project
+  works in m/s and its zombie — also `am = 0.5` — walks at 1.0 m/s. The
+  pigman therefore uses 1.0 and 1.9, preserving the 1.9x that is what the
+  player actually experiences.
+- The step sound is the zombie's pool. Alpha gives the pigman no step
+  sounds of its own (`lw` plays the block's), but this project already
+  gives the zombie a mob-specific step pool, and the pigman has the same
+  body on the same blocks.
+- `mob.zombiepig.zpig`, `zpighurt`, `zpigdeath` and `zpigangry` are
+  registered with their source volume and pitch — including the shout's
+  `h() * 2.0f` volume and `* 1.8f` pitch — but resolve to silence: the
+  OGGs are not in the repo, the same situation as the portal sounds, and
+  section 11 requires the silent-safe fallback. Dropping files at
+  `assets/audio/sfx/mob/zombiepig/` enables them with no code change.
+- The ModelBiped geometry is duplicated from `zombie.gd` rather than
+  extracted to a shared builder. Vanilla's `pt extends nt` would suggest
+  subclassing our `Zombie`, but its texture path, melee damage and drop
+  are consts, so a subclass could not change them without overriding the
+  model builder anyway — which is the bulk of the file. Three species now
+  carry a copy (zombie, skeleton, pigman); no further bipeds are planned,
+  so the extraction is noted rather than done.
+
+**Also added: `player.gd` joins a `player` group.** The group-aggro check
+needs to answer "is this node the player", and player.gd declares no
+`class_name` — a bare `Player` reference fails to parse at script load,
+which is why EntitySave already matches Boat and Minecart by script path.
+The check takes the script path first and the group second, and the group
+is a real membership rather than a test-only affordance.

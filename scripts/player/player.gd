@@ -513,6 +513,11 @@ var _pre_mount_collision_disabled: bool = false
 
 
 func _ready() -> void:
+	# Anything that needs to ask "is this node the player" can, without
+	# depending on player.gd — which declares no class_name, so a bare
+	# `Player` reference fails to parse at script load. ZombiePigman's
+	# group-aggro check is the first caller (vanilla `lw2 instanceof eb`).
+	add_to_group(ZombiePigman.PLAYER_GROUP)
 	# Touch mode never captures: pointer lock doesn't exist on touch
 	# browsers, and a stray grant (Android Chrome) would route emulated
 	# mouse motion into the look path on top of TouchControls' deltas.

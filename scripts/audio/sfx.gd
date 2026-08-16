@@ -343,6 +343,13 @@ const _PORTAL_AMBIENT_SOUND: String = "res://assets/audio/sfx/portal/portal.ogg"
 const _PORTAL_TRIGGER_SOUND: String = "res://assets/audio/sfx/portal/trigger.ogg"
 const _PORTAL_TRAVEL_SOUND: String = "res://assets/audio/sfx/portal/travel.ogg"
 
+# Zombie pigman — `pt.java` names four events. Absent from the repo for
+# the same reason as the portal sounds; see play_pigman_say.
+const _PIGMAN_SAY_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpig.ogg"
+const _PIGMAN_HURT_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpighurt.ogg"
+const _PIGMAN_DEATH_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigdeath.ogg"
+const _PIGMAN_ANGRY_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigangry.ogg"
+
 # Vanilla MC plays step.gravel for hoe tilling, soil step events, etc.
 const _GRAVEL_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/step/gravel1.ogg",
@@ -942,6 +949,48 @@ func play_zombie_death(pos: Vector3) -> void:
 
 func play_zombie_step(pos: Vector3) -> void:
 	_play_mob_sound_3d(_ZOMBIE_STEP_SOUNDS, pos, -2.0)
+
+
+# Zombie pigman — `pt.java`'s four `mob.zombiepig.*` events.
+#
+# Like the portal sounds, these OGGs are not in the repo (Alpha served
+# its sound set from Mojang's resources endpoint rather than the jar), so
+# they route through the optional loader and resolve to silence until the
+# files are dropped in. Plan section 11 requires exactly that fallback.
+#
+# The step pool is the ZOMBIE's. Alpha gives the pigman no step sounds of
+# its own — `lw` plays the block's own step sound — but this project
+# already gives the zombie a mob-specific step pool, and the pigman has
+# the same body walking on the same blocks, so reusing it keeps the two
+# consistent rather than leaving one of them silent.
+func play_pigman_say(pos: Vector3) -> void:
+	_play_optional_3d(_PIGMAN_SAY_SOUND, pos, -1.0, _mob_pitch())
+
+
+func play_pigman_hurt(pos: Vector3) -> void:
+	_play_optional_3d(_PIGMAN_HURT_SOUND, pos, -1.0, _mob_pitch())
+
+
+func play_pigman_death(pos: Vector3) -> void:
+	_play_optional_3d(_PIGMAN_DEATH_SOUND, pos, -1.0, _mob_pitch())
+
+
+# `pt.e_()` — volume `h() * 2.0f` (twice the normal mob volume, hence the
+# +6 dB) and pitch `((nextFloat() - nextFloat()) * 0.2f + 1.0f) * 1.8f`.
+# The 1.8x is what makes an angry pigman shriek rather than grunt.
+func play_pigman_angry(pos: Vector3) -> void:
+	_play_optional_3d(_PIGMAN_ANGRY_SOUND, pos, 5.0, _mob_pitch() * 1.8)
+
+
+func play_pigman_step(pos: Vector3) -> void:
+	_play_mob_sound_3d(_ZOMBIE_STEP_SOUNDS, pos, -2.0)
+
+
+# Vanilla's standard mob pitch jitter: `(nextFloat() - nextFloat()) * 0.2
+# + 1.0`, a triangular distribution centred on 1.0 rather than the
+# uniform one `_play_mob_sound_3d` applies.
+func _mob_pitch() -> float:
+	return (randf() - randf()) * 0.2 + 1.0
 
 
 func play_skeleton_say(pos: Vector3) -> void:
