@@ -250,6 +250,11 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# `dx.aK(0).a(229)` → (229 % 16, 229 / 16). Extracted into the
 	# alpha_vanilla pack alongside the slime mob + slime block.
 	Items.SLIMEBALL: "slimeball",
+	# Glowstone dust — vanilla dx.java:101 `dx(92).a(73)`, so items.png
+	# tile (73 % 16, 73 / 16) = (9, 4). Extracted into the alpha_vanilla
+	# pack by the Nether pass; _load_item_sprite falls back to
+	# assets/textures/items/ for packs that don't ship it.
+	Items.GLOWSTONE_DUST: "glowstone_dust",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

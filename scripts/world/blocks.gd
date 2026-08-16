@@ -488,6 +488,47 @@ const STONE_PRESSURE_PLATE := 95
 # That difference is the whole point of having two plates.
 const WOODEN_PRESSURE_PLATE := 96
 
+# --- Alpha Nether (docs/nether-alpha-1.2.6-implementation-plan.md §4) ---
+#
+# Source ids differ from ours; the mapping is recorded in the plan's
+# reservation table. Every property below traces to nq.java:110-113:
+#
+#   nq bb = new qb(87, 103).c(0.4f).a(h)             netherrack
+#   nq bc = new it(88, 104).c(0.5f).a(l)             soul sand
+#   nq bd = new hk(89, 105, hb.o).c(0.3f).a(j).a(1)  glowstone
+#   x  be = new x (90,  14).c(-1f) .a(j).a(0.75f)    portal
+#
+# `.c(f)` is hardness, `.a(bi)` the step-sound group, `.a(float)` the
+# light emission as a 0..1 fraction of 15.
+
+# Netherrack (source id 87). Rock material, hardness 0.4, stone step
+# sound. Its defining trait is not in this file: fire lit ON netherrack
+# never burns out, because qh.java's two extinguish paths both check
+# whether the supporting block is netherrack. See BlockFire.
+const NETHERRACK := 97
+
+# Soul sand (source id 88). `it.java` gives it a 0.125 collision inset —
+# the top face sits at 0.875 — and multiplies a colliding entity's X and
+# Z velocity by 0.4 while leaving Y untouched.
+const SOUL_SAND := 98
+# it.java multiplies a colliding entity's X and Z motion by this.
+const SOUL_SAND_DRAG: float = 0.4
+
+# Glowstone (source id 89). Emits full light 15 (`.a(1.0f)`) and
+# `hk.java::a` drops exactly one glowstone dust regardless of tool —
+# Alpha has no fortune-style multiplier, and never drops the block.
+const GLOWSTONE := 99
+
+# Nether portal (source id 90). A WORLD-ONLY block: no item form, no
+# drop, no collision, no selection box. Hardness -1.0 is vanilla's
+# unbreakable sentinel; the cell is removed by frame invalidation, not by
+# mining. Reserved here so Batch 7 can render and drive it; the id is
+# already excluded from every item-facing path via WORLD_ONLY_IDS.
+#
+# 206 sits ABOVE the item floor of 100. That is only safe because content
+# kind is a registry query now — see is_registered / has_item_form.
+const PORTAL := 206
+
 # Redstone wire — vanilla lu.java via nq.av (id 55, tex 84/85 with the
 # powered variants at +16). Hardness 0, no collision box, needs a normal
 # solid cube directly below. Metadata is the POWER LEVEL 0-15 and uses
@@ -699,17 +740,20 @@ const REGISTERED_IDS: Array[int] = [
 	STONE_BUTTON,
 	STONE_PRESSURE_PLATE,
 	WOODEN_PRESSURE_PLATE,
+	NETHERRACK,
+	SOUL_SAND,
+	GLOWSTONE,
+	PORTAL,
 ]
 
 # Blocks that exist only as world cells — never as an inventory stack, a
 # hotbar slot, a held mesh, a dropped entity or a debug-spawner row.
 # AIR is excluded separately (it is registered but is not content).
 #
-# Empty today. The Nether portal (id 206) joins it in Batch 2: Alpha's
-# `x.java` gives the portal no item form, no drop and no pick-block, so
-# it must never reach a presentation path even though it is a perfectly
-# ordinary byte inside `Chunk.blocks`.
-const WORLD_ONLY_IDS: Array[int] = []
+# Alpha's `x.java` gives the portal no item form, no drop and no
+# pick-block, so it must never reach a presentation path even though it
+# is a perfectly ordinary byte inside `Chunk.blocks`.
+const WORLD_ONLY_IDS: Array[int] = [PORTAL]
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -1071,10 +1115,13 @@ static func has_sprite_tile(id: int) -> bool:
 # 8e) extend the same surface to items / projectiles / carts. The fast
 # path is one block read + two compares, cheap enough for per-footstep
 # (player) and 20 Hz env-tick (mob) call sites.
-static func on_entity_walking(manager, pos: Vector3i, _entity: Node = null) -> void:
+static func on_entity_walking(manager, pos: Vector3i, entity: Node = null) -> void:
 	var id: int = manager.get_world_block(pos)
 	if id == REDSTONE_ORE or id == GLOWING_REDSTONE_ORE:
 		touch_redstone_ore(manager, pos)
+		return
+	if id == SOUL_SAND:
+		apply_soul_sand_drag(entity)
 		return
 	# An entity standing IN a plate's cell wakes it immediately; the
 	# 20-tick recheck then handles release (ap.java's onEntityCollision
@@ -1090,6 +1137,28 @@ static func on_entity_walking(manager, pos: Vector3i, _entity: Node = null) -> v
 	var above_id: int = manager.get_world_block(above)
 	if above_id == STONE_PRESSURE_PLATE or above_id == WOODEN_PRESSURE_PLATE:
 		Redstone.update_plate(manager, above, above_id, true)
+
+
+# Soul-sand drag. `it.java::a(cy, x, y, z, lw)`:
+#
+#     lw2.az *= 0.4;
+#     lw2.aB *= 0.4;
+#
+# `az` and `aB` are the entity's X and Z motion; `aA` (Y) is untouched, so
+# a player can still jump out at full height — the block slows walking,
+# not falling or jumping. Applied to any entity with a `velocity`, which
+# covers the player, mobs and carts alike.
+#
+# Returns true when a drag was applied, so tests can assert it without a
+# live scene.
+static func apply_soul_sand_drag(entity: Node) -> bool:
+	if entity == null or not is_instance_valid(entity):
+		return false
+	if not ("velocity" in entity):
+		return false
+	var v: Vector3 = entity.get("velocity")
+	entity.set("velocity", Vector3(v.x * SOUL_SAND_DRAG, v.y, v.z * SOUL_SAND_DRAG))
+	return true
 
 
 # One contact event on a redstone ore cell. Returns the number of
@@ -1138,6 +1207,11 @@ static func _emit_ore_reddust(manager, pos: Vector3i) -> int:
 static func is_solid_collision(id: int) -> bool:
 	if is_opaque(id):
 		return true
+	if id == PORTAL:
+		# x.java overrides the collision box to null — the player walks
+		# straight into a portal, which is how standing in one works at
+		# all. No selection box either (see selection_aabb).
+		return false
 	return (
 		id == CHEST
 		or id == MOB_SPAWNER
@@ -1196,6 +1270,10 @@ static func is_opaque(id: int) -> bool:
 		# slime_block pixels would otherwise be hidden behind a culled
 		# adjacent face. Same treatment as GLASS / LEAVES.
 		and id != SLIME_BLOCK
+		# Portal is a thin translucent surface, not a filled cell — the
+		# blocks behind it must keep emitting faces. Its light also has to
+		# reach past it, which light_opacity handles separately.
+		and id != PORTAL
 		and id != WOOD_STAIRS
 		and id != COBBLESTONE_STAIRS
 		and id != WOODEN_DOOR
@@ -1384,6 +1462,10 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[CACTUS] = 0
 	_light_opacity_lut[SNOW_LAYER] = 0
 	_light_opacity_lut[SAPLING] = 0
+	# Portal — a thin translucent surface. Vanilla registers it with the
+	# non-opaque constructor, so light passes through unattenuated; it
+	# is also a light SOURCE (see light_emission).
+	_light_opacity_lut[PORTAL] = 0
 	_light_opacity_lut[LEAVES] = 1  # vanilla BlockLeaves
 	# Alpha 1.2.6 explicitly overrides the non-opaque constructor default:
 	# nq.java registers water IDs 8/9 with `.d(3)` and lava IDs 10/11 with
@@ -1500,6 +1582,10 @@ static func light_emission(id: int) -> int:
 			return 9  # int(15 * 0.625), nq.aO glowing redstone ore
 		REDSTONE_TORCH:
 			return 7  # int(15 * 0.5), nq.aQ lit redstone torch
+		GLOWSTONE:
+			return 15  # nq.java:112 .a(1.0f)
+		PORTAL:
+			return 11  # int(15 * 0.75), nq.java:113 .a(0.75f)
 	return 0
 
 
@@ -1574,6 +1660,18 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# Vanilla BlockSnowLayer setBlockBounds(0, 0, 0, 1, 0.125, 1)
 		# — full-width slab, 2/16 tall.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
+	if id == SOUL_SAND:
+		# it.java::d — `f2 = 0.125f`, box (x, y, z)..(x+1, y+1-f2, z+1).
+		# A full-width cell whose top sits at 0.875, which is why a
+		# player walking across soul sand is visibly sunk into it. This
+		# must be a real collision height, not a speed fudge on a
+		# full-height cube: it changes eye/foot height and step-up.
+		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.875, 1.0))
+	if id == PORTAL:
+		# x.java returns a null collision box AND is not selectable —
+		# a portal cell cannot be targeted or mined. Zero-size AABB keeps
+		# the raycast from ever registering a hit.
+		return AABB(Vector3.ZERO, Vector3.ZERO)
 	if id == STONE_BUTTON:
 		# iy.java:113-125 — 6/16 tall, 6/16 wide, 2/16 deep unpressed and
 		# 1/16 when pressed, hugging the wall it is mounted on.
@@ -1969,6 +2067,17 @@ static func hardness(id: int) -> float:
 			return 0.5
 		GRASS, FARMLAND, GRAVEL:
 			return 0.6
+		NETHERRACK:
+			return 0.4  # nq.java:110 .c(0.4f)
+		SOUL_SAND:
+			return 0.5  # nq.java:111 .c(0.5f)
+		GLOWSTONE:
+			return 0.3  # nq.java:112 .c(0.3f)
+		PORTAL:
+			# nq.java:113 .c(-1.0f) — vanilla's unbreakable sentinel. The
+			# cell disappears when its obsidian frame is invalidated, not
+			# when it is mined.
+			return -1.0
 		LADDER:
 			return 0.4  # ca.java `c(0.4f)` — soft wood, quick break
 		TNT:
@@ -2107,6 +2216,13 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_PICKAXE
 		DIRT, GRASS, SAND, FARMLAND, GRAVEL:
 			return Items.TOOL_TYPE_SHOVEL
+		NETHERRACK:
+			# Rock material — any pickaxe tier speeds it up and is
+			# required for the drop (see required_harvest_level).
+			return Items.TOOL_TYPE_PICKAXE
+		SOUL_SAND:
+			# hb.m (sand material) — shovel, like sand and gravel.
+			return Items.TOOL_TYPE_SHOVEL
 		PUMPKIN, JACK_O_LANTERN:
 			# Vanilla BlockPumpkin sets `b("axe")` via Block.b(String) —
 			# axe gets the break-speed bonus, but any tool / bare hand drops.
@@ -2224,6 +2340,12 @@ static func break_time_bare_hand(id: int) -> float:
 			return 0.75
 		GRASS, FARMLAND, GRAVEL:
 			return 0.9
+		NETHERRACK:
+			return 0.6
+		SOUL_SAND:
+			return 0.75
+		GLOWSTONE:
+			return 0.45
 		LOG:
 			return 3.0
 		PLANKS:
@@ -2263,6 +2385,14 @@ static func drops(id: int) -> int:
 			return Items.SNOWBALL
 		CACTUS:
 			return CACTUS  # drops itself
+		GLOWSTONE:
+			# hk.java::a(int, Random) returns dx.aR — glowstone dust,
+			# never the block, and with no tool-tier or fortune term.
+			# Alpha drops exactly ONE; the 2-4 range is a later change.
+			return Items.GLOWSTONE_DUST
+		PORTAL:
+			# x.java has no drop and cannot be mined at all (hardness -1).
+			return AIR
 		SNOW_LAYER:
 			# Vanilla BlockSnow drops 1 snowball per layer broken. Modern
 			# scales with layer depth (1-8); we follow Alpha which only
@@ -2409,6 +2539,14 @@ static func name_of(id: int) -> String:
 			return "leaves"
 		SAND:
 			return "sand"
+		NETHERRACK:
+			return "netherrack"
+		SOUL_SAND:
+			return "soul_sand"
+		GLOWSTONE:
+			return "glowstone"
+		PORTAL:
+			return "portal"
 		COAL_ORE:
 			return "coal_ore"
 		IRON_ORE:
@@ -2736,6 +2874,16 @@ static func get_face_texture(id: int, face: String) -> String:
 			return "leaves"
 		SAND:
 			return "sand"
+		NETHERRACK:
+			return "netherrack"
+		SOUL_SAND:
+			return "soul_sand"
+		GLOWSTONE:
+			return "glowstone"
+		PORTAL:
+			# Batch 7 gives the portal a bespoke translucent surface; the
+			# atlas tile is registered now so the texture pipeline is ready.
+			return "portal"
 		COAL_ORE:
 			return "coal_ore"
 		IRON_ORE:

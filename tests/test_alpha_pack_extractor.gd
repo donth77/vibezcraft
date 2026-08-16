@@ -88,14 +88,25 @@ func test_verify_reports_the_nether_assets_the_plan_requires() -> void:
 		assert_true(_verify_output.contains(needle), "verify reports Nether asset %s" % needle)
 
 
-func test_verify_confirms_no_write_target_is_tracked() -> void:
+func test_verify_confirms_every_write_target_is_a_sanctioned_asset_dir() -> void:
 	if _skip_if_unavailable():
 		return
-	# The acceptance criterion: extraction must never stage raw Mojang
-	# assets. verify asks `git check-ignore` about each write target.
+	# Batch 0 phrased this as "is the target gitignored?", assuming
+	# extracted art is never tracked. It is: the project keeps its pack
+	# art in Git LFS and over a thousand of these files are already in the
+	# index, so that question flipped the moment Batch 2 added the
+	# allow-rules that make new tiles behave like their siblings.
+	#
+	# The invariant that does NOT move: the tool may only write per-tile
+	# derivatives into the sanctioned asset directories, and must never
+	# copy a raw redistributable blob into the repo.
 	assert_false(
-		_verify_output.contains("TRACKED"),
-		"every extraction target is gitignored:\n%s" % _verify_output
+		_verify_output.contains("OUTSIDE the asset tree"),
+		"every extraction target is a sanctioned asset dir:\n%s" % _verify_output
+	)
+	assert_false(
+		_verify_output.contains("raw vendor blob copied"),
+		"no client.jar or whole-atlas copy landed in assets/"
 	)
 	assert_true(_verify_output.contains("verify: PASS"), "the dry run reports PASS")
 

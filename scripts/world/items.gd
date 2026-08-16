@@ -344,6 +344,12 @@ const SNOWBALL: int = 203
 # it's just a collectible item with no further use until pistons land.
 const SLIMEBALL: int = 204
 
+# Glowstone dust — vanilla `dx.aR = new dx(92).a(73)`, so item id 348
+# (92 + the 256 item offset) and sprite tile 73. Dropped one-per-block by
+# glowstone (hk.java::a) and crafted back into a block by a full 3x3 grid
+# of nine (en.java:32). Alpha has no four-dust recipe and no other use.
+const GLOWSTONE_DUST: int = 205
+
 # --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
 #
 # The authoritative list of every item id this build defines, and the
@@ -465,6 +471,7 @@ const REGISTERED_IDS: Array[int] = [
 	GOLD_HOE,
 	SNOWBALL,
 	SLIMEBALL,
+	GLOWSTONE_DUST,
 ]
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
@@ -971,6 +978,14 @@ static func id_from_name(item_name: String) -> int:
 			return MUSIC_DISC_STILL_WATER
 		"slimeball":
 			return SLIMEBALL
+		"glowstone_dust":
+			return GLOWSTONE_DUST
+		"netherrack":
+			return Blocks.NETHERRACK
+		"soul_sand":
+			return Blocks.SOUL_SAND
+		"glowstone":
+			return Blocks.GLOWSTONE
 		"slime_block":
 			return Blocks.SLIME_BLOCK
 		"stone_button":
@@ -1334,6 +1349,8 @@ static func display_name(item_id: int) -> String:
 			return "Music Disc - Hearthstone"
 		MUSIC_DISC_STILL_WATER:
 			return "Music Disc - Still Water"
+		GLOWSTONE_DUST:
+			return "Glowstone Dust"
 	return ""
 
 

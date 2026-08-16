@@ -582,6 +582,13 @@
       "pattern": ["PP"],
       "key": {"P": "planks"},
       "result": {"id": "wooden_pressure_plate", "count": 1}
+    },
+    {
+      "_comment": "Glowstone — en.java:32 `a(new fp(nq.bd, 1), \"###\", \"###\", \"###\", '#', dx.aR)`. A FULL 3x3 of nine dust for one block. Alpha has no four-dust variant; that is a later change and must not be added.",
+      "id": "glowstone",
+      "pattern": ["GGG", "GGG", "GGG"],
+      "key": {"G": "glowstone_dust"},
+      "result": {"id": "glowstone", "count": 1}
     }
   ],
   "shapeless": [

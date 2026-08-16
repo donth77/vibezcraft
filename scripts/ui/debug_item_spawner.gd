@@ -130,6 +130,12 @@ const _BLOCKS: Array = [
 	Blocks.WOOD_DOUBLE_SLAB,
 	Blocks.COBBLESTONE_HALF_SLAB,
 	Blocks.COBBLESTONE_DOUBLE_SLAB,
+	# Nether blocks. PORTAL is deliberately absent — it has no item form
+	# (Blocks.WORLD_ONLY_IDS) and must never appear in a spawner list;
+	# tests/test_nether_blocks.gd asserts its exclusion.
+	Blocks.NETHERRACK,
+	Blocks.SOUL_SAND,
+	Blocks.GLOWSTONE,
 ]
 # Sign item — separate from block list since the item-place handler
 # decides standing vs wall sign at right-click time.
@@ -277,6 +283,9 @@ const _ITEMS: Array = [
 	# recipe (9 → 1). Right-click does nothing for now (sticky pistons
 	# / lead crafting would consume them in modern MC; not in our scope).
 	Items.SLIMEBALL,
+	# Glowstone dust — glowstone's only drop, and the sole reagent in the
+	# nine-dust block recipe.
+	Items.GLOWSTONE_DUST,
 ]
 
 var _player: Node

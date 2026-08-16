@@ -26,8 +26,10 @@ const _ITEM_NON_ID_PREFIXES: Array[String] = ["ARMOR_SLOT_", "TOOL_TYPE_"]
 # Constants that are lists of ids rather than ids themselves.
 const _ID_LIST_NAMES: Array[String] = ["REGISTERED_IDS", "WORLD_ONLY_IDS", "BURNED_IDS"]
 
-# Ids the Nether plan reserves but has not defined yet. They must stay
-# unclaimed by BOTH registries until the batch that introduces them.
+# Ids the Nether plan reserved. Batch 2 claimed all five; the assertions
+# below check they landed in the RIGHT registry, which is the property
+# that actually matters — 206 in particular is a block living above the
+# item floor, and the whole registry refactor exists to make that safe.
 const _RESERVED_BLOCK_IDS: Array[int] = [97, 98, 99, 206]
 const _RESERVED_ITEM_IDS: Array[int] = [205]
 
@@ -129,13 +131,10 @@ func test_burned_id_50_is_not_in_either_id_list() -> void:
 
 
 func test_live_world_only_blocks_are_registered_without_an_item_form() -> void:
-	# Vacuous until Batch 2 adds the portal; the seam test below is what
-	# proves the mechanism in the meantime.
-	assert_eq(
-		Blocks.WORLD_ONLY_IDS.size(),
-		0,
-		"no world-only blocks are defined yet (portal lands in Batch 2)"
-	)
+	# Batch 2 populated this with the Nether portal. Was vacuous before
+	# that; the builder-seam test below still proves the mechanism
+	# independently of what happens to be listed.
+	assert_true(Blocks.WORLD_ONLY_IDS.has(Blocks.PORTAL), "the portal is the world-only block")
 	for id: int in Blocks.WORLD_ONLY_IDS:
 		assert_true(Blocks.is_registered(id), "world-only id %d is still a block" % id)
 		assert_false(Blocks.has_item_form(id), "world-only id %d has no item form" % id)
@@ -303,15 +302,13 @@ func test_registry_lists_match_the_constant_sweep_exactly() -> void:
 # --- Nether reservations (plan §3.1) ---
 
 
-func test_reserved_nether_ids_are_still_free() -> void:
-	# Batch 0 gate: abort the reservation if anything already claimed
-	# these. Later batches flip the block assertions as they land.
+func test_reserved_nether_ids_landed_in_the_right_registry() -> void:
 	for id: int in _RESERVED_BLOCK_IDS:
-		assert_false(Blocks.is_registered(id), "reserved block id %d is unclaimed" % id)
-		assert_false(Items.is_registered(id), "reserved block id %d is not an item" % id)
+		assert_true(Blocks.is_registered(id), "reserved block id %d is a block" % id)
+		assert_false(Items.is_registered(id), "reserved block id %d is NOT an item" % id)
 	for id: int in _RESERVED_ITEM_IDS:
-		assert_false(Items.is_registered(id), "reserved item id %d is unclaimed" % id)
-		assert_false(Blocks.is_registered(id), "reserved item id %d is not a block" % id)
+		assert_true(Items.is_registered(id), "reserved item id %d is an item" % id)
+		assert_false(Blocks.is_registered(id), "reserved item id %d is NOT a block" % id)
 
 
 func test_ids_207_to_255_are_free_for_future_content() -> void:

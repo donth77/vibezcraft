@@ -204,6 +204,19 @@ const _LAYOUT := {
 	"lever": 107,
 	"redstone_torch_on": 108,
 	"redstone_torch_off": 109,
+	# Alpha Nether (docs/nether-alpha-1.2.6-implementation-plan.md §4.1).
+	# terrain.png tiles 103/104/105 -> (7,6) / (8,6) / (9,6); the portal's
+	# source tile is 14 -> (14,0). Append-only, same rule as everything
+	# above: slot indices are baked into mesher UVs and marshalled to the
+	# native extension, so never renumber.
+	#
+	# The portal slot is registered here in Batch 2 even though Batch 7
+	# owns its mesh and animation — its texture has to exist before the
+	# custom surface can sample it.
+	"netherrack": 110,
+	"soul_sand": 111,
+	"glowstone": 112,
+	"portal": 113,
 }
 
 # Foliage tint variants.

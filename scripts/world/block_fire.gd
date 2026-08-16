@@ -158,19 +158,32 @@ static func update(manager, pos: Vector3i) -> void:
 	if current_id != Blocks.FIRE:
 		return
 	var age: int = manager.get_world_block_meta(pos)
+	# Vanilla qh.java:52 — `boolean bl2 = world.getBlockId(x, y-1, z) ==
+	# Block.netherrack.blockID`. Netherrack fire is eternal, and this one
+	# flag is the whole mechanism: it gates BOTH extinguish paths below.
+	# It deliberately does not gate ageing or spreading, so the age
+	# counter still climbs and the fire still spreads normally.
+	var on_netherrack: bool = manager.get_world_block(pos + Vector3i(0, -1, 0)) == Blocks.NETHERRACK
 	# Step 1 — age bump.
 	if age < MAX_AGE:
 		manager.set_world_block_with_meta(pos, Blocks.FIRE, age + 1)
 		TickScheduler.schedule(pos, Blocks.FIRE, TICK_RATE)
-	# Step 2 — no neighbor to burn: maybe extinguish.
-	if not _can_neighbor_burn(manager, pos):
+	# Step 2 — no neighbor to burn: maybe extinguish. Skipped entirely on
+	# netherrack, which also means execution falls through to the spread
+	# pass below rather than returning early (qh.java does the same).
+	if not on_netherrack and not _can_neighbor_burn(manager, pos):
 		var below: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 		if not Blocks.is_opaque(below) or age > 3:
 			manager.set_world_block(pos, Blocks.AIR)
 		return
 	# Step 3 — high-age burnout when nothing flammable below.
 	var below_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
-	if not _can_block_catch_fire(below_id) and age == MAX_AGE and randi() % 4 == 0:
+	if (
+		not on_netherrack
+		and not _can_block_catch_fire(below_id)
+		and age == MAX_AGE
+		and randi() % 4 == 0
+	):
 		manager.set_world_block(pos, Blocks.AIR)
 		return
 	# Step 4 — only spread on every-other-tick after age 2.

@@ -153,6 +153,11 @@ const _ICONIFIED_BLOCKS: Array = [
 	# bake gives an inventory icon; without this entry the slot falls
 	# back to a flat 2D sprite which we don't ship for slime_block.
 	Blocks.SLIME_BLOCK,
+	# Nether blocks — plain opaque cubes, so the standard iso bake is
+	# right for all three. PORTAL is excluded: it has no inventory form.
+	Blocks.NETHERRACK,
+	Blocks.SOUL_SAND,
+	Blocks.GLOWSTONE,
 ]
 
 static var _viewport: SubViewport

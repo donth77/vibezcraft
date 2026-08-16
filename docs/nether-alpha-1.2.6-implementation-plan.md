@@ -1510,8 +1510,9 @@ must trace back to the Alpha source or a version-specific history entry.
 
 ## 17. Batch findings log
 
-Recorded as each batch lands. Findings that contradict earlier sections
-are also corrected in place; this log is the chronological trail.
+Recorded as each batch lands. Findings that contradict earlier
+sections are also corrected in place; this log is the chronological
+trail.
 
 ### 17.1 Batch 0 (2026-08-16)
 
@@ -1622,3 +1623,49 @@ classes did not resolve under `godot --headless -s gut_cmdln.gd` until
 `godot --headless --editor --quit-after N` rebuilt
 `.godot/global_script_class_cache.cfg`. `.godot/` is gitignored, so a
 fresh clone or CI needs that pass before the suite will run.
+
+### 17.3 Batch 2 (2026-08-16)
+
+**Every §4 property confirmed against source**, plus two the plan did not
+state: the portal's hardness is `-1.0f` (bedrock's unbreakable sentinel),
+and its terrain.png tile 14 is a flat blue placeholder — vanilla
+overwrites it at runtime with `et.java`'s generated 32-frame animation,
+which is Batch 7's job. Glowstone's `hk.java::a` returns `dx.aR` with no
+tool, tier or fortune term, so exactly one dust always.
+
+**Netherrack fire is one boolean, not a big tick number.** `qh.java:52`
+computes `below == netherrack` once and uses it to skip BOTH extinguish
+paths — the no-fuel check and the age-15 burnout. It deliberately does
+not gate ageing or spreading, and when the flag is set the no-fuel branch
+falls THROUGH to the spread pass rather than returning. Ported exactly;
+`tests/test_nether_blocks.gd` pins both paths with a stone control case.
+
+**The extractor had leather on the wrong tile.** `"leather": (7, 5)` is
+sprite 87, which `dx.java:72` assigns to the RAW PORKCHOP. Leather is
+`dx.java:87` `new dx(78).a(103)` → tile (7, 6). The broken `ROOT` from
+Batch 0 meant the tool had not run in a long time, so the wrong sprite
+never reached the pack. Fixed before turning extraction back on.
+
+**Batch 0's path-safety check rested on a false premise.** It asked "is
+this write target gitignored?", assuming extracted art is never tracked.
+It is: the project keeps pack art in **Git LFS** (`.gitattributes`), and
+over a thousand of those files are already in the index — the blanket
+`*.png` rule was added later and never applied retroactively. Batch 2
+added narrow allow-rules so new tiles behave like their siblings, which
+flipped the old check to a failure. `--verify` now enforces the invariant
+that does not move: writes land only in sanctioned asset directories, and
+no raw redistributable blob (client.jar, a whole atlas) is ever copied
+into the tree.
+
+**Pack fallback covers the other two packs.** `pixel_perfection` and
+`programmer_art` ship no Nether tiles; `BlockAtlas.build` already falls
+back to `alpha_vanilla` per-tile, and `tests/test_nether_rendering.gd`
+asserts every new tile resolves to a real atlas slot under the active
+pack. New PNGs need a `godot --headless --editor` import pass before
+`ResourceLoader.exists` can see them.
+
+**Deferred to Batch 7 by design.** The portal has an id, a registry
+contract, a light level, a hardness, an atlas slot and full exclusion
+from every item-facing path — but no mesh, animation, particles, sound or
+travel behaviour.
+
