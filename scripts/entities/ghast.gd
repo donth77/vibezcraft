@@ -157,6 +157,12 @@ func spawns_airborne() -> bool:
 	return true
 
 
+# `am.i()` returns 1 where the EntityLiving default is 4. Ghasts never
+# appear in groups.
+func spawn_group_size() -> int:
+	return 1
+
+
 # `this.bm = true`.
 func _is_fire_immune() -> bool:
 	return true

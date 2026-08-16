@@ -2211,3 +2211,125 @@ ghast AI tick.
   (`h()` = 10, capped at +8 dB rather than the literal 20x ratio) and
   resolve to silence — the OGGs are not in the repo, as with the portal
   and pigman sets. Section 11's silent-safe fallback.
+
+### 17.10 Batch 10 (2026-08-16)
+
+**Confirmed against source.** `bg.java` matches section 8.4 in every
+detail checked: the 17×17 chunk set per player, the `>` (not `>=`)
+threshold comparison, the one-in-50 per-chunk gate, one class chosen per
+candidate group, `nextInt(16) / nextInt(128) / nextInt(16)` for the
+start cell, three group passes of four attempts, the triangular
+`nextInt(6) - nextInt(6)` X/Z spread, the literally-zero
+`nextInt(1) - nextInt(1)` Y jitter, the 24-block player and world-spawn
+exclusions, and the entity's own `i()` group cap. `gy.java` gives
+hostiles a factor of 100 and passives 20. `k.java` is two lines and they
+are the whole Hell spawn table: `r = {am.class, pt.class}` and
+`s = new Class[0]`.
+
+**Neither Nether mob inherits the light gate, and the reason is
+structural.** `ef.a()` (EntityMonster) is where the sky-light and
+block-light rejections live, and every Overworld hostile reaches it via
+`super.a()`. `pt.a()` and `am.a()` both reimplement the predicate from
+`hf.a()` upward and never call `super.a()` — the pigman adds only
+`difficulty > 0`, the ghast adds `nextInt(20) == 0` and the same
+difficulty check. So a pigman spawns in a lava-lit hall exactly as
+readily as in a dark one, which is what makes the Nether feel populated
+rather than nocturnal. Modelled as
+`WorldProvider.hostile_spawns_use_light_gate` rather than an `if nether`.
+
+**`k.java` gives Hell no passive list at all** — not an empty one that
+happens to produce nothing, but `new Class[0]`. Gated on
+`WorldProvider.has_passive_spawns` inside `PassiveSpawner` itself rather
+than at its two call sites, so neither the per-frame tick nor the
+worldgen seed pass can forget.
+
+**Slimes needed their own gate.** They bypass the normal hostile pool
+entirely — no light gate, no night gate, a separate per-tick path — so
+the pool swap alone would have left them spawning in the Nether despite
+appearing on no list.
+
+**Measurements.** Nether chunk generation, native path: p50 18.9 ms,
+p95 19.8 ms (the Overworld baseline is p50 54.4 ms). On the GDScript
+reference path the same chunks take p50 1.86 s — the ~95× that justifies
+the Batch 5 port, and the reason the perf suite carries two ceilings.
+100 pigmen through one AI tick: p50 0.11 ms, p95 0.18 ms against a
+50 ms budget. 32 fireballs, one tick: p95 0.18 ms. Ghast course scan
+across 50 blocks of open air: p95 0.79 ms; into a wall two blocks out,
+40 calls in 0.12 ms. 100k brightness queries: 19.4 ms. Portal texture
+after warm: 1000 calls in 0.13 ms.
+
+**Overworld regression check.** Batch 0 baseline was
+`worldgen.generate_chunk` p50 56.51 ms / p95 66.74 ms. Now: p50 54.44 ms
+/ p95 68.74 ms. That is +3.0% on p95, inside the release gate's 10%, and
+p50 is slightly faster — both within run-to-run noise on this machine.
+The Overworld generation hash fixture has matched at every batch.
+
+**Fallback-path run.** With the debug dylib moved aside, the suite is
+1169/1221. Every failure is a per-native parity suite asserting
+`native == gdscript` with no native to compare against —
+`test_mesher_native`, `test_worldgen_native`, `test_pathfinder_native`,
+`test_voxel_collider_native`, `test_water_fx_native`. That is
+pre-existing behaviour of those suites and not a Nether regression; this
+feature's own parity suite (`test_nether_worldgen_native.gd`) self-skips
+cleanly, which is the pattern the older ones should adopt. Logged as a
+known issue rather than fixed here, since changing five unrelated suites
+is outside this feature.
+
+---
+
+## Consolidated deviation checklist
+
+Every intentional departure from Alpha 1.2.6, gathered from §17.1–17.10
+for the release gate. Nothing here is a defect; each is a decision with
+its reason.
+
+| # | Area | Deviation | Why |
+|---|---|---|---|
+| 1 | RNG | Overworld caves keep `next_long_legacy_unsigned_low`, a `nextLong` that sign-extends only the high word | OpenJDK sign-extends both. Fixing it changes every existing Overworld save's cave layout. The corrected `next_long` ships alongside and the Nether uses it. **Open decision for the user.** |
+| 2 | Portals | Exposure travels at 81 ticks, not the nominal 80 | `0.0125` is not exactly representable and Alpha accumulates it into a Java float. 81 is what the source actually produces. |
+| 3 | Portals | `create_portal` runs one site-clearance pass where `no.java` runs two | Only *which* clear spot wins differs. The fallback and the 70–118 Y clamp are exact. |
+| 4 | Portals | Rendered by a dedicated MultiMesh, not chunk geometry | The surface animates at 20 Hz and the chunk atlas is static. Also satisfies §7.1's one-material rule by construction. |
+| 5 | Portals | Particles use persistent emitters for the nearest six cells | `x.java` asks for 480 spawns/second across one portal. Bounds particle and voice counts as §7.1 requires. |
+| 6 | Ghast | Render scale normalised by its resting value | `jz.java`'s 4.5× assumes MC's 1/16 model units; this project's model is already in metres. |
+| 7 | Ghast | `course_is_clear` tests only newly covered cells per step | Identical result — the world does not change mid-walk — at 8.7× the speed. |
+| 8 | Fireball | One persistent smoke emitter per projectile | `e_()` emits every tick, 20 spawns/second, against a six-emitter shared pool. |
+| 9 | Pigman | Walk speeds are the source ratio (1.0 → 1.9 m/s), not the raw `am` scalars | This project works in m/s; its zombie, also `am = 0.5`, walks at 1.0. |
+| 10 | Pigman | Step sound reuses the zombie's pool | Alpha gives the pigman none of its own; this project already deviates that way for the zombie. |
+| 11 | Mobs | ModelBiped geometry duplicated across zombie, skeleton and pigman | Texture path, melee damage and drop are consts, so a subclass would have to override the model builder anyway. No further bipeds are planned. |
+| 12 | Mobs | `Ghast._voxel_half_extents` overridden rather than fixing the base's hardcoded 0.6 | Correcting it globally would change spider and cow collision — an Overworld behaviour change. **Latent inconsistency, logged.** |
+| 13 | Spawning | Overworld hostile cap stays at 70; the Nether uses the source's 100 | §8.4 explicitly forbids changing the Overworld figure without separate measurement. |
+| 14 | Spawning | The per-chunk loop remains this project's per-tick random-cell sample | Pre-existing Overworld behaviour; the Nether reuses it rather than forking a second controller. |
+| 15 | Audio | Portal, pigman and ghast sound events resolve to silence | The OGGs are not in the repository — Alpha served its sound set from Mojang's resources endpoint, not the jar. §11 requires exactly this silent-safe fallback. **The one outstanding asset gap.** |
+| 16 | Difficulty | `Game.difficulty` exists with no UI | Several source behaviours gate on `as.k`; modelling them as always-Normal would silently drop them. |
+| 17 | Explosion | `Explosion.detonate` gained a `flaming` parameter, default false | Only the fireball passes true. TNT and creepers are untouched. |
+
+### Out-of-batch fixes made during this feature
+
+Both were found while validating, both reproduce on a clean `HEAD`, and
+both are recorded in full at §17.7:
+
+- **Headless boots were writing to real saves.** The autosave timer had
+  been guarded since the 2026-07 World1 corruption, but chunk-eviction
+  write-through is not on that timer, and one `--quit-after` boot rewrote
+  a live region file with seed-12345 terrain. Now guarded by a single
+  `ChunkManager._disk_writes_allowed()`.
+- **`_spawn_chunk_sync` bypassed the dimension provider**, so a player
+  who saved in the Nether would have been handed a ring of Overworld
+  terrain at world entry.
+
+### Known issues at the release gate
+
+1. **No Nether audio.** Deviation 15 above. Drop files at
+   `assets/audio/sfx/portal/`, `assets/audio/sfx/mob/zombiepig/` and
+   `assets/audio/sfx/mob/ghast/` and every event lights up with no code
+   change.
+2. **Five pre-existing native-parity suites fail without the
+   extension.** They assert `native == gdscript` and have nothing to
+   compare against. `test_nether_worldgen_native.gd` shows the fix.
+3. **Overworld cave RNG.** Deviation 1 — needs a user decision about
+   existing saves before it can be corrected.
+4. **`_voxel_half_extents` hardcodes 0.6** for every non-ghast mob.
+   Deviation 12.
+5. **`godot --headless main.tscn --quit-after N` ends in a signal 11**
+   inside `WorkerThreadPool::finish()`. Reproduces on a clean HEAD;
+   unrelated to this feature.

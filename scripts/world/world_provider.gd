@@ -98,11 +98,33 @@ var provides_player_spawn: bool = true
 # rather than a snap.
 var instruments_wander: bool = false
 
-# Natural hostile spawn table. The Overworld pool lives in
-# NaturalMobSpawner today; the Nether's is exactly ghast + zombie pigman.
-# Empty means "use the existing Overworld path" until Batch 10 wires the
-# single authoritative controller.
+# Natural hostile spawn table. Empty means "use the dimension's own
+# default pool" — for the Overworld that is NaturalMobSpawner's
+# zombie/skeleton/spider/creeper list, kept where it is so nothing about
+# Overworld spawning moves. The Nether names its two species explicitly.
 var natural_hostile_species: PackedStringArray = PackedStringArray()
+
+# Whether the passive spawner runs here at all. `k.java` gives the Hell
+# biome a hostile list and NO passive list — not an empty one, none — so
+# a pig can never appear in the Nether by any natural route. Gated on the
+# provider rather than at the two call sites so neither can forget.
+var has_passive_spawns: bool = true
+
+# Whether hostile spawning applies EntityMonster's light gate. `ef.a()`
+# rejects a cell whose sky light beats `nextInt(32)` or whose block light
+# beats `nextInt(8)`, and every Overworld hostile inherits it. Neither
+# Nether species does: `pt.a()` and `am.a()` both reimplement the check
+# from `hf.a()` upward and never call `super.a()`, so a pigman spawns in
+# a lava-lit hall exactly as readily as in a dark one.
+var hostile_spawns_use_light_gate: bool = true
+
+# `gy.java` — `a(cz.class, 100)`. The per-type hostile threshold is
+# `100 * eligible_chunks / 256`, and `bg.java` skips only when the count
+# is GREATER than it, so a group that starts under the line may finish
+# over it. The Overworld keeps this project's shipped 70 (see
+# NaturalMobSpawner) because changing it would alter established
+# behaviour; the Nether uses the source figure.
+var hostile_cap_per_256_chunks: int = 70
 
 
 # Per-light-level brightness multiplier, as `oz.java::b()` builds it:

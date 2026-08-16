@@ -41,8 +41,15 @@ func _init() -> void:
 	instruments_wander = true
 
 	# §8.4 — the Hell biome list is exactly these two, with no passive
-	# list at all.
+	# list at all. `k.java` is two lines: `r = {am.class, pt.class}` and
+	# `s = new Class[0]`.
 	natural_hostile_species = PackedStringArray(["zombie_pigman", "ghast"])
+	has_passive_spawns = false
+	# Neither Nether species inherits EntityMonster's light gate — see
+	# WorldProvider.hostile_spawns_use_light_gate.
+	hostile_spawns_use_light_gate = false
+	# `gy.java` gives hostiles a factor of 100.
+	hostile_cap_per_256_chunks = 100
 
 
 # Alpha Nether terrain. `WorldgenNether` is a bit-exact port of

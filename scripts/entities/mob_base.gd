@@ -542,6 +542,13 @@ func _uses_gravity() -> bool:
 	return true
 
 
+# `hf.i()` — how many of this species one candidate group may produce.
+# Four by default; `am.i()` returns 1, which is why ghasts are always
+# alone. Read by NaturalMobSpawner.
+func spawn_group_size() -> int:
+	return 4
+
+
 # True when this species belongs in open air rather than standing on a
 # floor. The debug spawner and the spawner cage both place mobs one cell
 # above the first opaque block they find, which is right for everything

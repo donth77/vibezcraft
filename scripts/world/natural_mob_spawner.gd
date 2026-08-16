@@ -98,6 +98,9 @@ const _PACK_JITTER_XZ: int = 6  # vanilla nextInt(6) - nextInt(6) = ±5
 # regardless of how cleanly our chunk geometry resembles vanilla.
 const _SOLO_SPAWN_CHANCE: float = 0.25  # vanilla — 75% of seeds expand into packs
 
+# `hf.i()` returns 4. Species override it — `am.i()` returns 1.
+const _DEFAULT_GROUP_SIZE: int = 4
+
 # Cached lookups so the per-tick path avoids find_child + Script load.
 var _player_cache: Node3D = null
 var _chunk_manager_cache: Node = null
@@ -105,7 +108,13 @@ var _chunk_manager_cache: Node = null
 # uniformly from this list. Vanilla SpawnerAnimals weights by mob's
 # `getCanSpawnHere` per attempt rather than a flat pool, but uniform
 # is close enough until skeleton-vs-zombie biome rules ship.
-var _hostile_script_pool: Array = []
+# dimension:int -> Array[Script]. Keyed by dimension because a portal
+# trip changes the answer; a single slot would have carried Overworld
+# mobs into the Nether.
+var _hostile_pool_cache: Dictionary = {}
+# Script -> {airborne, size, group_size}. Read once per species; see
+# _species_descriptor.
+var _species_cache: Dictionary = {}
 var _spawn_accum: float = 0.0
 # Per-tick spawn counter, reset at the top of each spawn pass and
 # incremented inside _spawn_mob_at. Caps the actual mob-instantiation
@@ -132,6 +141,11 @@ func _process(delta: float) -> void:
 
 
 func _run_spawn_pass() -> void:
+	# `ef.e_()` kills every hostile outright on Peaceful and `pt.a()` /
+	# `am.a()` both refuse to spawn there. Stopping the whole pass is the
+	# same observable result and saves the work.
+	if Game.difficulty == Game.DIFFICULTY_PEACEFUL:
+		return
 	var player: Node3D = _get_player()
 	if player == null:
 		return
@@ -163,14 +177,22 @@ func _run_spawn_pass() -> void:
 	var loaded_chunks: int = 256
 	if manager.has_method("iter_loaded_chunks"):
 		loaded_chunks = manager.iter_loaded_chunks().size()
-	var hostile_cap: int = mini(_HOSTILE_CAP, _HOSTILE_CAP * loaded_chunks / 256)
+	# The per-256-chunk factor is `gy.java`'s, read off the provider: 70
+	# in the Overworld (this project's shipped figure, unchanged) and the
+	# source's 100 in the Nether.
+	var factor: int = DimensionContext.active_provider().hostile_cap_per_256_chunks
+	var hostile_cap: int = mini(factor, factor * loaded_chunks / 256)
 	if hostile_count >= hostile_cap:
 		return
 	# Slime pass runs every tick regardless of time-of-day. Vanilla
 	# `ns.java::a()` doesn't check sky_factor — slimes spawn 24/7
 	# because they're deep underground anyway.
-	for _i in range(_SLIME_ATTEMPTS_PER_TICK):
-		_try_spawn_slime(manager, player)
+	# Slimes are not on any Nether list — `k.java` names ghast and pigman
+	# and nothing else — and this path deliberately bypasses the normal
+	# pool, so it needs its own gate.
+	if DimensionContext.active_provider().natural_hostile_species.is_empty():
+		for _i in range(_SLIME_ATTEMPTS_PER_TICK):
+			_try_spawn_slime(manager, player)
 	# Normal hostile pass. The per-cell effective-light check below is the
 	# time-of-day gate for exposed cells and still permits dark daytime caves.
 	if pool.is_empty():
@@ -182,13 +204,14 @@ func _run_spawn_pass() -> void:
 	while not _pack_queue.is_empty() and _spawns_this_tick < _MAX_SPAWNS_PER_TICK:
 		var entry: Array = _pack_queue.pop_front()
 		var queued_cell: Vector3i = entry[1] as Vector3i
-		if _is_valid_hostile_spawn_cell(manager, queued_cell):
+		if _is_valid_spawn_cell_for(manager, entry[0] as Script, queued_cell):
 			_spawn_mob_at(manager, entry[0] as Script, queued_cell)
 	# Then new seed rolls if budget remains.
 	for _i in range(_ATTEMPTS_PER_TICK):
 		if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
 			break
-		# Uniform pick from the hostile pool per attempt.
+		# `int n6 = cy2.l.nextInt(classArray.length)` — ONE class is
+		# chosen per candidate group, not per attempt within it.
 		var mob_script: Script = pool[randi() % pool.size()] as Script
 		_try_spawn_one(manager, player, mob_script)
 
@@ -218,10 +241,15 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 		int(floor(player.global_position.x)), 0, int(floor(player.global_position.z))
 	)
 	var seed_cell: Vector3i = Vector3i(origin.x + dx, sy, origin.z + dz)
-	if not _is_valid_hostile_spawn_cell(manager, seed_cell):
+	if not _is_valid_spawn_cell_for(manager, mob_script, seed_cell):
 		return
 	# Seed mob — always spawns at the validated seed cell.
 	_spawn_mob_at(manager, mob_script, seed_cell)
+	# `if (n10 >= hf2.i()) continue block6;` — the group-size cap is the
+	# ENTITY's, and a ghast's is 1. `am.i()` returns 1 where the
+	# EntityLiving default is 4, which is why ghasts are always alone.
+	if _group_size_for(mob_script) <= 1:
+		return
 	# Solo-roll: 25% of seeds skip the pack expansion, so the player
 	# encounters lone hostiles from time to time instead of always-packs.
 	if randf() < _SOLO_SPAWN_CHANCE:
@@ -240,7 +268,7 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 			0,
 			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ)
 		)
-		if _is_valid_hostile_spawn_cell(manager, pack_cell):
+		if _is_valid_spawn_cell_for(manager, mob_script, pack_cell):
 			_pack_queue.append([mob_script, pack_cell])
 	# Bound the queue so a runaway frame can't pile up hundreds of
 	# pending mobs that all spawn over the next 100 seconds.
@@ -266,6 +294,63 @@ func _spawn_mob_at(manager: Node, mob_script: Script, cell: Vector3i) -> void:
 	_spawns_this_tick += 1
 
 
+# Per-species spawn validity. `bg.java` constructs the entity and calls
+# its own `a()` predicate, so the rules are the ENTITY's, not the
+# spawner's — and a 4x4 ghast needs a very different pocket from a 2-tall
+# humanoid. This dispatches on a descriptor read once per species rather
+# than constructing and discarding an entity per attempt.
+func _is_valid_spawn_cell_for(manager: Node, mob_script: Script, pos: Vector3i) -> bool:
+	var descriptor: Dictionary = _species_descriptor(mob_script)
+	if not bool(descriptor.get("airborne", false)):
+		return _is_valid_hostile_spawn_cell(manager, pos)
+	# A flying species wants open air and no floor at all. `hf.a()` is
+	# "the box is clear of blocks, entities and liquid" — for a ghast
+	# that is a 4x4x4 pocket, which is also what stops one appearing
+	# half-inside a cavern roof.
+	var chunk_coord := Vector2i(pos.x >> 4, pos.z >> 4)
+	if manager.get_chunk_at_coord(chunk_coord) == null:
+		return false
+	var span: int = int(ceil(float(descriptor.get("size", 1.0))))
+	var half: int = span / 2
+	for dx: int in range(-half, span - half):
+		for dy: int in range(span):
+			for dz: int in range(-half, span - half):
+				var cell := Vector3i(pos.x + dx, pos.y + dy, pos.z + dz)
+				if manager.get_world_block(cell) != Blocks.AIR:
+					return false
+	return true
+
+
+# `hf2.i()` — the entity's own group-size cap. Four by default,
+# one for a ghast.
+func _group_size_for(mob_script: Script) -> int:
+	return int(_species_descriptor(mob_script).get("group_size", _DEFAULT_GROUP_SIZE))
+
+
+# Read a species' spawn-relevant constants once. The probe instance is
+# never added to the tree, so `_ready` does not run — which is fine
+# because every method read here returns a constant. Freed immediately.
+func _species_descriptor(mob_script: Script) -> Dictionary:
+	if _species_cache.has(mob_script):
+		return _species_cache[mob_script]
+	var descriptor: Dictionary = {"airborne": false, "size": 1.0, "group_size": _DEFAULT_GROUP_SIZE}
+	var probe: Object = mob_script.new()
+	if probe != null:
+		if probe.has_method("spawns_airborne"):
+			descriptor["airborne"] = bool(probe.call("spawns_airborne"))
+		if probe.has_method("_get_body_height"):
+			descriptor["size"] = float(probe.call("_get_body_height"))
+		if probe.has_method("spawn_group_size"):
+			descriptor["group_size"] = int(probe.call("spawn_group_size"))
+		if probe is Node:
+			(probe as Node).free()
+		else:
+			probe.free()
+	_species_cache[mob_script] = descriptor
+	return descriptor
+
+
+# gdlint: disable=max-returns
 # Vanilla hostile-spawn cell rules:
 #   * Candidate cell AIR (entity body bottom).
 #   * Cell above also AIR (entity head clearance; humanoid 2-tall).
@@ -293,6 +378,14 @@ func _is_valid_hostile_spawn_cell(manager: Node, pos: Vector3i) -> bool:
 	# Alpha combines block light with raw sky minus the world's integer
 	# skyLightSubtracted value. The manager helper is shared with shaders,
 	# plants, AI, and entity rendering.
+	#
+	# Skipped entirely in the Nether: `ef.a()` owns the light gate, and
+	# neither `pt.a()` nor `am.a()` calls `super.a()` — they both
+	# reimplement the check from `hf.a()` upward. A pigman is as happy in
+	# a lava-lit hall as in a dark one, which is exactly what makes the
+	# Nether feel populated rather than nocturnal.
+	if not DimensionContext.active_provider().hostile_spawns_use_light_gate:
+		return true
 	var lit: int = manager.get_world_effective_light(pos)
 	if lit > 7:
 		return false
@@ -388,15 +481,34 @@ func _is_valid_slime_spawn_cell(manager: Node, pos: Vector3i) -> bool:
 	return true
 
 
+# The hostile pool for whichever dimension is resident.
+#
+# `bg.java` reads the biome's own list — `gg.java` for the Overworld,
+# `k.java` for Hell — so the pool is a property of where you are, not a
+# global. The Overworld's list stays hard-coded here exactly as it was;
+# the Nether names its two species on its provider.
+#
+# Cached per dimension, because a portal trip changes the answer and the
+# old single-slot cache would have carried Overworld mobs into the Nether.
 func _get_hostile_script_pool() -> Array:
-	if not _hostile_script_pool.is_empty():
-		return _hostile_script_pool
-	# Spider added M5. The cell-validity check below still demands a
-	# 2-tall AIR pocket — vanilla Alpha's SpawnerCreature uniformly
-	# checks for humanoid clearance regardless of entity height, so
-	# this matches vanilla even though spider's BB is only 0.9 m tall.
-	for name: String in ["zombie", "skeleton", "spider", "creeper"]:
+	var dimension: int = DimensionContext.active()
+	if _hostile_pool_cache.has(dimension):
+		return _hostile_pool_cache[dimension]
+	var names: Array = []
+	var configured: PackedStringArray = DimensionContext.provider(dimension).natural_hostile_species
+	if configured.is_empty():
+		# Spider added M5. The cell-validity check still demands a 2-tall
+		# AIR pocket — vanilla Alpha's SpawnerCreature uniformly checks
+		# for humanoid clearance regardless of entity height, so this
+		# matches vanilla even though spider's BB is only 0.9 m tall.
+		names = ["zombie", "skeleton", "spider", "creeper"]
+	else:
+		for entry: String in configured:
+			names.append(entry)
+	var pool: Array = []
+	for name: String in names:
 		var s: Script = _MOB_REGISTRY.script_for(name)
 		if s != null:
-			_hostile_script_pool.append(s)
-	return _hostile_script_pool
+			pool.append(s)
+	_hostile_pool_cache[dimension] = pool
+	return pool

@@ -137,6 +137,8 @@ var _rng := RandomNumberGenerator.new()
 func tick(delta: float, chunk_mgr: Node, player: Node3D) -> void:
 	if chunk_mgr == null or player == null:
 		return
+	if not DimensionContext.active_provider().has_passive_spawns:
+		return
 	_accum += delta
 	while _accum >= _TICK_DT:
 		_accum -= _TICK_DT
@@ -257,6 +259,11 @@ func _spawn_mob(chunk_mgr: Node, script: Script, mob_name: String, x: int, y: in
 # and the player exclusion zone (those apply to ongoing live spawning,
 # not the gen-time seed pass).
 func populate_chunk_at_gen(chunk_mgr: Node, chunk_coord: Vector2i) -> void:
+	# The worldgen seed pass is the other route a passive mob can enter
+	# the world by, and it is gated for the same reason `tick` is: the
+	# Hell biome has no passive list at all.
+	if not DimensionContext.active_provider().has_passive_spawns:
+		return
 	# `while rand < density` — Beta's geometric loop. Expected ~0.11
 	# packs per chunk with the default density of 0.1. Capped at
 	# _WORLDGEN_MAX_PACKS_PER_CHUNK to bound worst-case frame cost from
