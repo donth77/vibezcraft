@@ -590,18 +590,35 @@ static func warm_pool(parent: Node) -> void:
 	# Defer until after all _readys (Player, Camera3D) so the active camera
 	# is set up. Without this, get_camera_3d returns null at boot and we'd
 	# spawn at origin where culling may skip the draw → no shader compile.
+	# Capture WEAK references, not the nodes. A deferred lambda that
+	# captures a Node directly errors at CALL time when that node has been
+	# freed in the meantime ("Lambda capture at index N was freed") — the
+	# is_instance_valid guard inside the body never gets the chance to
+	# run, because the failure happens while binding the captures. In the
+	# running game the ChunkManager outlives the frame; in tests it does
+	# not, and a suite that spins several managers up and down turns the
+	# warm-up into a wall of engine errors.
+	var parent_ref: WeakRef = weakref(parent)
+	var particles_ref: WeakRef = weakref(particles)
 	var warmer := func() -> void:
-		if not is_instance_valid(parent) or not is_instance_valid(particles):
+		var host: Node = parent_ref.get_ref() as Node
+		var emitter: CPUParticles3D = particles_ref.get_ref() as CPUParticles3D
+		if host == null or emitter == null:
 			return
-		var cam: Camera3D = parent.get_viewport().get_camera_3d()
+		var cam: Camera3D = host.get_viewport().get_camera_3d()
 		if cam != null:
-			particles.position = cam.global_position + (-cam.global_transform.basis.z) * 3.0
+			emitter.position = cam.global_position + (-cam.global_transform.basis.z) * 3.0
 		else:
-			particles.position = Vector3.ZERO
-		particles.visible = true
-		particles.restart()
-		var tree: SceneTree = parent.get_tree()
+			emitter.position = Vector3.ZERO
+		emitter.visible = true
+		emitter.restart()
+		var tree: SceneTree = host.get_tree()
 		if tree != null:
 			var cleanup := tree.create_timer(_LIFETIME_SEC + 0.2)
-			cleanup.timeout.connect(func() -> void: _return(particles))
+			cleanup.timeout.connect(
+				func() -> void:
+					var late: CPUParticles3D = particles_ref.get_ref() as CPUParticles3D
+					if late != null:
+						_return(late)
+			)
 	warmer.call_deferred()

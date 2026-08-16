@@ -2753,8 +2753,34 @@ func _build_debug_report() -> String:
 	return "\n".join(lines) + "\n\n=== event log ===\n" + DebugLog.dump()
 
 
+# Death in a non-Overworld dimension sends the player home.
+#
+# Alpha has no Nether respawn: the bed / world-spawn point the player
+# returns to is an Overworld coordinate, so the dimension switch has to
+# happen first. Batch 1 wires the scaffolding; the portal work in Batch 7
+# shares the same ChunkManager transaction.
+func _return_to_overworld_on_death() -> void:
+	if DimensionContext.is_overworld():
+		return
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("transition_to_dimension"):
+		# No manager (unit tests, teardown) — still correct the recorded
+		# dimension so a save written now does not claim the Nether.
+		DimensionContext.set_active(DimensionContext.OVERWORLD)
+		return
+	cm.call("transition_to_dimension", DimensionContext.OVERWORLD, _safe_spawn_position())
+
+
 func _respawn() -> void:
 	Music.set_paused(false)
+	# Dying in the Nether returns the player to the Overworld BEFORE the
+	# usual bed / world-spawn selection runs (Nether plan §5.2). Ordering
+	# matters: _safe_spawn_position consults WorldMeta's spawn and the
+	# bed-respawn point, both of which are Overworld coordinates, and
+	# _teleport_to_safe_spawn sync-loads chunks around wherever it lands.
+	# Doing the dimension switch afterwards would stream a ring of Nether
+	# chunks around an Overworld coordinate first.
+	_return_to_overworld_on_death()
 	_teleport_to_safe_spawn()
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y

@@ -40,7 +40,13 @@ extends RefCounted
 # beds in §2.10 of pre-mob-roadmap will move it to per-player later).
 
 const _MAGIC_BYTES: Array[int] = [0x4D, 0x43, 0x41, 0x50]  # "MCAP"
-const _FORMAT_VERSION: int = 1
+# v2 (Nether, Batch 1) adds "dimension" to the payload. v1 saves are read
+# unchanged and migrate to dimension 0 in memory — nothing on disk is
+# rewritten until the player's next save, so opening an old world and
+# quitting without playing leaves its bytes alone.
+const _FORMAT_VERSION: int = 2
+const _VERSION_WITHOUT_DIMENSION: int = 1
+const _SUPPORTED_VERSIONS: Array[int] = [1, 2]
 const _HEADER_SIZE: int = 8
 
 # "MCAP" magic — same const-expression workaround as the other persistence modules.
@@ -60,21 +66,57 @@ static func player_path(world_name: String = "") -> String:
 # ignored because chunk selection is XZ-only; out-of-bounds Y is fixed up
 # separately in _apply_payload. Returns null on missing or malformed.
 static func peek_position(world_name: String = "") -> Variant:
-	var path: String = player_path(world_name)
-	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
-	if bytes.size() < _HEADER_SIZE:
-		return null
-	if bytes.slice(0, 4) != _magic:
-		return null
-	if bytes.decode_u32(4) != _FORMAT_VERSION:
-		return null
-	var parsed: Variant = bytes_to_var(bytes.slice(_HEADER_SIZE, bytes.size()))
-	if not parsed is Dictionary:
-		return null
-	var d: Dictionary = parsed as Dictionary
+	var d: Dictionary = _peek_payload(world_name)
 	if not d.has("pos"):
 		return null
 	return d["pos"] as Vector3
+
+
+# Which dimension the player was last in. ChunkManager._ready needs this
+# BEFORE it builds the initial chunk ring — otherwise a player saved in
+# the Nether has an Overworld ring generated around them, and the chunks
+# they actually land in arrive late (the same class of bug peek_position
+# exists to prevent).
+#
+# Returns dimension 0 for v1 saves, for a fresh world, and for anything
+# unreadable: the Overworld is the only safe place to put a player whose
+# save we cannot interpret.
+static func peek_dimension(world_name: String = "") -> int:
+	var d: Dictionary = _peek_payload(world_name)
+	return _dimension_from_payload(d)
+
+
+# Shared decode for the two peek helpers. Returns {} when the file is
+# missing, truncated, wrong-magic, or written by a version this build
+# does not understand.
+static func _peek_payload(world_name: String) -> Dictionary:
+	var path: String = player_path(world_name)
+	var bytes: PackedByteArray = SaveLoad.read_with_recovery(path)
+	if bytes.size() < _HEADER_SIZE:
+		return {}
+	if bytes.slice(0, 4) != _magic:
+		return {}
+	if not _SUPPORTED_VERSIONS.has(int(bytes.decode_u32(4))):
+		return {}
+	var parsed: Variant = bytes_to_var(bytes.slice(_HEADER_SIZE, bytes.size()))
+	if not parsed is Dictionary:
+		return {}
+	return parsed as Dictionary
+
+
+# The v1 -> v2 migration, such as it is: a payload with no "dimension"
+# key was written before the Nether existed, so its player was in the
+# Overworld by definition. An unregistered id is treated the same way
+# rather than trusted, so a save hand-edited to dimension 7 cannot strand
+# the player in a world with no provider.
+static func _dimension_from_payload(payload: Dictionary) -> int:
+	if not payload.has("dimension"):
+		return DimensionContext.OVERWORLD
+	var dim: int = int(payload["dimension"])
+	if not DimensionContext.is_registered(dim):
+		push_warning("[PlayerSave] unknown dimension %d in save; falling back to Overworld" % dim)
+		return DimensionContext.OVERWORLD
+	return dim
 
 
 # --- Save ---
@@ -168,6 +210,10 @@ static func _build_payload(player: Node3D) -> Dictionary:
 		}
 	return {
 		"pos": player.global_position,
+		# v2: which dimension this position belongs to. Written from the
+		# resident dimension rather than anything on the player, because
+		# DimensionContext is the single authority on what is loaded.
+		"dimension": DimensionContext.active(),
 		"yaw": yaw,
 		"pitch": pitch,
 		"health": health_now,
@@ -205,7 +251,7 @@ static func load_player(player: Node3D, world_name: String = "") -> bool:
 		push_warning("[PlayerSave] %s: bad magic, skipping" % path)
 		return false
 	var version: int = bytes.decode_u32(4)
-	if version != _FORMAT_VERSION:
+	if not _SUPPORTED_VERSIONS.has(version):
 		push_warning("[PlayerSave] %s: unknown format_version=%d, skipping" % [path, version])
 		return false
 	var body: PackedByteArray = bytes.slice(_HEADER_SIZE, bytes.size())
@@ -218,6 +264,12 @@ static func load_player(player: Node3D, world_name: String = "") -> bool:
 
 
 static func _apply_payload(player: Node3D, payload: Dictionary) -> void:
+	# Dimension first: the Y-clamp below consults world spawn metadata,
+	# and every later system that asks "where am I?" needs the right
+	# answer. ChunkManager has already peeked this to centre the initial
+	# chunk ring; setting it again here is what makes a direct
+	# load_player call (tests, future respawn paths) self-contained.
+	DimensionContext.set_active(_dimension_from_payload(payload))
 	# Sanitize saved Y. The autosave loop persists position unconditionally,
 	# so if the player ever falls into open space (e.g. a chunk-load race
 	# at world entry, or a creative-mode void plunge) the disk Y can land

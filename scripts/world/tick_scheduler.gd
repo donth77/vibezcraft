@@ -238,9 +238,20 @@ static func current_tick() -> int:
 	return _current_tick
 
 
-# Test hook. Tests need a clean scheduler between cases since the static
-# queue persists across GUT test boundaries.
-static func reset_for_tests() -> void:
+# Drop every scheduled tick and rewind the clock.
+#
+# The queue is static and world-position-keyed, so it belongs to whatever
+# dimension is resident. A dimension transition MUST clear it or a fluid
+# update scheduled at (10, 64, 10) in the Overworld fires against the
+# Nether's block at the same coordinate. ChunkManager calls this from its
+# dimension-owned state reset; tests call it between cases for the same
+# reason (the statics outlive a GUT test boundary).
+static func clear_all() -> void:
 	_pending.clear()
 	_current_tick = 0
 	_accum_seconds = 0.0
+
+
+# Retained name for the existing test callsites.
+static func reset_for_tests() -> void:
+	clear_all()

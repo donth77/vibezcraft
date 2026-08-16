@@ -174,7 +174,9 @@ assets/
 
 ## Architecture invariants
 
-**Classes vs autoloads.** Only `Game` (scripts/game.gd) is an autoload. `Blocks`, `Items`, `Chunk`, `Mesher`, `Worldgen`, `BlockAtlas`, `Recipes`, `SpriteExtruder`, `BlockIconRenderer` are `class_name` statics / `RefCounted` — call directly (`BlockAtlas.texture()`), no `get_node`.
+**Classes vs autoloads.** Autoloads are `Game`, `SFX`, `FurnaceManager`, `ChestStorage`, `JukeboxStorage`, `NaturalMobSpawner`, `SignStorage`, `JukeboxAudio`, `WorldTime`, `WaterFX`, `Music` (see `project.godot`). `Blocks`, `Items`, `Chunk`, `Mesher`, `Worldgen`, `BlockAtlas`, `Recipes`, `SpriteExtruder`, `BlockIconRenderer`, `DimensionContext` are `class_name` statics / `RefCounted` — call directly (`BlockAtlas.texture()`), no `get_node`.
+
+**One resident dimension.** `DimensionContext` owns the active dimension id and a monotonic transition epoch. Every chunk job carries both, and `_materialize_one_ready_chunk` drops any result whose tags no longer match — `WorkerThreadPool` has no cancel API, so refusing stale results is the only defence against a worker landing after a dimension switch. Per-dimension policy (skylight, fog, coordinate scale, lava decay, spawn table) lives on `WorldProvider` / `NetherProvider`, not in `if nether` branches. Dimension 0 persists at the world root; dimension -1 under `DIM-1/`.
 
 **Threading contract.** `WorkerThreadPool` runs `_compute_chunk_data` (worldgen + meshing). The main thread owns: GPU mesh upload, scene-tree manipulation, `_pending` dict. `_ready_results` is the hand-off, guarded by `_result_mutex`. `Game._ready` warms `BlockAtlas.build()`, `Worldgen.surface_height(0,0)`, `Recipes.ensure_loaded()`, and `BlockIconRenderer.setup/render_all()` on the main thread so workers never hit lazy-init races — preserve this.
 
@@ -182,7 +184,9 @@ assets/
 
 **Chunk dims are fixed.** `SIZE_X=16`, `SIZE_Y=128`, `SIZE_Z=16`. Y-major indexing (`y * SIZE_X * SIZE_Z + z * SIZE_X + x`). Changing these breaks save format, mesher, tests.
 
-**Block IDs are stable.** `scripts/world/blocks.gd` IDs are uint8 in the range 0–99; append new IDs to the end, never renumber — they're persisted in `Chunk.blocks` (`PackedByteArray`). Item IDs start at 100 (`scripts/world/items.gd`) to keep the two spaces disjoint; `Items.id_from_name()` resolves unified name → id for recipe JSON.
+**Block IDs are stable.** `scripts/world/blocks.gd` IDs are uint8; append new IDs to the end, never renumber — they're persisted in `Chunk.blocks` (`PackedByteArray`). Blocks currently occupy 0–49 and 51–96, items 100–204. **50 is burned** (removed tall grass) and must never be reused.
+
+**Never infer content kind from the id.** Blocks and items are no longer separated by a numeric line — the Nether portal is reserved at block id 206, above the item floor. Ask `Blocks.is_registered` / `Blocks.has_item_form` / `Blocks.is_inventory_placeable` / `Items.is_registered`, never `id < 100`. Both registries list their ids explicitly (`REGISTERED_IDS`), and `tests/test_content_registry.gd` sweeps each script's constant map so a new content constant cannot escape its registry.
 
 **Deterministic worldgen.** `Worldgen.generate_chunk(x, z)` is pure on `(WORLD_SEED, x, z)`. Don't introduce time/RNG dependencies — chunk reload must reproduce identical terrain. Ore veins use hash-derived pseudo-random floats (`_float01`) rather than `RandomNumberGenerator`, to keep the algorithm deterministic *and* chunk-isolated.
 

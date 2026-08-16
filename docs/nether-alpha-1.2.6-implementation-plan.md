@@ -1572,3 +1572,53 @@ test a stale library.
 `next_gaussian`; the ghast fireball's 0.4 spread (§8.3) needs it, and the
 JDK's cached-pair behaviour is easy to get wrong, so the expected values
 are already captured in the oracle fixture for whichever batch adds it.
+
+### 17.2 Batch 1 (2026-08-16)
+
+**`CLAUDE.md` was wrong about autoloads.** It claims only `Game` is an
+autoload; there are eleven (`Game`, `SFX`, `FurnaceManager`,
+`ChestStorage`, `JukeboxStorage`, `NaturalMobSpawner`, `SignStorage`,
+`JukeboxAudio`, `WorldTime`, `WaterFX`, `Music`). Five of them are
+world-position-keyed tile-entity stores with no dimension component,
+which is exactly why `_clear_dimension_owned_state` exists.
+
+**One resident dimension, cleared rather than keyed.** §3.3 allows either
+clearing dimension-owned structures or keying them by dimension. Clearing
+won: with one resident dimension a keyed structure would only ever hold
+one key, and the clear is the same operation world-load already
+performed. `ChunkManager._ready` now calls the same helper the transition
+does, so the two paths cannot drift.
+
+**Tests can write to a real save slot without naming one.** Persistence
+APIs default `world_name` to `""`, which `SaveLoad.resolve_world`
+resolves to `Game.active_world` — a real slot. The transition
+transaction legitimately saves the dimension it is leaving, so the new
+tests overwrote the live `World1` `player.bin` and `entities.bin` and
+left a stray `DIM-1/`. Region files were untouched; everything was
+restored from a pre-run backup, and both new suites now redirect
+`Game.active_world` to a throwaway name. Any future batch that tests a
+saving path must do the same — passing explicit world names is not
+enough when the production function under test uses the default.
+
+**A deferred lambda that captures a Node breaks on teardown.**
+`BlockFx.warm_pool` captured the ChunkManager and its particle emitter in
+a `call_deferred` lambda. Godot raises "Lambda capture at index N was
+freed" while BINDING the captures, so the `is_instance_valid` guard
+inside the body never runs. Invisible in the game (the manager outlives
+the frame) and a wall of errors in a suite that spins managers up and
+down. Now captures `weakref`s. Note `weakref()` returns Variant, so it
+needs an explicit `: WeakRef` annotation or the project's
+warnings-as-errors setting rejects `:=`.
+
+**The mesher's worker-arity guard earned its keep.**
+`tests/test_mesher.gd::test_worker_entry_point_accepts_bound_complete_edge`
+drives `_compute_chunk_data` through the real bound Callable precisely
+because `WorkerThreadPool` resolves arity at call time. Adding the
+dimension and epoch parameters tripped it, which is the failure mode it
+was written for. It now also asserts the tags are published.
+
+**New `class_name` scripts need an editor index pass.** The three new
+classes did not resolve under `godot --headless -s gut_cmdln.gd` until
+`godot --headless --editor --quit-after N` rebuilt
+`.godot/global_script_class_cache.cfg`. `.godot/` is gitignored, so a
+fresh clone or CI needs that pass before the suite will run.

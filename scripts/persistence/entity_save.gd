@@ -63,8 +63,11 @@ static var _magic: PackedByteArray = PackedByteArray(_MAGIC_BYTES)
 # --- Path ---
 
 
-static func entities_path(world_name: String = "") -> String:
-	return "%s/entities.bin" % SaveLoad.world_dir(world_name)
+# Entities are dimension-scoped: a pig left in the Overworld must not
+# reappear in the Nether. Dimension 0 still resolves to the world root, so
+# every existing entities.bin keeps loading from where it already is.
+static func entities_path(world_name: String = "", dimension: int = SaveLoad.DIM_ACTIVE) -> String:
+	return "%s/entities.bin" % SaveLoad.dimension_dir(world_name, dimension)
 
 
 # --- Save ---
@@ -74,17 +77,21 @@ static func entities_path(world_name: String = "") -> String:
 # persist (currently DroppedItem). Writes the result to entities.bin
 # atomically via the same .new → rename pattern SaveLoad uses.
 # Returns the count of entities written.
-static func save_all(parent: Node, world_name: String = "") -> int:
+static func save_all(
+	parent: Node, world_name: String = "", dimension: int = SaveLoad.DIM_ACTIVE
+) -> int:
 	if parent == null:
 		return 0
-	_ensure_world_dir(world_name)
+	_ensure_world_dir(world_name, dimension)
 	var entries: Array = []
 	for child in parent.get_children():
 		var entry: Dictionary = _serialize_one(child)
 		if not entry.is_empty():
 			entries.append(entry)
 	var body: PackedByteArray = var_to_bytes(entries)
-	if not SaveLoad.pack_and_write(entities_path(world_name), _magic, _FORMAT_VERSION, body):
+	if not SaveLoad.pack_and_write(
+		entities_path(world_name, dimension), _magic, _FORMAT_VERSION, body
+	):
 		return 0
 	return entries.size()
 
@@ -92,6 +99,19 @@ static func save_all(parent: Node, world_name: String = "") -> int:
 # Try to serialize one node. Returns {} for unsupported types (so the
 # caller can skip without burning a branch per type — keeps the dispatch
 # table here, not at every callsite).
+# True when this node is one of the types save_all persists.
+#
+# Shares the dispatch with _serialize_one rather than duplicating the
+# type list, so a new persisted entity type can never be saved but not
+# recognised (or vice versa). Used by the dimension transition, which has
+# to free exactly the entities it just wrote and leave the player, the
+# chunk nodes and any UI children alone.
+static func is_persistable(node: Node) -> bool:
+	if node == null:
+		return false
+	return not _serialize_one(node).is_empty()
+
+
 static func _serialize_one(node: Node) -> Dictionary:
 	if node is DroppedItem:
 		var d: DroppedItem = node
@@ -137,10 +157,12 @@ static func _serialize_one(node: Node) -> Dictionary:
 # doesn't exist (returns 0); also resilient to a missing-main +
 # .new-or-.old recovery (delegates to SaveLoad._read_with_recovery via
 # the shared atomic-write contract — see crash recovery in save-load-plan §5.3).
-static func load_all(parent: Node, world_name: String = "") -> int:
+static func load_all(
+	parent: Node, world_name: String = "", dimension: int = SaveLoad.DIM_ACTIVE
+) -> int:
 	if parent == null:
 		return 0
-	var path: String = entities_path(world_name)
+	var path: String = entities_path(world_name, dimension)
 	# read_with_recovery handles missing-main-but-.new-or-.old-exists from
 	# a prior crash, same path SaveLoad uses for region files. Without it
 	# a crash during save_all would silently lose entities forever.
@@ -237,15 +259,17 @@ static func _spawn_one(entry: Dictionary, parent: Node) -> bool:
 
 # Delete the entities file for a world. Used when starting a fresh world
 # in a previously-used slot (multi-world UI in step 7.6+) and by tests.
-static func delete_entities_file(world_name: String = "") -> bool:
-	var path: String = entities_path(world_name)
+static func delete_entities_file(
+	world_name: String = "", dimension: int = SaveLoad.DIM_ACTIVE
+) -> bool:
+	var path: String = entities_path(world_name, dimension)
 	if not FileAccess.file_exists(path):
 		return true
 	return DirAccess.remove_absolute(path) == OK
 
 
-static func _ensure_world_dir(world_name: String) -> void:
-	var path: String = SaveLoad.world_dir(world_name)
+static func _ensure_world_dir(world_name: String, dimension: int = SaveLoad.DIM_ACTIVE) -> void:
+	var path: String = SaveLoad.dimension_dir(world_name, dimension)
 	if DirAccess.dir_exists_absolute(path):
 		return
 	DirAccess.make_dir_recursive_absolute(path)

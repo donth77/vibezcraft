@@ -104,6 +104,14 @@ const _CANE_MAX_HEIGHT: int = 3
 # Cumulative count of chunks fully materialized this session — never
 # decremented when chunks unload. Read by the debug stats panel.
 var chunks_generated_total: int = 0
+# Worker results discarded because their dimension/epoch no longer
+# matches the resident world. Surfaced in the debug overlay and
+# asserted by tests/test_dimension_context.gd — a transition that
+# leaks work shows up here rather than as corrupted terrain.
+var stale_results_rejected: int = 0
+# Non-reentrancy guard for transition_to_dimension. A transition that
+# re-entered would free the scene it is mid-way through rebuilding.
+var _in_dimension_transition: bool = false
 
 var _player: Node3D
 var _chunks: Dictionary = {}  # Vector2i → Node3D (ChunkNode)
@@ -284,11 +292,7 @@ func _ready() -> void:
 	# world's chest would inherit the old world's loot via
 	# `get_or_create`. Player-placed TEs are normally safe (their
 	# chunks dirty on edit), but we wipe everything for uniformity.
-	MobSpawnerManager.clear_all()
-	ChestStorage.clear_all()
-	FurnaceManager.clear_all()
-	SignStorage.clear_all()
-	JukeboxStorage.clear_all()
+	_clear_dimension_owned_state()
 	# Pre-warm the fluid-FX particle pool so the first water-on-lava fizz
 	# doesn't pay a GPU shader-compile hitch. Safe here (ChunkManager
 	# outlives the gameplay session) and cheap (builds 6 inert emitters).
@@ -317,6 +321,11 @@ func _ready() -> void:
 	# blocks away — the teleport then lands in unloaded space and the
 	# player falls through the world before the per-frame chunk loader
 	# catches up. ZERO fallback covers fresh worlds + corrupt saves.
+	# Peek the saved DIMENSION before the position, and before the ring is
+	# built: a player saved in the Nether needs the Nether's provider
+	# selected so the initial chunks come from the right generator and the
+	# right region directory. v1 saves and fresh worlds answer Overworld.
+	DimensionContext.set_active(PlayerSave.peek_dimension())
 	var saved_pos: Variant = PlayerSave.peek_position()
 	if saved_pos is Vector3:
 		var p: Vector3 = saved_pos as Vector3
@@ -714,7 +723,16 @@ func _dispatch_workers() -> void:
 		# thread, so the worker's first mesh lights its seam faces from real
 		# data instead of the OOB sky=15 default.
 		var edge_planes: Dictionary = _snapshot_neighbor_edge_planes(coord)
-		WorkerThreadPool.add_task(_compute_chunk_data.bind(coord, saved_entry, edge_planes))
+		# Tag the job with the dimension and epoch it was dispatched
+		# under. WorkerThreadPool has no cancel API, so a task queued just
+		# before a portal transition WILL run to completion and try to
+		# publish afterwards; carrying the tags is what lets the
+		# main-thread drain reject it. See DimensionContext.accepts_result.
+		WorkerThreadPool.add_task(
+			_compute_chunk_data.bind(
+				coord, saved_entry, edge_planes, DimensionContext.active(), DimensionContext.epoch()
+			)
+		)
 
 
 # Worker-thread function — runs off the main thread. Uses the supplied
@@ -728,12 +746,19 @@ func _dispatch_workers() -> void:
 # shipped (everything reads as default 15 and caves render lit). With
 # the C++ port this costs ~30-50ms per chunk vs the old 380ms, so the
 # wasted-work argument no longer holds and correctness wins.
-func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary, edge_planes: Dictionary) -> void:
+func _compute_chunk_data(
+	coord: Vector2i, saved_entry: Dictionary, edge_planes: Dictionary, dimension: int, epoch: int
+) -> void:
 	var probe_token := PerfProbe.begin("chunk_mgr.worker_total")
 	var chunk: Chunk
 	var sapling_positions: Array[Vector3i] = []
 	if saved_entry.is_empty():
-		chunk = Worldgen.generate_chunk(coord.x, coord.y)
+		# Route through the provider rather than calling Worldgen
+		# directly, and use the dimension passed IN — reading
+		# DimensionContext.active() here would race a transition that
+		# happens while this worker runs. The Overworld provider is a
+		# straight call to Worldgen, so dimension 0 output is unchanged.
+		chunk = DimensionContext.provider(dimension).generate_chunk(coord.x, coord.y)
 	else:
 		var decoded: Array = _decode_saved_entry(coord, saved_entry)
 		chunk = decoded[0] as Chunk
@@ -760,6 +785,8 @@ func _compute_chunk_data(coord: Vector2i, saved_entry: Dictionary, edge_planes: 
 	_ready_results[coord] = {
 		"chunk": chunk,
 		"mesh": mesh_data,
+		"dimension": dimension,
+		"epoch": epoch,
 		"from_save": not saved_entry.is_empty(),
 		"saplings": sapling_positions,
 		"pending_ticks": saved_entry.get("pending_ticks", []),
@@ -786,6 +813,17 @@ func _materialize_one_ready_chunk() -> void:
 		_ready_results.erase(coord)
 	_result_mutex.unlock()
 	if not has_one:
+		return
+	# Stale-work gate. A worker dispatched before a dimension transition
+	# finishes after it, and its chunk belongs to a world that is no
+	# longer resident. Applying it would splice Overworld terrain into the
+	# Nether. Drop the result and clear the pending slot so the coord can
+	# be re-dispatched under the current epoch.
+	if not DimensionContext.accepts_result(
+		int(data.get("dimension", DimensionContext.OVERWORLD)), int(data.get("epoch", -1))
+	):
+		_pending.erase(coord)
+		stale_results_rejected += 1
 		return
 	# Player may have moved away while the worker was running — drop the result.
 	var pc := _cached_player_chunk
@@ -1297,6 +1335,168 @@ func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
 # TickScheduler ticks stay in the queue, chest/furnace state stays in
 # the singletons. The chunk_manager keeps running normally afterward.
 # Returns the count of chunks written.
+# --- Dimension ownership (Nether plan §3.3 / §7.2, Batch 1) ---
+
+
+# Drop every piece of runtime state that belongs to ONE dimension.
+#
+# Called on world load and on every dimension transition. The plan allows
+# either clearing these structures or keying them by dimension; clearing
+# is the honest choice here because exactly one dimension is resident at
+# a time (§3.3), so a keyed structure would only ever hold one key.
+#
+# Everything world-position-keyed has to go. A chest at (10, 64, 10) in
+# the Overworld and a chest at (10, 64, 10) in the Nether are different
+# chests, and the tile-entity singletons key on position alone — leaving
+# an entry behind means the Nether chest opens holding Overworld loot.
+# Same argument for scheduled ticks, light queues and the saved-chunk
+# cache.
+func _clear_dimension_owned_state() -> void:
+	# Tile entities. These are autoload singletons keyed by world
+	# position, with no dimension component of their own.
+	MobSpawnerManager.clear_all()
+	ChestStorage.clear_all()
+	FurnaceManager.clear_all()
+	SignStorage.clear_all()
+	JukeboxStorage.clear_all()
+	# Scheduled block ticks — fluid flow, falling blocks, redstone.
+	_TICK_SCHEDULER.clear_all()
+	# Generation + meshing pipeline. _ready runs before any of these has
+	# content; a transition runs when they may be full.
+	_spawn_queue.clear()
+	_spawn_queue_set.clear()
+	_pending.clear()
+	_result_mutex.lock()
+	_ready_results.clear()
+	_relight_results.clear()
+	_result_mutex.unlock()
+	_pending_relights.clear()
+	_pending_relight_dispatch.clear()
+	_pending_relight_dispatch_set.clear()
+	_pending_immediate_rebuild.clear()
+	# Persisted-chunk caches. _saved_chunks holds compressed blocks keyed
+	# by chunk coord with no dimension in the key.
+	_saved_chunks.clear()
+	_dirty_loaded.clear()
+	# Deferred block-update bookkeeping.
+	_notify_queue.clear()
+	_notify_queued.clear()
+	_deferred_sky_seeds.clear()
+	_deferred_block_seeds.clear()
+	_deferred_fizz.clear()
+	# Growth/decay work lists, all world-position-keyed.
+	_decaying_leaves.clear()
+	_growing_saplings.clear()
+	_growing_canes.clear()
+	# Force the next _update_chunk_set to rebuild from scratch rather
+	# than trusting a cached centre from the previous dimension.
+	_last_chunk_set_coord = Vector2i(2147483647, 2147483647)
+	_last_collision_center = Vector2i(2147483647, 2147483647)
+
+
+# Free every resident chunk node and every persisted entity child.
+#
+# Bypasses the normal retire path deliberately: retirement is a graceful
+# multi-frame fade for chunks the player walked away from, and a
+# dimension switch has no "away" to fade toward. Everything goes now, so
+# the assertion that only one dimension's scene is resident holds the
+# moment the transition returns.
+func _free_dimension_scene() -> int:
+	var freed: int = 0
+	for coord: Vector2i in _chunks.keys():
+		var node: Node = _chunks[coord] as Node
+		if is_instance_valid(node):
+			remove_child(node)
+			node.queue_free()
+			freed += 1
+	_chunks.clear()
+	for coord: Vector2i in _retiring_chunks.keys():
+		var record: Dictionary = _retiring_chunks[coord]
+		var shell: Variant = record.get("node")
+		if shell is Node and is_instance_valid(shell as Node):
+			(shell as Node).queue_free()
+	_retiring_chunks.clear()
+	# Persisted entities (dropped items, mobs, carts, boats, paintings)
+	# were just written to the SOURCE dimension's entities.bin; the live
+	# nodes must not follow the player through.
+	for child: Node in get_children():
+		if EntitySave.is_persistable(child):
+			remove_child(child)
+			child.queue_free()
+			freed += 1
+	return freed
+
+
+# Persist everything the resident dimension owns. Split out of the
+# autosave path so a transition can save the SOURCE dimension explicitly,
+# before DimensionContext switches and the default dimension argument
+# starts resolving to the destination.
+func save_dimension(dimension: int) -> void:
+	flush_dirty_loaded()
+	SaveLoad.flush_all_regions()
+	EntitySave.save_all(self, "", dimension)
+
+
+# Move the world from one dimension to another as a single transaction.
+#
+# Batch 1 wires no gameplay caller: the portal drives this in Batch 7.
+# What exists now is the transaction itself, so the persistence and
+# isolation guarantees can be proven before anything depends on them.
+#
+# Ordering follows plan §7.2. The epoch bump comes FIRST, before any
+# teardown, so a worker that lands mid-unload is already rejectable
+# rather than racing the clear.
+#
+# Returns false and restores the source dimension if the destination has
+# no provider — the plan requires a failure to leave a coherent world
+# rather than a half-switched one.
+func transition_to_dimension(target_dimension: int, arrival_position: Vector3) -> bool:
+	if _in_dimension_transition:
+		push_warning("[ChunkManager] dimension transition already in progress")
+		return false
+	var source: int = DimensionContext.active()
+	if target_dimension == source:
+		return true
+	if not DimensionContext.is_registered(target_dimension):
+		push_error("[ChunkManager] no provider for dimension %d" % target_dimension)
+		return false
+	_in_dimension_transition = true
+
+	# 1. Invalidate in-flight work before anything else changes.
+	DimensionContext.begin_transition()
+	# 2. Persist the source while its dimension is still the active one.
+	save_dimension(source)
+	if _player != null:
+		PlayerSave.save_player(_player)
+	# 3. Tear down the source scene and every dimension-owned structure.
+	_free_dimension_scene()
+	_clear_dimension_owned_state()
+	# 4. Switch. From here the default dimension argument resolves to the
+	#    destination, so every path/cache lookup lands in the new
+	#    namespace.
+	DimensionContext.set_active(target_dimension)
+	# 5. Region cache entries are dimension-keyed, but dropping them keeps
+	#    the memory profile of a transition flat rather than cumulative.
+	SaveLoad.clear_cache()
+	# 6. Place the player and rebuild the streaming centre around them, so
+	#    the first ring generates where they actually land.
+	if _player != null:
+		_player.global_position = arrival_position
+		if _player is CharacterBody3D:
+			(_player as CharacterBody3D).velocity = Vector3.ZERO
+	_initial_load_center = Vector2i(
+		int(floor(arrival_position.x / float(Chunk.SIZE_X))),
+		int(floor(arrival_position.z / float(Chunk.SIZE_Z)))
+	)
+	_cached_player_chunk = _initial_load_center
+	# 7. Load the destination's entities, then let the normal per-frame
+	#    streaming fill the ring.
+	EntitySave.load_all(self, "", target_dimension)
+	_update_chunk_set()
+	_in_dimension_transition = false
+	return true
+
+
 func flush_dirty_loaded() -> int:
 	# Union _dirty_loaded with chunks that have live tile entities.
 	# Chest / furnace content changes mutate the singletons directly via
