@@ -72,6 +72,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
+	var provider: WorldProvider = DimensionContext.active_provider()
+	if not provider.renders_sky:
+		_apply_skyless_environment(provider)
+		return
 	if _env != null and _env.environment != null:
 		var env := _env.environment
 		env.ambient_light_color = WorldTime.ambient_color()
@@ -111,3 +115,31 @@ func _process(_delta: float) -> void:
 	var sky_subtraction: float = float(WorldTime.sky_light_subtracted())
 	BlockAtlas.material().set_shader_parameter("sky_subtraction", sky_subtraction)
 	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", sky_subtraction)
+
+
+# Dimensions with no sky (om.java's Nether) get a flat fog colour and no
+# celestial anything. Alpha renders no sky dome, no sun, no moon, no
+# stars and no clouds down there; the horizon is the fog colour all the
+# way round, which is what makes the Nether feel enclosed.
+#
+# The sun light itself is switched off rather than merely hidden: a
+# sub-horizon directional light still shades geometry in Godot, and the
+# Nether's illumination has to come entirely from the block-light channel
+# (glowstone, lava, fire, portals).
+func _apply_skyless_environment(provider: WorldProvider) -> void:
+	if _env != null and _env.environment != null:
+		var env := _env.environment
+		var fog: Color = provider.fog_color
+		env.background_mode = Environment.BG_COLOR
+		env.background_color = fog
+		env.ambient_light_color = fog
+		env.fog_light_color = fog
+		_last_sky_top = Color(-1, -1, -1, -1)
+	if _sun != null:
+		_sun.visible = false
+	# No sky channel means no daylight subtraction to push: the terrain
+	# shader's sky term is zero everywhere, so block light is the whole
+	# story. Writing 0 keeps the uniform in a defined state across a
+	# dimension switch rather than leaving the Overworld's last value.
+	BlockAtlas.material().set_shader_parameter("sky_subtraction", 0.0)
+	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", 0.0)

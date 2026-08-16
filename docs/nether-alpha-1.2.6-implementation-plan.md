@@ -1835,3 +1835,58 @@ at 512 entries and cleared wholesale when full. A 24x24 traversal leaves
 chunk (0, 0) byte-identical, which is the plan's no-unbounded-growth
 check.
 
+### 17.6b Batch 6 (2026-08-16)
+
+**Every §5 value confirmed against `om.java` and `oz.java`.** The fog
+colour is `ao.b(0.2f, 0.03f, 0.03f)`, the celestial angle is a literal
+`return 0.5f`, the save directory is `DIM-1`, and the brightness table is
+the SAME loop in both providers with one constant changed:
+
+    float f2 = <0.05 overworld | 0.1 nether>;
+    for (i = 0; i <= 15; i++) {
+        float f3 = 1.0f - i / 15.0f;
+        f[i] = (1.0f - f3) / (f3 * 3.0f + 1.0f) * (1.0f - f2) + f2;
+    }
+
+`(1.0f - f2)` is the plan's 0.9 for the Nether. The observable
+consequence is that an unlit Nether cell sits at exactly twice the
+brightness of an unlit Overworld one — gloomy rather than black — while
+full light stays 1.0 in both.
+
+**The lava rule is the opposite way round from the code comment.**
+`ja.java:27-29` is:
+
+    int n7 = 1;
+    if (this.bs == hb.g && !cy2.q.d) { n7 = 2; }
+
+The decay increment DEFAULTS to 1 and is RAISED to 2 for lava outside the
+Nether. `block_fluids.gd` carried a comment saying the Nether uses a
+10-tick cadence instead of 30 — that is a later-version behaviour, and
+the plan already forbade it. Cadence is untouched in both dimensions;
+only the increment moves, which takes lava's reach from 3 blocks to 7.
+
+**The compass and clock share one branch.** `ae.java:67` and `gp.java:40`
+are the same two lines against the same provider flag, and both replace
+their computed angle with `Math.random() * 3.1415927410125732 * 2.0` — a
+real `Math.random()`, not the world RNG, so two compasses in the same
+Nether disagree. The existing damped-approach renderers turn that into
+the familiar wander rather than a snap. Modelled as
+`WorldProvider.instruments_wander` rather than reusing `renders_sky`,
+because they are separate flags in the source even though both are true
+in the Nether.
+
+**Beds are denied and nothing else.** Alpha 1.2.6 has no exploding bed;
+the handler returns after a message, before it looks at the time of day,
+sets a spawn point or passes time. A structural test pins that ordering,
+since a denial placed after the spawn-point write would still "work"
+while quietly moving the player's respawn into the Nether.
+
+**Batch 1's policy surface was the right shape.** Every field this batch
+consumed — `has_sky_light`, `ambient_light_floor`, `renders_sky`,
+`fog_color`, `fixed_celestial_angle`, `lava_horizontal_decay`,
+`allows_water_placement`, `allows_sleeping` — already existed with its
+source-derived value and simply had no reader. Only `instruments_wander`
+had to be added. The ten-switch test checks all of them survive repeated
+transitions, which also catches a system mutating a shared provider
+instance rather than reading it.
+

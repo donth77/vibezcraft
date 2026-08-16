@@ -38,6 +38,7 @@ func _init() -> void:
 	lava_horizontal_decay = 1
 	allows_sleeping = false
 	provides_player_spawn = false
+	instruments_wander = true
 
 	# §8.4 — the Hell biome list is exactly these two, with no passive
 	# list at all.

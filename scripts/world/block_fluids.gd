@@ -58,13 +58,25 @@ extends RefCounted
 # from the subclass constructor (BlockFlowing.ctor calls super with
 # tickRate). Values verified against Bukkit/mc-dev BlockFlowing.
 const WATER_TICK_RATE: int = 5  # 250 ms per spread step @ 20 Hz
-const LAVA_TICK_RATE: int = 30  # 1.5 s per spread step (overworld; 10 in nether)
+# 1.5 s per spread step. Unchanged in the Nether: `ja.java:27-29` varies
+# the DECAY increment by dimension, not the cadence. (A faster Nether
+# tick is a later-version behaviour and the plan forbids it here.)
+const LAVA_TICK_RATE: int = 30
 
 # Per-step level decay. Water reach = 7 blocks (source at 0 → level 7
 # after 7 decay steps, level 8 would be dry). Lava reach = 3 blocks
 # (source at 0 → level 2 after 1 step = 2, level 4 after 2 steps = 4,
 # level 6 after 3 steps — any further would be 8+ = dry).
 const WATER_DECAY_PER_STEP: int = 1
+# Overworld lava. ja.java:27-29 reads:
+#
+#     int n7 = 1;
+#     if (this.bs == hb.g && !cy2.q.d) { n7 = 2; }
+#
+# — the increment DEFAULTS to 1 and is raised to 2 only for lava outside
+# the Nether. So Nether lava does not flow faster, it decays slower, and
+# therefore reaches roughly twice as far. The per-dimension value lives on
+# WorldProvider.lava_horizontal_decay; this constant is the Overworld's.
 const LAVA_DECAY_PER_STEP: int = 2
 
 # "Falling" bit — set in meta when a cell is being fed from directly above.
@@ -82,7 +94,11 @@ const FALLING_BIT: int = 8
 # lava_flowing) that was scheduled. Mirrors ja.java:23 `a(World, x, y, z, Random)`.
 static func update(manager, pos: Vector3i, block_id: int) -> void:
 	var is_water_fluid: bool = Blocks.is_water(block_id)
-	var decay: int = WATER_DECAY_PER_STEP if is_water_fluid else LAVA_DECAY_PER_STEP
+	var decay: int = (
+		WATER_DECAY_PER_STEP
+		if is_water_fluid
+		else DimensionContext.active_provider().lava_horizontal_decay
+	)
 	var tick_rate: int = WATER_TICK_RATE if is_water_fluid else LAVA_TICK_RATE
 	# `current_level` is the RAW meta value (0 = source, 1-7 = flowing,
 	# 8-15 = falling with the level=meta-8 bit). Vanilla ja.java's `n6`

@@ -76,6 +76,15 @@ static func enable_native() -> bool:
 # extension isn't loaded. Parity guarded by tests/test_lighting.gd.
 static func fill_sky_light(chunk: Chunk) -> void:
 	var probe_token := PerfProbe.begin("lighting.fill_sky")
+	# Dimensions with no sky generate no sky light at all. Alpha's Nether
+	# provider reports hasNoSky, and the channel simply stays zero — which
+	# is why the only illumination down there is glowstone, lava, fire and
+	# portals. Skipping the fill is not an optimisation: propagating a
+	# sky channel would light the whole cavern system.
+	if not DimensionContext.active_provider().has_sky_light:
+		chunk.sky_light.fill(0)
+		PerfProbe.end("lighting.fill_sky", probe_token)
+		return
 	if _native_lighting != null:
 		chunk.sky_light = _native_lighting.fill_sky_light(chunk.blocks, _opacity_lut_for_native())
 		PerfProbe.end("lighting.fill_sky", probe_token)

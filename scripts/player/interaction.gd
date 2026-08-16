@@ -1718,6 +1718,18 @@ func _try_bucket(hit: Dictionary, hit_id: int) -> bool:
 				return true
 		if not Blocks.is_replaceable(dest_id) and dest_id != Blocks.AIR:
 			return false
+		# Water evaporates on contact in dimensions that forbid it. Alpha's
+		# Nether does exactly what the fire branch above does — fizz, a
+		# puff of smoke, no fluid, and an empty bucket. The bucket is still
+		# consumed, so a player cannot carry water down and keep it.
+		if (
+			item_id == Items.BUCKET_WATER
+			and not DimensionContext.active_provider().allows_water_placement
+		):
+			FluidFx.spawn_fizz(_chunk_manager, place_pos)
+			inv.replace_selected(Items.BUCKET_EMPTY, 1)
+			_trigger_player_use_swing()
+			return true
 		var source_id: int = (
 			Blocks.WATER_STILL if item_id == Items.BUCKET_WATER else Blocks.LAVA_STILL
 		)
@@ -2699,6 +2711,13 @@ func _try_place_painting(hit: Dictionary, _stack: ItemStack) -> bool:
 # using the meta-encoded facing so the spawn point is consistent.
 func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
 	if _chunk_manager == null:
+		return
+	# Sleeping is a per-dimension policy. The Nether denies it outright:
+	# no sleep, no spawn point set, no time skip. Alpha 1.2.6 has no
+	# exploding bed — that arrives much later — so the plan explicitly
+	# forbids adding one here.
+	if not DimensionContext.active_provider().allows_sleeping:
+		_CHAT_HUD.push("This dimension is unsuitable for sleeping.")
 		return
 	var tick: int = WorldTime.current_tick()
 	# Vanilla sleep window — between sunset and pre-dawn. Outside this

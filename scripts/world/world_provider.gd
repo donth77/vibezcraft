@@ -83,11 +83,53 @@ var allows_sleeping: bool = true
 # Whether terrain in this dimension may define a player spawn point.
 var provides_player_spawn: bool = true
 
+# Whether the compass and clock give a meaningful reading. Alpha checks
+# one provider flag in both items — `ae.java:67` and `gp.java:40` are the
+# same two lines:
+#
+#     if (world.provider.<flag>) {
+#         d3 = Math.random() * 3.1415927410125732 * 2.0;
+#     }
+#
+# so the needle chases a fresh random direction every update instead of
+# the spawn point (compass) or the celestial angle (clock). It is a real
+# `Math.random()`, not the world RNG — genuinely unpredictable, not
+# seed-derived — and the existing damped approach turns it into a wander
+# rather than a snap.
+var instruments_wander: bool = false
+
 # Natural hostile spawn table. The Overworld pool lives in
 # NaturalMobSpawner today; the Nether's is exactly ghast + zombie pigman.
 # Empty means "use the existing Overworld path" until Batch 10 wires the
 # single authoritative controller.
 var natural_hostile_species: PackedStringArray = PackedStringArray()
+
+
+# Per-light-level brightness multiplier, as `oz.java::b()` builds it:
+#
+#     float f2 = <ambient floor>;
+#     for (i = 0; i <= 15; i++) {
+#         float f3 = 1.0f - i / 15.0f;
+#         f[i] = (1.0f - f3) / (f3 * 3.0f + 1.0f) * (1.0f - f2) + f2;
+#     }
+#
+# The ONLY difference between dimensions is that floor: 0.05 in the
+# Overworld (oz.java:23), 0.1 in the Nether (om.java:24). A Nether cell
+# with no light is therefore twice as bright as an unlit Overworld cell —
+# which is why the Nether reads as gloomy rather than pitch black.
+func brightness(level: int) -> float:
+	var l: int = clampi(level, 0, 15)
+	var f: float = 1.0 - float(l) / 15.0
+	return (1.0 - f) / (f * 3.0 + 1.0) * (1.0 - ambient_light_floor) + ambient_light_floor
+
+
+# The whole 16-entry table, for consumers that want to upload it once.
+func brightness_table() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(16)
+	for i: int in range(16):
+		out[i] = brightness(i)
+	return out
 
 
 # Generate one chunk of this dimension's terrain.

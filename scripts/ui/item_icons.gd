@@ -617,6 +617,8 @@ static func _get_player() -> Node3D:
 # correctly points toward spawn instead of 180° away (which led to
 # players following the compass into the wrong territory).
 static func _compass_target_angle() -> float:
+	if DimensionContext.active_provider().instruments_wander:
+		return _wander_angle()
 	var player: Node3D = _get_player()
 	if player == null:
 		return 0.0
@@ -633,7 +635,17 @@ static func _compass_target_angle() -> float:
 # Without this, the dial reads about 6 hours behind reality (e.g.
 # shows midnight when the world clock is at sunrise).
 static func _clock_target_angle() -> float:
+	if DimensionContext.active_provider().instruments_wander:
+		return _wander_angle()
 	return -(WorldTime.phase() - 0.25) * TAU
+
+
+# ae.java:68 / gp.java:41 — `Math.random() * 3.1415927410125732 * 2.0`.
+# A fresh random target per update, not a seeded one, which is why two
+# compasses in the same Nether disagree. The existing damped approach in
+# the renderers turns this into the familiar spin rather than a snap.
+static func _wander_angle() -> float:
+	return randf() * TAU
 
 
 # Ensure base sprites are loaded into Image buffers. The set_pixelv calls
