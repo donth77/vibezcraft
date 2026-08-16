@@ -1578,10 +1578,11 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	var fire_pos: Vector3i = hit.block_pos + hit.normal_i
 	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
 		return false
-	_chunk_manager.set_world_block(fire_pos, Blocks.FIRE)
-	# Kickstart the spread/decay loop — without this, fire just sits
-	# there static and never spreads to adjacent flammables.
-	TickScheduler.schedule(fire_pos, Blocks.FIRE, BlockFire.TICK_RATE)
+	# BlockFire.place is vanilla's onBlockAdded: it lights a Nether portal
+	# when the cell sits on obsidian inside a valid frame, and otherwise
+	# writes the fire and kickstarts the spread/decay loop — without which
+	# fire just sits there static and never reaches adjacent flammables.
+	BlockFire.place(_chunk_manager, fire_pos)
 	# `random.click` at pitch 0.9 — see SFX.play_flint_and_steel for the
 	# vanilla audio note (Alpha was silent; modern MC plays a metallic
 	# strike). Click-at-low-pitch is the closest tactile substitute we

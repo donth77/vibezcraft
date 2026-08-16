@@ -328,6 +328,21 @@ const _WATER_SWIM_SOUNDS: Array = [
 	"res://assets/audio/sfx/water/swim4.ogg",
 ]
 
+# Nether portal audio — Alpha's three `portal.*` events (x.java:129 for the
+# ambient hum, bq.java:36/41 for trigger and travel).
+#
+# These OGGs are NOT in the repo: Alpha shipped its sound set from
+# Mojang's resources server rather than the jar, and the plan
+# (nether-alpha-1.2.6-implementation-plan.md §11) anticipates that with
+# "provide silent-safe fallback if optional local Alpha audio is absent."
+# So the events are registered with their source volume and pitch
+# parameters and resolve to silence until the assets are dropped in at
+# these exact paths — no error spam, no missing-resource stall, and no
+# behaviour that depends on a sound having played.
+const _PORTAL_AMBIENT_SOUND: String = "res://assets/audio/sfx/portal/portal.ogg"
+const _PORTAL_TRIGGER_SOUND: String = "res://assets/audio/sfx/portal/trigger.ogg"
+const _PORTAL_TRAVEL_SOUND: String = "res://assets/audio/sfx/portal/travel.ogg"
+
 # Vanilla MC plays step.gravel for hoe tilling, soil step events, etc.
 const _GRAVEL_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/step/gravel1.ogg",
@@ -994,6 +1009,79 @@ func play_creeper_say(pos: Vector3) -> void:
 
 func play_creeper_death(pos: Vector3) -> void:
 	_play_mob_sound_3d([_CREEPER_DEATH_SOUND], pos)
+
+
+# --- Nether portal ---
+
+
+# x.java:129 — the ambient hum, played from a portal cell on a random
+# display tick. Volume 1.0, pitch `nextFloat() * 0.4 + 0.8`.
+#
+# Routed through the 3D pool so a portal two rooms away is quiet, and so
+# the pool's fixed size caps the voice count no matter how many cells are
+# humming — the plan's "without allowing particles or audio voices to grow
+# without bound".
+func play_portal_ambient(pos: Vector3) -> void:
+	_play_optional_3d(_PORTAL_AMBIENT_SOUND, pos, 0.0, randf() * 0.4 + 0.8)
+
+
+# bq.java:36-38 — fires on the tick the exposure meter leaves zero, i.e.
+# the moment the player steps in, not once per tick inside.
+func play_portal_trigger(pos: Vector3) -> void:
+	_play_optional_3d(_PORTAL_TRIGGER_SOUND, pos, 0.0, 1.0)
+
+
+# bq.java:41 — fires on the tick travel happens. Non-positional: it is a
+# thing that happens TO the local player, and their position is about to
+# change dimension anyway.
+func play_portal_travel() -> void:
+	_play_optional_2d(_PORTAL_TRAVEL_SOUND, 0.0, 1.0)
+
+
+# Play a sound that may not be installed. Unlike the other helpers this
+# checks existence before load(), because load() on an absent path pushes
+# an engine error every call — and a portal hums once every hundred
+# display ticks, forever.
+func _play_optional_3d(path: String, pos: Vector3, volume_db: float, pitch: float) -> void:
+	if not Game.sfx_enabled or Game.is_loading:
+		return
+	var stream: AudioStream = _optional_stream(path)
+	if stream == null:
+		return
+	var player: AudioStreamPlayer3D = _players_3d[_next_player_3d]
+	_next_player_3d = (_next_player_3d + 1) % POOL_SIZE_3D
+	player.global_position = pos
+	player.stream = stream
+	player.volume_db = volume_db
+	player.pitch_scale = pitch
+	player.play()
+
+
+func _play_optional_2d(path: String, volume_db: float, pitch: float) -> void:
+	if not Game.sfx_enabled or Game.is_loading:
+		return
+	var stream: AudioStream = _optional_stream(path)
+	if stream == null:
+		return
+	var player: AudioStreamPlayer = _players[_next_player]
+	_next_player = (_next_player + 1) % POOL_SIZE
+	player.stream = stream
+	player.volume_db = volume_db
+	player.pitch_scale = pitch
+	player.play()
+
+
+# Cache the miss as well as the hit — `_stream_cache[path] = null` means
+# "checked, absent", so an uninstalled sound costs one ResourceLoader.exists
+# call for the whole session rather than one per play.
+func _optional_stream(path: String) -> AudioStream:
+	if _stream_cache.has(path):
+		return _stream_cache[path] as AudioStream
+	var stream: AudioStream = null
+	if ResourceLoader.exists(path):
+		stream = load(path) as AudioStream
+	_stream_cache[path] = stream
+	return stream
 
 
 # 3D-positional mob-sound helper. Routes through the AudioStreamPlayer3D

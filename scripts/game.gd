@@ -414,6 +414,12 @@ func _ready() -> void:
 		print("[Game] using GDScript Pathfinder")
 	# Load crafting recipes from disk once at boot.
 	Recipes.ensure_loaded()
+	# Bake the 32 portal animation frames + the strip texture the shader
+	# samples. ~8K pixels of float maths — cheap, but it belongs here for
+	# the same reason everything else in this function does: the first
+	# portal a player lights must not pay for it mid-frame, and nothing
+	# lazily-initialised may be first touched from a worker thread.
+	PortalTexture.strip_texture()
 	# Bake 3D-isometric block icons for the inventory. Setup is sync; the
 	# render loop is async (one frame per block) and runs in the background
 	# without awaiting — the inventory falls back to flat textures until

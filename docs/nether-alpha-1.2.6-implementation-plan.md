@@ -524,8 +524,11 @@ without allowing particles or audio voices to grow without bound.
 
 ### 7.2 Exposure and transition
 
-The local player accumulates portal exposure by `0.0125` per tick,
-requiring 80 ticks (four seconds at 20 Hz) to travel. Outside a portal,
+The local player accumulates portal exposure by `0.0125` per tick.
+Nominally that is 80 ticks (four seconds at 20 Hz) to travel; the
+source-supported figure is **81**, because `0.0125` is not exactly
+representable in binary and Alpha accumulates it into a Java `float`, so
+eighty additions land just short of 1.0. See §17.7. Outside a portal,
 exposure decays by `0.05` per tick. Completion sets a ten-tick cooldown.
 Play trigger and travel sounds at the source-compatible points and use
 the Alpha loading labels “Entering the Nether” and “Leaving the
@@ -1116,8 +1119,10 @@ Acceptance criteria:
 - Invalidating any required frame block removes all connected portal
   cells without unrelated flood-fill damage.
 - Portal has no collision, selection, item, drop, or debug-item entry.
-- Continuous exposure travels at 80 ticks, leaving decays at 0.05/tick,
-  and cooldown prevents immediate bounce-back for ten ticks.
+- Continuous exposure travels at 81 ticks (see §7.2 — 80 is the nominal
+  figure, 81 is what float accumulation of 0.0125 actually produces),
+  leaving decays at 0.05/tick, and cooldown prevents immediate
+  bounce-back for ten ticks.
 - Positive and negative 8:1 coordinate round trips find or create safe
   portals using source bounds.
 - Existing portals win by nearest squared 3D distance; stale index
@@ -1890,3 +1895,134 @@ had to be added. The ten-switch test checks all of them survive repeated
 transitions, which also catches a system mutating a shared provider
 instance rather than reading it.
 
+
+### 17.7 Batch 7 (2026-08-16)
+
+**The portal validator's along-axis vector is not the perpendicular.**
+`x.java:76-79` sets `n7`/`n8` from which neighbours are PORTAL, making
+`(n7, 0, n8)` the vector ALONG the sheet, and the final check at line 105
+is:
+
+    if (!(world.getId(x + n7, y, z + n8) == obsidian
+              && world.getId(x - n7, y, z - n8) == portal
+          || world.getId(x - n7, y, z - n8) == obsidian
+              && world.getId(x + n7, y, z + n8) == portal)) { remove }
+
+Reading `n7`/`n8` as the across-axis vector — the natural mistake, since
+a "sheet" suggests testing its faces — makes every intact portal fail,
+because the cells either side of the sheet are air. The first
+implementation here did exactly that and dissolved every portal on the
+first neighbour update. Pinned by
+`test_an_intact_portal_survives_a_neighbour_update`.
+
+**Continuous exposure travels on tick 81, not 80.** Section 7.2, every
+wiki page, and the arithmetic all say `1.0 / 0.0125 = 80`. The real
+answer is 81: `0.0125` is not exactly representable in binary, and
+Alpha accumulates it into a Java `float`. Eighty additions land just
+under 1.0, so the meter crosses on the eighty-first. Both float32 and
+double accumulation agree, so it is a property of the constant rather
+than of the precision. `PortalExposure` accumulates through
+`AlphaMath.f32` and documents `TICKS_TO_TRAVEL = 81`. The batch's
+acceptance criterion says "travels at 80 ticks"; the source-supported
+behaviour is 81 and that is what shipped.
+
+**Fire only tries to light a portal when it sits on obsidian.**
+`qh.java:168-170` — `BlockFire.onBlockAdded` is
+
+    if (world.getId(x, y - 1, z) == Block.obsidian.id
+            && Block.portal.tryToCreatePortal(world, x, y, z)) return;
+
+so the gate is part of activation, not an optimisation, and it is why a
+frame lights from its bottom row. Every route that creates a fire cell
+now goes through `BlockFire.place`, which reproduces the whole of
+`onBlockAdded` including the early return that suppresses both the fire
+write and its spread tick.
+
+**The synchronous chunk-spawn path was still Overworld-only.** Batch 1
+routed the WORKER path through `DimensionContext.provider(...)` but
+`ChunkManager._spawn_chunk_sync` called `Worldgen.generate_chunk`
+directly. A player who saved in the Nether would have been handed a ring
+of Overworld terrain at world entry — a Batch 1 gap that only became
+reachable once travel existed. Fixed here.
+
+**The portal index is a chunk-loading hint and nothing more.** Section
+7.3 permits an index; what forced one is that
+`ChunkManager.get_world_block` returns AIR for an unloaded chunk, so the
+literal 128-radius scan is both unaffordable (289 chunks) and silently
+blind without it. `PortalIndex` therefore answers only "which chunks are
+worth loading"; `NetherTeleporter.find_portal` still runs the raw
+`no.java` scan and its answer wins. Pinned by
+`test_a_lying_index_does_not_move_the_destination`, which puts the index
+and the world in direct conflict.
+
+**Search cost, measured.** On the ring a transition materializes (5×5
+chunks plus index hints) the 128-radius scan is ~170 ms; with no
+residency test at all it is ~1.7 s. It stays slow in absolute terms
+because resident columns still descend 128 cells each, and there is no
+honest way to skip them: the Nether's bedrock roof puts every chunk's
+`max_y` at 127, and narrowing the scan by the index would make
+correctness depend on the cache. Paid once per trip, behind the loading
+screen. Other measurements: portal texture build (32 frames + strip)
+21.7 ms, warmed in `Game._ready`; index hint derivation 0.20 ms for 64
+entries; and the portal revalidation now riding the block-notification
+drain costs 0.271 µs per non-portal cell.
+
+**Deliberate deviations.**
+
+- `NetherTeleporter.create_portal` runs one site-clearance pass where
+  `no.java:96-157` runs two of decreasing strictness. The only
+  observable difference is WHICH clear spot wins, and the plan's
+  canonicalisation already accepts a deterministic choice there. The
+  fallback and the 70–118 Y clamp — the parts a player can end up
+  depending on — are reproduced exactly.
+- Portal cells are rendered by a dedicated `PortalRenderer`
+  (MultiMesh + one shared material sampling a 16×512 strip of
+  `et.java`'s 32 frames) rather than as chunk-mesh geometry. The surface
+  animates at 20 Hz and the chunk atlas is static, so animating it in
+  the atlas would mean re-uploading the atlas twenty times a second for
+  a handful of cells. This also satisfies §7.1's one-material rule for
+  free.
+- Particles use one persistent emitter per cell for the nearest six
+  cells (`PortalRenderer.EFFECT_CELLS`) rather than four one-shot
+  spawns per cell per tick. x.java's rate is 480 spawns/second across a
+  single portal; a steady-state emitter produces the same population for
+  a fixed cost, and capping at six bounds both particle and audio-voice
+  counts as §7.1 requires. Vanilla's ease-out-and-return drift arc is
+  approximated by outward velocity plus a steady rise.
+- `portal.portal` / `portal.trigger` / `portal.travel` are registered
+  with their source volume and pitch parameters but resolve to silence:
+  the OGGs are not in the repo (Alpha served its sound set from Mojang's
+  resources endpoint, not the jar). Section 11 anticipates exactly this
+  — "provide silent-safe fallback if optional local Alpha audio is
+  absent" — and `SFX._optional_stream` caches the miss so an absent
+  sound costs one `ResourceLoader.exists` call per session rather than
+  one per play. Dropping the files at
+  `assets/audio/sfx/portal/{portal,trigger,travel}.ogg` enables them
+  with no code change.
+
+**Out-of-batch fix: headless boots were still writing to real saves.**
+Found while validating this batch. `ChunkManager._setup_autosave` has
+skipped the autosave timer under headless since the 2026-07-09 World1
+corruption, on the documented grounds that "headless sessions are
+READ-ONLY" — but eviction write-through (`_persist_chunk`, called when
+the streaming ring drops an edited chunk) is not on that timer. A single
+`godot --headless main.tscn --quit-after 400` rewrote
+`World1/region/r.0.-1.bin` with seed-12345 terrain. Reproduced on a clean
+HEAD, so it predates this batch. The guard is now a single
+`_disk_writes_allowed()` checked by `_persist_chunk`,
+`flush_dirty_loaded`, `save_dimension`, and the transition's
+`PlayerSave.save_player`. It is deliberately NOT on `SaveLoad`: the GUT
+suite legitimately writes and reads back throwaway worlds through that
+API, and only the live streaming paths can produce wrong-seed terrain.
+The affected region file was restored from a pre-run backup and verified
+byte-identical.
+
+**`PortalIndex.load_index` merges rather than replaces.** The headless
+guard above surfaced this: with writes skipped, a Nether round trip came
+back to an empty Overworld index, because loading the destination's file
+clobbered the in-memory bucket. Loading is not forgetting — a portal lit
+since the last save, or every hint in a session whose writes were
+skipped, would vanish on the way back. Staleness is `validate`'s job.
+World isolation now comes from an explicit `PortalIndex.reset()` at world
+entry in `ChunkManager._ready`, which is a different question and was
+being conflated with the load.

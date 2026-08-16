@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 # gdlint: disable=max-file-lines
 # gdlint: disable=class-definitions-order
 # gdlint: disable=max-returns
@@ -103,6 +104,8 @@ const KNOCKBACK_VERTICAL: float = 4.0
 # every 4 seconds while below max and not currently dying. No food
 # gating — just a constant background heal rate.
 const HEALTH_REGEN_INTERVAL_SEC: float = 4.0
+# One vanilla tick. Portal exposure is defined per tick, not per second.
+const PORTAL_TICK_INTERVAL: float = 1.0 / 20.0
 
 # Damage types — affects whether armor reduction kicks in. Vanilla Alpha
 # `DamageSource.ignoresArmor` returns true for FALL, DROWN, and FIRE_TICK
@@ -371,6 +374,15 @@ var _regen_accum: float = 0.0
 # armor drip through over many hits instead of being permanently
 # absorbed (and turning the player invincible). Cleared on respawn.
 var _armor_damage_carry: int = 0
+# Nether portal exposure — vanilla bq.java's three fields, kept as their
+# own object so the timeline (trigger tick, travel tick, cooldown) is
+# testable without a scene. See PortalExposure.
+var _portal_exposure := PortalExposure.new()
+# Fixed-rate accumulator for the above. The fill rate is 0.0125 PER TICK,
+# not per second — running it off `delta` would make travel time depend on
+# framerate, so this drives it at a hard 20 Hz the same way the mob AI
+# tick does.
+var _portal_tick_accum: float = 0.0
 
 # Tunable at runtime via the FP Tool Tuner panel. These defaults are the
 # user's hand-tuned best preset (closest match to vanilla MC) — keep in
@@ -2216,6 +2228,9 @@ func _physics_process(delta: float) -> void:
 	# consistently whether the player is swimming, walking, or flying.
 	_tick_air(delta)
 	_tick_lava(delta)
+	# Portal exposure, likewise before branch dispatch: a portal is walked
+	# into, swum into and flown into, and all three have to fill the meter.
+	_tick_portal(delta)
 	# Creative flight — double-tap jump toggles. Detected here (not in
 	# _unhandled_input) so the jump press still triggers a normal ground
 	# jump on the first tap; the second tap within FLY_DOUBLE_TAP_SEC
@@ -2919,6 +2934,88 @@ func _tick_air(delta: float) -> void:
 		_air_sec = _AIR_MAX_SEC
 		_drown_tick = 0.0
 	air_changed.emit(clampf(_air_sec / _AIR_MAX_SEC, 0.0, 1.0))
+
+
+# Nether portal exposure — bq.java:33-57 through PortalExposure.
+#
+# Fixed 20 Hz, not per-frame: 0.0125 is a per-TICK rate, and running it
+# off delta would make a 144 fps player travel in the same wall-clock time
+# as a 30 fps one only by accident. The while-loop catches up if a frame
+# ran long, so a stutter cannot lose exposure.
+func _tick_portal(delta: float) -> void:
+	if PortalTravel.in_progress():
+		return
+	_portal_tick_accum += delta
+	if _portal_tick_accum < PORTAL_TICK_INTERVAL:
+		return
+	var standing_in_portal: bool = _is_in_portal()
+	while _portal_tick_accum >= PORTAL_TICK_INTERVAL:
+		_portal_tick_accum -= PORTAL_TICK_INTERVAL
+		_portal_exposure.in_portal = standing_in_portal
+		var travel: bool = _portal_exposure.advance()
+		if _portal_exposure.triggered_this_tick:
+			SFX.play_portal_trigger(global_position)
+		if travel:
+			_portal_tick_accum = 0.0
+			_begin_portal_travel()
+			return
+
+
+# True when any cell the player's body occupies is a portal. Two samples —
+# feet and eye level — because the body is 1.8 m tall and a portal is 3,
+# so a single centre sample would miss a player crouched at the bottom of
+# the sheet.
+func _is_in_portal() -> bool:
+	if _portal_exposure.on_cooldown():
+		# bq.java:42 — the ten ticks after a trip. The player ARRIVES
+		# standing inside the destination portal; without this they would
+		# start filling again immediately and bounce back and forth.
+		return false
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().get_root().find_child("ChunkManager", true, false)
+		_chunk_manager_ref = cm
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	for offset: Vector3 in [Vector3(0.0, 0.2, 0.0), Vector3(0.0, 1.5, 0.0)]:
+		var cell: Vector3i = Vector3i(
+			floori(global_position.x + offset.x),
+			floori(global_position.y + offset.y),
+			floori(global_position.z + offset.z)
+		)
+		if cm.call("get_world_block", cell) == Blocks.PORTAL:
+			return true
+	return false
+
+
+func _begin_portal_travel() -> void:
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().get_root().find_child("ChunkManager", true, false)
+		_chunk_manager_ref = cm
+	if cm == null:
+		return
+	# Fire and forget: PortalTravel is a coroutine (it yields between
+	# destination chunks so the loading screen paints), and Game.is_loading
+	# freezes this body for the duration, so there is nothing to await for.
+	PortalTravel.travel(self, cm)
+
+
+# Camera pitch back to level. Plan §7.2 step 8 — arriving through a portal
+# preserves yaw but zeroes pitch, so the player is looking at the horizon
+# rather than at the ceiling they happened to be facing.
+func reset_pitch() -> void:
+	if _camera != null:
+		_camera.rotation.x = 0.0
+
+
+# Called by PortalTravel once the player is placed. Clears the meter and
+# arms the cooldown, so the destination portal they are standing inside
+# does not immediately start filling it again.
+func reset_portal_exposure() -> void:
+	_portal_exposure.reset()
+	_portal_exposure.cooldown = PortalExposure.COOLDOWN_TICKS
+	_portal_tick_accum = 0.0
 
 
 # Lava contact damage. Mirrors vanilla Entity.burn (Alpha source at

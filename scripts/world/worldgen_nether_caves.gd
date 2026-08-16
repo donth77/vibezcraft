@@ -38,82 +38,46 @@ const _ALPHA_NETHERRACK: int = 87
 # chunk borders seamlessly and independently of load order.
 const _NEIGHBOURHOOD: int = 8
 
-# fi.java:8 — the sine table's index scale. Java's `10430.378f` literal is
-# a FLOAT, so its value is 10430.3779296875; using the double 10430.378
-# shifts the table index near the ends of the range.
-const _SIN_SCALE: float = 10430.3779296875
-const _SIN_TABLE_SIZE: int = 65536
-const _SIN_MASK: int = 0xFFFF
-# fi.java:11 — cos is the same table offset a quarter turn.
-const _COS_OFFSET: float = 16384.0
-# Java's `(float)Math.PI`. Spelt out because f32(PI) appears in three
-# separate source expressions and the double PI is a different number.
-const _PI_F32: float = 3.1415927410125732
-
 # ju.java:110 — carving stops at this Y, and at 1 below. Keeps the
 # bedrock shell intact.
 const _MAX_CARVE_Y: int = 120
 const _MIN_CARVE_Y: int = 1
 
-static var _sin_table: PackedFloat32Array = PackedFloat32Array()
-
-# --- Alpha MathHelper (fi.java) ---
-
-
-static func _ensure_sin_table() -> void:
-	if _sin_table.size() == _SIN_TABLE_SIZE:
-		return
-	_sin_table.resize(_SIN_TABLE_SIZE)
-	for i: int in range(_SIN_TABLE_SIZE):
-		# fi.java:56 — the table is built in double precision and stored
-		# as float, so the rounding happens once, here.
-		_sin_table[i] = sin(float(i) * PI * 2.0 / float(_SIN_TABLE_SIZE))
+# Alpha's MathHelper lives in AlphaMath now — Batch 7 extracted it so the
+# portal texture could share the same table. These thin aliases keep the
+# call sites below reading like the Java they mirror.
 
 
-# fi.a(float) — sine by table lookup.
 static func _sin(angle: float) -> float:
-	_ensure_sin_table()
-	return _sin_table[int(_fmul(angle, _SIN_SCALE)) & _SIN_MASK]
+	return AlphaMath.sin_table(angle)
 
 
-# fi.b(float) — cosine, the same table a quarter turn along.
 static func _cos(angle: float) -> float:
-	_ensure_sin_table()
-	return _sin_table[int(_fadd(_fmul(angle, _SIN_SCALE), _COS_OFFSET)) & _SIN_MASK]
+	return AlphaMath.cos_table(angle)
 
 
-# fi.b(double) — floor toward negative infinity, as an int.
 static func _floor(v: float) -> int:
-	var n: int = int(v)
-	return n - 1 if v < float(n) else n
+	return AlphaMath.floor_int(v)
 
 
-# Round a double through float32, matching a Java `float` expression.
-#
-# Java rounds after EVERY float operation, so grouping matters:
-# `a * b / c` in float is `f32(f32(a * b) / c)`, which is not the same
-# number as `f32(a * b / c)`. The four helpers below make each source
-# operation one call, so the port can be read against the Java line by
-# line instead of hoping a single outer rounding is close enough.
 static func _f32(v: float) -> float:
-	var b := PackedFloat32Array([v])
-	return b[0]
+	return AlphaMath.f32(v)
 
 
 static func _fmul(a: float, b: float) -> float:
-	return _f32(a * b)
+	return AlphaMath.fmul(a, b)
 
 
 static func _fdiv(a: float, b: float) -> float:
-	return _f32(a / b)
+	return AlphaMath.fdiv(a, b)
 
 
 static func _fadd(a: float, b: float) -> float:
-	return _f32(a + b)
+	return AlphaMath.fadd(a, b)
 
 
 static func _fsub(a: float, b: float) -> float:
-	return _f32(a - b)
+	return AlphaMath.fsub(a, b)
 
 
 # --- dl.java: the per-neighbourhood driver ---
@@ -183,7 +147,7 @@ static func _spawn_from_source_chunk(
 			# ju.java:139-141 — `nextFloat() * (float)PI * 2.0f`,
 			# `(nextFloat() - 0.5f) * 2.0f / 8.0f`, and
 			# `nextFloat() * 2.0f + nextFloat()`, each rounded per operation.
-			var yaw: float = _fmul(_fmul(rng.next_float(), _PI_F32), 2.0)
+			var yaw: float = _fmul(_fmul(rng.next_float(), AlphaMath.PI_F32), 2.0)
 			var pitch: float = _fdiv(_fmul(_fsub(rng.next_float(), 0.5), 2.0), 8.0)
 			var width: float = _fadd(_fmul(rng.next_float(), 2.0), rng.next_float())
 			_carve_worm(
@@ -235,7 +199,7 @@ static func _carve_worm(
 		# ju.java:32 — `1.5 + (double)(fi.a((float)n4 * (float)PI /
 		# (float)n5) * f2 * 1.0f)`. The trig argument and the product are
 		# float; only the leading `1.5 +` happens in double.
-		var phase: float = _fdiv(_fmul(float(step), _PI_F32), float(length))
+		var phase: float = _fdiv(_fmul(float(step), AlphaMath.PI_F32), float(length))
 		var horiz_radius: float = 1.5 + _fmul(_fmul(_sin(phase), width), 1.0)
 		var vert_radius: float = horiz_radius * vertical_scale
 		var cos_pitch: float = _cos(pitch)

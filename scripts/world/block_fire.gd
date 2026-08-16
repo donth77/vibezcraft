@@ -128,8 +128,7 @@ static func _try_to_catch_block_on_fire(manager, target: Vector3i, var5: int) ->
 		return
 	var was_tnt: bool = id == Blocks.TNT
 	if randi() % 2 == 0:
-		manager.set_world_block_with_meta(target, Blocks.FIRE, 0)
-		TickScheduler.schedule(target, Blocks.FIRE, TICK_RATE)
+		place(manager, target)
 	else:
 		manager.set_world_block(target, Blocks.AIR)
 	if was_tnt:
@@ -211,8 +210,7 @@ static func update(manager, pos: Vector3i) -> void:
 					rand_max += (dy - 1) * 100
 				var chance: int = _get_chance_of_neighbors_encouraging_fire(manager, target)
 				if chance > 0 and randi() % rand_max <= chance:
-					manager.set_world_block_with_meta(target, Blocks.FIRE, 0)
-					TickScheduler.schedule(target, Blocks.FIRE, TICK_RATE)
+					place(manager, target)
 
 
 # Place a fresh FIRE cell at `pos` and schedule its first tick. Called
@@ -220,5 +218,27 @@ static func update(manager, pos: Vector3i) -> void:
 static func ignite(manager, pos: Vector3i) -> void:
 	if manager.get_world_block(pos) != Blocks.AIR:
 		return
+	place(manager, pos)
+
+
+# Vanilla qh.java::e — BlockFire.onBlockAdded. Every route that creates a
+# fire cell goes through here, because the FIRST thing Alpha's fire does
+# on being added is try to light a Nether portal:
+#
+#     if (world.getBlock(x, y - 1, z) == Block.obsidian.id
+#             && Block.portal.tryToCreatePortal(world, x, y, z)) return;
+#
+# When that succeeds the six portal cells have already overwritten this
+# one, so no fire block is written and no spread tick is scheduled. The
+# obsidian-below gate is the source's, not an optimisation: it is why a
+# frame is lit from its bottom row and not from anywhere inside.
+#
+# Returns true when a portal was lit instead of a fire placed.
+static func place(manager, pos: Vector3i) -> bool:
+	if manager.get_world_block(pos + Vector3i(0, -1, 0)) == Blocks.OBSIDIAN:
+		if NetherPortal.try_create(manager, pos):
+			SFX.play_portal_trigger(Vector3(pos) + Vector3(0.5, 0.5, 0.5))
+			return true
 	manager.set_world_block_with_meta(pos, Blocks.FIRE, 0)
 	TickScheduler.schedule(pos, Blocks.FIRE, TICK_RATE)
+	return false

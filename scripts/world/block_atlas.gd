@@ -271,6 +271,7 @@ static var _entity_material: ShaderMaterial
 # mesh. Owns no state — the shader is self-contained (see shaders/water.gdshader).
 static var _water_material: ShaderMaterial
 static var _lava_material: ShaderMaterial
+static var _portal_material: ShaderMaterial
 static var _slot_size: int = 32  # auto-detected on build()
 
 
@@ -678,6 +679,22 @@ static func lava_material() -> ShaderMaterial:
 	return _lava_material
 
 
+# Shared Nether-portal ShaderMaterial. The animation lives entirely in the
+# shader (TIME picks a row of PortalTexture's 32-frame strip), so this is
+# genuinely one material and one texture for every portal in the world —
+# the plan forbids a material or texture per portal block or chunk.
+static func portal_material() -> ShaderMaterial:
+	if _portal_material == null:
+		_portal_material = ShaderMaterial.new()
+		_portal_material.shader = load("res://shaders/portal.gdshader") as Shader
+		_portal_material.set_shader_parameter("frames", PortalTexture.strip_texture())
+		_portal_material.set_shader_parameter(
+			"frames_per_second", 1.0 / PortalTexture.FRAME_SECONDS
+		)
+		_portal_material.set_shader_parameter("frame_count", float(PortalTexture.FRAMES))
+	return _portal_material
+
+
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
@@ -688,3 +705,4 @@ static func reset() -> void:
 	_entity_material = null
 	_water_material = null
 	_lava_material = null
+	_portal_material = null

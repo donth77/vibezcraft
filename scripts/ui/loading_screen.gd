@@ -1,3 +1,4 @@
+class_name LoadingScreen
 extends CanvasLayer
 
 # Alpha-style startup loading screen. Mirrors vendor/alpha-1.2.6-src/src/hu.java
@@ -21,6 +22,17 @@ const _BAR_FILL: Color = Color(0x80 / 255.0, 0xFF / 255.0, 0x80 / 255.0, 1.0)
 const _BAR_WIDTH: float = 400.0
 const _BAR_HEIGHT: float = 10.0
 
+# Non-empty puts the screen in TRANSITION mode: same visuals, but it is
+# covering a Nether portal trip rather than world entry. Set before
+# add_child(), because _ready() reads it.
+#
+# In that mode it must not touch the day/night clock (a portal trip does
+# not skip to noon), must not restore world state (the world is already
+# restored), and must not self-free on the chunk-progress signal — the
+# travel transaction owns its lifetime and frees it when the player is
+# safely placed.
+var transition_label: String = ""
+
 var _status_label: Label
 var _bar_fill_rect: ColorRect
 
@@ -30,12 +42,13 @@ func _ready() -> void:
 	# break/place, ambience) so the chunk-gen player physics doesn't
 	# leak audio through the loading screen.
 	Game.is_loading = true
-	# Reset the day/night clock to noon for each new world. WorldTime is
-	# an autoload, so its own _ready only fires once per Godot session;
-	# without this, loading a new seed inherits whatever time the prior
-	# session left it at (could be midnight) and the player drops into
-	# darkness on a fresh world.
-	WorldTime.set_time_ticks(6000)
+	if transition_label == "":
+		# Reset the day/night clock to noon for each new world. WorldTime
+		# is an autoload, so its own _ready only fires once per Godot
+		# session; without this, loading a new seed inherits whatever time
+		# the prior session left it at (could be midnight) and the player
+		# drops into darkness on a fresh world.
+		WorldTime.set_time_ticks(6000)
 	layer = 100
 	var root := Control.new()
 	root.anchor_right = 1.0
@@ -46,12 +59,45 @@ func _ready() -> void:
 	_build_title(root)
 	_build_status(root)
 	_build_progress_bar(root)
+	if transition_label != "":
+		set_status(transition_label)
+		set_progress(0.0)
+		return
 	# ChunkManager lives next to us under Main. Connect deferred so we
 	# still get the final-emit even if the manager's _ready fired before
 	# this scene was reachable.
 	var mgr: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 	if mgr != null and mgr.has_signal("initial_chunks_ready"):
 		mgr.connect("initial_chunks_ready", _on_chunk_progress)
+
+
+# Raise this screen over a live world for a portal trip. The label is
+# Alpha's own — "Entering the Nether" / "Leaving the Nether" — and the
+# caller is responsible for calling dismiss() when the destination is
+# ready, because only it knows when the player is safely standing on
+# something.
+static func show_transition(tree: SceneTree, label: String) -> LoadingScreen:
+	var screen := LoadingScreen.new()
+	screen.transition_label = label
+	tree.root.add_child(screen)
+	return screen
+
+
+func set_status(text: String) -> void:
+	if _status_label != null:
+		_status_label.text = text
+
+
+func set_progress(fraction: float) -> void:
+	if _bar_fill_rect != null:
+		_bar_fill_rect.offset_right = clampf(fraction, 0.0, 1.0) * _BAR_WIDTH
+
+
+# Tear the transition screen down and hand control back. Safe to call on
+# a screen that is already gone.
+func dismiss() -> void:
+	Game.is_loading = false
+	queue_free()
 
 
 func _build_background(root: Control) -> void:
