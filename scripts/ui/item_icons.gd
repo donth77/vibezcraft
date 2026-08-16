@@ -396,7 +396,7 @@ static func icon_for(item_id: int) -> Texture2D:
 	var block_tile: String = ""
 	if _BLOCK_ICON_NAMES.has(item_id):
 		block_tile = _BLOCK_ICON_NAMES[item_id]
-	elif item_id > Blocks.AIR and item_id < 100:
+	elif Blocks.has_item_form(item_id):
 		block_tile = Blocks.get_face_texture(item_id, "side")
 	if block_tile != "":
 		var tile: String = block_tile

@@ -48,8 +48,25 @@ func test_next_int_bounded_alpha_15() -> void:
 
 
 func test_next_long_first_call() -> void:
+	# Was -4962768461381414600 here until 2026-08-16: that value came from
+	# treating the low 32 bits as unsigned, which runs 2^32 high whenever
+	# the low word is negative. The JDK itself now supplies the expected
+	# value via tests/test_alpha_source_oracle.gd; this literal is the
+	# same number that oracle emits for seed 0.
 	var r := JavaRandom.new(0)
-	assert_eq(r.next_long(), -4962768461381414600, "seed=0, nextLong() [0]")
+	assert_eq(r.next_long(), -4962768465676381896, "seed=0, nextLong() [0]")
+
+
+func test_legacy_next_long_preserves_shipped_overworld_caves() -> void:
+	# worldgen_caves.gd still draws from the legacy sequence so existing
+	# saves keep the caves they were generated with. Pin it so the
+	# deviation stays deliberate rather than drifting back by accident.
+	var r := JavaRandom.new(0)
+	assert_eq(
+		r.next_long_legacy_unsigned_low(),
+		-4962768461381414600,
+		"legacy nextLong keeps the pre-fix value"
+	)
 
 
 func test_next_float_first_calls() -> void:

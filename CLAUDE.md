@@ -135,7 +135,9 @@ scripts/
                               #  block_icon_renderer, character_preview, hp_bar, air_bar,
                               #  damage_overlay, water_overlay, fire_overlay, durability_bar,
                               #  loading_screen, vanilla_button, minecraft_font
-  dev/                        # pre-commit.sh, install-hooks.sh, extract_alpha_pack.py
+  dev/                        # pre-commit.sh, install-hooks.sh, perf_probe.gd, serve_web.py
+    internal/                 # gitignored — tools that read Mojang material
+                              #  (extract_alpha_pack.py, alpha_oracle/, save audits)
 scenes/                       # chunk, chunk_manager, player, ui, entities
 shaders/
   chunk.gdshader              # cull_back, per-face Notch shading, atlas sampling, brightness LUT

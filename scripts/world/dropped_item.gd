@@ -63,19 +63,19 @@ func setup(
 	_pickup_delay = p_pickup_delay
 	_spawn_time = Time.get_ticks_msec() / 1000.0
 	# Mesh is a child Node3D so we can bob its local Y without fighting the
-	# root's gravity-controlled global Y. Block IDs render as a real cube
-	# via BlockMesh; non-block items (coal, ingots, sticks, tools — id >=
-	# 100) get the voxel-extruded sprite mesh used by held items, which
+	# root's gravity-controlled global Y. Registered blocks render as a
+	# real cube via BlockMesh; non-block items (coal, ingots, sticks,
+	# tools) get the voxel-extruded sprite mesh used by held items, which
 	# would otherwise show as a textureless cube. Non-cube blocks (sapling,
 	# future torches/plants) take the sprite path too — vanilla draws them
 	# as flat 2D billboards on the ground, not as textured cubes with the
 	# icon tiled on every face.
 	_mesh = MeshInstance3D.new()
-	# Sprite path: items (id ≥ 100) and flat-billboard blocks (cross-quads
+	# Sprite path: non-block items and flat-billboard blocks (cross-quads
 	# like sapling/fire, and torches). MESH_SHAPE_EXTERNAL blocks (chest)
 	# read as cubes in inventory and on the ground — same fix as the
 	# held-item routing in player.gd::_update_held_item.
-	_is_sprite_item = p_item_id >= Items.STICK or Blocks.has_sprite_tile(p_item_id)
+	_is_sprite_item = (not Blocks.is_registered(p_item_id) or Blocks.has_sprite_tile(p_item_id))
 	if _is_sprite_item:
 		_build_sprite_mesh(p_item_id)
 	else:

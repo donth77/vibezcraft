@@ -58,9 +58,30 @@ struct JavaRandom {
 
 	// Signed int64. (int)next(32) << 32 + next(32); first is sign-
 	// extended to 64 bits, second is treated as unsigned 32 bits.
-	int64_t next_long() {
+	// KNOWN DEVIATION from Java, kept deliberately. OpenJDK's nextLong is
+	// `((long)next(32) << 32) + next(32)` with BOTH halves sign-extended,
+	// so a negative low word subtracts; this runs 2^32 high in that case.
+	// The GDScript side matched the same mistake, which is why the
+	// two-way parity tests never caught it — see
+	// tests/test_alpha_source_oracle.gd, where the JDK itself is the
+	// oracle.
+	//
+	// Only the cave generator calls this, and its output is baked into
+	// every Overworld world already saved, so correcting it here would
+	// re-carve unvisited chunks of existing saves. GDScript pins the same
+	// behaviour behind JavaRandom.next_long_legacy_unsigned_low(). Any
+	// NEW native generator (the Nether, Batch 5) must use a correctly
+	// sign-extended nextLong instead.
+	int64_t next_long_legacy_unsigned_low() {
 		const int64_t high = static_cast<int32_t>(next(32));  // sign-extend
-		const int64_t low = static_cast<uint32_t>(next(32));  // unsigned
+		const int64_t low = static_cast<uint32_t>(next(32));  // unsigned (the deviation)
+		return (high << 32) + low;
+	}
+
+	// True Java parity — use this for anything new.
+	int64_t next_long() {
+		const int64_t high = static_cast<int32_t>(next(32));
+		const int64_t low = static_cast<int32_t>(next(32));
 		return (high << 32) + low;
 	}
 
@@ -477,7 +498,7 @@ void carve_worm(JavaRandom &outer_rng, uint8_t *blocks_ptr, int chunk_x, int chu
 void carve_worm(JavaRandom &outer_rng, uint8_t *blocks_ptr, int chunk_x, int chunk_z,
 		double init_x, double init_y, double init_z, double width, double init_yaw,
 		double init_pitch, int init_step, int init_length, double vertical_scale) {
-	JavaRandom worm_rng(outer_rng.next_long());
+	JavaRandom worm_rng(outer_rng.next_long_legacy_unsigned_low());
 	const double origin_x = double(chunk_x * 16 + 8);
 	const double origin_z = double(chunk_z * 16 + 8);
 
@@ -929,8 +950,9 @@ PackedByteArray WorldgenNative::scatter_caves(
 	// dl.java:10-20 — seed multipliers derived from world seed, then
 	// per-chunk re-seed for each contributing seed chunk.
 	JavaRandom rng(world_seed);
-	const int64_t l2 = rng.next_long() / 2LL * 2LL + 1LL;  // force odd
-	const int64_t l3 = rng.next_long() / 2LL * 2LL + 1LL;
+	// Legacy variant on purpose — see the JavaRandom note above.
+	const int64_t l2 = rng.next_long_legacy_unsigned_low() / 2LL * 2LL + 1LL;  // force odd
+	const int64_t l3 = rng.next_long_legacy_unsigned_low() / 2LL * 2LL + 1LL;
 	for (int seed_cx = p_chunk_x - CAVES_RADIUS_CHUNKS;
 			seed_cx <= p_chunk_x + CAVES_RADIUS_CHUNKS; seed_cx++) {
 		for (int seed_cz = p_chunk_z - CAVES_RADIUS_CHUNKS;

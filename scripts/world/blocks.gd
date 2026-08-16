@@ -582,6 +582,135 @@ const MESH_SHAPE_BUTTON: int = 17
 # Pressure plate — a flat pad on the floor, thinner when pressed.
 const MESH_SHAPE_PRESSURE_PLATE: int = 18
 
+# --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
+#
+# The authoritative list of every block id this build defines. Until now
+# the engine inferred "is this a block or an item?" from `id < 100`,
+# which held only because blocks stopped at 96 and items started at 100.
+# The Nether portal is reserved at id 206 — a block living ABOVE the item
+# floor — so that arithmetic would silently classify it as an item and
+# route it into inventories, icons and drops. Every content-kind
+# decision now asks this registry instead.
+#
+# Append new ids here in the same commit that adds the const. The
+# reflection sweep in tests/test_content_registry.gd fails the build if a
+# block const ever escapes this list, so drift can't go unnoticed.
+#
+# Reserved-but-not-yet-defined (see plan §3.1): 97 netherrack, 98 soul
+# sand, 99 glowstone, 206 portal (world-only). Item 205 is glowstone
+# dust. Id 50 is a BURNED legacy tall-grass value and must never be
+# reused — an old save carrying that byte would otherwise resurrect as
+# whatever new block claimed it.
+const BURNED_IDS: Array[int] = [50]
+const REGISTERED_IDS: Array[int] = [
+	AIR,
+	BEDROCK,
+	STONE,
+	DIRT,
+	GRASS,
+	COBBLESTONE,
+	LOG,
+	PLANKS,
+	LEAVES,
+	SAND,
+	BRICK,
+	OBSIDIAN,
+	COAL_ORE,
+	IRON_ORE,
+	GOLD_ORE,
+	DIAMOND_ORE,
+	CRAFTING_TABLE,
+	FARMLAND,
+	GRAVEL,
+	FURNACE,
+	LIT_FURNACE,
+	GLASS,
+	SAPLING,
+	WATER_FLOWING,
+	WATER_STILL,
+	LAVA_FLOWING,
+	LAVA_STILL,
+	FIRE,
+	TORCH,
+	CHEST,
+	FENCE,
+	WOOD_STAIRS,
+	COBBLESTONE_STAIRS,
+	WOODEN_DOOR,
+	IRON_DOOR,
+	LADDER,
+	TNT,
+	FLOWER_RED,
+	FLOWER_YELLOW,
+	MUSHROOM_BROWN,
+	MUSHROOM_RED,
+	SUGAR_CANE,
+	ICE,
+	SNOW_BLOCK,
+	CACTUS,
+	SNOW_LAYER,
+	PUMPKIN,
+	JACK_O_LANTERN,
+	BOOKSHELF,
+	CROPS,
+	MOB_SPAWNER,
+	WOOL_WHITE,
+	WOOL_ORANGE,
+	WOOL_MAGENTA,
+	WOOL_LIGHT_BLUE,
+	WOOL_YELLOW,
+	WOOL_LIME,
+	WOOL_PINK,
+	WOOL_GRAY,
+	WOOL_LIGHT_GRAY,
+	WOOL_CYAN,
+	WOOL_PURPLE,
+	WOOL_BLUE,
+	WOOL_BROWN,
+	WOOL_GREEN,
+	WOOL_RED,
+	WOOL_BLACK,
+	SPONGE,
+	IRON_BLOCK,
+	GOLD_BLOCK,
+	DIAMOND_BLOCK,
+	CLAY,
+	HALF_SLAB,
+	DOUBLE_SLAB,
+	SIGN_STANDING,
+	SIGN_WALL,
+	FENCE_GATE,
+	RAIL,
+	WOOD_HALF_SLAB,
+	WOOD_DOUBLE_SLAB,
+	COBBLESTONE_HALF_SLAB,
+	COBBLESTONE_DOUBLE_SLAB,
+	BED_FOOT,
+	BED_HEAD,
+	JUKEBOX,
+	MOSSY_COBBLESTONE,
+	SLIME_BLOCK,
+	REDSTONE_ORE,
+	GLOWING_REDSTONE_ORE,
+	REDSTONE_WIRE,
+	REDSTONE_TORCH,
+	REDSTONE_TORCH_OFF,
+	LEVER,
+	STONE_BUTTON,
+	STONE_PRESSURE_PLATE,
+	WOODEN_PRESSURE_PLATE,
+]
+
+# Blocks that exist only as world cells — never as an inventory stack, a
+# hotbar slot, a held mesh, a dropped entity or a debug-spawner row.
+# AIR is excluded separately (it is registered but is not content).
+#
+# Empty today. The Nether portal (id 206) joins it in Batch 2: Alpha's
+# `x.java` gives the portal no item form, no drop and no pick-block, so
+# it must never reach a presentation path even though it is a perfectly
+# ordinary byte inside `Chunk.blocks`.
+const WORLD_ONLY_IDS: Array[int] = []
+
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
 # match in GDScript — called ~30K times per worldgen chunk + ~30K times
@@ -597,6 +726,11 @@ const MESH_SHAPE_PRESSURE_PLATE: int = 18
 # GDExtension without touching lazy GDScript state.
 static var _selection_aabb_flat: PackedFloat32Array = PackedFloat32Array()
 static var _light_opacity_lut: PackedByteArray
+# Lazy-init content-kind table, one byte per uint8 id. Bit 0 = the id is
+# a registered block; bit 1 = it also has an inventory/item form. A flat
+# byte index keeps `is_registered` cheap enough for the per-drop and
+# per-icon call sites that replaced the old `id < 100` arithmetic.
+static var _registry_lut: PackedByteArray
 # Lazy-init explosion-resistance LUT (PackedFloat32Array of 256 entries).
 # explosion_resistance() is called once per non-AIR cell per ray step in
 # an explosion (~5000+ calls per TNT detonation). The match statement
@@ -864,8 +998,64 @@ static func _tick_crops(manager, pos: Vector3i) -> void:
 #
 # Buttons and plates are deliberately absent: they texture from `stone`
 # and `planks`, which are fully opaque, so a cube reads fine.
+# --- Content registry queries (plan §3.1) ---
+#
+# These three replace every `id < 100` / `id >= 100` content-kind test.
+# The old arithmetic was load-bearing in six places and each one would
+# have misread the Nether portal (block id 206) as an item.
+# Pure builder, kept separate from the cached global so the invariant
+# tests can register a hypothetical id set — notably the reserved
+# world-only portal at 206 — and check the resulting classification
+# without mutating live registry state.
+static func build_registry_flags(ids: Array[int], world_only: Array[int]) -> PackedByteArray:
+	var lut := PackedByteArray()
+	lut.resize(256)
+	for id: int in ids:
+		if id < 0 or id >= 256:
+			continue
+		# Bit 0: registered. Bit 1: has an inventory form. AIR is a real
+		# registered id (it is what an empty cell holds) but is not
+		# content, so it never gets the item-form bit.
+		var flags: int = 1
+		if id != AIR and not world_only.has(id):
+			flags |= 2
+		lut[id] = flags
+	return lut
+
+
+static func _build_registry_lut() -> void:
+	_registry_lut = build_registry_flags(REGISTERED_IDS, WORLD_ONLY_IDS)
+
+
+# True when `id` is a block this build defines. False for item ids, for
+# the burned id 50, and for anything unassigned.
+static func is_registered(id: int) -> bool:
+	if _registry_lut.is_empty():
+		_build_registry_lut()
+	if id < 0 or id >= _registry_lut.size():
+		return false
+	return (_registry_lut[id] & 1) != 0
+
+
+# True when the block can exist as an inventory stack — and therefore as
+# a hotbar slot, a held mesh, a dropped entity and a debug-spawner row.
+# False for AIR and for world-only blocks such as the Nether portal.
+static func has_item_form(id: int) -> bool:
+	if _registry_lut.is_empty():
+		_build_registry_lut()
+	if id < 0 or id >= _registry_lut.size():
+		return false
+	return (_registry_lut[id] & 2) != 0
+
+
+# Spelling used by the placement/interaction paths, where "can the player
+# put this in the world from a stack?" reads better than "item form".
+static func is_inventory_placeable(id: int) -> bool:
+	return has_item_form(id)
+
+
 static func has_sprite_tile(id: int) -> bool:
-	if id >= 100:
+	if not is_registered(id):
 		return false  # item ids have no mesh shape
 	match mesh_shape(id):
 		MESH_SHAPE_CROSS, MESH_SHAPE_TORCH, MESH_SHAPE_LADDER:

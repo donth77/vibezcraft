@@ -160,7 +160,8 @@ static func set_held_item(item_id: int) -> void:
 	# flat 2D billboard, not a textured cube. Without this the inventory
 	# avatar holds a cube tiled with the sapling icon on every face.
 	var as_sprite: bool = (
-		item_id >= Items.STICK or (item_id != 0 and Blocks.needs_gdscript_mesher(item_id))
+		not Blocks.is_registered(item_id)
+		or (item_id != 0 and Blocks.needs_gdscript_mesher(item_id))
 	)
 	if as_sprite:
 		var tex: Texture2D = ItemIcons.icon_for(item_id)

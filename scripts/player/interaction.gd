@@ -1911,10 +1911,11 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	var stack: ItemStack = inv.selected()
 	if stack.is_empty():
 		return false
-	# Only block IDs are placeable. Tools, sticks, coal etc. are non-block
-	# items (Items.* IDs >= 100) and right-clicking with one shouldn't drop
-	# a textureless mystery block into the world.
-	# Door items are non-block (id >= 100) but still placeable — they spawn
+	# Only blocks with an inventory form are placeable. Tools, sticks,
+	# coal etc. are items and right-clicking with one shouldn't drop a
+	# textureless mystery block into the world; world-only blocks (the
+	# Nether portal) are excluded by the same registry query.
+	# Door items are items, not blocks, but still placeable — they spawn
 	# a two-block-tall door block. Route through a dedicated handler.
 	if stack.item_id == Items.WOODEN_DOOR or stack.item_id == Items.IRON_DOOR:
 		return _try_place_door(hit, stack)
@@ -1955,8 +1956,8 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# above.
 	#
 	# It has to be dispatched HERE, with the other item-placed blocks,
-	# because the `stack.item_id >= 100` guard a few lines below rejects
-	# every item id outright. Sitting after that guard made this branch
+	# because the `is_inventory_placeable` guard a few lines below
+	# rejects every item id outright. Sitting after it made this branch
 	# unreachable, so right-clicking with redstone did nothing at all.
 	if stack.item_id == Items.REDSTONE:
 		return _try_place_redstone_dust(hit)
@@ -1973,7 +1974,7 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	):
 		if _try_slab_combine(hit, stack):
 			return true
-	if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
+	if not Blocks.is_inventory_placeable(stack.item_id) or Items.is_tool_item(stack.item_id):
 		return false
 	# Vanilla Block.isReplaceable: when the targeted cell holds a plant /
 	# water / etc., the new block goes INTO that cell (overwriting the

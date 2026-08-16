@@ -676,16 +676,17 @@ func _update_held_item() -> void:
 	# TP orient is a child of TP pivot; queue_free above already disposed it.
 	_held_tool_tp_orient = null
 	if id != Blocks.AIR:
-		# Block IDs live in [1..99]; non-block items (sticks, tools, coal,
-		# ingots, diamond) start at Items.STICK = 100. Block-IDs get a 3D
-		# cube held in the hand; everything else uses the sprite-extruded
+		# Registered blocks get a 3D cube held in the hand; non-block
+		# items (sticks, tools, coal, ingots, diamond) take the sprite-
+		# extruded path. That split is a registry query, not an id
+		# compare — see Blocks.is_registered. Everything else uses the
 		# mesh (vanilla MC's ItemModelGenerator path). Non-cube blocks
 		# (sapling, future torches/plants) also route through the sprite
 		# path — vanilla renders them as flat 2D billboards in the held
 		# position via RenderItem.renderItemIn2D, not as a textured cube.
 		# Without this, the sapling icon tiles onto all six faces of the
 		# held cube, which reads as obviously wrong.
-		# Sprite path: items (id ≥ 100), cross-quads (sapling, fire), and
+		# Sprite path: non-block items, cross-quads (sapling, fire), and
 		# torch — vanilla MC renders all of these as a flat 2D billboard in
 		# the held position via RenderItem.renderItemIn2D. CHEST is also
 		# routed through the GDScript mesher (MESH_SHAPE_EXTERNAL) but
@@ -701,7 +702,8 @@ func _update_held_item() -> void:
 		# have a bespoke pillar mesh that reads far better in the hand
 		# than a flat sprite, so they stay on the block path.
 		var as_sprite: bool = (
-			id >= Items.STICK or (Blocks.has_sprite_tile(id) and shape != Blocks.MESH_SHAPE_TORCH)
+			not Blocks.is_registered(id)
+			or (Blocks.has_sprite_tile(id) and shape != Blocks.MESH_SHAPE_TORCH)
 		)
 		if as_sprite:
 			_build_held_tool(id)

@@ -76,7 +76,7 @@ func test_sprite_tiled_blocks_get_a_tile_and_solid_ones_may_get_a_bake() -> void
 # Mirror of player.gd::_update_held_item's routing decision.
 func _held_takes_sprite_path(id: int) -> bool:
 	return (
-		id >= Items.STICK
+		not Blocks.is_registered(id)
 		or (Blocks.has_sprite_tile(id) and Blocks.mesh_shape(id) != Blocks.MESH_SHAPE_TORCH)
 	)
 

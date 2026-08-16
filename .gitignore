@@ -63,10 +63,11 @@ build
 test-screenshots/
 # `docs/*` rather than `docs/` so the negation below can take effect —
 # git will not re-include a file whose parent DIRECTORY is excluded.
-# Everything in docs/ stays ignored except the redstone documents,
-# which are release artefacts the plan and playtest gate depend on.
+# Everything in docs/ stays ignored except the tracked feature plans,
+# audit reports, and playtest guides selected below.
 docs/*
 !docs/redstone-*.md
+!docs/nether-*.md
 scripts/dev/internal
 scripts/dev/__pycache__/
 ./Library

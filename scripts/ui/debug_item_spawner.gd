@@ -430,9 +430,9 @@ func _on_cell_pressed(item_id: int) -> void:
 
 func _display_name(item_id: int) -> String:
 	# Items.display_name covers both blocks and items; fall back to
-	# Blocks.name_of for block-ids below 100 when Items doesn't match.
+	# Blocks.name_of for registered blocks when Items doesn't match.
 	var pretty: String = Items.display_name(item_id)
-	if pretty == "" and item_id < 100:
+	if pretty == "" and Blocks.is_registered(item_id):
 		pretty = Blocks.name_of(item_id).capitalize()
 	return pretty
 
