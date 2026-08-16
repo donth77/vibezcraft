@@ -98,6 +98,12 @@ static var _aux_10: NoiseOctaves  # kj this.a
 static var _aux_16: NoiseOctaves  # kj this.b
 static var _cached_seed: int = 0
 static var _built: bool = false
+# Native dispatch (Batch 5). The GDScript path stays the correctness
+# reference and the fallback for platforms without the extension; when the
+# native class is present every entry point routes to it instead, and
+# tests/test_nether_worldgen_native.gd proves the two produce identical
+# bytes.
+static var _native: RefCounted = null
 
 # kj keeps its Random as a field (`this.h`) and reseeds it per chunk. This
 # port does NOT: chunk generation runs on WorkerThreadPool, and a shared
@@ -133,9 +139,29 @@ static func density_index(gx: int, gy: int, gz: int) -> int:
 # --- Setup ---
 
 
+static func enable_native() -> bool:
+	if not ClassDB.class_exists("WorldgenNetherNative"):
+		return false
+	_native = ClassDB.instantiate("WorldgenNetherNative")
+	if _native == null:
+		return false
+	_native.call("set_world_seed", Worldgen.WORLD_SEED)
+	return true
+
+
+static func native_available() -> bool:
+	return _native != null
+
+
+static func native_write_list(source_x: int, source_z: int) -> PackedInt32Array:
+	return _native.call("write_list", source_x, source_z)
+
+
 static func reset() -> void:
 	_built = false
 	WorldgenNetherPopulation.reset()
+	if _native != null:
+		_native.call("set_world_seed", Worldgen.WORLD_SEED)
 
 
 # Build the noise generators up front. Called from Game._ready for the
@@ -426,6 +452,14 @@ static func chunk_rng(chunk_x: int, chunk_z: int) -> JavaRandom:
 # This is what a source chunk's population reads, and what the oracle's
 # `after_caves` stage reports.
 static func generate_terrain_only(chunk_x: int, chunk_z: int) -> PackedByteArray:
+	if _native != null:
+		return _native.call("generate_terrain_only", chunk_x, chunk_z)
+	return generate_terrain_only_gdscript(chunk_x, chunk_z)
+
+
+# The reference path, kept callable by name so the parity test can drive
+# both sides in one process without unloading the extension.
+static func generate_terrain_only_gdscript(chunk_x: int, chunk_z: int) -> PackedByteArray:
 	var blocks: PackedByteArray = new_chunk_buffer()
 	var rng: JavaRandom = chunk_rng(chunk_x, chunk_z)
 	fill_base(blocks, chunk_x, chunk_z)
@@ -455,7 +489,13 @@ static func post_surface_rng(chunk_x: int, chunk_z: int) -> JavaRandom:
 
 
 static func generate_raw(chunk_x: int, chunk_z: int) -> PackedByteArray:
-	var blocks: PackedByteArray = generate_terrain_only(chunk_x, chunk_z)
+	if _native != null:
+		return _native.call("generate_raw", chunk_x, chunk_z)
+	return generate_raw_gdscript(chunk_x, chunk_z)
+
+
+static func generate_raw_gdscript(chunk_x: int, chunk_z: int) -> PackedByteArray:
+	var blocks: PackedByteArray = generate_terrain_only_gdscript(chunk_x, chunk_z)
 	WorldgenNetherPopulation.decorate(blocks, chunk_x, chunk_z)
 	return blocks
 

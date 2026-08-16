@@ -6,6 +6,7 @@
 #include "voxel_collider_native.h"
 #include "water_fx_native.h"
 #include "worldgen_native.h"
+#include "worldgen_nether_native.h"
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/defs.hpp>
@@ -19,6 +20,7 @@ void initialize_mesher_native_module(ModuleInitializationLevel p_level) {
 	}
 	GDREGISTER_CLASS(MesherNative);
 	GDREGISTER_CLASS(WorldgenNative);
+	GDREGISTER_CLASS(WorldgenNetherNative);
 	GDREGISTER_CLASS(LightingNative);
 	GDREGISTER_CLASS(WaterFXNative);
 	GDREGISTER_CLASS(VoxelColliderNative);

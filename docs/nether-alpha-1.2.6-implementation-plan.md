@@ -1789,3 +1789,49 @@ after its whole neighbourhood exists, is byte-identical — which is the
 property Alpha cannot offer, because it decorates into a live world from
 an RNG it never reseeds.
 
+### 17.6 Batch 5 (2026-08-16)
+
+**A prerequisite refactor came first.** `JavaRandom`, `NoisePerlin` and
+the two octave grid helpers lived in an anonymous namespace inside
+`worldgen_native.cpp`, so they were file-local and unusable from a second
+generator. They moved to `src/worldgen_native_shared.h` unchanged, with
+the free functions marked `inline`; the Overworld hash fixture is what
+proves nothing shifted in the move. That extraction was done and verified
+on its own before any Nether C++ was written.
+
+**One bug, and it was a precedence bug.** `dl.java` seeds each cave
+neighbourhood with `(long)i2 * l2 + (long)i3 * l3 ^ cy2.u`. Java binds
+`^` looser than `+`, so the xor applies to the whole sum — and so does
+C++, which is why the existing Overworld line is correct with no
+parentheses at all. Writing the Nether version with an explicit
+`(b * l3 ^ seed)` group reseeded every cave in the world. Terrain hashes
+diverged on most chunks and matched on a few, which is exactly what a
+seed-level difference looks like.
+
+**The gate is not close.** Native Nether p95 measured **3.93 ms** against
+the native Overworld's **65.87 ms** on the same 24-chunk sample — a ratio
+of **0.06** against a limit of 1.25. Against the GDScript reference's
+~590 ms per decorated chunk that is roughly a **150x** speedup, which is
+in line with the shipped ports' 40-90x and unsurprising given how much of
+the cost was the 1500-attempt glowstone loops and the 17x17 cave
+neighbourhood.
+
+The full suite dropped from 374 s to 179 s as a side effect, since every
+Nether suite now generates through the native path.
+
+**Coverage moved, and that is worth knowing.** With native enabled,
+`test_nether_worldgen_oracle.gd`'s whole-chunk assertions now measure the
+NATIVE path against the Alpha fixtures, not the GDScript one. Its staged
+density and surface assertions still call `fill_base` / `apply_surface`
+directly and remain GDScript-only, and
+`test_nether_worldgen_native.gd` proves native equals GDScript
+everywhere — so both paths stay pinned to the source, just via different
+routes. A future change that removes the parity suite would silently
+leave GDScript unverified.
+
+**The caches moved into C++ too.** Terrain and per-source write lists are
+cached natively under the same mutex that guards the noise build, bounded
+at 512 entries and cleared wholesale when full. A 24x24 traversal leaves
+chunk (0, 0) byte-identical, which is the plan's no-unbounded-growth
+check.
+

@@ -396,6 +396,10 @@ func _ready() -> void:
 		print("[Game] using native WorldgenNative (GDExtension)")
 	else:
 		print("[Game] using GDScript Worldgen")
+	if WorldgenNether.enable_native():
+		print("[Game] using native WorldgenNetherNative (GDExtension)")
+	else:
+		print("[Game] using GDScript WorldgenNether")
 	if Lighting.enable_native():
 		print("[Game] using native LightingNative (GDExtension)")
 	else:

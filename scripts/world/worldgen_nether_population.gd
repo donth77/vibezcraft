@@ -135,6 +135,18 @@ static func _build_window(world_seed: int, source_x: int, source_z: int) -> Pack
 # Every cell one source chunk's decorations write, as a flat list of
 # [world_x, y, world_z, alpha_id]. Deterministic in (seed, source chunk).
 static func write_list(world_seed: int, source_x: int, source_z: int) -> Array:
+	if WorldgenNether.native_available():
+		# Native returns a flat [x, y, z, id, ...] int array; unpack to the
+		# same shape the GDScript path produces so callers never branch.
+		var flat: PackedInt32Array = WorldgenNether.native_write_list(source_x, source_z)
+		var unpacked: Array = []
+		for i: int in range(0, flat.size(), 4):
+			unpacked.append([flat[i], flat[i + 1], flat[i + 2], flat[i + 3]])
+		return unpacked
+	return write_list_gdscript(world_seed, source_x, source_z)
+
+
+static func write_list_gdscript(world_seed: int, source_x: int, source_z: int) -> Array:
 	var key: String = _key(world_seed, source_x, source_z)
 	_cache_mutex.lock()
 	var hit: bool = _writes_cache.has(key)
