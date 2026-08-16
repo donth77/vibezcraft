@@ -34,12 +34,23 @@ compass, a clock, and a stack of cobblestone.
 
 Run the desktop build with `godot --path . main.tscn`.
 
-**Known gap, expected everywhere below:** the Nether is SILENT. The
-portal, pigman and ghast sound events are all registered with their
-Alpha volume and pitch, but the OGG files are not in the repository —
-Alpha served its sound set from Mojang's resources endpoint rather than
-the game jar. Every "you should hear" note below is therefore a
-**deferred** check, not a failure.
+**The Nether has audio.** All twelve portal, pigman and ghast sound
+events play, at their Alpha volume and pitch. Listen for them as you go:
+
+| Sound | When |
+|---|---|
+| `portal.portal` | A lit portal's hum, one display tick in a hundred |
+| `portal.trigger` / `portal.travel` | Stepping in, and completing the trip |
+| `mob.zombiepig.zpig` ×4 | Pigman idle |
+| `mob.zombiepig.zpigangry` ×4 | The shout when a group turns on you |
+| `mob.zombiepig.zpighurt` ×2, `zpigdeath` | Hitting one, killing one |
+| `mob.ghast.moan` ×7 | Ghast idle — seven clips, so it never loops |
+| `mob.ghast.scream` ×5, `death` | Hitting one, killing one |
+| `mob.ghast.charge` / `fireball4` | Charge counter 10, and the shot at 20 |
+
+A ghast plays at ten times a normal mob's volume — that is Alpha's
+`h()`, not a bug. If any of these is silent, it is a real failure now;
+`tests/test_nether_audio.gd` asserts every path resolves.
 
 ---
 

@@ -2299,7 +2299,7 @@ its reason.
 | 12 | Mobs | `Ghast._voxel_half_extents` overridden rather than fixing the base's hardcoded 0.6 | Correcting it globally would change spider and cow collision — an Overworld behaviour change. **Latent inconsistency, logged.** |
 | 13 | Spawning | Overworld hostile cap stays at 70; the Nether uses the source's 100 | §8.4 explicitly forbids changing the Overworld figure without separate measurement. |
 | 14 | Spawning | The per-chunk loop remains this project's per-tick random-cell sample | Pre-existing Overworld behaviour; the Nether reuses it rather than forking a second controller. |
-| 15 | Audio | Portal, pigman and ghast sound events resolve to silence | The OGGs are not in the repository — Alpha served its sound set from Mojang's resources endpoint, not the jar. §11 requires exactly this silent-safe fallback. **The one outstanding asset gap.** |
+| 15 | Audio | Nether sounds route through an OPTIONAL loader that checks existence before `load()` | The clips ARE vendored (see §17.11), so nothing is silent. The optional path stays because §11 requires a silent-safe fallback and a build without the assets should go quiet rather than error once per portal hum. |
 | 16 | Difficulty | `Game.difficulty` exists with no UI | Several source behaviours gate on `as.k`; modelling them as always-Normal would silently drop them. |
 | 17 | Explosion | `Explosion.detonate` gained a `flaming` parameter, default false | Only the fireball passes true. TNT and creepers are untouched. |
 
@@ -2319,10 +2319,7 @@ both are recorded in full at §17.7:
 
 ### Known issues at the release gate
 
-1. **No Nether audio.** Deviation 15 above. Drop files at
-   `assets/audio/sfx/portal/`, `assets/audio/sfx/mob/zombiepig/` and
-   `assets/audio/sfx/mob/ghast/` and every event lights up with no code
-   change.
+1. ~~**No Nether audio.**~~ Resolved — see §17.11.
 2. **Five pre-existing native-parity suites fail without the
    extension.** They assert `native == gdscript` and have nothing to
    compare against. `test_nether_worldgen_native.gd` shows the fix.
@@ -2333,3 +2330,65 @@ both are recorded in full at §17.7:
 5. **`godot --headless main.tscn --quit-after N` ends in a signal 11**
    inside `WorkerThreadPool::finish()`. Reproduces on a clean HEAD;
    unrelated to this feature.
+
+### 17.11 Nether audio (2026-08-16, post-Batch 10)
+
+**A correction first.** Batches 7, 8 and 9 each shipped their sound
+events registered but silent, and each recorded the reason as "the OGGs
+are not in the repository — Alpha served its sound set from Mojang's
+resources endpoint, not the jar." The first half is true and was
+verified. The conclusion drawn from it — that the files were therefore
+unobtainable without an outbound fetch — was never checked, and it was
+wrong. A local extraction of that same resources payload was on the
+development machine the whole time, at
+`~/Library/Application Support/minecraft/resources/sound3/`. It is
+where the zombie, skeleton, creeper and spider clips already in this
+repo came from, which a byte-match confirms:
+
+    shasum assets/audio/sfx/mob/zombie/death.ogg
+    shasum <resources>/sound3/mob/zombie/death.ogg
+    -> 6e0488ab07b9539fbaebc093f194bb6a95b2caec, both
+
+Neither `mcasset.cloud/a1.2.6` nor InventivetalentDev's mirror would
+have helped: both mirror JAR contents, and Alpha's sounds were never in
+the jar. `sound3/` is the right generation — `newsound/` carries the
+same three portal files but is a later payload, and the byte-match above
+pins which one this project standardised on.
+
+**Twenty-nine clips vendored**, vanilla filenames verbatim, following the
+rule the existing sets already follow — only what the decompiled source
+actually references:
+
+| Event | Files |
+|---|---|
+| `portal.portal` / `trigger` / `travel` | `portal/{portal,trigger,travel}.ogg` |
+| `mob.zombiepig.zpig` | `zpig1-4.ogg` |
+| `mob.zombiepig.zpigangry` | `zpigangry1-4.ogg` |
+| `mob.zombiepig.zpighurt` | `zpighurt1-2.ogg` |
+| `mob.zombiepig.zpigdeath` | `zpigdeath.ogg` |
+| `mob.ghast.moan` | `moan1-7.ogg` |
+| `mob.ghast.scream` | `scream1-5.ogg` |
+| `mob.ghast.death` / `charge` / `fireball` | `death.ogg`, `charge.ogg`, `fireball4.ogg` |
+
+Two details worth recording. `fireball4.ogg` is the real filename —
+there is no 1 through 3, and a plausible-looking rename to
+`fireball.ogg` would break the shot sound silently. And
+`affectionate scream.ogg` ships beside the ghast set but `am.java` never
+plays it, so it is deliberately not vendored — the same rule that keeps
+`infect`, `remedy`, `wood*` and `metal*` out of the zombie directory.
+
+**Alpha's SoundManager pools by numeric suffix**, resolving an event name
+to any file matching it plus a digit. The Batch 7-9 code assumed one
+file per event; it now uses pools, via a `_play_optional_pool_3d` that
+picks uniformly. Seven ghast moans is why a ghast never sounds like a
+loop.
+
+**The optional loader stays.** §11 asks for a silent-safe fallback and
+that requirement has not gone away — a build shipped without these
+assets should go quiet, not spam an engine error once per portal hum. Its
+one liability is that a broken path now fails SILENTLY, so
+`tests/test_nether_audio.gd` asserts all twenty-nine resolve to
+importable streams rather than trusting the silence.
+
+Attribution recorded in `assets/fonts/ATTRIBUTION.md` alongside the GUI
+textures, on the same personal/non-commercial study-project footing.

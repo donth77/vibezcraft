@@ -331,33 +331,69 @@ const _WATER_SWIM_SOUNDS: Array = [
 # Nether portal audio — Alpha's three `portal.*` events (x.java:129 for the
 # ambient hum, bq.java:36/41 for trigger and travel).
 #
-# These OGGs are NOT in the repo: Alpha shipped its sound set from
-# Mojang's resources server rather than the jar, and the plan
-# (nether-alpha-1.2.6-implementation-plan.md §11) anticipates that with
-# "provide silent-safe fallback if optional local Alpha audio is absent."
-# So the events are registered with their source volume and pitch
-# parameters and resolve to silence until the assets are dropped in at
-# these exact paths — no error spam, no missing-resource stall, and no
-# behaviour that depends on a sound having played.
+# Alpha shipped its sound set from Mojang's resources server rather than
+# the game jar, so `extract_alpha_pack.py` cannot produce these; they came
+# from a local extracted copy of that server payload, the same source the
+# zombie and skeleton clips already in this repo byte-match.
+#
+# They still route through the OPTIONAL loader rather than the ordinary
+# one. §11 asks for a silent-safe fallback, and a build whose audio is
+# missing should go quiet rather than spam engine errors — a portal hums
+# once every hundred display ticks, forever, and load() on an absent path
+# errors every call.
 const _PORTAL_AMBIENT_SOUND: String = "res://assets/audio/sfx/portal/portal.ogg"
 const _PORTAL_TRIGGER_SOUND: String = "res://assets/audio/sfx/portal/trigger.ogg"
 const _PORTAL_TRAVEL_SOUND: String = "res://assets/audio/sfx/portal/travel.ogg"
 
-# Zombie pigman — `pt.java` names four events. Absent from the repo for
-# the same reason as the portal sounds; see play_pigman_say.
-const _PIGMAN_SAY_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpig.ogg"
-const _PIGMAN_HURT_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpighurt.ogg"
-const _PIGMAN_DEATH_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigdeath.ogg"
-const _PIGMAN_ANGRY_SOUND: String = "res://assets/audio/sfx/mob/zombiepig/zpigangry.ogg"
+# Zombie pigman — `pt.java` names four events. Alpha's SoundManager
+# resolves an event name to any file matching it plus a number, so
+# `mob.zombiepig.zpig` is a four-clip pool and `zpigdeath` is a single
+# file. Vanilla filenames kept verbatim, same as the zombie set.
+const _PIGMAN_SAY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombiepig/zpig1.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpig2.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpig3.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpig4.ogg",
+]
+const _PIGMAN_HURT_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombiepig/zpighurt1.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpighurt2.ogg",
+]
+const _PIGMAN_DEATH_SOUNDS: Array = ["res://assets/audio/sfx/mob/zombiepig/zpigdeath.ogg"]
+const _PIGMAN_ANGRY_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/zombiepig/zpigangry1.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpigangry2.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpigangry3.ogg",
+	"res://assets/audio/sfx/mob/zombiepig/zpigangry4.ogg",
+]
 
 # Ghast — `am.java` names five events, all played at `h()` = 10.0f, the
-# loudest volume any entity uses. Absent from the repo like the rest of
-# the Nether sound set.
-const _GHAST_MOAN_SOUND: String = "res://assets/audio/sfx/mob/ghast/moan.ogg"
-const _GHAST_SCREAM_SOUND: String = "res://assets/audio/sfx/mob/ghast/scream.ogg"
-const _GHAST_DEATH_SOUND: String = "res://assets/audio/sfx/mob/ghast/death.ogg"
-const _GHAST_CHARGE_SOUND: String = "res://assets/audio/sfx/mob/ghast/charge.ogg"
-const _GHAST_FIREBALL_SOUND: String = "res://assets/audio/sfx/mob/ghast/fireball.ogg"
+# loudest volume any entity uses. Seven moans and five screams is a big
+# pool for one mob, and it is why a ghast never sounds like a loop.
+#
+# `fireball4.ogg` is the vanilla filename — there is no 1 through 3.
+# `affectionate scream.ogg` ships in the same directory and is
+# deliberately NOT copied: `am.java` references only these five events,
+# and its space would be a needless import hazard.
+const _GHAST_MOAN_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/ghast/moan1.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan2.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan3.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan4.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan5.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan6.ogg",
+	"res://assets/audio/sfx/mob/ghast/moan7.ogg",
+]
+const _GHAST_SCREAM_SOUNDS: Array = [
+	"res://assets/audio/sfx/mob/ghast/scream1.ogg",
+	"res://assets/audio/sfx/mob/ghast/scream2.ogg",
+	"res://assets/audio/sfx/mob/ghast/scream3.ogg",
+	"res://assets/audio/sfx/mob/ghast/scream4.ogg",
+	"res://assets/audio/sfx/mob/ghast/scream5.ogg",
+]
+const _GHAST_DEATH_SOUNDS: Array = ["res://assets/audio/sfx/mob/ghast/death.ogg"]
+const _GHAST_CHARGE_SOUNDS: Array = ["res://assets/audio/sfx/mob/ghast/charge.ogg"]
+const _GHAST_FIREBALL_SOUNDS: Array = ["res://assets/audio/sfx/mob/ghast/fireball4.ogg"]
 # `am.h()` returns 10.0f against the 1.0f every other mob uses. Twenty dB
 # is that ratio, clamped well below it so a ghast is unmistakably loud
 # without pinning the mixer.
@@ -966,10 +1002,7 @@ func play_zombie_step(pos: Vector3) -> void:
 
 # Zombie pigman — `pt.java`'s four `mob.zombiepig.*` events.
 #
-# Like the portal sounds, these OGGs are not in the repo (Alpha served
-# its sound set from Mojang's resources endpoint rather than the jar), so
-# they route through the optional loader and resolve to silence until the
-# files are dropped in. Plan section 11 requires exactly that fallback.
+# Same provenance and same optional-loader treatment as the portal set.
 #
 # The step pool is the ZOMBIE's. Alpha gives the pigman no step sounds of
 # its own — `lw` plays the block's own step sound — but this project
@@ -977,22 +1010,22 @@ func play_zombie_step(pos: Vector3) -> void:
 # the same body walking on the same blocks, so reusing it keeps the two
 # consistent rather than leaving one of them silent.
 func play_pigman_say(pos: Vector3) -> void:
-	_play_optional_3d(_PIGMAN_SAY_SOUND, pos, -1.0, _mob_pitch())
+	_play_optional_pool_3d(_PIGMAN_SAY_SOUNDS, pos, -1.0, _mob_pitch())
 
 
 func play_pigman_hurt(pos: Vector3) -> void:
-	_play_optional_3d(_PIGMAN_HURT_SOUND, pos, -1.0, _mob_pitch())
+	_play_optional_pool_3d(_PIGMAN_HURT_SOUNDS, pos, -1.0, _mob_pitch())
 
 
 func play_pigman_death(pos: Vector3) -> void:
-	_play_optional_3d(_PIGMAN_DEATH_SOUND, pos, -1.0, _mob_pitch())
+	_play_optional_pool_3d(_PIGMAN_DEATH_SOUNDS, pos, -1.0, _mob_pitch())
 
 
 # `pt.e_()` — volume `h() * 2.0f` (twice the normal mob volume, hence the
 # +6 dB) and pitch `((nextFloat() - nextFloat()) * 0.2f + 1.0f) * 1.8f`.
 # The 1.8x is what makes an angry pigman shriek rather than grunt.
 func play_pigman_angry(pos: Vector3) -> void:
-	_play_optional_3d(_PIGMAN_ANGRY_SOUND, pos, 5.0, _mob_pitch() * 1.8)
+	_play_optional_pool_3d(_PIGMAN_ANGRY_SOUNDS, pos, 5.0, _mob_pitch() * 1.8)
 
 
 func play_pigman_step(pos: Vector3) -> void:
@@ -1009,25 +1042,25 @@ func _mob_pitch() -> float:
 # Ghast. `d()` moan, `f_()` scream, `f()` death, plus the two combat
 # events fired from `b_()` at charge counters 10 and 20. All five use
 # `h()` = 10.0f and the standard `(nextFloat() - nextFloat()) * 0.2 + 1`
-# pitch jitter.
+# pitch jitter. Moan and scream are pools; the other three are one clip.
 func play_ghast_moan(pos: Vector3) -> void:
-	_play_optional_3d(_GHAST_MOAN_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+	_play_optional_pool_3d(_GHAST_MOAN_SOUNDS, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_ghast_scream(pos: Vector3) -> void:
-	_play_optional_3d(_GHAST_SCREAM_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+	_play_optional_pool_3d(_GHAST_SCREAM_SOUNDS, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_ghast_death(pos: Vector3) -> void:
-	_play_optional_3d(_GHAST_DEATH_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+	_play_optional_pool_3d(_GHAST_DEATH_SOUNDS, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_ghast_charge(pos: Vector3) -> void:
-	_play_optional_3d(_GHAST_CHARGE_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+	_play_optional_pool_3d(_GHAST_CHARGE_SOUNDS, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_ghast_fireball(pos: Vector3) -> void:
-	_play_optional_3d(_GHAST_FIREBALL_SOUND, pos, _GHAST_VOLUME_DB, _mob_pitch())
+	_play_optional_pool_3d(_GHAST_FIREBALL_SOUNDS, pos, _GHAST_VOLUME_DB, _mob_pitch())
 
 
 func play_skeleton_say(pos: Vector3) -> void:
@@ -1122,6 +1155,15 @@ func play_portal_trigger(pos: Vector3) -> void:
 # change dimension anyway.
 func play_portal_travel() -> void:
 	_play_optional_2d(_PORTAL_TRAVEL_SOUND, 0.0, 1.0)
+
+
+# Pool variant of _play_optional_3d. Alpha's SoundManager resolves an
+# event name to any file matching it plus a number and picks uniformly,
+# which is why a mob with seven moans never sounds like a loop.
+func _play_optional_pool_3d(paths: Array, pos: Vector3, volume_db: float, pitch: float) -> void:
+	if paths.is_empty():
+		return
+	_play_optional_3d(paths[randi() % paths.size()] as String, pos, volume_db, pitch)
 
 
 # Play a sound that may not be installed. Unlike the other helpers this
