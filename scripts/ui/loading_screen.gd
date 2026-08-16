@@ -1,9 +1,9 @@
 extends CanvasLayer
 
 # Alpha-style startup loading screen. Mirrors vendor/alpha-1.2.6-src/src/hu.java
-# (Minecraft's pre-Beta progress UI): tiled dirt background tinted 0x404040,
+# (MC's pre-Beta progress UI): tiled dirt background tinted 0x404040,
 # centered two-line title + status, and a 100×2-unit progress bar drawn at
-# 0x808080 border / 0x80FF80 fill. Vanilla's Minecraft.java:1012 calls it
+# 0x808080 border / 0x80FF80 fill. Vanilla calls it
 # with status = "Building terrain" during initial chunk population, which is
 # exactly when we need it — the synchronous pre-gen of 49 chunks at boot
 # was showing up as a gray-screen freeze.
