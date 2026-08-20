@@ -110,6 +110,10 @@ func setup(fuse_seconds: float = _DEFAULT_FUSE_SEC) -> void:
 
 
 func _ready() -> void:
+	# Swept by ChunkManager._free_dimension_scene on dimension travel —
+	# transient projectiles are non-persistable, so without the group a
+	# live one crossed portals as a ghost node (audit finding #5).
+	add_to_group("transient_projectile")
 	# Initialize ray query here so it exists even when callers add the
 	# entity to the tree BEFORE calling setup() (e.g. fire auto-prime in
 	# block_fire.gd). _ready runs at add_child time and used to crash when

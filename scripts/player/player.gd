@@ -2961,6 +2961,13 @@ func _tick_portal(delta: float) -> void:
 		if _portal_exposure.triggered_this_tick:
 			SFX.play_portal_trigger(global_position)
 		if travel:
+			DebugLog.add(
+				"PORTAL",
+				(
+					"travel fired at %v exposure=%.3f cooldown=%d"
+					% [global_position, _portal_exposure.exposure, _portal_exposure.cooldown]
+				)
+			)
 			_portal_tick_accum = 0.0
 			_begin_portal_travel()
 			return
@@ -2971,11 +2978,12 @@ func _tick_portal(delta: float) -> void:
 # so a single centre sample would miss a player crouched at the bottom of
 # the sheet.
 func _is_in_portal() -> bool:
-	if _portal_exposure.on_cooldown():
-		# bq.java:42 — the ten ticks after a trip. The player ARRIVES
-		# standing inside the destination portal; without this they would
-		# start filling again immediately and bounce back and forth.
-		return false
+	# No cooldown filtering here — the detector reports the raw truth and
+	# PortalExposure.advance applies vanilla's setInPortal gate (refresh
+	# the cooldown, tick as outside). Filtering here is what caused the
+	# arrival ping-pong loop: with in_portal forced false, the cooldown
+	# counted DOWN under the player's feet instead of refreshing, the
+	# meter refilled, and travel re-fired every ~2.5 s.
 	var cm: Node = _chunk_manager_ref
 	if cm == null or not is_instance_valid(cm):
 		cm = get_tree().get_root().find_child("ChunkManager", true, false)
@@ -3014,11 +3022,26 @@ func reset_pitch() -> void:
 		_camera.rotation.x = 0.0
 
 
-# Called by PortalTravel once the player is placed. Clears the meter and
-# arms the cooldown, so the destination portal they are standing inside
-# does not immediately start filling it again.
+# The HUD's portal overlay polls this each frame. Vanilla draws the
+# portal texture over the whole screen at alpha equal to the exposure
+# meter — plan §7.1's screen overlay.
+func portal_overlay_strength() -> float:
+	return clampf(_portal_exposure.exposure, 0.0, 1.0)
+
+
+# Called by PortalTravel once the player is placed. Vanilla does NOT
+# zero the meter on arrival — `bq.java`'s `c` rides through the
+# dimension switch at 1.0 and the ordinary 0.05/tick drain pulls it
+# down, which is the one-second purple fade-out the overlay shows in
+# the new world. Only the in-portal latch resets, and the cooldown
+# stops the destination portal from refilling the meter immediately —
+# stand still in it and it refills after the cooldown, which is
+# vanilla's portal ping-pong.
 func reset_portal_exposure() -> void:
-	_portal_exposure.reset()
+	_portal_exposure.in_portal = false
+	_portal_exposure.triggered_this_tick = false
+	_portal_exposure.travelled_this_tick = false
+	_portal_exposure.exposure = 1.0
 	_portal_exposure.cooldown = PortalExposure.COOLDOWN_TICKS
 	_portal_tick_accum = 0.0
 

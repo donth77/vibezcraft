@@ -76,6 +76,10 @@ func setup(shooter: Node, vel: Vector3, is_critical: bool) -> void:
 
 
 func _ready() -> void:
+	# Swept by ChunkManager._free_dimension_scene on dimension travel —
+	# transient projectiles are non-persistable, so without the group a
+	# live one crossed portals as a ghost node (audit finding #5).
+	add_to_group("transient_projectile")
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 	_player = get_tree().root.get_node_or_null("Main/Player")
 	_build_mesh()
@@ -328,6 +332,13 @@ func _sweep_entity_hit(from: Vector3, to: Vector3) -> bool:
 	# head-shot) instead of an RNG-random spot on the body.
 	var hit_pos: Vector3 = result.get("position", to) as Vector3
 	while node != null:
+		# Ghast fireball — deflects along the ARROW's own flight vector
+		# (full 3D, unlike an attacker's flattened look) and consumes the
+		# arrow; `az.a` discards the damage amount.
+		if node is GhastFireball:
+			node.take_damage(1, _velocity.normalized(), 1.0, null)
+			queue_free()
+			return true
 		if node is MobBase:
 			_hit_mob(node, hit_pos)
 			return true

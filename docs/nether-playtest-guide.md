@@ -202,7 +202,7 @@ calms down over time, it burns, or it drops its sword.
 | H6 | Break line of sight mid-charge (duck behind a pillar) | The charge winds back DOWN rather than resetting; the red fades |
 | H7 | Let a fireball hit terrain | A small explosion — about a third of TNT — and scattered fires on the exposed floor |
 | H8 | Hit a fireball with anything (sword, fist, arrow) | It reverses along your look direction |
-| H9 | Deflect one back into the ghast | It dies. Two hits kill one — it has 10 health, not 20 |
+| H9 | Deflect one back into the ghast | A point-blank power-1 blast is 9 damage against 10 health — it drops to its last half-heart. A second deflection or one arrow finishes it. (Alpha has no modern one-shot deflection kill) |
 | H10 | Shoot a ghast with a bow | Two arrows |
 | H11 | Set one on fire, or fly it into lava | Unharmed |
 | H12 | Kill one | 0–2 gunpowder. Never a ghast tear — those do not exist in Alpha |

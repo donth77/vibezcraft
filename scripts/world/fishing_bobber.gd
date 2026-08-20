@@ -57,6 +57,10 @@ var _last_light_brightness: float = -1.0
 # derived from look direction. We set up the visuals + initial velocity
 # here. Caller (interaction.gd) attaches us to the scene root.
 func setup(player: Node3D, chunk_manager: Node, camera_pos: Vector3, look_dir: Vector3) -> void:
+	# Swept by ChunkManager._free_dimension_scene on dimension travel —
+	# a cast bobber must not survive into the other dimension while the
+	# rod that owns it stays behind (audit finding #5).
+	add_to_group("transient_projectile")
 	_owner_player = player
 	_chunk_manager = chunk_manager
 	global_position = camera_pos

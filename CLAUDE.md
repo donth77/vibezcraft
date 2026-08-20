@@ -211,9 +211,12 @@ assets/
 ## Commands
 
 ```sh
-# Run
+# Run (normal boot: splash -> main menu -> world select)
+godot --path .
+MC_CLONE_TEXTURE_PACK=programmer_art godot --path .
+# Dev shortcut: skip the menu, load straight into World1 (Game.active_world
+# default) — note this loads AND autosaves the real World1
 godot --path . main.tscn
-MC_CLONE_TEXTURE_PACK=programmer_art godot --path . main.tscn
 
 # Rebuild native extension (needed after any change under src/)
 scons platform=macos target=template_debug -j8    # or linux / windows

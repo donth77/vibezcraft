@@ -332,6 +332,11 @@ func _save_world_with_indicator() -> void:
 	if chunk_manager != null and chunk_manager.has_method("flush_dirty_loaded"):
 		chunk_manager.flush_dirty_loaded()
 	SaveLoad.flush_all_regions()
+	# Portal hints (audit finding #6): without this, a portal lit this
+	# session and never travelled through was forgotten by the index on
+	# save-and-quit — invisible on reload, though travel still worked.
+	if PortalIndex.is_dirty(DimensionContext.active()):
+		PortalIndex.save()
 	if chunk_manager != null:
 		EntitySave.save_all(chunk_manager)
 	var player: Node3D = get_tree().get_root().find_child("Player", true, false) as Node3D

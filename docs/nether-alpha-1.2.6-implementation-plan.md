@@ -2392,3 +2392,284 @@ importable streams rather than trusting the silence.
 
 Attribution recorded in `assets/fonts/ATTRIBUTION.md` alongside the GUI
 textures, on the same personal/non-commercial study-project footing.
+
+### 17.12 Post-audit fixes (2026-08-19)
+
+A review pass over the shipped feature — reading the wiring against the
+source and against itself, at the seams between systems where the
+per-batch suites cannot look — produced sixteen verified findings, all
+now fixed. The full write-up lives in the audit artifact; this is the
+durable record of what changed and why.
+
+**The portal was meshed as a solid cube, with collision.**
+`Blocks.mesh_shape` had no PORTAL case and fell through to CUBE, and the
+native mesher's non-cube skip lists did not know id 206 — proven by
+probe: a 2×3 sheet added 80 vertices and 40 collision triangles to the
+chunk trimesh. The player physically could not enter a portal, so
+exposure never filled and travel was unreachable in-game; every Batch 7
+test had used FakeWorlds, and nothing ever meshed a chunk containing a
+portal. Fixed with `MESH_SHAPE_NONE`, PORTAL in all three native id
+lists (both cube-emission skips and the special-cells classifier), and
+PORTAL in the native opaque mirror, the fluid boundary-face rule and the
+flow-direction rule — without those three, neighbours would have culled
+their faces against the now-invisible portal, because the native mirror
+treats unknown ids as opaque. Pinned by the strongest available oracle:
+`test_portal_rendering` asserts a portal cell meshes IDENTICALLY to air,
+on both the reference and production paths. Requires the rebuilt
+`libmesher_native` (macos debug + release rebuilt; **the web wasm still
+carries the old code** and needs the emsdk rebuild before the next web
+export).
+
+**The fireball could not be hit.** It had no collider of any kind, so
+player melee and arrows — both `intersect_ray` — passed straight
+through; the deflection logic was correct, tested, and unreachable.
+It now carries a 1×1 ray-visible Area3D (`a(1.0f, 1.0f)`), the melee
+walk and the arrow walk both gained a GhastFireball branch (deflect
+along the full-3D camera look / the arrow's own flight vector; `az.a`
+discards the damage amount), and the fireball's own entity sweep
+excludes its own area. A direct hit on the PLAYER now uses the player's
+`(int, String, Vector3)` signature — the mob-style call was a runtime
+type error on every direct hit.
+
+**Explosions only ever damaged the player.** `_apply_entity_damage`
+predated mobs and was never revisited; creeper and TNT blasts never
+hurt another mob, and a deflected fireball could not hurt its ghast.
+Mobs now take the same falloff through a shared `_blast_damage` helper
+(player numbers byte-identical), with the `source` entity exempt.
+Recorded honestly: a point-blank power-1 blast is 9 damage against a
+ghast's 10 health — the last half-heart, NOT a kill. Alpha has no
+modern deflection-one-shot special case, and the playtest guide's H9
+originally overstated this.
+
+**Return portals were built floating at Y 70–118.** The site search was
+confined to the fallback band where vanilla scans the full column; an
+Overworld return (arriving at the player's unscaled Nether Y, below the
+surface) found no in-band site and conjured a sky platform. The search
+now covers Y 4–120 with every candidate competing on 3D distance (the
+per-column break also removed — it re-biased arrivals upward), and the
+fallback clamp is unchanged. Pinned by two tests: a floor at Y 40 wins
+over the band, and a 63-surface world puts the portal ON the surface
+with the ground beside the frame untouched.
+
+**Projectiles survived dimension travel.** Transient projectiles are
+deliberately non-persistable, which also meant the transition's entity
+sweep ignored them — a fireball mid-flight crossed the portal as a live
+node and detonated in the destination at its source coordinates.
+Fireball, arrow, snowball, primed TNT, fishing bobber and falling block
+all join a `transient_projectile` group in `_ready`/`setup`, and
+`_free_dimension_scene` sweeps the group globally (spawn parents vary).
+
+**The portal index is now durable and self-healing.** It was written
+only by dimension transitions — autosave and pause-quit lost it, and
+`rebuild_from_loaded` had no gameplay caller, so a portal lit and saved
+without travelling was invisible on reload (masked until now by the
+portal rendering as cubes). Autosave and the pause save both persist it
+dirty-checked, and `_index_portals_in_chunk` re-derives entries at the
+single chunk-materialization choke point — `PackedByteArray.find` is a
+native memchr, so the 99.9% of chunks with no portal pay one 32 KB scan.
+
+**Smaller fixes, each with its regression test where testable:** the
+`portal.travel` sound was ordered before `Game.is_loading` cleared and
+so could never play (reordered); index-hint chunks could be evicted by
+normal streaming during the travel transaction's awaited frames, so a
+distant known portal was occasionally missed and duplicated (hints are
+re-pinned synchronously before the search); ghast combat now steps its
+charge counter by the LOD tick scale with >=-crossing triggers, so the
+32–64 m band fires at vanilla cadence instead of quarter speed; a
+texture swap during a hurt flash updates the flash's captured originals
+instead of fighting it; lighting a portal no longer double-fires audio
+(the `portal.trigger` misuse in `BlockFire.place` removed — the event
+belongs to the exposure meter leaving zero); `PortalTravel` validates
+the player node after its awaited frames and guards its save under the
+same headless rule as every other disk path; flying mobs no longer sink
+in fluids (`ot.java`'s liquid branch is drag-only); slimes are gated by
+an explicit `has_slime_spawns` provider flag rather than the
+"species list is empty" convention; and pack-expansion spawn cells are
+re-checked against `bg.java`'s 24-block player exclusion at enqueue and
+at drain.
+
+Full suite green after the pass, with the new regression tests included.
+
+### 17.13 Playtest follow-ups (2026-08-19)
+
+**The §7.1 screen overlay had never been implemented — and the audit
+missed it too.** The plan's line "Add the screen overlay/transition
+effect" covers two things; Batch 7 shipped the transition (loading
+screen) and silently skipped the overlay, and the audit's seam-focused
+pass re-verified mechanisms rather than re-reading §7.1's presentation
+list, so it sailed through both. Now implemented as
+`scripts/ui/portal_overlay.gd` in the HUD scene, drawing the shared
+PortalTexture frames fullscreen at alpha = the exposure meter, exactly
+as Alpha's GuiIngame does. `reset_portal_exposure` was corrected with
+it: vanilla's meter rides through the dimension switch at 1.0 and the
+ordinary 0.05/tick drain produces the one-second purple fade-out on
+arrival — zeroing it on arrival (the previous behaviour) killed that
+fade and, with the overlay present, would have snapped the screen clear.
+
+**The click-to-doorway chain now has an end-to-end test.** A live
+playtest report of an invisible portal exposed that every prior test
+checked one link; `test_lighting_a_frame_produces_visible_instances`
+runs fire placement → `BlockFire.place` → `try_create` → index →
+renderer and asserts six drawn instances with the shared material and
+an opaque texture. A companion test pins that fire placed mid-air
+against a side column does NOT light the frame — `qh.java` requires
+obsidian directly below the fire cell, so that "nothing happened" is
+vanilla, not a bug. The chain is green; the field report is consistent
+with a session predating the mesher fix, where the portal rendered as a
+solid cube wearing the blank static atlas tile — invisible but
+impassable.
+
+**Obsidian had drifted to later-version numbers.** `nq.java:72` is
+`.c(10.0f).b(2000.0f)`: hardness 10 in Alpha — ≈1.9 s with a diamond
+pickaxe, 50 s bare-handed — where the shipped 50/250 encoded the
+later-version buff (a test even asserted the drifted value). Resistance
+2000, diamond-only harvest (level 3), 1:1 drop and the water-on-source
+→ obsidian / water-on-flowing → cobblestone formation were all verified
+correct against `cw.java` and `ld.java:223-254`; hardness and the
+derived bare-hand time were the only two numbers off, both now fixed
+with citations.
+
+**The portal destroyed itself the moment it was lit — in the real game
+only.** Field report from the playtest: fresh worlds, frame lights,
+nothing appears, the doorway is walkable. Root cause: this project's
+`set_world_block` notifies the WRITTEN CELL ITSELF (`_NOTIFY_OFFSETS`
+includes zero) and drains synchronously, so `try_create`'s per-cell fill
+had each portal cell re-validate while its column was one block tall —
+invalid by definition — and erase itself before its column-mates were
+written. The sheet never existed. Vanilla forecloses exactly this:
+`x.java:65-71` and `no.java:202-212` bracket their portal writes with
+`cy2.i = true` (editingBlocks), a line that was READ during Batch 7 and
+not ported. Now ported as `ChunkManager.begin/end_block_edit`, guarded
+in `enqueue_block_notification` precisely where vanilla's `cy.h()`
+checks the flag, and bracketing the fire-lit fill, arrival-frame
+construction and the fallback platform. Why nothing caught it: every
+portal test — all 26 of them, plus the end-to-end chain test written in
+response to the first report — used FakeWorld doubles, and no double
+reproduces the synchronous notify-and-revalidate cascade. Two
+regression tests now run the whole thing on a REAL ChunkManager:
+lighting survives its own creation, and breaking the frame still
+dissolves the sheet through the same drain the suppression brackets.
+
+**Arrival froze the player inside the destination portal, then bounced
+them straight back — an infinite enter/leave loop.** Second field
+report, World 2. Chain: `_spawn_chunk_sync`'s FRESH branch materialized
+the chunk node but left its first mesh+collision queued in
+`_pending_apply` (drained one per frame), so the moment `_finish`
+cleared `Game.is_loading` the player was standing on a chunk whose
+collision shape was still null. The ground-readiness guard did its job —
+froze velocity for up to 4 s — but the exposure meter arrives at 1.0
+(the vanilla purple fade-out), drains 0.5 over the 10-tick cooldown and
+refills in 40 more ticks: bounce-back at ~2.5 s, well inside the freeze.
+The player never held control for a single tick. Fix in two parts, both
+at the arrival boundary rather than in the guard: `_spawn_chunk_sync`
+now force-applies pending mesh+collision on BOTH branches (the resident
+branch already did; the comment on the function always promised "fully
+usable"), and `PortalTravel` calls the new
+`ChunkManager.refresh_collision_activity()` after placing the player —
+the per-frame activation sweep only fires on a cached-chunk CHANGE, and
+an arrival needs the ground active the same frame control returns.
+Regression: `test_spawn_chunk_now_delivers_live_collision_immediately`
+runs the real fresh-spawn path and asserts `has_live_collision` with no
+frames idled.
+
+**Lighting the frame hitched.** Two independent costs on the ignition
+frame: six unbatched emission-11 light floods (each portal cell ran its
+own synchronous BFS), and the first-portal lazy build of the particle
+emitters — CPUParticles node setup plus particle-shader compile. The
+floods now converge through one `begin_batch`/`end_batch` bracket per
+fill (the same multi-source pass explosions use), nested inside the
+existing `begin/end_block_edit` brackets in `try_create`, `build_frame`
+and `_build_platform`; the emitter pool is built dormant in
+`PortalRenderer._ready`.
+
+**The particles were flat pink squares, and far too many of them.** Two
+misreadings of vanilla. Look: `jd.java` particles are SMOKE TILES
+(random tile 0-7 of particles.png row 0) tinted purple per particle by
+`nextFloat() * 0.6 + 0.4` — the old renderer drew untextured quads in
+one flat color. Count: `x.java:133` spawns four per animateTick HIT, but
+animateTick samples 1000 random cells per tick from a ±16 TRIANGULAR
+distribution around the player — a portal cell a few blocks away is hit
+~0.1-0.25 times a tick, for a steady state of ~20-40 motes per cell. The
+old 176-per-cell constant assumed a hit every tick and rendered 1056
+quads per portal. Now: AtlasTexture smoke row (FluidFx's largesmoke
+recipe), `color_initial_ramp` dim→bright purple reproducing the f2 roll,
+random fixed anim frame per particle, negative radial acceleration
+approximating jd.java's ease-out-and-return drift, 28 per emitter at
+vanilla's 0.10-0.14 world size.
+
+**Portal audio, for the record:** all three sounds were already wired
+and ordered correctly — hum (1-in-100 per display tick per cell, 3D pool
+with 16 m falloff), trigger (the tick exposure leaves zero), travel
+(after `_finish`, because the optional-sound players gate on
+`Game.is_loading`). The freeze/loop chaos is the likely reason none of
+it registered; nothing to change until a report survives the fixes
+above.
+
+**The enter/leave loop survived the collision fix — the real cause was
+an anti-bounce inversion (2026-08-19, second field report).** The
+collision force-apply above was a real latent bug but NOT the loop's
+mechanism. The actual defect: vanilla anti-bounce lives in
+`Entity.setInPortal` — while the ten-tick post-travel cooldown runs,
+standing inside REFRESHES it and the tick proceeds as "outside" (the
+meter drains, the purple fades, and the cooldown can only expire once
+the player steps out). Our port split that guard across two components
+that each disabled the other: `PortalExposure.advance()` had a
+refresh-while-inside branch, but `player._is_in_portal()` returned
+false during cooldown — so the state machine was told the player was
+outside, the cooldown counted DOWN under their feet, the meter drained
+to 0.5 and refilled, and travel re-fired every ~2.5 s. Forever, in both
+dimensions. The refresh branch was unreachable dead code. Why the test
+lied: `test_standing_in_the_arrival_portal_never_bounces_back` drove
+the state machine directly, bypassing the lying detector — the same
+unit-vs-integration blind spot as the editingBlocks bug. Fix: the
+detector now reports raw truth and `advance()` normalizes with
+vanilla's setter semantics (`if in_portal and cooldown > 0: refresh,
+tick as outside`); the never-bounce test now pins the vanilla-true
+contract (meter DRAINS to zero while standing inside — it must never
+refill underfoot), plus a 400-tick arrival-state regression covering
+the exact state PortalTravel leaves behind. Travel begin/arrival now
+leave `[PORTAL]` DebugLog breadcrumbs so the next field report carries
+data. Note for reproduction reports: engine log rotation destroyed the
+session log for this report — rescue `user://logs/` before running any
+headless command during a bug hunt.
+
+**Third field report cracked it — the arrival was PARALYZED BY
+PENETRATION, and it took a full-game headless repro harness to see it
+(2026-08-19).** Symptom unchanged across three reports: arrive in the
+Nether, cannot move, cannot walk out. The session logs showed perfect
+arrivals (doorway-centred landing, live collision) and then total
+silence — no guard freeze, no falls, no bounce. A scratchpad harness
+that boots the REAL game headless (`main.tscn` under a SceneTree
+script), builds and lights a real portal, lets the real exposure meter
+fire the real travel, then injects real `move_forward` input,
+reproduced it on the first run: walk velocity set, gravity
+accumulating to -144 m/s, displacement 0.000000 over 240 frames.
+Physics probes narrowed it in three steps: the block data around the
+player was a perfect open doorway; the encasing StaticBody was the
+CURRENT chunk's own collision (no orphan, no stale node); and the
+capsule's FEET were at y = cell + 0.5 - 0.9. The root cause is a
+coordinate-convention mismatch: `arrival_position` returned
+`cell.y + 0.5` — a feet-origin convention — but the player body's
+origin is its capsule CENTRE (half-height 0.9), so every arrival sank
+the body 0.4 m into the frame's floor row. Deep symmetric penetration
+is unresolvable for move_and_slide: zero motion on every axis, no
+depenetration jitter, silent forever. Fix: landing y =
+`cell.y + 0.901` (floor top + half height + skin — the voxel floor
+guard's own convention), applied to `arrival_position` and the
+unfindable-frame fallback; the repro then walked 10.2 m out of the
+portal. Two of the earlier fixes were masking layers of this: with no
+live collision the ground guard froze the player (report #1's loop),
+and with the exposure inversion the meter yanked them back (report
+#2); only when both were fixed did the embed paralysis surface clean.
+Also fixed en route: portal construction never triggered a remesh
+(`set_world_block` leaves meshing to the caller) — the carved doorway
+existed only in block data while the chunk still meshed and collided
+as virgin terrain; `build_frame` and `_build_platform` now call the
+new `ChunkManager.rebuild_chunk_now` (same-frame mesh + collision, the
+`_flush_immediate_rebuild` contract) for every touched chunk.
+Regression tests pin the landing convention (`test_arrival_lands_the_
+capsule_above_the_floor_not_inside_it`) and the two stale `+0.5` pins
+were corrected — they had encoded the bug as truth, the third time a
+test faithfully guarded broken behavior. The harness lives in the
+session scratchpad (`repro/nether_move_repro.gd`); worth promoting to
+`scripts/dev/` if arrival bugs recur.
