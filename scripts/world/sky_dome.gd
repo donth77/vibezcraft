@@ -53,6 +53,8 @@ var _moon: MeshInstance3D
 var _sun: MeshInstance3D
 var _cloud_plane: MeshInstance3D
 var _cloud_material: ShaderMaterial
+# Latched so the visibility writes only happen on a dimension change.
+var _sky_bodies_shown: bool = true
 # Debug probe: throttled log counter. Fires when Game.debug_clouds is on.
 var _debug_clouds_last_print_ms: int = 0
 var _debug_clouds_stats_printed: bool = false
@@ -95,6 +97,19 @@ func _process(_delta: float) -> void:
 	# rendered into the ground from the player's actual POV at (8, 100, 8).
 	if _player == null:
 		_player = get_node_or_null(player_path) as Node3D
+	# A dimension with no sky shows no sky. Vanilla's Nether reports
+	# hasNoSky and renders no sun, no moon and no cloud layer — only the
+	# fog. Checked here rather than in _ready because the dome is built
+	# once and outlives every dimension switch.
+	var lit_sky: bool = DimensionContext.active_provider().has_sky_light
+	if lit_sky != _sky_bodies_shown:
+		_sky_bodies_shown = lit_sky
+		if _sun != null:
+			_sun.visible = lit_sky
+		if _moon != null:
+			_moon.visible = lit_sky
+		if _cloud_plane != null:
+			_cloud_plane.visible = lit_sky
 	# Sky dome follows the player in ALL three axes so the celestial
 	# sphere always appears centered on the camera. Pivot then rotates
 	# the sun/moon around the player's position.

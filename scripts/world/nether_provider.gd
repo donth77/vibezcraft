@@ -45,6 +45,9 @@ func _init() -> void:
 	# `s = new Class[0]`.
 	natural_hostile_species = PackedStringArray(["zombie_pigman", "ghast"])
 	has_passive_spawns = false
+	# Slimes appear on no Nether list either — k.java names exactly the
+	# two species above.
+	has_slime_spawns = false
 	# Neither Nether species inherits EntityMonster's light gate — see
 	# WorldProvider.hostile_spawns_use_light_gate.
 	hostile_spawns_use_light_gate = false

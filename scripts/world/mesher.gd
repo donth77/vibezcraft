@@ -321,6 +321,11 @@ static func _emit_special_cell(
 		_emit_lever_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_BED:
 		_emit_bed_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_NONE:
+		# Portal — drawn by PortalRenderer, not the chunk mesh. Nothing is
+		# emitted, INCLUDING collision; the pinned oracle is that a portal
+		# cell meshes identically to air (test_portal_rendering).
+		pass
 
 
 # Merge locally-emitted non-cube arrays into a mesh result dict, shifting

@@ -37,7 +37,15 @@ func test_break_time_bare_hand() -> void:
 	assert_gt(
 		Blocks.break_time_bare_hand(Blocks.STONE), 5.0, "stone painfully slow without pickaxe"
 	)
-	assert_gt(Blocks.break_time_bare_hand(Blocks.OBSIDIAN), 100.0, "obsidian extreme")
+	# nq.java:72 — Alpha obsidian is hardness 10, so bare hands take
+	# 10 × 5 = 50 s. The old "> 100" expectation encoded the later-version
+	# hardness-50 buff (250 s), which had drifted in.
+	assert_almost_eq(
+		Blocks.break_time_bare_hand(Blocks.OBSIDIAN),
+		50.0,
+		0.01,
+		"obsidian: 50 s bare-handed in Alpha"
+	)
 
 
 func test_drops_alpha_faithful() -> void:

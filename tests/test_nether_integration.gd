@@ -64,6 +64,28 @@ func _bind_chunk(coord: Vector2i) -> Chunk:
 	return chunk
 
 
+# --- Sync-spawn collision contract ---
+
+
+func test_spawn_chunk_now_delivers_live_collision_immediately() -> void:
+	# The arrival freeze / enter-leave loop: a FRESH sync spawn queued its
+	# first mesh+collision through _pending_apply (drained 1/frame), so a
+	# portal arrival regained control standing on a chunk whose collision
+	# shape was still null — the ground guard froze the player inside the
+	# portal while the exposure meter refilled and bounced them back.
+	# "Sync" must mean live collision on the same call, no frames idled.
+	# The bare-new harness has no scene-assigned chunk_scene export.
+	_cm.chunk_scene = load("res://scenes/world/chunk.tscn")
+	_cm.spawn_chunk_now(Vector2i(0, 0))
+	var node: Node3D = _cm._chunks.get(Vector2i(0, 0))
+	assert_not_null(node, "chunk materialized synchronously")
+	assert_true(bool(node.call("has_live_collision")), "collision shape live on return")
+	assert_true(
+		_cm.is_ground_ready_at(Vector3(8.0, 64.0, 8.0)),
+		"the player ground guard would release immediately"
+	)
+
+
 # --- Dimension isolation ---
 
 
@@ -360,6 +382,100 @@ func test_tile_entity_state_does_not_cross() -> void:
 	assert_gt(ChestStorage.get_active_chunks().size(), 0, "a chest exists")
 	_cm.transition_to_dimension(DimensionContext.NETHER, Vector3(8, 80, 8))
 	assert_eq(ChestStorage.get_active_chunks().size(), 0, "and the Nether starts with none of it")
+
+
+# --- The portal on a REAL manager (the bug every FakeWorld hid) ---
+
+
+func test_lighting_a_portal_survives_the_real_notification_drain() -> void:
+	# The field bug: ChunkManager notifies the written cell itself and
+	# drains SYNCHRONOUSLY, so each portal cell self-validated while its
+	# column was one tall and erased itself the moment it was written —
+	# the sheet never existed. Vanilla brackets the fill with
+	# `cy2.i = true` (x.java:65-71), now ported as begin/end_block_edit.
+	# Every FakeWorld double has no notification cascade, which is why
+	# 26 portal tests passed while the real game destroyed the portal.
+	var chunk: Chunk = _bind_chunk(Vector2i(0, 0))
+	for along: int in range(4):
+		for up: int in range(5):
+			if along == 0 or along == 3 or up == 0 or up == 4:
+				chunk.set_block(3 + along, 64 + up, 5, Blocks.OBSIDIAN)
+	var lit: bool = BlockFire.place(_cm, Vector3i(4, 65, 5))
+	assert_true(lit, "the flint click lit a portal, not a fire")
+	for along: int in range(2):
+		for up: int in range(3):
+			assert_eq(
+				_cm.get_world_block(Vector3i(4 + along, 65 + up, 5)),
+				Blocks.PORTAL,
+				"cell (%d, %d) SURVIVED its own creation" % [along, up]
+			)
+	assert_eq(PortalIndex.count(DimensionContext.OVERWORLD), 2, "and the index kept both columns")
+
+
+func test_breaking_the_frame_still_dissolves_it_through_the_real_drain() -> void:
+	# The suppression must be a bracket, not a switch left on: the very
+	# same synchronous drain is what dissolves a sheet when its frame
+	# breaks, and that direction has to keep working.
+	var chunk: Chunk = _bind_chunk(Vector2i(0, 0))
+	for along: int in range(4):
+		for up: int in range(5):
+			if along == 0 or along == 3 or up == 0 or up == 4:
+				chunk.set_block(3 + along, 64 + up, 5, Blocks.OBSIDIAN)
+	assert_true(BlockFire.place(_cm, Vector3i(4, 65, 5)), "lit")
+	# Break one side-column obsidian through the real write path.
+	_cm.set_world_block(Vector3i(3, 65, 5), Blocks.AIR)
+	var survivors: int = 0
+	for along: int in range(2):
+		for up: int in range(3):
+			if _cm.get_world_block(Vector3i(4 + along, 65 + up, 5)) == Blocks.PORTAL:
+				survivors += 1
+	assert_eq(survivors, 0, "the whole sheet dissolved cell by cell")
+	assert_eq(PortalIndex.count(DimensionContext.OVERWORLD), 0, "and the index forgot it")
+
+
+# --- Post-audit: projectiles and the index heal ---
+
+
+func test_projectiles_do_not_survive_a_transition() -> void:
+	# Audit finding #5: transient projectiles are non-persistable, so the
+	# entity sweep ignored them and a fireball mid-flight crossed the
+	# portal as a live node, detonating in the destination dimension at
+	# its source coordinates.
+	var ball: Node3D = GhastFireball.new()
+	_cm.add_child(ball)
+	ball.global_position = Vector3(10, 80, 10)
+	var snowball: Node3D = SnowballProjectile.new()
+	_cm.add_child(snowball)
+	snowball.global_position = Vector3(12, 80, 10)
+	_cm.transition_to_dimension(DimensionContext.NETHER, Vector3(8, 80, 8))
+	assert_true(ball.is_queued_for_deletion(), "the fireball was swept")
+	assert_true(snowball.is_queued_for_deletion(), "and the snowball")
+
+
+func test_a_streamed_chunk_heals_the_portal_index() -> void:
+	# Audit finding #6: the index was written only by transitions, so a
+	# portal saved via autosave or pause-quit was forgotten on reload and
+	# the renderer drew nothing. Chunks now re-derive their entries as
+	# they materialize.
+	var chunk := Chunk.new()
+	for a: int in range(2):
+		for up: int in range(3):
+			chunk.set_block(4 + a, 64 + up, 9, Blocks.PORTAL)
+	assert_eq(PortalIndex.count(DimensionContext.OVERWORLD), 0, "index starts empty")
+	_cm._index_portals_in_chunk(Vector2i(2, -1), chunk)
+	assert_eq(PortalIndex.count(DimensionContext.OVERWORLD), 2, "one entry per column")
+	assert_has(
+		PortalIndex.entries(DimensionContext.OVERWORLD),
+		Vector3i(2 * 16 + 4, 64, -1 * 16 + 9),
+		"bottom cell, in world coordinates, negative chunk handled"
+	)
+
+
+func test_the_heal_scan_ignores_portal_free_chunks() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(4, 64, 4, Blocks.NETHERRACK)
+	_cm._index_portals_in_chunk(Vector2i(0, 0), chunk)
+	assert_eq(PortalIndex.count(DimensionContext.OVERWORLD), 0, "nothing to record")
 
 
 # --- Content registry ---

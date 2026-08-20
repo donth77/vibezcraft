@@ -135,6 +135,12 @@ public:
 	static constexpr int STONE_BUTTON = 94;
 	static constexpr int STONE_PRESSURE_PLATE = 95;
 	static constexpr int WOODEN_PRESSURE_PLATE = 96;
+	// Nether portal — WORLD-ONLY and mesh-invisible. The chunk mesh emits
+	// NOTHING for it (PortalRenderer draws the animated sheet), and it is
+	// non-opaque so neighbours keep their faces and fluids keep their
+	// boundary faces against it. Mirrors Blocks.MESH_SHAPE_NONE +
+	// Blocks.is_opaque()'s exclusion.
+	static constexpr int PORTAL = 206;
 	// Beta 1.3 wood + cobblestone slab variants — same half-height
 	// mesh as HALF_SLAB but with planks / cobblestone textures.
 	// Native skips the cube pass so GDScript _emit_slab_geometry owns

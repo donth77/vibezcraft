@@ -622,6 +622,12 @@ const MESH_SHAPE_REDSTONE_WIRE: int = 16
 const MESH_SHAPE_BUTTON: int = 17
 # Pressure plate — a flat pad on the floor, thinner when pressed.
 const MESH_SHAPE_PRESSURE_PLATE: int = 18
+# Emits NOTHING — no faces, no collision triangles. The portal's visual
+# is PortalRenderer's shared MultiMesh, and its "collision" is the
+# absence of one (x.java returns a null box; walking in is the whole
+# mechanic). Routing it through the special-cell path with no branch is
+# what guarantees the chunk mesh contributes zero geometry for it.
+const MESH_SHAPE_NONE: int = 19
 
 # --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
 #
@@ -1916,6 +1922,11 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_BUTTON
 	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
 		return MESH_SHAPE_PRESSURE_PLATE
+	if id == PORTAL:
+		# Falling through to CUBE here gave the portal solid geometry AND
+		# chunk collision — the player could never step into one, which
+		# made travel unreachable in-game (audit finding #1).
+		return MESH_SHAPE_NONE
 	return MESH_SHAPE_CUBE
 
 
@@ -2126,7 +2137,10 @@ static func hardness(id: int) -> float:
 			# through the same constructor chain).
 			return 3.0
 		OBSIDIAN:
-			return 50.0
+			# nq.java:72 — `new cw(49, 37).c(10.0f)`. Hardness 10 in Alpha
+			# (≈1.9 s with a diamond pickaxe); the famous 50 is a
+			# later-version buff and had drifted in here.
+			return 10.0
 		PUMPKIN, JACK_O_LANTERN:
 			# Vanilla BlockPumpkin / BlockPumpkinLantern both `c(1.0f)`.
 			# Axe-preferred but breakable by hand.
@@ -2357,7 +2371,7 @@ static func break_time_bare_hand(id: int) -> float:
 		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			return 15.0  # ores are tougher than stone — wood-pick takes ~2.5s
 		OBSIDIAN:
-			return 250.0  # only diamond pickaxe is practical
+			return 50.0  # 10 hardness × 5 (no-tool penalty) — Alpha's 10, not the later 50
 	return 1.5
 
 

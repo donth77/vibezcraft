@@ -237,7 +237,11 @@ static func ignite(manager, pos: Vector3i) -> void:
 static func place(manager, pos: Vector3i) -> bool:
 	if manager.get_world_block(pos + Vector3i(0, -1, 0)) == Blocks.OBSIDIAN:
 		if NetherPortal.try_create(manager, pos):
-			SFX.play_portal_trigger(Vector3(pos) + Vector3(0.5, 0.5, 0.5))
+			# No sound here: the flint-and-steel click already played from
+			# the interaction, and `portal.trigger` belongs to the
+			# EXPOSURE meter leaving zero (bq.java:36) — playing it on
+			# ignition doubled the audio and misused the event (audit
+			# finding #12).
 			return true
 	manager.set_world_block_with_meta(pos, Blocks.FIRE, 0)
 	TickScheduler.schedule(pos, Blocks.FIRE, TICK_RATE)

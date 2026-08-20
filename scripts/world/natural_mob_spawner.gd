@@ -189,8 +189,11 @@ func _run_spawn_pass() -> void:
 	# because they're deep underground anyway.
 	# Slimes are not on any Nether list — `k.java` names ghast and pigman
 	# and nothing else — and this path deliberately bypasses the normal
-	# pool, so it needs its own gate.
-	if DimensionContext.active_provider().natural_hostile_species.is_empty():
+	# pool, so it needs its own gate. An explicit provider flag rather
+	# than "the species list is empty": that convention would have
+	# silently killed Overworld slimes the day the Overworld gained an
+	# explicit list (audit finding #15).
+	if DimensionContext.active_provider().has_slime_spawns:
 		for _i in range(_SLIME_ATTEMPTS_PER_TICK):
 			_try_spawn_slime(manager, player)
 	# Normal hostile pass. The per-cell effective-light check below is the
@@ -204,6 +207,8 @@ func _run_spawn_pass() -> void:
 	while not _pack_queue.is_empty() and _spawns_this_tick < _MAX_SPAWNS_PER_TICK:
 		var entry: Array = _pack_queue.pop_front()
 		var queued_cell: Vector3i = entry[1] as Vector3i
+		if not _outside_player_exclusion(player, queued_cell):
+			continue
 		if _is_valid_spawn_cell_for(manager, entry[0] as Script, queued_cell):
 			_spawn_mob_at(manager, entry[0] as Script, queued_cell)
 	# Then new seed rolls if budget remains.
@@ -268,6 +273,8 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 			0,
 			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ)
 		)
+		if not _outside_player_exclusion(player, pack_cell):
+			continue
 		if _is_valid_spawn_cell_for(manager, mob_script, pack_cell):
 			_pack_queue.append([mob_script, pack_cell])
 	# Bound the queue so a runaway frame can't pile up hundreds of
@@ -348,6 +355,18 @@ func _species_descriptor(mob_script: Script) -> Dictionary:
 			probe.free()
 	_species_cache[mob_script] = descriptor
 	return descriptor
+
+
+# `bg.java` rejects any spawn attempt within 24 blocks of a player. The
+# seed ring already starts at 24, but pack jitter is ±5 per hop with up
+# to three hops, so an expansion cell could land inside the ring (audit
+# finding #16). Checked at enqueue AND at drain — the player moves
+# between the two.
+func _outside_player_exclusion(player: Node3D, cell: Vector3i) -> bool:
+	if player == null or not is_instance_valid(player):
+		return true
+	var centre: Vector3 = Vector3(cell) + Vector3(0.5, 0.0, 0.5)
+	return centre.distance_squared_to(player.global_position) >= 24.0 * 24.0
 
 
 # gdlint: disable=max-returns

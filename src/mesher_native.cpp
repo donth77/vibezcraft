@@ -90,7 +90,8 @@ static inline bool cube_needs_alpha_test(int id) {
 static inline bool is_fluid_face_emit_target(int neighbor_id, bool self_is_lava) {
 	if (neighbor_id == MesherNative::AIR || neighbor_id == MesherNative::LEAVES
 			|| neighbor_id == MesherNative::GLASS
-			|| neighbor_id == MesherNative::SAPLING) {
+			|| neighbor_id == MesherNative::SAPLING
+			|| neighbor_id == MesherNative::PORTAL) {
 		return true;
 	}
 	return self_is_lava ? is_water_id(neighbor_id) : is_lava_id(neighbor_id);
@@ -362,6 +363,7 @@ static Vector2 fluid_flow_vector(const uint8_t *blocks_ptr, const uint8_t *meta_
 					&& nid != MesherNative::STONE_BUTTON
 					&& nid != MesherNative::STONE_PRESSURE_PLATE
 					&& nid != MesherNative::WOODEN_PRESSURE_PLATE
+					&& nid != MesherNative::PORTAL
 					&& !n_is_water && !n_is_lava);
 			if (n_opaque) {
 				continue;
@@ -634,7 +636,7 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
 					continue;
 				}
 
@@ -666,7 +668,7 @@ Dictionary MesherNative::mesh_chunk_data(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -912,7 +914,7 @@ Dictionary MesherNative::mesh_lit_core(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
 					continue;
 				}
 				const float block_alpha_test = cube_needs_alpha_test(id) ? 1.0f : 0.0f;
@@ -945,7 +947,7 @@ Dictionary MesherNative::mesh_lit_core(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -1431,7 +1433,7 @@ void MesherNative::append_noncube_pass(Dictionary &result,
 							|| id == HALF_SLAB || id == WOOD_HALF_SLAB
 							|| id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING
 							|| id == SIGN_WALL || id == FENCE_GATE || id == RAIL
-							|| id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE) {
+							|| id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
 						// Player-built shapes stay GDScript — returned in scan
 						// order for Mesher._append_special_cells.
 						special_cells.append(idx);

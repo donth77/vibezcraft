@@ -118,6 +118,13 @@ var has_passive_spawns: bool = true
 # a lava-lit hall exactly as readily as in a dark one.
 var hostile_spawns_use_light_gate: bool = true
 
+# Whether the slime path runs here. Slimes bypass the normal hostile
+# pool entirely (no light gate, no night gate, their own per-tick pass),
+# so the pool swap alone cannot exclude them — and keying this on "the
+# species list is empty" made Overworld slimes hostage to a convention
+# (audit finding #15). An explicit flag says what it means.
+var has_slime_spawns: bool = true
+
 # `gy.java` — `a(cz.class, 100)`. The per-type hostile threshold is
 # `100 * eligible_chunks / 256`, and `bg.java` skips only when the count
 # is GREATER than it, so a group that starts under the line may finish

@@ -147,6 +147,12 @@ func test_the_nether_has_no_passive_list_at_all() -> void:
 	assert_true(
 		DimensionContext.provider(_OVERWORLD).has_passive_spawns, "the Overworld still has them"
 	)
+	# Slimes are their own path (no light gate, no pool) and their own
+	# flag — an explicit declaration, not the "species list is empty"
+	# convention that would have broken the day the Overworld gained an
+	# explicit list (audit finding #15).
+	assert_false(DimensionContext.provider(_NETHER).has_slime_spawns, "no Nether slimes")
+	assert_true(DimensionContext.provider(_OVERWORLD).has_slime_spawns, "Overworld slimes intact")
 
 
 func test_the_passive_spawner_refuses_to_tick_in_the_nether() -> void:

@@ -186,6 +186,16 @@ var _inside_fluid_notify: bool = false
 var _notify_queue: Array[Vector4i] = []
 var _notify_queued: Dictionary = {}
 var _notify_draining: bool = false
+# Vanilla `cy.i` (editingBlocks) — true while a multi-block structure is
+# being written cell by cell, so no neighbour update can observe it
+# half-built. x.java:65-71 brackets the portal fill with it and
+# no.java:202-212 brackets portal construction; without it, the portal's
+# own per-cell self-validation fired synchronously on the FIRST written
+# cell — a one-tall column, invalid by definition — and erased every
+# cell the moment it was born. The sheet never existed: walkable,
+# invisible, no travel. Every unit test passed because FakeWorld doubles
+# have no notification cascade.
+var _editing_blocks: bool = false
 
 # Per-world redstone-torch burnout entries ({pos, tick}); see
 # redstone_burnout_log().
@@ -702,6 +712,29 @@ func _snapshot_neighbor_edge_planes(coord: Vector2i) -> Dictionary:
 	if south != null:
 		planes["south"] = south.north_edge_slices()
 		signature["south"] = [south.get_instance_id(), south.lighting_revision]
+	# A dimension with no sky has to spell that out at its frontier. Every
+	# resident Nether cell is sky_light 0 (Lighting.fill_sky_light zeroes the
+	# channel), but an ABSENT neighbour falls back to the OOB default of 15 —
+	# "unloaded chunks are fully sky-lit", which is right for the Overworld
+	# and maximally wrong here. The result is a full-bright face on every
+	# chunk border against pitch-dark terrain: the lit grid standing out
+	# across the Nether. Hand the mesher an explicitly dark sky plane instead.
+	#
+	# Only the sky plane is synthesised. Blocks and meta stay empty so
+	# cross-chunk face culling is unchanged (an absent neighbour still reads
+	# as AIR and the boundary face is still emitted), and block light already
+	# defaults to 0. Both Chunk.get_sky_light and the native read_sky_light
+	# consult these planes, so the two implementations stay byte-identical
+	# without touching the GDExtension ABI.
+	if not DimensionContext.active_provider().has_sky_light:
+		var none := PackedByteArray()
+		for side: String in ["west", "east", "north", "south"]:
+			if planes.has(side):
+				continue
+			var dark := PackedByteArray()
+			var across: int = Chunk.SIZE_Z if side == "west" or side == "east" else Chunk.SIZE_X
+			dark.resize(Chunk.SIZE_Y * across)
+			planes[side] = [none, none, dark, none]
 	# Metadata only; _set_edge_planes iterates the four canonical side names
 	# and ignores this key. The ready-result gate uses it to catch a neighbor
 	# arriving, unloading, being replaced, or changing while worldgen/meshing
@@ -900,6 +933,7 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	PerfProbe.end("chunk_mgr.materialize.add_child", t_add)
 	_chunks[coord] = node
 	chunks_generated_total += 1
+	_index_portals_in_chunk(coord, data.chunk)
 	# A chunk that came from `_saved_chunks` is already player-edited;
 	# mark it so any further edits (or just the next unload) re-persist.
 	# Re-enqueue saplings + pending block ticks from the worker decode here
@@ -1092,6 +1126,8 @@ func _spawn_chunk_sync_neighborhood(center: Vector2i) -> void:
 # get there eventually, but "eventually" is a player falling through the
 # Nether. Behind a loading screen, so the frame cost is expected.
 func spawn_chunk_now(coord: Vector2i) -> void:
+	# _spawn_chunk_sync force-applies pending mesh+collision on both its
+	# branches — "now" means live collision, not a queued apply.
 	_spawn_chunk_sync(coord)
 
 
@@ -1152,6 +1188,14 @@ func _spawn_chunk_sync(coord: Vector2i) -> void:
 			"edge_signature": edge_planes.get("_signature", {}),
 		}
 	)
+	# Same contract as the resident branch above: "sync" must mean live
+	# collision, not a queued _pending_apply. Without this, a portal
+	# arrival regained control on a chunk with a null collision shape —
+	# the ground guard froze the player inside the portal and the
+	# exposure meter bounced them straight back: the enter/leave loop.
+	var fresh_node: Node3D = _chunks.get(coord)
+	if fresh_node != null and fresh_node.has_method("force_apply_pending"):
+		fresh_node.call("force_apply_pending")
 
 
 # Snapshot the {target + cardinal neighbors} chunks and dispatch the
@@ -1317,6 +1361,10 @@ func _on_autosave_tick() -> void:
 	var t_start_msec: int = Time.get_ticks_msec()
 	flush_dirty_loaded()
 	SaveLoad.flush_all_regions()
+	# Portal hints (audit finding #6) — dirty-checked, so the common
+	# autosave writes nothing extra.
+	if PortalIndex.is_dirty(DimensionContext.active()):
+		PortalIndex.save()
 	if _player != null:
 		PlayerSave.save_player(_player)
 	EntitySave.save_all(self)
@@ -1354,6 +1402,38 @@ func _on_autosave_tick() -> void:
 # never pays for compression. Light arrays compress cheaply (long runs of
 # 15s above ground, 0s in caves) so adding them ~doubles the payload but
 # stays under a couple KB per typical edited chunk.
+# Self-healing portal index (audit finding #6). The index used to be
+# written only by dimension transitions, so a portal lit and then saved
+# via autosave or the pause menu was lost on reload — travel still found
+# it (the raw scan reads real blocks) but the renderer, which is
+# index-driven, drew nothing. Re-deriving entries as chunks stream in
+# means a lost, stale or never-written index converges back to truth the
+# moment the player can see the portal.
+#
+# PackedByteArray.find is a native memchr, so the 99.9% of chunks with
+# no portal pay one 32 KB scan and nothing else.
+func _index_portals_in_chunk(coord: Vector2i, chunk: Chunk) -> void:
+	var idx: int = chunk.blocks.find(Blocks.PORTAL)
+	if idx == -1:
+		return
+	var dimension: int = DimensionContext.active()
+	while idx != -1:
+		# Y-major layout: idx = y*256 + z*16 + x. Shifts, because this
+		# runs inside the materialize hot path when a portal IS present.
+		var y: int = idx >> 8
+		var rem: int = idx & 255
+		# Only column BOTTOMS become entries — the same normalisation the
+		# search and the renderer both use.
+		if y == 0 or chunk.blocks[idx - 256] != Blocks.PORTAL:
+			PortalIndex.record(
+				dimension,
+				Vector3i(
+					coord.x * Chunk.SIZE_X + (rem & 15), y, coord.y * Chunk.SIZE_Z + (rem >> 4)
+				)
+			)
+		idx = chunk.blocks.find(Blocks.PORTAL, idx + 1)
+
+
 # A headless session must never write to the world on disk.
 #
 # `Game._ready` pins the worldgen seed to the GUT test default under
@@ -1487,6 +1567,17 @@ func _free_dimension_scene() -> int:
 		if EntitySave.is_persistable(child):
 			remove_child(child)
 			child.queue_free()
+			freed += 1
+	# Transient projectiles (audit finding #5) are deliberately
+	# NON-persistable — vanilla drops them across dimensions too — which
+	# also meant nothing here swept them: a fireball mid-flight crossed a
+	# portal as a live node and detonated in the destination dimension at
+	# its source coordinates. Group membership is declared in each
+	# projectile's _ready, and the sweep is global rather than
+	# children-of-this-node because spawn parents vary.
+	for node: Node in get_tree().get_nodes_in_group("transient_projectile"):
+		if is_instance_valid(node):
+			node.queue_free()
 			freed += 1
 	return freed
 
@@ -1776,6 +1867,18 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 # Re-enable physics only on chunks within collision_radius of the player
 # (Chebyshev / square ring). Skips unless the player actually crossed a
 # chunk boundary, so cost is O(loaded) at most once per crossing.
+# Re-run the collision-activation sweep against the player's CURRENT
+# position, immediately. The per-frame path only sweeps when the cached
+# player chunk changes, and a portal arrival moves the player and needs
+# the ground under them active on the same frame control is returned.
+func refresh_collision_activity() -> void:
+	if _player == null:
+		return
+	_cached_player_chunk = _player_chunk_coord()
+	_last_collision_center = Vector2i(2147483647, 2147483647)
+	_update_collision_activity()
+
+
 func _update_collision_activity() -> void:
 	var pc := _cached_player_chunk
 	if pc == _last_collision_center:
@@ -1882,7 +1985,17 @@ func set_world_block(world_pos: Vector3i, id: int, meta: int = -1) -> void:
 	# render distance can hang behind background relight-driven re-meshes
 	# for many seconds (ghost-block bug). chunk_node clears the flag on
 	# apply.
-	chunk_node.set("_priority_apply", true)
+	#
+	# NOT during a batch. A batch is by definition a bulk edit — an
+	# explosion, a fluid cascade, an area fill — and it can dirty several
+	# chunks in one call. Forcing every one of them past the budget lands
+	# all their re-meshes AND their collision cooks in a single frame, and
+	# a cook alone is 3-8 ms, so a ghast fireball straddling four chunks
+	# becomes a multi-frame stall. Bulk edits ride the budget and spread
+	# over consecutive frames instead; the interactive single-block edit
+	# the flag was written for still jumps the queue.
+	if _light_defer_depth == 0:
+		chunk_node.set("_priority_apply", true)
 	# Edge-edit neighbor refresh. Native mesher culls faces across chunk
 	# seams via chunk_node._attach_neighbor_edges; neighbors must re-mesh
 	# when our edit lands on a seam cell, otherwise their opposing face
@@ -2028,6 +2141,18 @@ func set_world_block_immediate(world_pos: Vector3i, id: int) -> void:
 	if not _pending_immediate_rebuild.has(coord):
 		_pending_immediate_rebuild[coord] = true
 		call_deferred("_flush_immediate_rebuild", coord)
+
+
+# Public same-frame rebuild — mesh AND collision, synchronously. The
+# portal teleporter carves its arrival structure with bare
+# set_world_block calls, which mark flags but leave the actual remesh to
+# the caller; without this, the carved doorway existed only in block
+# data while the chunk's mesh and collision stayed virgin solid rock —
+# the player arrived entombed in terrain that was no longer really
+# there (field report #3: frozen in the Nether, zero displacement under
+# full walk velocity).
+func rebuild_chunk_now(coord: Vector2i) -> void:
+	_flush_immediate_rebuild(coord)
 
 
 # Drained at end of frame for each unique chunk that received an
@@ -2571,7 +2696,22 @@ func _dirty_seam_neighbors(coord: Vector2i, local_x: int, local_z: int) -> void:
 # is what vanilla passes (setBlockWithNotify → notifyBlockChange with the
 # new id). Breaking a component therefore reports AIR, and the consumers
 # that demand a power-capable source correctly decline.
+# Bracket a multi-cell structure write — vanilla `cy.i = true/false`.
+# Callers that may receive a test double check has_method first.
+func begin_block_edit() -> void:
+	_editing_blocks = true
+
+
+func end_block_edit() -> void:
+	_editing_blocks = false
+
+
 func enqueue_block_notification(world_pos: Vector3i, source_id: int = -1) -> void:
+	# Vanilla `cy.h()` checks editingBlocks before notifying — writes and
+	# lighting proceed; only the neighbour fanout is held. See
+	# _editing_blocks for why the portal cannot survive without this.
+	if _editing_blocks:
+		return
 	var source: int = get_world_block(world_pos) if source_id < 0 else source_id
 	for offset: Vector3i in _NOTIFY_OFFSETS:
 		var cell: Vector3i = world_pos + offset
