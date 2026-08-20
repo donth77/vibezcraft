@@ -71,6 +71,8 @@ var ticks_in_air: int = 0
 
 var _velocity: Vector3 = Vector3.ZERO
 var _chunk_manager: Node = null
+# The 1x1 ray-visible collider — see _build_hit_area.
+var _hit_area: Area3D = null
 var _sprite: Sprite3D = null
 var _smoke: CPUParticles3D = null
 var _tick_accum: float = 0.0
@@ -117,8 +119,31 @@ static func aim_to_acceleration(aim: Vector3, rng: RandomNumberGenerator = null)
 
 func _ready() -> void:
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
+	# Swept by ChunkManager._free_dimension_scene: a projectile that
+	# crossed a portal as a live node kept flying in the destination
+	# dimension at its source coordinates (audit finding #5).
+	add_to_group("transient_projectile")
 	_build_sprite()
 	_build_smoke_trail()
+	_build_hit_area()
+
+
+# `a(1.0f, 1.0f)` — a one-block collision size. Without a collider the
+# fireball was invisible to every intersect_ray in the game: player
+# melee and arrows could never touch it, so the deflection mechanic —
+# correct and tested at the logic level — had no physical route in
+# (audit finding #2). Monitoring stays off; the area exists purely to be
+# ray-visible, exactly like the mobs' head-hit areas.
+func _build_hit_area() -> void:
+	_hit_area = Area3D.new()
+	_hit_area.monitoring = false
+	_hit_area.monitorable = true
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3.ONE * COLLISION_SIZE
+	shape.shape = box
+	_hit_area.add_child(shape)
+	add_child(_hit_area)
 
 
 func _build_sprite() -> void:
@@ -186,10 +211,19 @@ func _tick() -> bool:
 	var entity_hit: Node = _sweep_entity(global_position, target)
 	if entity_hit != null:
 		# `nx2.g.a(this.j, 0)` — the direct hit deals ZERO damage and is
-		# credited to the SHOOTER, not the projectile. It still lands the
-		# hurt flash, iframe and aggro; the explosion does the real work.
-		if entity_hit.has_method("take_damage"):
-			entity_hit.call("take_damage", 0, _velocity.normalized(), 0.0, shooter)
+		# credited to the SHOOTER, not the projectile; the explosion does
+		# the real work. Signatures differ per target: the player's is
+		# (int, String, Vector3) — calling it mob-style was a runtime
+		# type error on every direct player hit (audit finding #9) — and
+		# a struck FIREBALL deflects (az.a), after which this one
+		# explodes, which is also what vanilla's fireball-on-fireball
+		# collision does.
+		if entity_hit is MobBase:
+			entity_hit.take_damage(0, _velocity.normalized(), 0.0, shooter)
+		elif entity_hit is GhastFireball:
+			entity_hit.take_damage(0, _velocity.normalized(), 0.0, null)
+		elif entity_hit.has_method("take_damage"):
+			entity_hit.call("take_damage", 0, "fireball", _velocity.normalized())
 		_explode()
 		return true
 	if block_hit != null:
@@ -257,8 +291,14 @@ func _sweep_entity(from: Vector3, to: Vector3) -> Node:
 	if space == null:
 		return null
 	var query := PhysicsRayQueryParameters3D.create(from, to)
+	# Always exclude our own hit area — the ray starts inside it — and
+	# the shooter's body while the grace window holds.
+	var excludes: Array = []
+	if _hit_area != null:
+		excludes.append(_hit_area.get_rid())
 	if ignores(shooter) and shooter != null and shooter.has_method("get_rid"):
-		query.exclude = [shooter.call("get_rid")]
+		excludes.append(shooter.call("get_rid"))
+	query.exclude = excludes
 	query.collide_with_bodies = true
 	query.collide_with_areas = true
 	var hit: Dictionary = space.intersect_ray(query)

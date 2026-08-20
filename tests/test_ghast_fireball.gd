@@ -410,6 +410,142 @@ func test_the_collision_size_is_one_block() -> void:
 	assert_eq(GhastFireball.COLLISION_SIZE, 1.0, "a(1.0f, 1.0f)")
 
 
+# --- Being hit (audit findings #2 / #3 / #9) ---
+
+
+func test_the_fireball_carries_a_one_block_hit_area() -> void:
+	# Without a collider it was invisible to every intersect_ray in the
+	# game — melee and arrows could never touch it, so deflection was
+	# unreachable despite the logic being correct.
+	var ball: Node3D = _fireball(Vector3(0, 70, 0), _fake_world())
+	var area: Area3D = null
+	for child: Node in ball.get_children():
+		if child is Area3D:
+			area = child
+	assert_not_null(area, "the ray-visible hit area exists")
+	if area == null:
+		return
+	var shape: CollisionShape3D = null
+	for child: Node in area.get_children():
+		if child is CollisionShape3D:
+			shape = child
+	assert_not_null(shape, "with a collision shape")
+	if shape != null:
+		assert_eq(
+			(shape.shape as BoxShape3D).size,
+			Vector3.ONE * GhastFireball.COLLISION_SIZE,
+			"a(1.0f, 1.0f) — one block"
+		)
+
+
+func test_a_raycast_can_actually_hit_it() -> void:
+	# End to end through the physics server, the way melee and arrows
+	# find their targets. Two physics frames so the area's transform is
+	# synced before the query.
+	var ball: Node3D = _fireball(Vector3(0, 70, 0), _fake_world())
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var space: PhysicsDirectSpaceState3D = ball.get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(Vector3(-4, 70, 0), Vector3(4, 70, 0))
+	query.collide_with_areas = true
+	query.collide_with_bodies = true
+	var result: Dictionary = space.intersect_ray(query)
+	assert_false(result.is_empty(), "the ray connects")
+	if result.is_empty():
+		return
+	var node: Node = result.get("collider") as Node
+	while node != null and not node.has_method("take_damage"):
+		node = node.get_parent()
+	assert_eq(node, ball, "and the parent walk lands on the fireball")
+
+
+func test_it_does_not_sweep_its_own_hit_area() -> void:
+	# The entity sweep's ray starts inside the fireball's own box; the
+	# explicit self-exclude is what keeps it from deflecting itself.
+	var ball: Node3D = _fireball(Vector3(0.5, 200.0, 0.5), _fake_world())
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	ball.set("acceleration", Vector3(0, 0.05, 0))
+	for _i: int in range(10):
+		ball.call("_tick")
+	assert_false(ball.is_queued_for_deletion(), "ten ticks of open sky, no self-hit")
+
+
+func test_the_blast_now_hurts_mobs() -> void:
+	# Audit finding #3: _apply_entity_damage predated mobs and only ever
+	# fetched the player — creeper and TNT blasts never hurt another mob,
+	# and a deflected fireball could not hurt its ghast.
+	var w: FakeWorld = _fake_world()
+	var pigman: Node = MobRegistry.script_for("zombie_pigman").new()
+	_parent.add_child(pigman)
+	(pigman as Node3D).global_position = Vector3(1.0, 70.0, 0.0)
+	Explosion.detonate(w, Vector3(0.0, 70.0, 0.0), 1.0)
+	assert_lt(pigman.get("health"), 20, "the blast landed")
+
+
+func test_a_point_blank_blast_is_nine_damage() -> void:
+	# The vanilla formula at distance zero for power 1:
+	# (1 + 1) / 2 * 8 * 1 + 1 = 9. Against a ghast's 10 health that is
+	# the last half-heart, NOT a kill — Alpha has no modern
+	# deflection-one-shot special case.
+	var w: FakeWorld = _fake_world()
+	var ghast: Node = MobRegistry.script_for("ghast").new()
+	_parent.add_child(ghast)
+	(ghast as Node3D).global_position = Vector3(0.0, 70.0, 0.0)
+	Explosion.detonate(w, Vector3(0.0, 70.0, 0.0), 1.0)
+	assert_eq(ghast.get("health"), 1, "10 health minus the 9-damage epicentre blast")
+
+
+func test_the_detonating_entity_is_not_hit_by_its_own_blast() -> void:
+	# `source` is how a creeper's detonation skips the creeper.
+	var w: FakeWorld = _fake_world()
+	var pigman: Node = MobRegistry.script_for("zombie_pigman").new()
+	_parent.add_child(pigman)
+	(pigman as Node3D).global_position = Vector3(0.0, 70.0, 0.0)
+	Explosion.detonate(w, Vector3(0.0, 70.0, 0.0), 1.0, pigman)
+	assert_eq(pigman.get("health"), 20, "the source is exempt")
+
+
+func test_a_direct_player_hit_uses_the_player_signature() -> void:
+	# Audit finding #9: the mob-style call put a Vector3 where the
+	# player's take_damage expects a String — a runtime type error on
+	# every direct hit. The player double below asserts the arg types.
+	var probe := _PlayerDouble.new()
+	_parent.add_child(probe)
+	probe.global_position = Vector3(0, 70, 2)
+	var ball: Node3D = _fireball(Vector3(0, 70, 0), _fake_world())
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	ball.call("set_velocity_per_tick", Vector3(0, 0, 4.0))
+	ball.call("_tick")
+	assert_eq(probe.calls, 1, "the direct hit reached the player")
+	assert_true(probe.types_ok, "with (int, String, Vector3) — the player signature")
+
+
+# Mimics the player: a body with the player-shaped take_damage. Records
+# whether the arguments arrived with the right types.
+class _PlayerDouble:
+	extends StaticBody3D
+
+	var calls: int = 0
+	var types_ok: bool = false
+
+	func _ready() -> void:
+		var shape := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3.ONE
+		shape.shape = box
+		add_child(shape)
+
+	func take_damage(amount: int, source: String = "generic", dir: Vector3 = Vector3.ZERO) -> void:
+		calls += 1
+		types_ok = (
+			typeof(amount) == TYPE_INT
+			and typeof(source) == TYPE_STRING
+			and typeof(dir) == TYPE_VECTOR3
+		)
+
+
 # --- Persistence ---
 
 

@@ -98,6 +98,8 @@ const _STUCK_ARROW_DECAY_SEC: float = 30.0
 # bobs at the surface.
 const _WATER_DRAG_PER_TICK: float = 0.8
 const _LAVA_DRAG_PER_TICK: float = 0.5
+# `ot.java:27` — EntityFlying damps all three axes by this every tick.
+const _FLYING_DRAG_PER_TICK: float = 0.91
 const _FLUID_GRAVITY: float = -0.4  # 0.02 m/tick × 20 = 0.4 m/s² down
 
 # Swim assist — vanilla `hf.java:588-592` toggles the jumping flag with
@@ -870,19 +872,31 @@ func _physics_process(delta: float) -> void:
 	if _in_water:
 		var k: float = pow(_WATER_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
-		velocity.y += _FLUID_GRAVITY * delta
+		# ot.java's liquid branch is drag-only — a flying mob does not
+		# sink. Every grounded mob keeps the gravity term.
+		if _uses_gravity():
+			velocity.y += _FLUID_GRAVITY * delta
 	elif _in_lava:
 		var k: float = pow(_LAVA_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
-		velocity.y += _FLUID_GRAVITY * delta
+		if _uses_gravity():
+			velocity.y += _FLUID_GRAVITY * delta
 	elif not _uses_gravity():
 		# `ot.java` (EntityFlying) overrides moveEntityWithHeading to drop
-		# the gravity term entirely and damp all three axes equally. The
-		# ghast is Alpha's only subclass, and its AI supplies every bit of
-		# the acceleration it gets — so nothing happens here, and the
-		# ground-friction branch below is skipped too. A flying mob damps
-		# itself.
-		pass
+		# the gravity term entirely and damp all three axes EQUALLY —
+		# `ot.java:27` `float f4 = 0.91f` then `:45-48` `this.az *= f4;
+		# this.aA *= f4; this.aB *= f4;`, run every tick via
+		# `hf.java:527`. aH (onGround) stays false while flying, so f4
+		# never drops to the 0.546 ground value.
+		#
+		# This branch used to be a bare `pass` on the theory that "a
+		# flying mob damps itself". Nothing did: the ghast's AI only ever
+		# ADDS impulse, so velocity had no terminal value at all and was
+		# bounded only by waypoint reversals. Simulated over 60 s of the
+		# vanilla waypoint loop that is ~15.6 m/s mean against vanilla's
+		# ~4.5, which is why ghasts rocketed around and slammed into
+		# cavern walls.
+		velocity *= pow(_FLYING_DRAG_PER_TICK, 20.0 * delta)
 	elif not _voxel_on_floor:
 		# Gravity. VoxelCollider sets _voxel_on_floor based on whether
 		# a solid cell sits directly below the AABB feet — replaces

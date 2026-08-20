@@ -48,6 +48,12 @@ const _TENTACLE_SEED: int = 1660
 const _TENTACLE_LENGTH_MIN: int = 8
 const _TENTACLE_LENGTH_SPAN: int = 7  # nextInt(7) + 8 -> [8, 14]
 # `this.a.b += 24 + n2` with `n2 = -16`, and tentacles at `31 + n2`.
+# MC model space is Y-DOWN and `ec.java:50` translates by -24*(1/16),
+# so model row 24 is the entity's feet. Local height above the feet is
+# therefore (24 - m) * _PIXEL_TO_METER, before the renderer's scale.
+# Failing to invert this is what put the tentacle roots ABOVE the body
+# centre and sealed all nine inside the body cube.
+const _MODEL_FEET_PX: float = 24.0
 const _BODY_PIVOT_Y_PX: float = 8.0
 const _TENTACLE_PIVOT_Y_PX: float = 15.0
 
@@ -236,7 +242,9 @@ func _build_model() -> void:
 	# which allocates nothing.
 	_render_root = Node3D.new()
 	_render_root.name = "GhastModel"
-	_render_root.position = Vector3(0.0, _BB_SIZE * 0.5, 0.0)
+	# Feet origin: every part is placed by the (24 - m) mapping below, and
+	# `jz.java`'s resting 4.5x scale is applied to this node.
+	_render_root.position = Vector3.ZERO
 	add_child(_render_root)
 	var mat: StandardMaterial3D = MobBase.get_shared_material(_TEXTURE_CALM, false)
 	var body_px := Vector3i(_BODY_CUBE_PX, _BODY_CUBE_PX, _BODY_CUBE_PX)
@@ -245,18 +253,20 @@ func _build_model() -> void:
 	_body_mesh.mesh = MobCube.build_textured_cube(
 		body_size, _TEXTURE_SIZE, Vector2i.ZERO, body_px, false
 	)
-	# `this.a.b += 24 + n2` with the body box spanning -8..8 about its
-	# own pivot, so the cube centre sits at the pivot.
-	_body_mesh.position = Vector3(0.0, _BODY_PIVOT_Y_PX * _PIXEL_TO_METER, 0.0)
+	# `hc.java:14-15` — box spans -8..8 about its own pivot at m=8, so the
+	# cube centre sits on the pivot and the body occupies model rows 0..16.
+	_body_mesh.position = Vector3(0.0, (_MODEL_FEET_PX - _BODY_PIVOT_Y_PX) * _PIXEL_TO_METER, 0.0)
 	_body_mesh.material_override = mat
 	_render_root.add_child(_body_mesh)
 	var lengths: Array[int] = tentacle_lengths()
 	for i: int in range(_TENTACLE_COUNT):
 		var anchor: Vector2 = tentacle_anchor(i)
 		var pivot := Node3D.new()
+		# `hc.java:25` pivot m=31+(-16)=15, i.e. seven rows BELOW the body
+		# centre, and the box extends further down from there.
 		pivot.position = Vector3(
 			anchor.x * _PIXEL_TO_METER,
-			_TENTACLE_PIVOT_Y_PX * _PIXEL_TO_METER,
+			(_MODEL_FEET_PX - _TENTACLE_PIVOT_Y_PX) * _PIXEL_TO_METER,
 			anchor.y * _PIXEL_TO_METER
 		)
 		_render_root.add_child(pivot)
@@ -426,32 +436,69 @@ func _tick_target() -> void:
 	_target_countdown = TARGET_REACQUIRE_TICKS
 
 
+# One vanilla combat tick per AI tick meant the charge counter ran at
+# the LOD tick rate — a ghast in the 32-64 m band, inside its own 64 m
+# engage radius, fired at a quarter of vanilla's cadence (audit finding
+# #10). Stepping the counter by the tick scale keeps combat real-time at
+# every distance the ghast can fight from; crossings below are tested
+# with >= so a large step cannot jump the sound or the shot.
+func _combat_step() -> int:
+	if _lod_tier == LOD_MID:
+		return 4
+	if _lod_tier == LOD_FAR:
+		return 20
+	return 1
+
+
 func _tick_combat() -> void:
+	var step: int = _combat_step()
 	if _target == null or not is_instance_valid(_target):
 		_face_travel_direction()
 		if charge > 0:
-			charge -= 1
+			charge = maxi(0, charge - step)
 		return
 	var delta_to_target: Vector3 = _target.global_position - global_position
 	if delta_to_target.length_squared() > ENGAGE_RADIUS * ENGAGE_RADIUS:
 		_face_travel_direction()
 		if charge > 0:
-			charge -= 1
+			charge = maxi(0, charge - step)
 		return
 	# `this.s = this.aC = -atan2(d7, d9) * 180 / PI` — face the target on
 	# the horizontal plane only; a ghast never pitches.
-	rotation.y = -atan2(delta_to_target.x, delta_to_target.z)
+	# `am.java:63` is correct in MC's yaw convention, not Godot's. Every
+	# other mob here uses atan2(-x, -z) (zombie.gd:564, skeleton.gd:722,
+	# spider.gd:728, ...); -atan2(x, z) agrees with it only when the target
+	# is exactly to the side and is 180 degrees wrong straight ahead or
+	# behind — which also threw the fireball spawn to the ghast's back.
+	rotation.y = atan2(-delta_to_target.x, -delta_to_target.z)
 	if not has_line_of_sight(_target):
 		# Losing sight DECREMENTS rather than resetting, so a player who
 		# ducks behind a pillar for two ticks loses two ticks of charge,
 		# not the whole windup.
 		if charge > 0:
-			charge -= 1
+			charge = maxi(0, charge - step)
 		return
-	if charge == CHARGE_SOUND_AT:
+	var before: int = charge
+	charge += step
+	if before < CHARGE_SOUND_AT and charge >= CHARGE_SOUND_AT:
 		SFX.play_ghast_charge(global_position)
-	charge += 1
-	if charge == CHARGE_FIRE_AT:
+		# The windup is the whole tell. Vanilla spends ten ticks between
+		# `mob.ghast.charge` and the shot, with the angry texture up the
+		# whole time, and that half second is the player's cue to break
+		# line of sight. A step of 4 (MID) or 20 (FAR) crosses both
+		# thresholds in the same tick, so the ghast fires the instant it
+		# growls — or with no growl at all. ENGAGE_RADIUS is 64 and MID
+		# starts at 32, so almost every ghast that shoots at you was
+		# firing without a tell.
+		#
+		# Stopping the counter ON the sound keeps the real-time cadence
+		# the LOD step exists to preserve (the -40 cooldown still runs at
+		# the scaled rate) while restoring the warning: the next tick
+		# resumes from 10 and the shot lands a tick or two later at MID,
+		# instead of simultaneously.
+		charge = CHARGE_SOUND_AT
+		return
+	if charge >= CHARGE_FIRE_AT:
 		SFX.play_ghast_fireball(global_position)
 		_fire_at(delta_to_target)
 		charge = CHARGE_COOLDOWN
@@ -500,7 +547,7 @@ func _face_travel_direction() -> void:
 	# when it has nothing to look at.
 	if velocity.x * velocity.x + velocity.z * velocity.z < 0.0001:
 		return
-	rotation.y = -atan2(velocity.x, velocity.z)
+	rotation.y = atan2(-velocity.x, -velocity.z)
 
 
 # `this.z = this.f > 10 ? ghast_fire : ghast`. Swapping the shared
@@ -514,6 +561,15 @@ func _apply_texture_state() -> void:
 	_charging_texture = charging
 	var path: String = _TEXTURE_CHARGING if charging else _TEXTURE_CALM
 	var mat: StandardMaterial3D = MobBase.get_shared_material(path, false)
+	# A hurt flash owns material_override right now and will restore what
+	# it captured when it clears — writing through it would hide the
+	# flash AND be reverted to the stale texture afterwards (audit
+	# finding #11). Every ghast mesh shares the one material, so updating
+	# the flash's captured originals is the whole fix.
+	if _hurt_flash_remaining > 0.0:
+		for entry: Array in _hurt_mat_overrides:
+			entry[1] = mat
+		return
 	if _body_mesh != null:
 		_body_mesh.material_override = mat
 	for pivot: Node3D in _tentacle_pivots:
@@ -529,7 +585,12 @@ func _animate(_delta: float) -> void:
 	# `b[i].d = 0.2 * sin(age * 0.3 + i) + 0.4`, where `age` is in ticks.
 	var age_ticks: float = _age_seconds * 20.0
 	for i: int in range(_tentacle_pivots.size()):
-		_tentacle_pivots[i].rotation.x = (
+		# Negated for Godot's Y-up. `hc.java:31` feeds `ka.java:106`
+		# glRotatef(d * 57.3, 1, 0, 0) INSIDE `ec.java:48` glScalef(-1,-1,1),
+		# so the sign inverts on the way in — the same flip zombie.gd:114-120
+		# documents for its own pitch. Unnegated the tentacles splayed ~23
+		# degrees FORWARD instead of trailing behind.
+		_tentacle_pivots[i].rotation.x = -(
 			_TENTACLE_SWAY_AMP * sin(age_ticks * _TENTACLE_SWAY_FREQ + float(i))
 			+ _TENTACLE_SWAY_BASE
 		)
@@ -540,12 +601,13 @@ func _animate(_delta: float) -> void:
 	# using the current counter directly is a half-tick behind at worst
 	# and allocates nothing.
 	var scale_xy: Vector2 = charge_render_scale(float(charge) / 20.0)
-	# The model is built in metres already (16 px at 1/16 m), so the
-	# source's 4.5x resting scale would make a 4.5 m ghast against a 4 m
-	# hitbox. Normalising by the resting value keeps the SHAPE change —
-	# which is the whole point of the effect — at the collision size.
-	var rest: Vector2 = charge_render_scale(0.0)
-	_render_root.scale = Vector3(scale_xy.x / rest.x, scale_xy.y / rest.y, scale_xy.x / rest.x)
+	# Applied RAW. `jz.java:22-24` rests at 4.5x and the model is authored
+	# in 1/16 model units, so 4.5 IS the ghast's size — vanilla genuinely
+	# renders a 4.5 m body against its 4 m hitbox, with the tentacles
+	# trailing below the box. The old code divided the resting value back
+	# out, which shrank the whole creature 4.5x and (with the un-inverted
+	# pivots) left it looking like a plain 1 m cube.
+	_render_root.scale = Vector3(scale_xy.x, scale_xy.y, scale_xy.x)
 
 
 # --- SFX ---

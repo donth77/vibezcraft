@@ -381,6 +381,93 @@ func test_the_fireball_launches_four_blocks_along_the_look_vector() -> void:
 	assert_almost_eq(offset.y, 4.0 * 0.5 + 0.5, 0.01, "and at mid-height plus half")
 
 
+# --- LOD cadence (audit finding #10) ---
+
+
+func test_mid_lod_combat_runs_at_real_time_cadence() -> void:
+	# At MID (32-64 m) the AI ticks at a quarter rate and each combat tick
+	# steps the charge counter by four, so the wall-clock fire rate matches
+	# vanilla. The counter PAUSES on the charge sound rather than stepping
+	# past it: 0 -> 4 -> 8 -> 10 (sound, held) -> 14 -> 18 -> 22 fires.
+	#
+	# Without that pause a step of four crossed 10 and 20 in the same tick
+	# and the ghast fired the instant it growled, with no windup for the
+	# player to react to — and at FAR (step 20) there was no growl at all.
+	var setup: Array = _engaged_ghast(0)
+	var mob: Node = setup[0]
+	mob.set("_lod_tier", MobBase.LOD_MID)
+	for _i: int in range(3):
+		mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), Ghast.CHARGE_SOUND_AT, "the counter holds on the charge sound")
+	for _i: int in range(2):
+		mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), 18, "then resumes stepping by four")
+	mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), Ghast.CHARGE_COOLDOWN, "and the next tick fires")
+
+
+func test_every_lod_tier_keeps_a_charge_warning() -> void:
+	# The tell is the mechanic: vanilla gives ten ticks between
+	# `mob.ghast.charge` and the fireball, and ENGAGE_RADIUS (64) reaches
+	# well into MID and FAR, so a collapsed windup means most ghasts that
+	# shoot at you fire without warning.
+	for tier: int in [MobBase.LOD_NEAR, MobBase.LOD_MID, MobBase.LOD_FAR]:
+		var setup: Array = _engaged_ghast(0)
+		var mob: Node = setup[0]
+		mob.set("_lod_tier", tier)
+		var sound_tick: int = -1
+		var fire_tick: int = -1
+		for tick: int in range(1, 60):
+			mob.call("_tick_combat")
+			if sound_tick < 0 and int(mob.get("charge")) == Ghast.CHARGE_SOUND_AT:
+				sound_tick = tick
+			if int(mob.get("charge")) == Ghast.CHARGE_COOLDOWN:
+				fire_tick = tick
+				break
+		assert_gt(sound_tick, -1, "tier %d played a charge sound" % tier)
+		assert_gt(fire_tick, sound_tick, "tier %d fires AFTER the warning, not with it" % tier)
+
+
+func test_a_large_step_cannot_jump_the_shot() -> void:
+	# Crossings are >= tests, so a FAR-tier step of 20 from the cooldown
+	# cannot tunnel past 20 without firing.
+	var setup: Array = _engaged_ghast(19)
+	var mob: Node = setup[0]
+	mob.set("_lod_tier", MobBase.LOD_FAR)
+	mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), Ghast.CHARGE_COOLDOWN, "fired despite overshooting 20")
+
+
+func test_lod_decrements_also_scale_and_floor_at_zero() -> void:
+	var setup: Array = _engaged_ghast(6)
+	var mob: Node = setup[0]
+	mob.set("_lod_tier", MobBase.LOD_MID)
+	(setup[1] as Node3D).global_position = Vector3(0, 70, 200)  # out of range
+	mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), 2, "one MID tick unwinds four units")
+	mob.call("_tick_combat")
+	assert_eq(mob.get("charge"), 0, "and floors at zero rather than going negative")
+
+
+# --- Hurt flash vs texture swap (audit finding #11) ---
+
+
+func test_a_texture_swap_during_a_hurt_flash_survives_the_flash() -> void:
+	var mob: Node = _ghast()
+	mob.call("_apply_hurt_flash")
+	mob.set("charge", 15)
+	mob.call("_apply_texture_state")
+	var flash_mat: Material = (mob.get("_body_mesh") as MeshInstance3D).material_override
+	mob.call("_clear_hurt_flash")
+	var charging: StandardMaterial3D = MobBase.get_shared_material(Ghast._TEXTURE_CHARGING, false)
+	assert_same(
+		(mob.get("_body_mesh") as MeshInstance3D).material_override,
+		charging,
+		"the flash restored the CHARGING texture, not the stale calm one"
+	)
+	assert_ne(flash_mat, charging, "and the flash itself was never clobbered mid-flash")
+
+
 # --- Texture state ---
 
 
