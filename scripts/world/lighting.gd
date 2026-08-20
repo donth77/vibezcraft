@@ -306,6 +306,20 @@ static func _lateral_pass(chunk: Chunk) -> void:
 # chunk) and uses an emission-aware recompute that doesn't need a
 # separate column pass — sky-exposed cells get emission=15 directly.
 static func update_sky_light_around(chunk: Chunk, lx: int, ly: int, lz: int) -> void:
+	# A dimension with no sky has no sky-light channel to propagate:
+	# fill_sky_light zeroes it and nothing can ever raise it, so every
+	# seed here is guaranteed to do no work. Skipping is not an
+	# optimisation of the algorithm, it is refusing to run an algorithm
+	# whose answer is known.
+	#
+	# Measured in the Nether before this guard: an explosion seeds the
+	# full 128-block column for each destroyed cell, so ~30 broken blocks
+	# queued ~3800 sources and the batch flush peaked at 1.29 SECONDS on
+	# the main thread — inside explosion.detonate, whose own peak was
+	# 1.37 s. It was the single most expensive thing in the profile and it
+	# could not have changed one light value.
+	if not DimensionContext.active_provider().has_sky_light:
+		return
 	var probe_token := PerfProbe.begin("lighting.update_sky")
 	var x_lo: int = maxi(0, lx - _LIGHT_DECAY_RADIUS)
 	var x_hi: int = mini(Chunk.SIZE_X - 1, lx + _LIGHT_DECAY_RADIUS)
@@ -366,6 +380,20 @@ static func update_sky_light_around(chunk: Chunk, lx: int, ly: int, lz: int) -> 
 # chunk coord; we apply each result and mark dirty. Falls through to the
 # GDScript BFS otherwise.
 static func update_sky_light_around_world(world_pos: Vector3i, manager) -> void:
+	# A dimension with no sky has no sky-light channel to propagate:
+	# fill_sky_light zeroes it and nothing can ever raise it, so every
+	# seed here is guaranteed to do no work. Skipping is not an
+	# optimisation of the algorithm, it is refusing to run an algorithm
+	# whose answer is known.
+	#
+	# Measured in the Nether before this guard: an explosion seeds the
+	# full 128-block column for each destroyed cell, so ~30 broken blocks
+	# queued ~3800 sources and the batch flush peaked at 1.29 SECONDS on
+	# the main thread — inside explosion.detonate, whose own peak was
+	# 1.37 s. It was the single most expensive thing in the profile and it
+	# could not have changed one light value.
+	if not DimensionContext.active_provider().has_sky_light:
+		return
 	var probe_token := PerfProbe.begin("lighting.update_sky_world")
 	if _native_lighting != null and manager.has_method("get_chunk_at_coord"):
 		_update_sky_light_around_world_native(world_pos, manager)
@@ -426,6 +454,20 @@ static func update_sky_light_around_world(world_pos: Vector3i, manager) -> void:
 # world height because an opacity change can move its heightmap boundary by
 # more than the normal 15-cell light-decay radius.
 static func update_sky_light_around_world_many(world_positions: Array[Vector3i], manager) -> void:
+	# A dimension with no sky has no sky-light channel to propagate:
+	# fill_sky_light zeroes it and nothing can ever raise it, so every
+	# seed here is guaranteed to do no work. Skipping is not an
+	# optimisation of the algorithm, it is refusing to run an algorithm
+	# whose answer is known.
+	#
+	# Measured in the Nether before this guard: an explosion seeds the
+	# full 128-block column for each destroyed cell, so ~30 broken blocks
+	# queued ~3800 sources and the batch flush peaked at 1.29 SECONDS on
+	# the main thread — inside explosion.detonate, whose own peak was
+	# 1.37 s. It was the single most expensive thing in the profile and it
+	# could not have changed one light value.
+	if not DimensionContext.active_provider().has_sky_light:
+		return
 	if world_positions.is_empty():
 		return
 	var probe_token := PerfProbe.begin("lighting.update_sky_world_batch")
