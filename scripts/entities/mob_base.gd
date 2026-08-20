@@ -763,11 +763,13 @@ static func _cached_box(size: Vector3) -> BoxShape3D:
 # physics + cooldowns; AI lives one level up so changing the AI of a
 # specific mob doesn't accidentally break gravity / damage / death.
 func _physics_process(delta: float) -> void:
+	var pp := PerfProbe.begin("mob.physics")
 	# Dying — freeze position + skip all physics. The tilt rotation
 	# applied in _process is the only thing that should move while the
 	# mob is falling over.
 	if _dying:
 		velocity = Vector3.ZERO
+		PerfProbe.end("mob.physics", pp)
 		return
 	# Distance gate — mobs far from any player skip physics + AI to
 	# keep frame cost flat regardless of total mob count. Vanilla
@@ -801,6 +803,7 @@ func _physics_process(delta: float) -> void:
 					_DESPAWN_GATED_SECONDS, true, false, true
 				))
 				_despawn_timer.timeout.connect(_on_gated_despawn_check)
+			PerfProbe.end("mob.physics", pp)
 			return
 		# Cancel any pending despawn — we're back in range.
 		if _despawn_timer != null:
@@ -834,6 +837,7 @@ func _physics_process(delta: float) -> void:
 		)
 		if not _chunk_manager.is_chunk_loaded(mob_chunk):
 			velocity = Vector3.ZERO
+			PerfProbe.end("mob.physics", pp)
 			return
 	var pre_move_y: float = global_position.y
 	var pre_move_vel_y: float = velocity.y
@@ -1036,6 +1040,8 @@ func _physics_process(delta: float) -> void:
 	while _env_tick_accum >= _ENV_TICK_DT:
 		_env_tick_accum -= _ENV_TICK_DT
 		_env_tick(in_fire)
+
+	PerfProbe.end("mob.physics", pp)
 
 
 func _process(delta: float) -> void:

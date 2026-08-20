@@ -319,18 +319,22 @@ func _process(delta: float) -> void:
 # a ghast that has just arrived immediately picks a new heading rather
 # than stalling for a tick.
 func _ai_tick() -> void:
+	var pp := PerfProbe.begin("ghast.ai")
 	if roll_idle_sfx_tick():
 		_play_idle_sfx()
 	# `if (this.as.k == 0) this.J();` — Peaceful kills it outright, before
 	# anything else runs.
 	if Game.difficulty == Game.DIFFICULTY_PEACEFUL:
 		die()
+		PerfProbe.end("ghast.ai", pp)
 		return
 	prev_charge = charge
 	_tick_waypoint()
 	_tick_target()
 	_tick_combat()
 	_apply_texture_state()
+
+	PerfProbe.end("ghast.ai", pp)
 
 
 func _tick_waypoint() -> void:

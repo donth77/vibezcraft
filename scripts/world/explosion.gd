@@ -72,6 +72,7 @@ const _PRIMED_TNT := preload("res://scripts/world/primed_tnt.gd")
 static func detonate(
 	manager: Node, world_pos: Vector3, power: float, source: Node = null, flaming: bool = false
 ) -> void:
+	var pp := PerfProbe.begin("explosion.detonate")
 	var affected: Dictionary = {}
 	# Boundary-only sample of the 16³ direction grid — cells where at least
 	# one axis is on the edge. Skipping the interior (where all axes ∈
@@ -106,6 +107,8 @@ static func detonate(
 		_apply_flaming_pass(manager, affected)
 	if batched:
 		manager.end_batch()
+
+	PerfProbe.end("explosion.detonate", pp)
 
 
 static func _cast_ray(

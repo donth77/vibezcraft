@@ -175,9 +175,11 @@ func _build_cell_mesh() -> ArrayMesh:
 # Re-derive the drawn cell list from the index, confirming each entry
 # against live blocks.
 func rebuild() -> void:
+	var pp := PerfProbe.begin("portal.rebuild")
 	_cells.clear()
 	if _world == null:
 		_sync_multimesh()
+		PerfProbe.end("portal.rebuild", pp)
 		return
 	var dimension: int = DimensionContext.active()
 	for bottom: Vector3i in PortalIndex.entries(dimension):
@@ -193,6 +195,8 @@ func rebuild() -> void:
 			break
 	_sync_multimesh()
 	_sync_emitters()
+
+	PerfProbe.end("portal.rebuild", pp)
 
 
 func _sync_multimesh() -> void:

@@ -189,15 +189,19 @@ func _build_smoke_trail() -> void:
 # exponent, the acceleration step, the grace counter — is per tick. A
 # delta-scaled version would drift, so this drives a fixed tick.
 func _physics_process(delta: float) -> void:
+	var pp := PerfProbe.begin("fireball.physics")
 	_tick_accum += delta
 	var ticked: bool = false
 	while _tick_accum >= 1.0 / TICKS_PER_SEC:
 		_tick_accum -= 1.0 / TICKS_PER_SEC
 		ticked = true
 		if _tick():
+			PerfProbe.end("fireball.physics", pp)
 			return
 	if ticked:
 		_update_entity_lighting()
+
+	PerfProbe.end("fireball.physics", pp)
 
 
 # One source tick. Returns true when the fireball destroyed itself, so
