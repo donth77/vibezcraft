@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends GutTest
 
 # Portal presentation — the 32-frame texture, the shared material, and the
@@ -22,6 +23,11 @@ class FakeWorld:
 		return int(blocks.get(pos, Blocks.AIR))
 
 	func set_world_block(pos: Vector3i, id: int) -> void:
+		blocks[pos] = id
+
+	# BlockFire.place writes fire with metadata when the portal check
+	# fails, and schedules its first tick.
+	func set_world_block_with_meta(pos: Vector3i, id: int, _meta: int) -> void:
 		blocks[pos] = id
 
 
@@ -163,6 +169,78 @@ func test_two_renderers_still_share_one_material() -> void:
 	)
 
 
+# --- The chunk mesher must not see it ---
+
+
+func _meshed_chunk(with_portal: bool) -> Dictionary:
+	# A floor, a pillar STANDING AGAINST the portal cells, and the sheet
+	# itself. The pillar matters: its faces toward the portal must be
+	# emitted (portal is non-opaque), which catches the native mesher's
+	# own opaque-mirror treating an unknown id as solid.
+	var chunk := Chunk.new()
+	for x: int in range(16):
+		for z: int in range(16):
+			chunk.set_block(x, 64, z, Blocks.NETHERRACK)
+	for up: int in range(3):
+		chunk.set_block(6, 65 + up, 7, Blocks.NETHERRACK)
+		if with_portal:
+			chunk.set_block(7, 65 + up, 7, Blocks.PORTAL)
+			chunk.set_block(8, 65 + up, 7, Blocks.PORTAL)
+	return Mesher.mesh_chunk(chunk)
+
+
+func test_a_portal_cell_meshes_exactly_like_air() -> void:
+	# THE oracle for audit finding #1. The portal's visual belongs to
+	# PortalRenderer and its collision is the absence of one, so for the
+	# chunk mesher a portal cell must be indistinguishable from air —
+	# same faces, same collision soup, same everything. Before the fix a
+	# 2x3 sheet added 80 vertices and 40 collision triangles, and the
+	# player could not physically enter a portal.
+	var without: Dictionary = _meshed_chunk(false)
+	var with_portal: Dictionary = _meshed_chunk(true)
+	assert_eq(with_portal.vertices, without.vertices, "identical vertices — no cube was emitted")
+	assert_eq(with_portal.indices, without.indices, "identical indices")
+	assert_eq(
+		with_portal.collision_faces,
+		without.collision_faces,
+		"identical collision soup — the player can walk in"
+	)
+	assert_eq(with_portal.uvs, without.uvs, "identical UVs")
+	# And the same oracle through the PRODUCTION path — native cube pass
+	# plus the GDScript appendix. When the extension is absent this
+	# degrades to the reference path above, which is fine: the point is
+	# that whatever path ships, a portal cell contributes nothing.
+	var fast_without: Dictionary = _meshed_chunk_fast(false)
+	var fast_with: Dictionary = _meshed_chunk_fast(true)
+	assert_eq(fast_with.vertices, fast_without.vertices, "production path: identical vertices")
+	assert_eq(
+		fast_with.collision_faces,
+		fast_without.collision_faces,
+		"production path: identical collision"
+	)
+
+
+func _meshed_chunk_fast(with_portal: bool) -> Dictionary:
+	var chunk := Chunk.new()
+	for x: int in range(16):
+		for z: int in range(16):
+			chunk.set_block(x, 64, z, Blocks.NETHERRACK)
+	for up: int in range(3):
+		chunk.set_block(6, 65 + up, 7, Blocks.NETHERRACK)
+		if with_portal:
+			chunk.set_block(7, 65 + up, 7, Blocks.PORTAL)
+			chunk.set_block(8, 65 + up, 7, Blocks.PORTAL)
+	return Mesher.mesh_chunk_fast(chunk)
+
+
+func test_mesh_shape_routes_the_portal_off_the_cube_path() -> void:
+	assert_eq(Blocks.mesh_shape(Blocks.PORTAL), Blocks.MESH_SHAPE_NONE, "NONE, never CUBE")
+	assert_true(
+		Blocks.needs_gdscript_mesher(Blocks.PORTAL),
+		"so the native cube path skips it (mirrored in its own skip list)"
+	)
+
+
 # --- Cadence ---
 
 
@@ -178,6 +256,69 @@ func test_the_animation_advances_at_twenty_hertz_and_wraps() -> void:
 	assert_eq(PortalTexture.frame_at(1.57), 31, "the last frame of the loop")
 	assert_eq(PortalTexture.frame_at(1.62), 0, "32 ticks wraps back to the start")
 	assert_eq(PortalTexture.frame_at(1.67), 1, "and it keeps going")
+
+
+# --- End to end: flint click to visible instances ---
+
+
+func test_lighting_a_frame_produces_visible_instances() -> void:
+	# The whole chain the player exercises, in one test: fire placed on
+	# the bottom frame block -> BlockFire.place -> NetherPortal.try_create
+	# -> PortalIndex.record_sheet -> PortalRenderer.rebuild -> MultiMesh
+	# instances with the shared material. Every prior test checked one
+	# link; the playtest found the chain itself had never been watched.
+	var w := FakeWorld.new()
+	autofree(w)
+	add_child_autofree(w)
+	# A 4x5 frame along X at (10..13, 64..68, 5), interior (11..12, 65..67).
+	for along: int in range(4):
+		for up: int in range(5):
+			var is_frame: bool = along == 0 or along == 3 or up == 0 or up == 4
+			if is_frame:
+				w.set_world_block(Vector3i(10 + along, 64 + up, 5), 11)  # obsidian
+	# The player's click: fire lands on top of the bottom frame row, in
+	# the interior — the cell with obsidian directly below.
+	# place() returns TRUE when a portal was lit instead of fire written.
+	var lit: bool = BlockFire.place(w, Vector3i(11, 65, 5))
+	assert_true(lit, "place() lit the portal instead of writing fire")
+	assert_eq(w.get_world_block(Vector3i(11, 65, 5)), Blocks.PORTAL, "interior is portal")
+	assert_eq(PortalIndex.count(DimensionContext.active()), 2, "both columns recorded in the index")
+	var renderer := PortalRenderer.new()
+	add_child_autofree(renderer)
+	renderer.set_world(w)
+	var mm: MultiMesh = renderer.get_node("PortalCells").multimesh
+	assert_eq(mm.instance_count, 6, "six drawn cells the moment rebuild runs")
+	# (Instance TRANSFORM read-back is a dummy-renderer no-op headless,
+	# so the world-coordinate placement is asserted on the renderer's own
+	# cell list instead.)
+	var cells: Array = renderer.get("_cells")
+	assert_eq((cells[0]["pos"] as Vector3i).y, 65, "instances at the world cells")
+	var mat: ShaderMaterial = renderer.get_node("PortalCells").material_override
+	assert_not_null(mat.shader, "shader bound")
+	assert_same(
+		mat.get_shader_parameter("frames"), PortalTexture.strip_texture(), "strip texture bound"
+	)
+	var frame0: Image = PortalTexture.frame_image(0)
+	var texel: Color = frame0.get_pixel(8, 8)
+	assert_gt(texel.a, 0.5, "and the texture it samples is substantially opaque")
+
+
+func test_fire_on_a_side_column_does_not_light_and_that_is_vanilla() -> void:
+	# The other thing a playtester does: click the INNER FACE of a side
+	# column, putting fire mid-air in the interior. qh.java's portal
+	# check requires obsidian DIRECTLY BELOW the fire cell, so vanilla
+	# does not light from there either — the fire just burns out. Pinned
+	# so "nothing happened" from that click is never misread as a bug.
+	var w := FakeWorld.new()
+	autofree(w)
+	add_child_autofree(w)
+	for along: int in range(4):
+		for up: int in range(5):
+			if along == 0 or along == 3 or up == 0 or up == 4:
+				w.set_world_block(Vector3i(10 + along, 64 + up, 5), 11)
+	var lit: bool = BlockFire.place(w, Vector3i(11, 66, 5))  # mid-interior
+	assert_false(lit, "no obsidian below the fire cell, no portal")
+	assert_eq(w.get_world_block(Vector3i(11, 66, 5)), Blocks.FIRE, "just fire, which burns out")
 
 
 # --- The display tick ---
@@ -269,3 +410,38 @@ func test_particles_orient_across_the_sheet_not_along_it() -> void:
 			emitter.emission_box_extents.x,
 			"an X-axis sheet is thin across Z"
 		)
+
+
+func test_emitter_pool_is_prebuilt_and_dormant() -> void:
+	# Building the pool lazily on the first lit portal put CPUParticles
+	# node setup + particle-shader compile on the ignition frame, on top
+	# of the light floods — a visible hitch. The pool exists from _ready.
+	var renderer := PortalRenderer.new()
+	add_child_autofree(renderer)
+	var emitters: Array = renderer.get("_emitters")
+	assert_eq(emitters.size(), PortalRenderer.EFFECT_CELLS, "pool built at _ready")
+	for emitter: CPUParticles3D in emitters:
+		assert_false(emitter.emitting, "dormant until a portal claims it")
+		assert_false(emitter.visible, "invisible until claimed")
+
+
+func test_particles_are_textured_smoke_motes_not_flat_quads() -> void:
+	# The field report: untextured flat-pink 176-quad walls per cell. The
+	# vanilla look (jd.java) is a sparse swirl of smoke tiles from
+	# particles.png row 0, each tinted purple at a per-particle random
+	# brightness, converging back toward the sheet.
+	var renderer := PortalRenderer.new()
+	add_child_autofree(renderer)
+	var particles: CPUParticles3D = (renderer.get("_emitters") as Array)[0]
+	var mat: StandardMaterial3D = (particles.mesh as QuadMesh).material
+	assert_not_null(mat.albedo_texture, "smoke tile texture, not an untextured quad")
+	# AtlasTexture's region is ignored by the 3D particle path — the
+	# strip squishes onto each quad as a horizontal dash. The texture
+	# must be a standalone bake of the row (probe-verified).
+	assert_false(mat.albedo_texture is AtlasTexture, "standalone strip, not an AtlasTexture")
+	assert_eq(mat.albedo_texture.get_width(), 128, "the full smoke row")
+	assert_eq(mat.albedo_texture.get_height(), 16, "one row tall")
+	assert_eq(mat.particles_anim_h_frames, 8, "the 8-frame smoke row")
+	assert_not_null(particles.color_initial_ramp, "brightness roll, not one flat pink")
+	assert_lt(particles.radial_accel_max, 0.0, "motes converge back toward the sheet")
+	assert_eq(particles.amount, 28, "steady-state population, not a quad wall")

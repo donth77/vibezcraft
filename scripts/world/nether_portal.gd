@@ -113,12 +113,28 @@ static func try_create(world, pos: Vector3i) -> bool:
 			elif id != Blocks.AIR and id != Blocks.FIRE:
 				return false
 
+	# x.java:65-71 — `cy2.i = true` around the fill. Without the bracket,
+	# each written cell's synchronous neighbour update validates a
+	# one-tall column and erases it on the spot: the sheet is destroyed
+	# cell by cell as it is created and never exists at all.
 	var lit: Array[Vector3i] = []
+	if world.has_method("begin_block_edit"):
+		world.begin_block_edit()
+	# Each portal cell emits light 11, and an unbatched write runs its own
+	# synchronous BFS flood — six floods in one frame read as a hitch at
+	# the exact moment of ignition. Same batching the explosion path uses:
+	# defer the seeds, drain once.
+	if world.has_method("begin_batch"):
+		world.begin_batch()
 	for along: int in range(_INTERIOR_WIDTH):
 		for up: int in range(_INTERIOR_HEIGHT):
 			var cell: Vector3i = origin + step * along + Vector3i(0, up, 0)
 			world.set_world_block(cell, Blocks.PORTAL)
 			lit.append(cell)
+	if world.has_method("end_batch"):
+		world.end_batch()
+	if world.has_method("end_block_edit"):
+		world.end_block_edit()
 	# Recording here rather than at the callsite is deliberate: lighting a
 	# portal is the only way one comes into existence by hand, so the index
 	# cannot drift by someone forgetting to announce it. The index is a

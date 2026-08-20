@@ -56,6 +56,19 @@ var travelled_this_tick: bool = false
 func advance() -> bool:
 	triggered_this_tick = false
 	travelled_this_tick = false
+	# Entity.setInPortal — vanilla gates in the SETTER, not the update:
+	# while the post-travel cooldown runs, standing inside REFRESHES it
+	# to ten and the tick proceeds as "outside", so the meter DRAINS (the
+	# purple fades even while the player stands in the arrival portal)
+	# and the cooldown can only expire once they actually step out. The
+	# old shape put the refresh behind `in_portal` while the player-side
+	# detector reported false during cooldown — two anti-bounce guards
+	# wired so each disabled the other, which is the arrival ping-pong
+	# loop from the field: cooldown counted DOWN under the player's feet,
+	# the meter refilled, and travel re-fired every ~2.5 s forever.
+	if in_portal and cooldown > 0:
+		cooldown = COOLDOWN_TICKS
+		in_portal = false
 	var travel: bool = false
 	if in_portal:
 		# bq.java:36-38 — the trigger sound fires on the tick the meter
@@ -75,14 +88,17 @@ func advance() -> bool:
 			exposure = AlphaMath.f32(exposure - DRAIN_PER_TICK)
 		if exposure < 0.0:
 			exposure = 0.0
-	if cooldown > 0:
-		cooldown -= 1
+		# bq.java:52-53 — the countdown advances every tick it is not
+		# being refreshed, i.e. whenever the entity is effectively
+		# outside.
+		if cooldown > 0:
+			cooldown -= 1
 	return travel
 
 
-# True while the ten-tick post-travel cooldown is running. Callers use it
-# to suppress re-entry: the player arrives standing IN the destination
-# portal, and without this they would immediately start filling again.
+# True while the post-travel cooldown is armed. Purely observational —
+# re-entry suppression happens inside advance() (the setInPortal refresh),
+# never by filtering the caller's in-portal detection.
 func on_cooldown() -> bool:
 	return cooldown > 0
 

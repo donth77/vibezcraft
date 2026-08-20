@@ -27,7 +27,25 @@ const BUILD_RADIUS: int = 16
 const FALLBACK_MIN_Y: int = 70
 const FALLBACK_MAX_Y: int = 118
 
+# Site-search bounds — the FULL column, minus the bedrock plates.
+# Vanilla `no.java` scans every height for a buildable site and clamps
+# only the last-resort platform to 70-118. The first shipped version
+# confined the SITE SEARCH itself to that band, which is why Overworld
+# return portals materialised as platforms floating at Y 70 over flat
+# ~64-surface terrain (audit finding #4).
+const SITE_SEARCH_MIN_Y: int = 4
+const SITE_SEARCH_MAX_Y: int = 120
+
 const _FRAME_BLOCK: int = Blocks.OBSIDIAN
+
+# The player body's origin is its capsule CENTER (half-height 0.9), not
+# its feet. A landing of cell.y + 0.5 therefore sank the capsule 0.4 m
+# into the frame's floor row — deep symmetric penetration that
+# move_and_slide cannot resolve, so the arrival was paralyzed in every
+# axis (field reports #1-#3: "impossible to move and walk out"). Same
+# convention as the voxel floor guard: origin = floor top + half height
+# + skin.
+const _PLAYER_ORIGIN_ABOVE_FLOOR: float = 0.901
 
 
 # §7.2 — entering the Nether divides X/Z by the destination's coordinate
@@ -123,7 +141,9 @@ static func find_portal(world, around: Vector3, radius: int = SEARCH_RADIUS) -> 
 # inside one of its columns.
 static func arrival_position(world, portal_cell: Vector3i) -> Vector3:
 	var pos := Vector3(
-		float(portal_cell.x) + 0.5, float(portal_cell.y) + 0.5, float(portal_cell.z) + 0.5
+		float(portal_cell.x) + 0.5,
+		float(portal_cell.y) + _PLAYER_ORIGIN_ABOVE_FLOOR,
+		float(portal_cell.z) + 0.5
 	)
 	if world.get_world_block(portal_cell + Vector3i(-1, 0, 0)) == Blocks.PORTAL:
 		pos.x -= 0.5
@@ -142,9 +162,10 @@ static func arrival_position(world, portal_cell: Vector3i) -> Vector3:
 # Vanilla runs two site searches of decreasing strictness before falling
 # back to carving a platform. This port keeps the fallback and the Y
 # clamp — the parts a player can end up depending on — and simplifies the
-# site search to a single clearance test, because the two-pass version's
-# only observable difference is WHICH clear spot wins, and the plan's
-# canonicalisation already accepts a deterministic choice there.
+# site search to a single clearance test over the full column, because
+# the two-pass version's only observable difference is WHICH clear spot
+# wins, and the plan's canonicalisation already accepts a deterministic
+# choice there.
 #
 # Recorded as a deliberate deviation in the plan's findings log.
 static func create_portal(world, around: Vector3) -> Vector3i:
@@ -160,34 +181,66 @@ static func create_portal(world, around: Vector3) -> Vector3i:
 		for z: int in range(centre_z - BUILD_RADIUS, centre_z + BUILD_RADIUS + 1):
 			# Same reason as the search: an unloaded column is all-AIR to
 			# us, and building a frame there would write into nothing.
-			if can_test_residency and not world.has_chunk_at(x, z):
+			# The WHOLE footprint has to be resident, not just this column:
+			# set_world_block silently drops writes to unloaded chunks, so a
+			# base within two blocks of a chunk edge could pass this test and
+			# then lose part of its frame — bottom row included — to the
+			# neighbour that was not loaded yet.
+			if can_test_residency and not _footprint_is_resident(world, x, z):
 				continue
 			var dz: float = float(z) + 0.5 - around.z
-			for y: int in range(FALLBACK_MAX_Y, FALLBACK_MIN_Y - 1, -1):
+			for y: int in range(SITE_SEARCH_MAX_Y, SITE_SEARCH_MIN_Y - 1, -1):
 				if not _site_is_clear(world, Vector3i(x, y, z)):
 					continue
 				var dy: float = float(y) + 0.5 - around.y
 				var distance: float = dx * dx + dy * dy + dz * dz
+				# No break: every valid site in the column competes on 3D
+				# distance, exactly as vanilla's full scan does. Breaking
+				# on the first (highest) hit re-biased arrivals upward —
+				# the same failure the old Y band caused.
 				if not found or distance < best_distance:
 					best_distance = distance
 					best = Vector3i(x, y, z)
 					found = true
-				break
 
 	if not found:
 		# no.java:158-163 — nothing suitable anywhere, so clamp into the
-		# safe band and carve a platform to stand the frame on.
+		# safe band and carve a platform to stand the frame on. The
+		# platform is what guarantees a floor here, so it must reach every
+		# column the frame will occupy; a partially resident footprint
+		# would slab only the loaded half and leave the rest hanging.
 		best.y = clampi(best.y, FALLBACK_MIN_Y, FALLBACK_MAX_Y)
 		_build_platform(world, best)
 	build_frame(world, best)
 	return best
 
 
+# Every chunk column the frame OR its fallback platform can touch. The
+# frame runs x-1..x+2 at a fixed z; _build_platform widens that to
+# x-2..x+3 and z-1..z+1, so the platform bounds are the superset used
+# here. Writes outside a resident chunk are dropped on the floor by
+# ChunkManager.set_world_block, which is how a portal ends up built with
+# half of it — floor included — simply absent.
+static func _footprint_is_resident(world, base_x: int, base_z: int) -> bool:
+	for x: int in range(base_x - 2, base_x + 4):
+		for z: int in range(base_z - 1, base_z + 2):
+			if not world.has_chunk_at(x, z):
+				return false
+	return true
+
+
 # A 4-wide, 5-tall, 2-deep pocket of air with something solid underneath —
 # enough for the frame plus the player, without burying it in terrain.
 static func _site_is_clear(world, base: Vector3i) -> bool:
-	if not Blocks.is_solid_collision(world.get_world_block(base + Vector3i(0, -1, 0))):
-		return false
+	# Support under the WHOLE frame footprint, not just the base column.
+	# build_frame lays its bottom row across `along -1..2`, so checking one
+	# column accepted sites where the other three overhang open air — the
+	# Nether arrival with a floor under only half the frame. A site that
+	# cannot hold the whole row is rejected here, which routes construction
+	# to the _build_platform fallback that carves its own slab.
+	for along: int in range(-1, 3):
+		if not Blocks.is_solid_collision(world.get_world_block(base + Vector3i(along, -1, 0))):
+			return false
 	for along: int in range(-1, 3):
 		for up: int in range(0, 5):
 			for across: int in range(0, 2):
@@ -200,17 +253,38 @@ static func _site_is_clear(world, base: Vector3i) -> bool:
 # no.java:164-176 — an obsidian slab under the frame, so the fallback
 # portal is never floating.
 static func _build_platform(world, base: Vector3i) -> void:
+	# Inside no.java's same editingBlocks bracket — the carve and slab
+	# writes must not fan out mid-structure either.
+	if world.has_method("begin_block_edit"):
+		world.begin_block_edit()
+	if world.has_method("begin_batch"):
+		world.begin_batch()
 	for along: int in range(-2, 4):
 		for across: int in range(-1, 2):
 			world.set_world_block(base + Vector3i(along, -1, across), _FRAME_BLOCK)
 			for up: int in range(0, 5):
 				world.set_world_block(base + Vector3i(along, up, across), Blocks.AIR)
+	if world.has_method("end_batch"):
+		world.end_batch()
+	if world.has_method("end_block_edit"):
+		world.end_block_edit()
+	_rebuild_touched_chunks(world, base + Vector3i(-2, -1, -1), base + Vector3i(3, 4, 1))
 
 
 # no.java:178-207 — the frame itself: a 4x5 obsidian ring with a 2x3
 # portal interior, laid along X. Built directly rather than lit by fire,
 # because the destination has no player to strike a flint.
 static func build_frame(world, base: Vector3i) -> void:
+	# no.java:202-212 — construction is bracketed by `cy2.i = true` for
+	# the same reason x.java's fill is: the half-built sheet must not be
+	# observable by its own per-cell validation, or it erases itself as
+	# it is written.
+	if world.has_method("begin_block_edit"):
+		world.begin_block_edit()
+	# The six portal cells each emit light 11 — batch the floods into one
+	# drain, same as the ignition path in nether_portal.try_create.
+	if world.has_method("begin_batch"):
+		world.begin_batch()
 	var lit: Array[Vector3i] = []
 	for along: int in range(-1, 3):
 		for up: int in range(-1, 4):
@@ -221,6 +295,11 @@ static func build_frame(world, base: Vector3i) -> void:
 			else:
 				world.set_world_block(cell, Blocks.PORTAL)
 				lit.append(cell)
+	if world.has_method("end_batch"):
+		world.end_batch()
+	if world.has_method("end_block_edit"):
+		world.end_block_edit()
+	_rebuild_touched_chunks(world, base + Vector3i(-1, -1, 0), base + Vector3i(2, 3, 0))
 	PortalIndex.record_sheet(DimensionContext.active(), lit)
 
 
@@ -237,5 +316,31 @@ static func destination_for(world, arrival_centre: Vector3) -> Vector3:
 			# The frame we just built must be findable; if it is not,
 			# something rejected the writes and standing on the base cell
 			# is still safer than returning an unvalidated coordinate.
-			return Vector3(float(built.x) + 0.5, float(built.y) + 0.5, float(built.z) + 0.5)
+			return Vector3(
+				float(built.x) + 0.5,
+				float(built.y) + _PLAYER_ORIGIN_ABOVE_FLOOR,
+				float(built.z) + 0.5
+			)
 	return arrival_position(world, existing as Vector3i)
+
+
+# Same-frame mesh + collision rebuild for every chunk the write AABB
+# touches. set_world_block marks dirty flags but leaves the remesh to
+# its caller; a structure carved without this exists only in block data
+# — the chunk still MESHES AND COLLIDES as the virgin terrain, and a
+# player placed "in the doorway" is entombed in collision for geometry
+# that is no longer there.
+static func _rebuild_touched_chunks(world, cell_min: Vector3i, cell_max: Vector3i) -> void:
+	if not world.has_method("rebuild_chunk_now"):
+		return
+	var min_c := Vector2i(
+		floori(float(cell_min.x) / float(Chunk.SIZE_X)),
+		floori(float(cell_min.z) / float(Chunk.SIZE_Z))
+	)
+	var max_c := Vector2i(
+		floori(float(cell_max.x) / float(Chunk.SIZE_X)),
+		floori(float(cell_max.z) / float(Chunk.SIZE_Z))
+	)
+	for cx: int in range(min_c.x, max_c.x + 1):
+		for cz: int in range(min_c.y, max_c.y + 1):
+			world.rebuild_chunk_now(Vector2i(cx, cz))

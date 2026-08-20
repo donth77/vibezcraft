@@ -50,12 +50,20 @@ const EFFECT_CELLS: int = 6
 
 # jd.java:22 — lifetime is `(int)(random()*10) + 40` ticks, so 2.0-2.45 s.
 const _PARTICLE_LIFETIME: float = 2.2
-# x.java:133 — four per display tick. At 20 Hz with the lifetime above,
-# 4 * 20 * 2.2 rounds to the steady-state population of one emitter.
-const _PARTICLES_PER_EMITTER: int = 176
+# x.java:133 spawns four per animateTick HIT — but animateTick samples
+# 1000 random cells per tick from a ±16 triangular distribution around
+# the player, so a portal cell a few blocks away is hit ~0.1-0.25 times
+# a tick, not every tick. Steady state up close is ~20-40 motes per
+# cell; 176 (the old value, which assumed a hit every tick) rendered as
+# a solid wall of quads.
+const _PARTICLES_PER_EMITTER: int = 28
 # jd.java:19-21 — blue at full strength, red at 0.9, green at 0.3, all
-# scaled per particle by `nextFloat() * 0.6 + 0.4`.
-const _PARTICLE_COLOR := Color(0.9, 0.3, 1.0)
+# scaled per particle by `nextFloat() * 0.6 + 0.4`. The ramp reproduces
+# the uniform brightness roll: dim end at f2=0.4, bright end at f2=1.0.
+const _PARTICLE_COLOR_DIM := Color(0.36, 0.12, 0.4)
+const _PARTICLE_COLOR_BRIGHT := Color(0.9, 0.3, 1.0)
+
+const _PARTICLES_ATLAS_PATH: String = "res://assets/textures/particles/particles.png"
 
 # The particle material, shared by every emitter in every renderer.
 static var _particle_mat: StandardMaterial3D = null
@@ -85,6 +93,14 @@ func _ready() -> void:
 	# translucent surface would darken the frame it sits in.
 	_multimesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(_multimesh_instance)
+	# Build the emitter pool now, dormant. Deferring it to the first lit
+	# portal put the CPUParticles node setup and particle-shader compile
+	# on the ignition frame — a visible hitch on top of the light floods.
+	while _emitters.size() < EFFECT_CELLS:
+		var fresh: CPUParticles3D = _build_emitter()
+		fresh.visible = false
+		add_child(fresh)
+		_emitters.append(fresh)
 
 
 # The world to read blocks from. Normally the ChunkManager; tests pass a
@@ -271,18 +287,36 @@ func _build_emitter() -> CPUParticles3D:
 	particles.emission_box_extents = Vector3(0.5, 0.5, 0.25)
 	particles.direction = Vector3(0, 1, 0)
 	particles.spread = 180.0
-	particles.initial_velocity_min = 0.05
-	particles.initial_velocity_max = 0.35
-	# jd.java:54 — `ax = p + aA * f2 + (1 - f3)`, a steady rise on top of
-	# the drift. Vanilla's drift eases out and back; CPUParticles3D has no
-	# return arc, so the outward push plus this lift is the approximation.
-	particles.gravity = Vector3(0.0, 0.35, 0.0)
-	particles.scale_amount_min = 0.6
-	particles.scale_amount_max = 1.0
+	particles.initial_velocity_min = 0.1
+	particles.initial_velocity_max = 0.4
+	# jd.java:54 — vanilla's drift eases out and RETURNS: the mote is
+	# pushed off the sheet, then converges back toward where it spawned.
+	# CPUParticles3D has no return arc, but a negative radial pull toward
+	# the emitter origin against the outward launch reads the same way —
+	# a swirl breathing around the surface instead of a spray leaving it.
+	particles.radial_accel_min = -0.4
+	particles.radial_accel_max = -0.1
+	particles.gravity = Vector3(0.0, 0.15, 0.0)
+	particles.scale_amount_min = 0.5
+	particles.scale_amount_max = 0.7
 	particles.scale_amount_curve = _fade_curve()
-	particles.color = _PARTICLE_COLOR
+	# Per-particle brightness roll (nextFloat() * 0.6 + 0.4) — sampled
+	# uniformly along the dim→bright ramp instead of one flat pink.
+	var ramp := Gradient.new()
+	ramp.set_color(0, _PARTICLE_COLOR_DIM)
+	ramp.set_color(1, _PARTICLE_COLOR_BRIGHT)
+	particles.color_initial_ramp = ramp
+	# jd.java picks a random smoke tile (0-7 of particles.png row 0) per
+	# particle and keeps it: random anim offset, zero anim speed.
+	particles.anim_offset_min = 0.0
+	particles.anim_offset_max = 1.0
+	particles.anim_speed_min = 0.0
+	particles.anim_speed_max = 0.0
 	var draw := QuadMesh.new()
-	draw.size = Vector2(0.1, 0.1)
+	# EntityFX renders at half-width `0.1 * aq` with aq rolled 0.5-0.7 —
+	# a 0.2 quad under the 0.5-0.7 scale roll above lands on the same
+	# 0.10-0.14 world size.
+	draw.size = Vector2(0.2, 0.2)
 	draw.material = _particle_material()
 	particles.mesh = draw
 	particles.amount = _PARTICLES_PER_EMITTER
@@ -293,11 +327,30 @@ func _build_emitter() -> CPUParticles3D:
 
 static func _particle_material() -> StandardMaterial3D:
 	if _particle_mat == null:
+		# The 8-frame smoke row of vanilla particles.png. NOT via
+		# AtlasTexture — its region crop is ignored by the 3D particle
+		# path, so the whole 128x16 strip squishes onto each quad as
+		# horizontal dashes (the same artifact fluid_fx.gd documents on
+		# get_smoke_subparticle_material). Baking the row into a
+		# standalone ImageTexture makes the anim grid slice real pixels,
+		# the exact mechanism block_fx's dig particles ship on. The
+		# purple tint comes from the per-particle color ramp via
+		# vertex_color_use_as_albedo.
+		var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
+		var img: Image = sheet.get_image()
+		if img.is_compressed():
+			img.decompress()
+		var row: Image = img.get_region(Rect2i(0, 0, 128, 16))
 		var mat := StandardMaterial3D.new()
 		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 		mat.vertex_color_use_as_albedo = true
 		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_texture = ImageTexture.create_from_image(row)
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		mat.particles_anim_h_frames = 8
+		mat.particles_anim_v_frames = 1
+		mat.particles_anim_loop = false
 		_particle_mat = mat
 	return _particle_mat
 

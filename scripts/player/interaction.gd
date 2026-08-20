@@ -205,6 +205,15 @@ func _try_attack_mob() -> bool:
 	var mob: Node = null
 	var node: Node = collider
 	while node != null:
+		# Ghast fireball — `az.a(lw, int)`: ANY hit deflects it along the
+		# attacker's look and the damage amount is discarded, so a fist
+		# works as well as a sword. Full 3D camera forward (not the
+		# yaw-flattened melee vector) so the player can bat one upward.
+		if node is GhastFireball:
+			node.take_damage(1, -_camera.global_transform.basis.z, 1.0, null)
+			_trigger_player_use_swing()
+			SFX.play_player_hit()
+			return true
 		var script: Script = node.get_script()
 		if script != null and _script_extends(script, _MOB_BASE_SCRIPT):
 			mob = node
@@ -1577,6 +1586,15 @@ func _try_flint_and_steel(hit: Dictionary, hit_id: int) -> bool:
 	# normal_i is the AIR cell where fire lands.
 	var fire_pos: Vector3i = hit.block_pos + hit.normal_i
 	if _chunk_manager.get_world_block(fire_pos) != Blocks.AIR:
+		# The steel struck, but the cell this face points into is already
+		# occupied. The common case is a portal frame CORNER: its upward
+		# normal aims at the frame's own side column, not the interior, so
+		# half the bottom row of a 4x5 frame is a dead target. Vanilla is
+		# silent here, which in practice is indistinguishable from a broken
+		# feature — no fire, no portal, and no sound at all. Play the strike
+		# so a mis-aimed ignition reads as "wrong spot" rather than "nothing
+		# works". No durability is spent; nothing was lit.
+		SFX.play_flint_and_steel()
 		return false
 	# BlockFire.place is vanilla's onBlockAdded: it lights a Nether portal
 	# when the cell sits on obsidian inside a valid frame, and otherwise

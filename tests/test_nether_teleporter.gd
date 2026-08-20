@@ -190,7 +190,7 @@ func test_arrival_sits_between_the_two_portal_columns() -> void:
 	# The sheet runs along +X, so the arrival nudges half a block that way
 	# and lands on the seam rather than inside a column.
 	assert_eq(pos.x, 1.0, "nudged toward the partner column")
-	assert_eq(pos.y, 64.5, "standing on the bottom cell")
+	assert_almost_eq(pos.y, 64.901, 0.001, "standing on the bottom cell")
 	assert_eq(pos.z, 0.5, "centred across the sheet")
 
 
@@ -250,6 +250,44 @@ func test_a_built_portal_passes_the_frame_validator() -> void:
 	assert_eq(w.count(Blocks.PORTAL), 6, "the built portal survives revalidation")
 
 
+func test_a_low_altitude_site_beats_the_fallback_band() -> void:
+	# Audit finding #4: the site search used to be confined to the
+	# fallback band (70-118), so a perfectly good floor at the player's
+	# actual altitude was invisible to it. A floor at Y 40 with the
+	# arrival right there must produce a portal AT Y 41, not one lifted
+	# into the band.
+	var w: FakeWorld = _new_world()
+	for x: int in range(-20, 21):
+		for z: int in range(-20, 21):
+			w.set_world_block(Vector3i(x, 40, z), Blocks.NETHERRACK)
+	var built: Vector3i = NetherTeleporter.create_portal(w, Vector3(0.0, 41.0, 0.0))
+	assert_eq(built.y, 41, "built on the low floor, not floated to 70")
+	assert_eq(w.count(Blocks.PORTAL), 6, "and fully lit")
+
+
+func test_an_overworld_return_lands_on_the_surface_not_in_the_sky() -> void:
+	# The shape of the real bug: a return trip arrives at the player's
+	# UNSCALED Nether Y — often 30-60, below the ~64 Overworld surface.
+	# With the band restriction there was no valid site and the fallback
+	# built a platform floating at Y 70; the full-column search finds the
+	# surface instead.
+	var w: FakeWorld = _new_world()
+	for x: int in range(-20, 21):
+		for z: int in range(-20, 21):
+			w.set_world_block(Vector3i(x, 63, z), Blocks.NETHERRACK)
+	var built: Vector3i = NetherTeleporter.create_portal(w, Vector3(0.0, 30.0, 0.0))
+	assert_eq(built.y, 64, "the portal stands on the surface")
+	# A fallback platform writes a 6x3 obsidian apron at base-1; a normal
+	# build touches only the frame line. One cell OFF that line at floor
+	# height still being the original ground is the proof no platform was
+	# conjured.
+	assert_eq(
+		w.get_world_block(built + Vector3i(0, -1, 1)),
+		Blocks.NETHERRACK,
+		"the ground beside the frame is untouched — no conjured platform"
+	)
+
+
 func test_the_fallback_clamps_into_the_safe_band() -> void:
 	# no.java:158-163. With nowhere suitable at all, the platform is
 	# clamped to Y 70..118 so it is never in the bedrock floor or jammed
@@ -298,7 +336,7 @@ func test_destination_prefers_an_existing_portal_over_building() -> void:
 	var before: int = w.count(_OBSIDIAN)
 	var pos: Vector3 = NetherTeleporter.destination_for(w, Vector3(0.5, 64.5, 0.5))
 	assert_eq(w.count(_OBSIDIAN), before, "nothing new was built")
-	assert_almost_eq(pos.y, 64.5, 1e-6, "and the player lands at the existing portal")
+	assert_almost_eq(pos.y, 64.901, 0.001, "and the player lands at the existing portal")
 
 
 func test_destination_builds_when_nothing_is_in_range() -> void:
@@ -319,3 +357,17 @@ func test_a_blocked_site_still_produces_a_portal() -> void:
 	var pos: Vector3 = NetherTeleporter.destination_for(w, Vector3(0.0, 80.0, 0.0))
 	assert_eq(w.count(Blocks.PORTAL), 6, "a portal was carved out of solid rock")
 	assert_between(pos.y, 1.0, 127.0, "with a usable arrival position")
+
+
+func test_arrival_lands_the_capsule_above_the_floor_not_inside_it() -> void:
+	# The paralysis bug: the player origin is the capsule CENTER
+	# (half-height 0.9), so a cell.y + 0.5 landing sank the body 0.4 m
+	# into the frame floor — unresolvable penetration, frozen in every
+	# axis. The landing must clear the floor top by half height + skin.
+	var w := FakeWorld.new()
+	var base := Vector3i(0, 60, 0)
+	NetherTeleporter.build_frame(w, base)
+	var landing: Vector3 = NetherTeleporter.arrival_position(w, base)
+	assert_almost_eq(landing.y, 60.901, 0.001, "origin = floor top + capsule half height + skin")
+	assert_eq(landing.x, 1.0, "centered across the two-column doorway")
+	assert_eq(landing.z, 0.5, "centered in the one-deep sheet")

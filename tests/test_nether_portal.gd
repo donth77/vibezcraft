@@ -315,13 +315,71 @@ func test_travel_starts_a_ten_tick_cooldown() -> void:
 	for _i: int in range(PortalExposure.TICKS_TO_TRAVEL):
 		e.advance()
 	assert_true(e.travelled_this_tick, "travelled")
-	# The travel tick itself decrements the cooldown once.
-	assert_eq(e.cooldown, 9, "ten ticks, one already spent")
-	for tick: int in range(9):
+	# bq.java counts the cooldown down only while OUTSIDE, so the travel
+	# tick — which is an in-portal tick — does not spend one of the ten.
+	assert_eq(e.cooldown, PortalExposure.COOLDOWN_TICKS, "full ten ticks banked")
+	for tick: int in range(PortalExposure.COOLDOWN_TICKS):
 		assert_true(e.on_cooldown(), "still cooling at tick %d" % tick)
 		e.in_portal = false
 		e.advance()
-	assert_false(e.on_cooldown(), "cooldown expired")
+	assert_false(e.on_cooldown(), "cooldown expired once outside")
+
+
+# The arrival case, and the one the old cooldown test never covered: it
+# always stepped the player OUT while counting down. A player arrives
+# standing IN the destination portal, so if the cooldown drained under
+# their feet the meter would refill and send them straight back — the
+# enter/leave loop reported from a real save, where the player was found
+# parked inside the Nether portal cell.
+func test_standing_in_the_arrival_portal_never_bounces_back() -> void:
+	var e := PortalExposure.new()
+	e.in_portal = true
+	for _i: int in range(PortalExposure.TICKS_TO_TRAVEL):
+		e.advance()
+	assert_true(e.travelled_this_tick, "first travel happened")
+	# Never leave the portal. Far longer than the cooldown, and longer
+	# than a second full fill would take.
+	for tick: int in range(PortalExposure.TICKS_TO_TRAVEL * 2):
+		e.in_portal = true
+		assert_false(e.advance(), "no re-travel while still inside (tick %d)" % tick)
+	assert_true(e.on_cooldown(), "cooldown is refreshed, not counted down, while inside")
+	# bq.java — during the refreshed cooldown the entity ticks as
+	# OUTSIDE, so the meter drains: the purple fades even while the
+	# player stands in the arrival portal, and it must never refill
+	# underfoot.
+	assert_eq(e.exposure, 0.0, "meter drains to empty; it must not refill underfoot")
+	# Stepping out finally releases it.
+	for _i: int in range(PortalExposure.COOLDOWN_TICKS):
+		e.in_portal = false
+		e.advance()
+	assert_false(e.on_cooldown(), "leaving the portal lets the cooldown expire")
+
+
+func test_arrival_state_standing_inside_never_re_travels() -> void:
+	# The field loop, replayed on the exact arrival state PortalTravel
+	# leaves behind: meter at 1.0 (purple fade-out) plus a live cooldown,
+	# player standing in the destination portal. 400 ticks (20 s) of
+	# standing still must produce zero travels, the purple must fade, and
+	# stepping out then back in must take the normal 81-tick fill.
+	var e := PortalExposure.new()
+	e.exposure = 1.0
+	e.cooldown = PortalExposure.COOLDOWN_TICKS
+	for tick: int in range(400):
+		e.in_portal = true
+		assert_false(e.advance(), "no bounce-back while standing inside (tick %d)" % tick)
+	assert_eq(e.exposure, 0.0, "overlay fully faded while standing inside")
+	assert_true(e.on_cooldown(), "cooldown still armed until the player steps out")
+	for _i: int in range(PortalExposure.COOLDOWN_TICKS):
+		e.in_portal = false
+		e.advance()
+	assert_false(e.on_cooldown(), "stepping out releases the cooldown")
+	var travelled_on: int = -1
+	for tick: int in range(PortalExposure.TICKS_TO_TRAVEL + 5):
+		e.in_portal = true
+		if e.advance():
+			travelled_on = tick + 1
+			break
+	assert_eq(travelled_on, PortalExposure.TICKS_TO_TRAVEL, "deliberate re-entry travels normally")
 
 
 func test_reset_clears_everything() -> void:
@@ -399,3 +457,152 @@ func test_the_portal_reads_purple() -> void:
 			blue_total += int(c.b * 255.0)
 			green_total += int(c.g * 255.0)
 	assert_gt(blue_total, green_total, "blue dominates green — the portal is purple")
+
+
+# --- which bottom-row cells can actually be lit -------------------------
+# A 4x5 frame has FOUR blocks in its bottom row, but only the middle two
+# sit under the 2x3 interior. The outer two are CORNERS, and the cell above
+# a corner is the frame's own side column — so the ignition target is not
+# air and interaction._try_flint_and_steel bails before BlockFire.place
+# ever runs. Silent no-op: no fire, no portal, and (until now) no sound.
+#
+# Note _build_frame above deliberately omits corners, which is legitimate
+# for validation tests — activation ignores corner contents — but it means
+# no existing test ever modelled the frame a player actually builds. That
+# is why this reached a real save as "the portal is broken" when both
+# frames were valid and try_create succeeded on them: half the bottom row a
+# player naturally clicks is a dead target.
+
+
+# Same 4x5 frame, but WITH the four corners a player lays down.
+func _build_frame_with_corners(world: FakeWorld, origin: Vector3i, step: Vector3i) -> void:
+	_build_frame(world, origin, step)
+	for along: int in [-1, 2]:
+		for up: int in [-1, 3]:
+			world.set_world_block(origin + step * along + Vector3i(0, up, 0), _OBSIDIAN)
+
+
+# The ignition rule from interaction._try_flint_and_steel: fire lands in
+# block_pos + normal, and the attempt is abandoned unless that cell is air.
+func _ignition_target_is_air(world: FakeWorld, clicked: Vector3i) -> bool:
+	return world.get_world_block(clicked + Vector3i(0, 1, 0)) == Blocks.AIR
+
+
+func test_frame_corners_are_dead_ignition_targets() -> void:
+	var world: FakeWorld = _new_world()
+	var origin := Vector3i(0, 64, 0)
+	var step := Vector3i(1, 0, 0)
+	_build_frame_with_corners(world, origin, step)
+	for along: int in [-1, 2]:
+		var clicked: Vector3i = origin + step * along + Vector3i(0, -1, 0)
+		assert_false(
+			_ignition_target_is_air(world, clicked),
+			"top face of bottom-row corner aims at the side column, not the interior"
+		)
+
+
+func test_bottom_row_middle_cells_light_the_portal() -> void:
+	for along: int in [0, 1]:
+		var world: FakeWorld = _new_world()
+		var origin := Vector3i(0, 64, 0)
+		var step := Vector3i(1, 0, 0)
+		_build_frame_with_corners(world, origin, step)
+		var clicked: Vector3i = origin + step * along + Vector3i(0, -1, 0)
+		assert_true(_ignition_target_is_air(world, clicked), "middle cell targets air")
+		assert_true(
+			BlockFire.place(world, clicked + Vector3i(0, 1, 0)),
+			"lighting above a middle bottom-row cell creates a portal, not fire"
+		)
+		assert_eq(world.count(Blocks.PORTAL), 6, "the 2x3 interior fills with portal")
+		assert_eq(world.count(Blocks.FIRE), 0, "no stray fire left in the frame")
+
+
+# --- the arrival site must hold the whole frame -------------------------
+# build_frame lays its bottom row across `along -1..2`, but _site_is_clear
+# used to verify support under the BASE COLUMN only. A ledge whose edge fell
+# away one block later therefore passed, and the Nether portal was built
+# with a floor under half its width — reproduced from a real save, where the
+# frame spanned x -5..-2 above ground that stopped at x -4.
+
+
+func _clear_pocket(world: FakeWorld, base: Vector3i) -> void:
+	# Everything the site check wants to be air.
+	for along: int in range(-1, 3):
+		for up: int in range(0, 5):
+			for across: int in range(0, 2):
+				world.set_world_block(base + Vector3i(along, up, across), Blocks.AIR)
+
+
+func test_a_ledge_under_only_the_base_column_is_rejected() -> void:
+	var world: FakeWorld = _new_world()
+	var base := Vector3i(0, 60, 0)
+	_clear_pocket(world, base)
+	# Ground under the base column only — the other three overhang.
+	world.set_world_block(base + Vector3i(0, -1, 0), Blocks.NETHERRACK)
+	assert_false(
+		NetherTeleporter._site_is_clear(world, base),
+		"a site that cannot hold the whole bottom row is not a valid site"
+	)
+
+
+func test_ground_under_the_full_bottom_row_is_accepted() -> void:
+	var world: FakeWorld = _new_world()
+	var base := Vector3i(0, 60, 0)
+	_clear_pocket(world, base)
+	for along: int in range(-1, 3):
+		world.set_world_block(base + Vector3i(along, -1, 0), Blocks.NETHERRACK)
+	assert_true(
+		NetherTeleporter._site_is_clear(world, base), "fully supported ground is a valid site"
+	)
+
+
+# A world that can answer residency, so create_portal takes the same
+# has_chunk_at path the real ChunkManager does. Chunks are resident unless
+# explicitly withheld.
+class ResidencyWorld:
+	extends FakeWorld
+
+	var absent_chunks: Dictionary = {}
+
+	func has_chunk_at(world_x: int, world_z: int) -> bool:
+		return not absent_chunks.has(
+			Vector2i(int(floor(world_x / 16.0)), int(floor(world_z / 16.0)))
+		)
+
+
+func test_a_site_straddling_an_unloaded_chunk_is_rejected() -> void:
+	# The frame runs base.x-1 .. base.x+2, so a base two blocks from the
+	# edge reaches into the next chunk. Writes there are dropped silently by
+	# the real ChunkManager, which loses part of the frame — floor included.
+	var world := ResidencyWorld.new()
+	autofree(world)
+	world.absent_chunks[Vector2i(1, 0)] = true
+	assert_false(
+		NetherTeleporter._footprint_is_resident(world, 14, 0),
+		"a footprint reaching into an unloaded chunk is not buildable"
+	)
+	assert_true(
+		NetherTeleporter._footprint_is_resident(world, 8, 0),
+		"a footprint wholly inside a resident chunk is buildable"
+	)
+
+
+func test_created_portals_always_get_a_full_width_floor() -> void:
+	# End to end: whatever site create_portal picks, every column of the
+	# frame's bottom row must end up solid. This is the invariant the real
+	# save violated — frame across x -5..-2 over ground that stopped at -4.
+	var world := ResidencyWorld.new()
+	autofree(world)
+	# A ledge: solid only for x <= 0, open air beyond, across the band the
+	# search will consider.
+	for x: int in range(-40, 41):
+		for z: int in range(-40, 41):
+			if x <= 0:
+				world.set_world_block(Vector3i(x, 59, z), Blocks.NETHERRACK)
+	var base: Vector3i = NetherTeleporter.create_portal(world, Vector3(0.5, 60.5, 0.5))
+	for along: int in range(-1, 3):
+		var under: Vector3i = base + Vector3i(along, -1, 0)
+		assert_true(
+			Blocks.is_solid_collision(world.get_world_block(under)),
+			"bottom row column %d rests on something solid (at %s)" % [along, under]
+		)

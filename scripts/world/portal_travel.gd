@@ -96,6 +96,23 @@ static func travel(player: Node3D, chunk_manager: Node) -> bool:
 	#    it is a hint, and the raw search below is what decides.
 	await _materialize(chunk_manager, arrival_centre, target, screen, tree)
 
+	# The player node can in principle be freed while we were awaiting
+	# (scene teardown mid-trip); everything below dereferences it.
+	if not is_instance_valid(player):
+		_finish(screen)
+		_in_progress = false
+		return false
+	# Normal streaming ran during those awaited frames, and it evicts
+	# chunks outside the render-distance ring at 4 per frame — which can
+	# include hint chunks we sync-spawned for a DISTANT known portal
+	# (audit finding #8). Re-pin them with no awaits in between, so the
+	# search below sees every chunk it was promised; re-spawning a chunk
+	# that is still resident is a cheap force-apply.
+	for coord: Vector2i in PortalIndex.chunk_hints(
+		target, arrival_centre, NetherTeleporter.SEARCH_RADIUS
+	):
+		chunk_manager.call("spawn_chunk_now", coord)
+
 	# 6. Find or create the destination portal, then place the player.
 	var landing: Vector3 = NetherTeleporter.destination_for(chunk_manager, arrival_centre)
 
@@ -111,9 +128,32 @@ static func travel(player: Node3D, chunk_manager: Node) -> bool:
 	# built (a portal found at the edge of the index hints), so guarantee
 	# its neighbourhood before releasing physics.
 	_materialize_around(chunk_manager, landing)
-	PlayerSave.save_player(player)
-	SFX.play_portal_travel()
+	# The ground under the landing must be ACTIVE collision before
+	# is_loading clears, or the player's ground guard freezes them inside
+	# the portal while the exposure meter refills — the enter/leave loop.
+	if chunk_manager.has_method("refresh_collision_activity"):
+		chunk_manager.call("refresh_collision_activity")
+	# Headless sessions are read-only — the same rule as every
+	# ChunkManager disk path (see _disk_writes_allowed and the World1
+	# fossil incident it exists for).
+	if DisplayServer.get_name() != "headless":
+		PlayerSave.save_player(player)
+	DebugLog.add(
+		"PORTAL",
+		(
+			"arrived dim=%d landing=%v ground_ready=%s"
+			% [
+				DimensionContext.active(),
+				landing,
+				str(chunk_manager.call("is_ground_ready_at", landing))
+			]
+		)
+	)
 	_finish(screen)
+	# AFTER _finish, which clears Game.is_loading — the optional sound
+	# player gates on that flag, so ordered the other way round the
+	# travel sound could never play (audit finding #7).
+	SFX.play_portal_travel()
 	_in_progress = false
 	return true
 
