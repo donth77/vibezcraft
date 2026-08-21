@@ -606,3 +606,30 @@ func test_created_portals_always_get_a_full_width_floor() -> void:
 			Blocks.is_solid_collision(world.get_world_block(under)),
 			"bottom row column %d rests on something solid (at %s)" % [along, under]
 		)
+
+
+func test_portal_survives_mining_but_not_explosions() -> void:
+	# Two different axes, and vanilla splits them:
+	#   * hardness -1.0 (nq.java:113 `.c(-1.0f)`) — the unbreakable
+	#     sentinel, so the sheet is never mined out;
+	#   * blast resistance 0 — because setHardness only RAISES resistance
+	#     when `resistance < hardness * 5`, and -1 never satisfies that,
+	#     so the portal keeps the 0 default.
+	# That combination is why a ghast fireball really does erase the
+	# sheet from inside an intact obsidian frame (frame resistance 2000
+	# survives), and relighting is the vanilla remedy.
+	assert_eq(Blocks.hardness(Blocks.PORTAL), -1.0, "unbreakable sentinel, per nq.java:113")
+	assert_eq(Blocks.explosion_resistance(Blocks.PORTAL), 0.0, "blast resistance is the 0 default")
+	assert_gt(
+		Blocks.explosion_resistance(Blocks.OBSIDIAN),
+		Blocks.explosion_resistance(Blocks.PORTAL),
+		"the frame outlasts the sheet, which is what the player sees"
+	)
+	# The blast ray subtracts `(resistance + 0.3) * coeff`; a negative
+	# term would make a blast STRONGER for crossing a cell.
+	assert_gte(Blocks.explosion_resistance(Blocks.PORTAL) + 0.3, 0.0, "ray term stays positive")
+	# Mining is blocked by selectability, not hardness: x.java returns a
+	# null collision box, so the cell can never be targeted.
+	assert_eq(
+		Blocks.selection_aabb(Blocks.PORTAL).size, Vector3.ZERO, "untargetable, so unmineable"
+	)

@@ -2673,3 +2673,66 @@ were corrected — they had encoded the bug as truth, the third time a
 test faithfully guarded broken behavior. The harness lives in the
 session scratchpad (`repro/nether_move_repro.gd`); worth promoting to
 `scripts/dev/` if arrival bugs recur.
+
+**Playtest round 4 (2026-08-20): four field reports, four distinct
+causes.**
+
+*The World-4 portal vanished from inside an intact frame.* Not a bug in
+the sense the report implies — vanilla's portal block has blast
+resistance 0 (nq.java:113's `.c(-1.0f)` sets HARDNESS, and setHardness
+only raises resistance when `resistance < hardness * 5`, which -1 never
+satisfies), so a ghast fireball genuinely does erase the sheet and
+leave the obsidian standing. Relighting is the vanilla remedy — no code change
+was warranted, and none survives.
+
+CORRECTION, recorded because the first pass shipped a wrong claim: this
+investigation initially "fixed" a -1.0 it found next to the netherrack
+and glowstone entries, reporting that the blast ray's
+`intensity -= (resistance + 0.3) * coeff` was being fed a negative term
+and amplifying explosions. That -1.0 is in `hardness()`, not
+`explosion_resistance()` — the two functions sit adjacent in blocks.gd
+and the edit landed in the wrong one. `explosion_resistance(PORTAL)`
+was already 0.0 by default, so no amplification bug ever existed, and
+the edit instead broke the unbreakable-mining sentinel. Caught by an
+existing test (`portal hardness is the unbreakable sentinel`) in the
+full-suite run, reverted. `test_portal_survives_mining_but_not_
+explosions` now pins BOTH axes together — hardness -1.0, blast
+resistance 0.0, the ray term non-negative, and the frame outlasting the
+sheet — so the next reader cannot confuse them the way this pass did.
+Mining is blocked by the zero-size selection AABB (x.java's null
+collision box), not by hardness.
+
+*Ghasts "spamming snowballs".* Two separate answers. The snowball IS
+vanilla: gl.java renders the fireball as `dx.aB`'s item tile at 2x
+scale, and `dx.aB = new by(76)` is the snowball (item 332) — Alpha has
+no fire-charge sprite, so the ghast throws a scaled-up snowball. The
+spam was ours: `am.a()` gates ghast spawning behind
+`nextInt(20) == 0`, and that roll was never ported. With the Nether
+hostile pool being {pigman, ghast}, an ungated ghast took HALF of every
+hostile spawn instead of 2.5% — twenty times vanilla density, each
+firing on the correct 3 s cadence (charge -40 → 20). Ported as a
+per-species `natural_spawn_denominator()` hook, rolled on the candidate
+before any placement work, so a failed roll costs the attempt exactly
+as vanilla's does. Species that declare no gate are unaffected.
+
+*Breathing room on arrival (DEVIATION, requested).* Vanilla needs none
+because its own rarity gates do the work. `NaturalMobSpawner.grant_
+spawn_grace` suppresses the hostile pass for 12 s after a portal
+arrival and clears the pending pack queue so nothing lands the instant
+it closes; passive spawns and living mobs are untouched.
+
+*Lighting "staggering between light and dark way too much, even on the
+ghasts".* The ambient floor is the ONE term vanilla's brightness LUT
+varies by dimension — oz.java:23 uses 0.05, om.java:21 uses 0.1 — and
+`WorldProvider.ambient_light_floor` has carried the right value per
+dimension all along. Nothing consumed it: `chunk_common.gdshaderinc`
+hardcoded `float f2 = 0.05` and `EntityLighting._FLOOR` did the same,
+so the Nether rendered on the Overworld curve with every unlit cell at
+HALF the brightness vanilla gives it. Because the Nether has no sky
+channel, most of it sits at the low end of the curve where that gap is
+widest — hence the harsh staggering, and hence a ghast crossing from
+lava-light into shadow swinging twice as far as vanilla's does. The
+floor is now a shader uniform pushed from the active provider by
+day_night_driver (both the daylight path and the skyless path), with
+EntityLighting fed the same value so entities and the blocks under them
+share one curve.
