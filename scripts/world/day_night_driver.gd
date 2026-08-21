@@ -115,6 +115,7 @@ func _process(_delta: float) -> void:
 	var sky_subtraction: float = float(WorldTime.sky_light_subtracted())
 	BlockAtlas.material().set_shader_parameter("sky_subtraction", sky_subtraction)
 	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", sky_subtraction)
+	_push_ambient_floor()
 
 
 # Dimensions with no sky (om.java's Nether) get a flat fog colour and no
@@ -143,3 +144,20 @@ func _apply_skyless_environment(provider: WorldProvider) -> void:
 	# dimension switch rather than leaving the Overworld's last value.
 	BlockAtlas.material().set_shader_parameter("sky_subtraction", 0.0)
 	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", 0.0)
+	_push_ambient_floor()
+
+
+# The brightness LUT's floor is the one term vanilla varies by dimension
+# (oz.java:23 = 0.05, om.java:21 = 0.1). WorldProvider has carried the
+# right value all along; nothing was pushing it to the renderer, so the
+# Nether was lit on the Overworld curve — every unlit cell at half the
+# brightness vanilla gives it, which is what made the dark/light
+# transitions read as harsh.
+func _push_ambient_floor() -> void:
+	var provider: WorldProvider = DimensionContext.provider(DimensionContext.active())
+	if provider == null:
+		return
+	var floor_value: float = provider.ambient_light_floor
+	BlockAtlas.material().set_shader_parameter("ambient_floor", floor_value)
+	BlockAtlas.water_material().set_shader_parameter("ambient_floor", floor_value)
+	EntityLighting.set_ambient_floor(floor_value)
