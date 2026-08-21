@@ -18,6 +18,10 @@ extends GutTest
 # above Peaceful; and `am.i()` returns 1 where the default is 4, which is
 # why ghasts are always alone.
 
+const _SPAWNER_SCRIPT: GDScript = preload("res://scripts/world/natural_mob_spawner.gd")
+const _GHAST_SCRIPT: GDScript = preload("res://scripts/entities/ghast.gd")
+const _PIGMAN_SCRIPT: GDScript = preload("res://scripts/entities/zombie_pigman.gd")
+
 const _OVERWORLD := 0
 const _NETHER := -1
 
@@ -69,7 +73,7 @@ func after_each() -> void:
 
 
 func _spawner() -> Node:
-	var node: Node = (load("res://scripts/world/natural_mob_spawner.gd") as GDScript).new()
+	var node: Node = _SPAWNER_SCRIPT.new()
 	_parent.add_child(node)
 	return node
 
@@ -352,3 +356,60 @@ func test_slimes_do_not_spawn_in_the_nether() -> void:
 		if is_instance_valid(mob):
 			assert_false(mob is Slime, "no slimes down here")
 	assert_gte(MobBase.active_mobs().size(), before, "sanity")
+
+
+func test_the_ghast_declares_vanillas_one_in_twenty_spawn_gate() -> void:
+	# `am.a()` — `nextInt(20) == 0 && super.a() && difficulty > 0`. The
+	# Nether hostile pool is {pigman, ghast}, so an UNGATED ghast takes
+	# half of every hostile spawn instead of 2.5% of them: twenty times
+	# vanilla density, each firing on the correct 3 s cadence. That reads
+	# in play as constant bombardment.
+	var ghast: Node = _GHAST_SCRIPT.new()
+	assert_true(ghast.has_method("natural_spawn_denominator"), "the gate exists")
+	assert_eq(int(ghast.call("natural_spawn_denominator")), 20, "one in twenty, per am.a()")
+	ghast.free()
+	# Species without a declared gate must be unaffected.
+	var pigman: Node = _PIGMAN_SCRIPT.new()
+	assert_false(
+		pigman.has_method("natural_spawn_denominator"), "pigman has no gate in am.a()'s sense"
+	)
+	pigman.free()
+
+
+func test_the_spawn_gate_is_applied_by_the_spawner() -> void:
+	var spawner: Node = _SPAWNER_SCRIPT.new()
+	add_child_autofree(spawner)
+	var ghast_script: Script = _GHAST_SCRIPT
+	var pigman_script: Script = _PIGMAN_SCRIPT
+	# An ungated species always passes; the gate must never block it.
+	for _i: int in range(50):
+		assert_true(
+			bool(spawner.call("_passes_species_spawn_roll", pigman_script)),
+			"ungated species always spawn"
+		)
+	# The gated species passes roughly one attempt in twenty. Bounds are
+	# wide enough to be stable across seeds while still failing an
+	# ungated (always-true) implementation.
+	var passes: int = 0
+	for _i: int in range(2000):
+		if bool(spawner.call("_passes_species_spawn_roll", ghast_script)):
+			passes += 1
+	assert_between(passes, 40, 160, "~100 of 2000 attempts pass (1 in 20)")
+
+
+func test_arrival_grace_suppresses_the_hostile_pass() -> void:
+	# The breathing-room window: a player dropped into an unfamiliar
+	# dimension gets a few seconds before the hostile pass resumes.
+	var spawner: Node = _SPAWNER_SCRIPT.new()
+	add_child_autofree(spawner)
+	spawner.call("grant_spawn_grace", 12.0)
+	assert_almost_eq(float(spawner.get("_spawn_grace_remaining")), 12.0, 0.001, "window opens")
+	# A shorter grant must never shorten a longer live window.
+	spawner.call("grant_spawn_grace", 2.0)
+	assert_almost_eq(
+		float(spawner.get("_spawn_grace_remaining")), 12.0, 0.001, "longest window wins"
+	)
+	spawner.call("_process", 5.0)
+	assert_almost_eq(float(spawner.get("_spawn_grace_remaining")), 7.0, 0.001, "window drains")
+	spawner.call("_process", 30.0)
+	assert_eq(float(spawner.get("_spawn_grace_remaining")), 0.0, "window closes, never negative")

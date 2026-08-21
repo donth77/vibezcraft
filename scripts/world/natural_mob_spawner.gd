@@ -126,17 +126,39 @@ var _spawns_this_tick: int = 0
 # fully materialize instead of all-at-once. Maintains vanilla
 # clustered-pack visuals without the per-frame stutter.
 var _pack_queue: Array = []
+# Seconds of hostile-spawn suppression remaining. See grant_spawn_grace.
+var _spawn_grace_remaining: float = 0.0
 
 
 func _ready() -> void:
 	set_process(true)
 
 
+# DEVIATION from vanilla (modern QoL): hold off hostile spawning for a
+# few seconds after the player is dropped somewhere they did not walk
+# to. Vanilla Alpha has no such window — it does not need one, because
+# its own rarity gates (a ghast is `nextInt(20)`) mean an arrival is not
+# usually met by anything. A player who steps out of a portal into an
+# unfamiliar dimension has no bearings, no line of retreat, and cannot
+# yet see what is above them; being shot during that window reads as
+# unfair rather than dangerous. Applies to the hostile pass only —
+# passive spawns and already-living mobs are untouched.
+func grant_spawn_grace(seconds: float) -> void:
+	_spawn_grace_remaining = maxf(_spawn_grace_remaining, seconds)
+	# Anything already queued from before the trip would land the instant
+	# the window closes, which defeats the point.
+	_pack_queue.clear()
+
+
 func _process(delta: float) -> void:
+	if _spawn_grace_remaining > 0.0:
+		_spawn_grace_remaining = maxf(0.0, _spawn_grace_remaining - delta)
 	_spawn_accum += delta
 	if _spawn_accum < _SPAWN_INTERVAL_SEC:
 		return
 	_spawn_accum = 0.0
+	if _spawn_grace_remaining > 0.0:
+		return
 	_run_spawn_pass()
 
 
@@ -218,6 +240,11 @@ func _run_spawn_pass() -> void:
 		# `int n6 = cy2.l.nextInt(classArray.length)` — ONE class is
 		# chosen per candidate group, not per attempt within it.
 		var mob_script: Script = pool[randi() % pool.size()] as Script
+		# Vanilla rolls the species gate on the CANDIDATE, and a failed
+		# roll costs the attempt — that is what makes ghasts rare rather
+		# than merely slower to place.
+		if not _passes_species_spawn_roll(mob_script):
+			continue
 		_try_spawn_one(manager, player, mob_script)
 
 
@@ -334,13 +361,26 @@ func _group_size_for(mob_script: Script) -> int:
 	return int(_species_descriptor(mob_script).get("group_size", _DEFAULT_GROUP_SIZE))
 
 
+# Vanilla's per-species `getCanSpawnHere` roll (`am.a()`'s
+# `nextInt(20) == 0`). Species that do not declare one return 1, which
+# always passes — so this changes nothing for the eight species that
+# have no such gate.
+func _passes_species_spawn_roll(mob_script: Script) -> bool:
+	var denominator: int = int(_species_descriptor(mob_script).get("spawn_denominator", 1))
+	if denominator <= 1:
+		return true
+	return randi() % denominator == 0
+
+
 # Read a species' spawn-relevant constants once. The probe instance is
 # never added to the tree, so `_ready` does not run — which is fine
 # because every method read here returns a constant. Freed immediately.
 func _species_descriptor(mob_script: Script) -> Dictionary:
 	if _species_cache.has(mob_script):
 		return _species_cache[mob_script]
-	var descriptor: Dictionary = {"airborne": false, "size": 1.0, "group_size": _DEFAULT_GROUP_SIZE}
+	var descriptor: Dictionary = {
+		"airborne": false, "size": 1.0, "group_size": _DEFAULT_GROUP_SIZE, "spawn_denominator": 1
+	}
 	var probe: Object = mob_script.new()
 	if probe != null:
 		if probe.has_method("spawns_airborne"):
@@ -349,6 +389,8 @@ func _species_descriptor(mob_script: Script) -> Dictionary:
 			descriptor["size"] = float(probe.call("_get_body_height"))
 		if probe.has_method("spawn_group_size"):
 			descriptor["group_size"] = int(probe.call("spawn_group_size"))
+		if probe.has_method("natural_spawn_denominator"):
+			descriptor["spawn_denominator"] = maxi(1, int(probe.call("natural_spawn_denominator")))
 		if probe is Node:
 			(probe as Node).free()
 		else:

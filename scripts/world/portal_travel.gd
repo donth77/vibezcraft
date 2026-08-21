@@ -29,6 +29,11 @@ const LABEL_LEAVING: String = "Leaving the Nether"
 # Guard against a second trip starting while one is mid-flight. The
 # ChunkManager has its own re-entrancy guard, but this one also covers the
 # awaits before and after it, during which the manager is not yet busy.
+# Hostile-spawn suppression granted to the destination on arrival.
+# Long enough to look around, find the ground and step clear of the
+# portal; short enough that the dimension still feels hostile.
+const ARRIVAL_SPAWN_GRACE_SEC: float = 12.0
+
 static var _in_progress: bool = false
 
 
@@ -138,6 +143,10 @@ static func travel(player: Node3D, chunk_manager: Node) -> bool:
 	# fossil incident it exists for).
 	if DisplayServer.get_name() != "headless":
 		PlayerSave.save_player(player)
+	# Breathing room on the far side — see grant_spawn_grace for why this
+	# deviates from vanilla.
+	if NaturalMobSpawner != null:
+		NaturalMobSpawner.grant_spawn_grace(ARRIVAL_SPAWN_GRACE_SEC)
 	DebugLog.add(
 		"PORTAL",
 		(

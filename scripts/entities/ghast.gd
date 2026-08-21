@@ -169,6 +169,17 @@ func spawn_group_size() -> int:
 	return 1
 
 
+# `am.a()` — `this.bd.nextInt(20) == 0 && super.a() && this.as.k > 0`.
+# The 1-in-20 roll is the whole reason a vanilla ghast is an EVENT and
+# not weather: the Nether hostile pool is {pigman, ghast}, so an ungated
+# ghast takes HALF of every hostile spawn instead of 2.5% of them —
+# twenty times vanilla's density. Each one then fires on the correct
+# 3 s cadence, which reads in play as constant bombardment (field
+# report: "the ghast seems to be spamming snowballs too much").
+func natural_spawn_denominator() -> int:
+	return 20
+
+
 # `this.bm = true`.
 func _is_fire_immune() -> bool:
 	return true
