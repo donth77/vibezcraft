@@ -1240,14 +1240,23 @@ func _dispatch_relight(coord: Vector2i) -> void:
 	# µs per chunk; the height_map cache is a main-thread mutation).
 	var chunk_data: Array = Lighting.prepare_relight_data(coord, target, neighbors, self)
 	var revisions: Dictionary = Lighting.relight_revisions(chunk_data)
+	# Capture the provider policy on the main thread. The worker must not
+	# consult DimensionContext.active(): a portal transition can change it
+	# while this queued job is running, and the Nether must never execute
+	# the sky channel even when stale/corrupt height data says "exposed".
+	var has_sky_light: bool = DimensionContext.active_provider().has_sky_light
 	_pending_relights[coord] = true
-	WorkerThreadPool.add_task(_relight_worker.bind(coord, chunk_data, revisions))
+	WorkerThreadPool.add_task(_relight_worker.bind(coord, chunk_data, revisions, has_sky_light))
 
 
 # Worker-thread entry — runs the native BFS on the snapshotted slabs and
 # stashes the result for the main thread to apply.
-func _relight_worker(coord: Vector2i, chunk_data: Array, revisions: Dictionary) -> void:
-	var result: Dictionary = Lighting.compute_relight_borders_native(coord, chunk_data)
+func _relight_worker(
+	coord: Vector2i, chunk_data: Array, revisions: Dictionary, has_sky_light: bool
+) -> void:
+	var result: Dictionary = Lighting.compute_relight_borders_native(
+		coord, chunk_data, has_sky_light
+	)
 	_result_mutex.lock()
 	_relight_results[coord] = {"lighting": result, "revisions": revisions}
 	_result_mutex.unlock()

@@ -680,8 +680,8 @@ Dictionary LightingNative::update_block_light_around_world(
 // --- Cross-chunk relight on chunk load (slice 3b) ---
 //
 // One-shot pass that walks the 4 cardinal seam planes of the target chunk
-// against each loaded neighbor and runs a dual-channel (sky + block)
-// bidirectional BFS to converge the seams. Mirrors vanilla
+// against each loaded neighbor and runs block-light plus optional sky-light
+// bidirectional BFSes to converge the seams. Mirrors vanilla
 // WorldServer.lightChunk → World.b(EnumSkyBlock, AABB).
 
 namespace {
@@ -706,7 +706,8 @@ Dictionary LightingNative::relight_chunk_borders(
 		int p_target_z,
 		const Array &p_chunk_data,
 		const PackedByteArray &p_opacity_lut,
-		const PackedByteArray &p_emission_lut) const {
+		const PackedByteArray &p_emission_lut,
+		bool p_has_sky_light) const {
 	Dictionary result;
 	if (p_opacity_lut.size() < 256 || p_emission_lut.size() < 256) {
 		return result;
@@ -927,24 +928,26 @@ Dictionary LightingNative::relight_chunk_borders(
 	};
 
 	auto seed_cell = [&](int wx, int wy, int wz) {
-		int cur_sky = get_sky(wx, wy, wz);
-		int new_sky = recompute_sky(wx, wy, wz);
-		if (new_sky != cur_sky) {
-			set_sky(wx, wy, wz, new_sky);
-			sky_queue.push_back(pack_pos(wx, wy, wz));
+		if (p_has_sky_light) {
+			int cur_sky = get_sky(wx, wy, wz);
+			int new_sky = recompute_sky(wx, wy, wz);
+			if (new_sky != cur_sky) {
+				// Leave the old value in place. The drain performs the write,
+				// then schedules neighbors. Pre-writing here made the drain see
+				// new == current and stop after the single seam cell.
+				sky_queue.push_back(pack_pos(wx, wy, wz));
+			}
 		}
 		int cur_blk = get_block_light(wx, wy, wz);
 		int new_blk = recompute_block(wx, wy, wz);
 		if (new_blk != cur_blk) {
-			set_block_light(wx, wy, wz, new_blk);
 			block_queue.push_back(pack_pos(wx, wy, wz));
 		}
 	};
 
 	// Walk each cardinal seam between the target and any loaded neighbor.
-	// The sky channel walks with a ~15-cell halo into both sides; block
-	// channel uses the same seeds since the recompute logic differs but
-	// the seam topology is identical.
+	// The enabled channels walk with a ~15-cell halo into both sides. Their
+	// recompute logic differs, but the seam topology is identical.
 	for (int oi = 0; oi < 4; oi++) {
 		int dx = (oi == 0 ? 1 : (oi == 1 ? -1 : 0));
 		int dz = (oi == 2 ? 1 : (oi == 3 ? -1 : 0));
@@ -1060,6 +1063,7 @@ void LightingNative::_bind_methods() {
 			&LightingNative::update_block_light_around_world);
 	ClassDB::bind_method(
 			D_METHOD("relight_chunk_borders",
-					"target_x", "target_z", "chunk_data", "opacity_lut", "emission_lut"),
+					"target_x", "target_z", "chunk_data", "opacity_lut", "emission_lut",
+					"has_sky_light"),
 			&LightingNative::relight_chunk_borders);
 }

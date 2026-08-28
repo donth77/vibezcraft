@@ -788,7 +788,9 @@ static func _update_block_light_around_world_native(world_pos: Vector3i, manager
 # (Bukkit/mc-dev WorldServer.java). Walks the 4 cardinal seams with a
 # loaded neighbor; for every seam cell on EITHER side, the world-coord
 # recompute already crosses chunks correctly via `manager.get_world_*`,
-# so we can just seed both BFSes from the seams and drain.
+# so we can seed the applicable channels from the seams and drain. The
+# caller supplies the dimension's sky policy; no-sky dimensions run only
+# the block-light channel.
 #
 # The fill_*_light passes are per-chunk and always pessimistic at borders
 # (lateral propagation is bounds-checked and never reads OOB). Without
@@ -803,7 +805,7 @@ static func _update_block_light_around_world_native(world_pos: Vector3i, manager
 # ---------------------------------------------------------------------------
 
 
-static func relight_chunk_borders(coord: Vector2i, manager) -> void:
+static func relight_chunk_borders(coord: Vector2i, manager, has_sky_light: bool) -> void:
 	var probe_token := PerfProbe.begin("lighting.relight_borders")
 	if not manager.has_method("get_chunk_at_coord"):
 		PerfProbe.end("lighting.relight_borders", probe_token)
@@ -824,10 +826,10 @@ static func relight_chunk_borders(coord: Vector2i, manager) -> void:
 		PerfProbe.end("lighting.relight_borders", probe_token)
 		return
 	# Native fast-path: marshal target + loaded neighbors into the C++
-	# slab format and let LightingNative do the seam walk + dual BFS in
+	# slab format and let LightingNative do the seam walk + channel BFSes in
 	# one call. ~10× faster than the GDScript path for typical chunk loads.
 	if _native_lighting != null:
-		_relight_chunk_borders_native(coord, target, neighbors, manager)
+		_relight_chunk_borders_native(coord, target, neighbors, manager, has_sky_light)
 		PerfProbe.end("lighting.relight_borders", probe_token)
 		return
 	# AABB bound for the BFS — light decays in 15 steps, so the maximum
@@ -845,8 +847,8 @@ static func relight_chunk_borders(coord: Vector2i, manager) -> void:
 	var touched: Dictionary = {coord: true}
 	for n_coord: Vector2i in neighbors:
 		touched[n_coord] = true
-		_seed_seam(coord, n_coord, manager, sky_seeds, block_seeds)
-	if not sky_seeds.is_empty():
+		_seed_seam(coord, n_coord, manager, sky_seeds, block_seeds, has_sky_light)
+	if has_sky_light and not sky_seeds.is_empty():
 		_drain_world_relight_bfs(sky_seeds, manager, true, bx_lo, bx_hi, by_lo, by_hi, bz_lo, bz_hi)
 	if not block_seeds.is_empty():
 		_drain_world_relight_bfs(
@@ -859,19 +861,19 @@ static func relight_chunk_borders(coord: Vector2i, manager) -> void:
 
 # Native fast-path for relight_chunk_borders. Marshals target + each
 # loaded cardinal neighbor's [blocks, sky_light, block_light, height_map]
-# into a single C++ call that does the seam walk + dual-channel BFS.
+# into a single C++ call that does the seam walk + applicable channel BFSes.
 # C++ heightmap reads expect the cached array up to date, so we trigger a
 # rebuild via is_sky_exposed before marshalling each chunk (same trick as
 # _update_sky_light_around_world_native).
 static func _relight_chunk_borders_native(
-	coord: Vector2i, target: Chunk, neighbors: Array[Vector2i], manager
+	coord: Vector2i, target: Chunk, neighbors: Array[Vector2i], manager, has_sky_light: bool
 ) -> void:
 	# Synchronous path — kept for the GDScript fallback / tests / any
 	# caller that wants the result applied inline. The hot path (chunk
 	# materialize) uses prepare_relight_data + compute_relight_borders_native
 	# + apply_relight_result to run the BFS on a worker thread.
 	var chunk_data: Array = prepare_relight_data(coord, target, neighbors, manager)
-	var result: Dictionary = compute_relight_borders_native(coord, chunk_data)
+	var result: Dictionary = compute_relight_borders_native(coord, chunk_data, has_sky_light)
 	apply_relight_result(result, manager)
 
 
@@ -945,11 +947,18 @@ static func relight_revisions(chunk_data: Array) -> Dictionary:
 # snapshot array + the static LUTs (immutable after Lighting.warm_lookups);
 # touches no live chunk state, so safe to invoke off main. Returns the
 # result dict { Vector2i -> { sky_light, block_light } } unchanged.
-static func compute_relight_borders_native(coord: Vector2i, chunk_data: Array) -> Dictionary:
+static func compute_relight_borders_native(
+	coord: Vector2i, chunk_data: Array, has_sky_light: bool
+) -> Dictionary:
 	if _native_lighting == null:
 		return {}
 	return _native_lighting.relight_chunk_borders(
-		coord.x, coord.y, chunk_data, _opacity_lut_for_native(), _emission_lut_for_native()
+		coord.x,
+		coord.y,
+		chunk_data,
+		_opacity_lut_for_native(),
+		_emission_lut_for_native(),
+		has_sky_light
 	)
 
 
@@ -979,10 +988,10 @@ static func apply_relight_result(
 
 
 # Walk the shared seam plane between target_coord and n_coord. For each
-# cell on EITHER side of the seam, recompute both channels using the
-# world-coord recompute (which sees across the seam via the manager).
-# If the recomputed value differs from current, write the new value and
-# enqueue the cell so the BFS can propagate the change inland.
+# cell on EITHER side of the seam, recompute block light and, when enabled,
+# sky light using world coordinates (which see across the seam via the manager).
+# If the recomputed value differs from current, enqueue the cell so the
+# BFS can write it and propagate the change inland.
 #
 # Bidirectional (write `new` regardless of direction) so a chunk loading
 # with stale-saved sky_light from a prior session correctly darkens cells
@@ -993,7 +1002,8 @@ static func _seed_seam(
 	n_coord: Vector2i,
 	manager,
 	sky_seeds: Array[Vector3i],
-	block_seeds: Array[Vector3i]
+	block_seeds: Array[Vector3i],
+	has_sky_light: bool
 ) -> void:
 	var dx: int = n_coord.x - target_coord.x
 	var dz: int = n_coord.y - target_coord.y
@@ -1005,8 +1015,12 @@ static func _seed_seam(
 		for z in range(Chunk.SIZE_Z):
 			var world_z: int = target_coord.y * Chunk.SIZE_Z + z
 			for y in range(Chunk.SIZE_Y):
-				_seed_cell(Vector3i(t_world_x, y, world_z), manager, sky_seeds, block_seeds)
-				_seed_cell(Vector3i(n_world_x, y, world_z), manager, sky_seeds, block_seeds)
+				_seed_cell(
+					Vector3i(t_world_x, y, world_z), manager, sky_seeds, block_seeds, has_sky_light
+				)
+				_seed_cell(
+					Vector3i(n_world_x, y, world_z), manager, sky_seeds, block_seeds, has_sky_light
+				)
 	else:
 		# North/south seam: x-y plane.
 		var t_world_z: int = target_coord.y * Chunk.SIZE_Z + (Chunk.SIZE_Z - 1 if dz > 0 else 0)
@@ -1014,25 +1028,35 @@ static func _seed_seam(
 		for x in range(Chunk.SIZE_X):
 			var world_x: int = target_coord.x * Chunk.SIZE_X + x
 			for y in range(Chunk.SIZE_Y):
-				_seed_cell(Vector3i(world_x, y, t_world_z), manager, sky_seeds, block_seeds)
-				_seed_cell(Vector3i(world_x, y, n_world_z), manager, sky_seeds, block_seeds)
+				_seed_cell(
+					Vector3i(world_x, y, t_world_z), manager, sky_seeds, block_seeds, has_sky_light
+				)
+				_seed_cell(
+					Vector3i(world_x, y, n_world_z), manager, sky_seeds, block_seeds, has_sky_light
+				)
 
 
-# Recompute both channels at p. If either differs from the stored value,
-# write the new value and add p to the matching seed list. Skipping cells
-# where new == current avoids enqueueing 8K no-op seeds per chunk-load.
+# Recompute the applicable channels at p. If either differs from the stored
+# value, add p to the matching seed list without pre-writing it. Skipping
+# cells where new == current avoids enqueueing 8K no-op seeds per chunk-load.
 static func _seed_cell(
-	p: Vector3i, manager, sky_seeds: Array[Vector3i], block_seeds: Array[Vector3i]
+	p: Vector3i,
+	manager,
+	sky_seeds: Array[Vector3i],
+	block_seeds: Array[Vector3i],
+	has_sky_light: bool
 ) -> void:
-	var cur_sky: int = manager.get_world_sky_light(p)
-	var new_sky: int = _recompute_sky_light_at_world(p, manager)
-	if new_sky != cur_sky:
-		manager.set_world_sky_light(p, new_sky)
-		sky_seeds.append(p)
+	if has_sky_light:
+		var cur_sky: int = manager.get_world_sky_light(p)
+		var new_sky: int = _recompute_sky_light_at_world(p, manager)
+		if new_sky != cur_sky:
+			# Queue the OLD cell state. The drain owns the write and then
+			# schedules its neighbors. Pre-writing here made the drain see
+			# new == current and stop at the seam after exactly one cell.
+			sky_seeds.append(p)
 	var cur_block: int = manager.get_world_block_light(p)
 	var new_block: int = _recompute_block_light_at_world(p, manager)
 	if new_block != cur_block:
-		manager.set_world_block_light(p, new_block)
 		block_seeds.append(p)
 
 

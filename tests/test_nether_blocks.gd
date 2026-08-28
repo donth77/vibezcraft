@@ -19,9 +19,17 @@ extends GutTest
 # path. Half this file exists to pin that.
 
 const _WORLD := "test_nether_blocks"
+const _INTERACTION := preload("res://scripts/player/interaction.gd")
+
+var _dimension_was: int
+
+
+func before_each() -> void:
+	_dimension_was = DimensionContext.active()
 
 
 func after_each() -> void:
+	DimensionContext.set_active(_dimension_was)
 	SaveLoad.delete_world(_WORLD)
 	SaveLoad.clear_cache()
 
@@ -134,8 +142,69 @@ func test_netherrack_and_soul_sand_drop_themselves() -> void:
 	assert_eq(Blocks.drops(Blocks.SOUL_SAND), Blocks.SOUL_SAND, "soul sand drops itself")
 
 
+func test_netherrack_only_harvests_with_a_pickaxe() -> void:
+	# qb.java gives netherrack rock material (hb.d). fo.java::b rejects
+	# rock when the player has no harvesting item, while ac.java::a accepts
+	# every rock-material block for every pickaxe tier.
+	for tool: int in [Blocks.AIR, Items.WOODEN_SHOVEL, Items.GOLD_SWORD]:
+		assert_eq(
+			Blocks.random_drop(Blocks.NETHERRACK, tool),
+			Blocks.AIR,
+			"tool %d breaks netherrack but cannot harvest it" % tool
+		)
+	for pickaxe: int in [
+		Items.WOODEN_PICKAXE,
+		Items.STONE_PICKAXE,
+		Items.IRON_PICKAXE,
+		Items.DIAMOND_PICKAXE,
+		Items.GOLD_PICKAXE,
+	]:
+		assert_eq(
+			Blocks.random_drop(Blocks.NETHERRACK, pickaxe),
+			Blocks.NETHERRACK,
+			"pickaxe %d harvests one netherrack" % pickaxe
+		)
+
+
+func test_soul_sand_harvests_itself_even_without_a_shovel() -> void:
+	# it.java uses sand material (hb.m), which fo.java::b allows the player
+	# to harvest without a tool. A shovel is a speed bonus, not a drop gate.
+	for tool: int in [Blocks.AIR, Items.WOODEN_SHOVEL, Items.DIAMOND_PICKAXE, Items.GOLD_SWORD]:
+		assert_eq(
+			Blocks.random_drop(Blocks.SOUL_SAND, tool),
+			Blocks.SOUL_SAND,
+			"tool %d yields one soul sand" % tool
+		)
+
+
+func test_the_survival_break_path_spawns_each_nether_drop() -> void:
+	# This drives Interaction._complete_break, the gameplay entry point,
+	# rather than stopping at the Blocks registry. It catches the original
+	# symptom where a correct table entry could still fail to become a
+	# DroppedItem in the world.
+	DimensionContext.set_active(DimensionContext.NETHER)
+	var cases: Array[Array] = [
+		[Blocks.NETHERRACK, Blocks.AIR, []],
+		[Blocks.NETHERRACK, Items.WOODEN_SHOVEL, []],
+		[Blocks.NETHERRACK, Items.WOODEN_PICKAXE, [Blocks.NETHERRACK]],
+		[Blocks.SOUL_SAND, Blocks.AIR, [Blocks.SOUL_SAND]],
+		[Blocks.SOUL_SAND, Items.WOODEN_SHOVEL, [Blocks.SOUL_SAND]],
+		[Blocks.GLOWSTONE, Blocks.AIR, [Items.GLOWSTONE_DUST]],
+		[Blocks.GLOWSTONE, Items.DIAMOND_PICKAXE, [Items.GLOWSTONE_DUST]],
+		[Blocks.GLOWSTONE, Items.WOODEN_SHOVEL, [Items.GLOWSTONE_DUST]],
+	]
+	for entry: Array in cases:
+		var result: Dictionary = _break_through_interaction(entry[0], entry[1])
+		assert_eq(result.block_after, Blocks.AIR, "block %d was removed" % entry[0])
+		assert_eq(result.drops, entry[2], "block %d with tool %d" % [entry[0], entry[1]])
+
+
 func test_the_portal_drops_nothing() -> void:
 	assert_eq(Blocks.drops(Blocks.PORTAL), Blocks.AIR, "x.java has no drop")
+	for tool: int in [Blocks.AIR, Items.WOODEN_PICKAXE, Items.DIAMOND_PICKAXE]:
+		assert_eq(
+			Blocks.random_drop(Blocks.PORTAL, tool), Blocks.AIR, "no drop with tool %d" % tool
+		)
 
 
 # --- Light ---
@@ -403,11 +472,12 @@ func test_the_new_blocks_survive_a_region_round_trip() -> void:
 			assert_eq(out[i], probes[i], "id %d round-trips through disk" % probes[i])
 
 
-# Minimal world double: BlockFire and Blocks.on_entity_walking only need
-# block/meta reads and writes, and building a real ChunkManager would
-# drag in streaming, workers and a save path.
+# Minimal world double: BlockFire, Blocks.on_entity_walking and the normal
+# survival break path only need block/meta reads and writes plus a light
+# sample. Building a real ChunkManager would drag in streaming, workers
+# and a save path.
 class _FakeWorld:
-	extends Node
+	extends Node3D
 
 	var blocks: Dictionary = {}
 	var meta: Dictionary = {}
@@ -425,3 +495,40 @@ class _FakeWorld:
 	func set_world_block_with_meta(pos: Vector3i, id: int, m: int) -> void:
 		blocks[pos] = id
 		meta[pos] = m
+
+	func get_world_effective_light(_pos: Vector3i) -> int:
+		return 15
+
+
+class _FakeBreakPlayer:
+	extends Node3D
+
+	var inventory := Inventory.new()
+
+
+func _break_through_interaction(block_id: int, tool_id: int) -> Dictionary:
+	var pos := Vector3i(3, 64, 5)
+	var world := _FakeWorld.new()
+	var player := _FakeBreakPlayer.new()
+	var camera := Camera3D.new()
+	camera.name = "Camera3D"
+	player.add_child(camera)
+	add_child(world)
+	add_child(player)
+	var interaction: Node = _INTERACTION.new()
+	interaction.process_mode = Node.PROCESS_MODE_DISABLED
+	player.add_child(interaction)
+	interaction.set("_chunk_manager", world)
+	world.blocks[pos] = block_id
+	if tool_id != Blocks.AIR:
+		player.inventory.selected().item_id = tool_id
+		player.inventory.selected().count = 1
+	interaction.call("_complete_break", pos)
+	var dropped_ids: Array[int] = []
+	for child: Node in world.get_children():
+		if child is DroppedItem:
+			dropped_ids.append((child as DroppedItem).item_id)
+	var result := {"block_after": world.get_world_block(pos), "drops": dropped_ids}
+	player.free()
+	world.free()
+	return result

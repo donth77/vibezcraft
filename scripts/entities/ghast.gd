@@ -185,6 +185,13 @@ func _is_fire_immune() -> bool:
 	return true
 
 
+# `jz.java::a(am,float)` runs after RenderManager applies the entity's
+# sampled brightness and explicitly sets glColor4f(1,1,1,1). Ghasts are
+# therefore fullbright in Alpha 1.2.6, including their charge texture.
+func _renders_fullbright() -> bool:
+	return true
+
+
 func _ready() -> void:
 	max_health = _MAX_HEALTH
 	# `g_()` returns `dx.K.aW` — item 33 + 256 = 289, gunpowder. Ghast
@@ -591,6 +598,7 @@ func _apply_texture_state() -> void:
 		for child: Node in pivot.get_children():
 			if child is MeshInstance3D:
 				(child as MeshInstance3D).material_override = mat
+	_refresh_world_brightness()
 
 
 # --- Animation ---

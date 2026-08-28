@@ -504,6 +504,10 @@ static func generate_raw_gdscript(chunk_x: int, chunk_z: int) -> PackedByteArray
 # either mapping happens.
 static func remap_to_chunk(raw: PackedByteArray, chunk: Chunk) -> void:
 	var max_y: int = 0
+	var saw_non_cube: bool = false
+	var saw_water: bool = false
+	var saw_chest: bool = false
+	var saw_sign: bool = false
 	for y: int in range(Chunk.SIZE_Y):
 		for z: int in range(Chunk.SIZE_Z):
 			for x: int in range(Chunk.SIZE_X):
@@ -520,7 +524,28 @@ static func remap_to_chunk(raw: PackedByteArray, chunk: Chunk) -> void:
 				chunk.blocks[project_index(x, y, z)] = project_id
 				if project_id != Blocks.AIR and y > max_y:
 					max_y = y
+				if not saw_non_cube and Blocks.needs_gdscript_mesher(project_id):
+					saw_non_cube = true
+				if not saw_water and Blocks.is_water(project_id):
+					saw_water = true
+				if project_id == Blocks.CHEST:
+					saw_chest = true
+				if project_id == Blocks.SIGN_STANDING or project_id == Blocks.SIGN_WALL:
+					saw_sign = true
 	chunk.max_y = max_y
+	# The raw-layout conversion deliberately bypasses Chunk.set_block's
+	# per-cell overhead, so reproduce every derived flag that can affect
+	# materialization. In particular, generated FIRE needs the GDScript
+	# special-cell appendix even when the native cube pass owns the scan.
+	chunk.has_non_cube_blocks = saw_non_cube
+	chunk.has_water_cells = saw_water
+	chunk.has_chest_blocks = saw_chest
+	chunk.has_sign_blocks = saw_sign
+	# Chunk._init's zero heightmap is valid only while the chunk is empty.
+	# Direct array writes cannot maintain it incrementally, so force the
+	# worker's existing is_sky_exposed warm call to rebuild from these bytes.
+	# Without this, border relighting read every Nether cell as sky-exposed.
+	chunk._height_map_dirty = true
 
 
 static func generate_chunk(chunk_x: int, chunk_z: int) -> Chunk:

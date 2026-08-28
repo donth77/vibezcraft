@@ -19,12 +19,16 @@ class FakeWorld:
 	extends Node
 
 	var blocks: Dictionary = {}
+	var effective_light: int = 0
 
 	func get_world_block(pos: Vector3i) -> int:
 		return int(blocks.get(pos, Blocks.AIR))
 
 	func set_world_block(pos: Vector3i, id: int) -> void:
 		blocks[pos] = id
+
+	func get_world_effective_light(_pos: Vector3i, _sky_subtraction: int = -1) -> int:
+		return effective_light
 
 	func fill(from: Vector3i, to: Vector3i, id: int) -> void:
 		for x: int in range(from.x, to.x + 1):
@@ -469,6 +473,37 @@ func test_a_texture_swap_during_a_hurt_flash_survives_the_flash() -> void:
 
 
 # --- Texture state ---
+
+
+func test_alpha_renderer_keeps_ghasts_fullbright_in_zero_world_light() -> void:
+	# `mn.java` first sets the entity's sampled brightness, then
+	# `jz.java::a(am,float)` deliberately overrides it with white.
+	var mob: Node = _ghast_at(Vector3(0, 70, 0), _fake_world())
+	mob.call("_tick_world_brightness")
+	assert_eq(mob.get("_last_lit_bucket"), 31, "jz.java pins the final render colour to white")
+	var meshes: Array = MobBase._find_mesh_instances(mob)
+	assert_eq(meshes.size(), 10, "body plus all nine tentacles use the policy")
+	for mesh: MeshInstance3D in meshes:
+		var mat := mesh.material_override as StandardMaterial3D
+		assert_eq(mat.albedo_color, Color.WHITE, "every ghast mesh remains fullbright")
+
+
+func test_charge_texture_transitions_preserve_fullbright_policy() -> void:
+	var mob: Node = _ghast_at(Vector3(0, 70, 0), _fake_world())
+	mob.call("_tick_world_brightness")
+	var body := mob.get("_body_mesh") as MeshInstance3D
+	assert_eq((body.material_override as StandardMaterial3D).albedo_color, Color.WHITE, "calm")
+
+	mob.set("charge", 11)
+	mob.call("_apply_texture_state")
+	assert_eq((body.material_override as StandardMaterial3D).albedo_color, Color.WHITE, "charging")
+	assert_eq(mob.get("_last_lit_bucket"), 31, "the material swap reapplies the render policy")
+
+	mob.set("charge", Ghast.CHARGE_COOLDOWN)
+	mob.call("_apply_texture_state")
+	assert_eq(
+		(body.material_override as StandardMaterial3D).albedo_color, Color.WHITE, "calm again"
+	)
 
 
 func test_the_texture_swaps_above_ten_not_at_ten() -> void:

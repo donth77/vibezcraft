@@ -2194,7 +2194,8 @@ static func hardness(id: int) -> float:
 
 
 # Required harvest level to actually drop the block when broken with a tool.
-# 0 = no requirement (any tool / bare hand drops). Vanilla mc-dev values:
+# 0 = no TIER requirement; rock-class blocks can still require a pickaxe
+# of any tier through drop_with_tool's material gate. Vanilla mc-dev values:
 #   stone-class & coal: 0  (any pickaxe drops cobblestone/coal)
 #   iron ore:           1  (stone pick or better)
 #   gold/diamond/redstone ore: 2  (iron pick or better)
@@ -2232,7 +2233,7 @@ static func preferred_tool_type(id: int) -> int:
 			return Items.TOOL_TYPE_SHOVEL
 		NETHERRACK:
 			# Rock material — any pickaxe tier speeds it up and is
-			# required for the drop (see required_harvest_level).
+			# required for the drop (see drop_with_tool's stone-class rule).
 			return Items.TOOL_TYPE_PICKAXE
 		SOUL_SAND:
 			# hb.m (sand material) — shovel, like sand and gravel.

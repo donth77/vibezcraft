@@ -2736,3 +2736,28 @@ floor is now a shader uniform pushed from the active provider by
 day_night_driver (both the daylight path and the skyless path), with
 EntityLighting fed the same value so entities and the blocks under them
 share one curve.
+
+**Web target: deferred, not forgotten.** The web release wasm
+(`bin/libmesher_native.web.template_release.wasm32.wasm`, Aug 15) predates
+`src/mesher_native.h`'s `PORTAL = 206` (Aug 18), and the last export
+(`build/web/index.html`, Aug 15 01:30) predates the portal work entirely.
+A browser build made today would mesh portals as solid collidable cubes —
+audit finding #1, unfixed on that target only. Desktop is unaffected: the
+macOS dylibs were relinked after the header change.
+
+Deliberately NOT rebuilt yet. A fresh wasm alone changes nothing
+observable without a full re-export, native code may still move (a light
+BFS fix would touch `lighting_native.cpp`), and a web export can only be
+validated once the Nether is signed off on desktop. The web pass is one
+sequence, run in this order, AFTER desktop sign-off:
+
+    source ~/emsdk/emsdk_env.sh          # 4.0.20 pin — other versions
+                                         # break the side-module ABI
+    scons platform=web target=template_release threads=yes -j8
+    godot --headless --export-release "Web" build/web/index.html
+    python3 scripts/dev/serve_web.py 8060
+
+Then verify in-browser via a FRESH navigation, not a reload (see the web
+export notes), specifically: portal has no collision, the sheet renders,
+travel works, and the Nether's ambient floor reaches the shader — the
+four things the stale binary would silently get wrong.

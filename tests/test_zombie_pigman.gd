@@ -403,22 +403,27 @@ func test_the_held_item_pose_is_a_rotation_not_a_reflection() -> void:
 	assert_almost_eq(basis.determinant(), 1.0, 1e-5, "and orthonormal at unit scale")
 
 
-func test_the_blade_points_forward_out_of_the_hand() -> void:
-	# grip→tip must run along arm-local -Y, which is mob FORWARD once the
-	# arm is locked horizontal. Pointing it along +Y would bury the sword
-	# in the pigman's own arm.
+func test_the_blade_is_perpendicular_to_the_arm_like_vanilla() -> void:
+	# The complete m.java -> ku.java stack puts grip→tip almost on
+	# arm-local -Z. The omitted ku.java rotations used to put it on -Y,
+	# parallel to the raised arm and aimed directly at the player.
 	var basis: Basis = MobBase.held_item_basis_full_3d(1.0)
 	var grip_to_tip: Vector3 = (basis * Vector3(11.0, 13.0, 0.0)).normalized()
-	assert_lt(grip_to_tip.y, -0.9, "forward out of the hand")
-	assert_almost_eq(grip_to_tip.x, 0.0, 1e-5, "and not off to one side")
+	assert_lt(grip_to_tip.z, -0.99, "blade crosses the raised arm instead of following it")
+	assert_lt(absf(grip_to_tip.x), 0.05, "not kicked off to one side")
+	assert_lt(absf(grip_to_tip.y), 0.1, "not aimed down the arm at the player")
 
 
-func test_the_blade_tilts_up_rather_than_down() -> void:
-	# Arm-local -Z is mob UP. Vanilla's -100 degree X rotation tilts the
-	# item ten degrees past perpendicular, i.e. slightly upward.
+func test_the_raised_arm_leaves_the_sword_upright() -> void:
+	# ck.java locks the arm at -pi/2; our Y-flipped model uses +pi/2.
+	# Applying that arm pose after the complete held-item stack must leave
+	# the blade almost vertical, as in Alpha, rather than pointing forward.
 	var basis: Basis = MobBase.held_item_basis_full_3d(1.0)
 	var grip_to_tip: Vector3 = (basis * Vector3(11.0, 13.0, 0.0)).normalized()
-	assert_lt(grip_to_tip.z, 0.0, "tilted up, not drooping")
+	var raised_arm := Basis(Vector3.RIGHT, ZombiePigman._ARM_HORIZONTAL_PITCH)
+	var posed_blade: Vector3 = raised_arm * grip_to_tip
+	assert_gt(posed_blade.y, 0.99, "sword tip is above the hand")
+	assert_lt(absf(posed_blade.z), 0.1, "sword is not aimed at the player")
 
 
 # --- LOD and body ---

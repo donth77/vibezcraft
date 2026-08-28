@@ -266,6 +266,25 @@ func test_remap_sets_max_y_from_the_topmost_solid_cell() -> void:
 	assert_eq(chunk.max_y, 90, "max_y tracks the highest non-air cell")
 
 
+func test_remap_restores_chunk_bookkeeping_after_bulk_writes() -> void:
+	# Nether remapping writes the PackedByteArray directly for speed, so it
+	# must explicitly reproduce the derived state that Chunk.set_block would
+	# normally maintain. Missing either field caused a shipped failure:
+	# generated FIRE stayed hazardous but invisible, and the zero heightmap
+	# made border relighting inject sky=15 along every Nether chunk seam.
+	var raw := PackedByteArray()
+	raw.resize(32768)
+	raw[WorldgenNether.alpha_index(4, 63, 4)] = WorldgenNether.ALPHA_NETHERRACK
+	raw[WorldgenNether.alpha_index(4, 64, 4)] = WorldgenNether.ALPHA_FIRE
+	raw[WorldgenNether.alpha_index(4, 127, 4)] = WorldgenNether.ALPHA_BEDROCK
+	var chunk := Chunk.new()
+	WorldgenNether.remap_to_chunk(raw, chunk)
+	assert_true(chunk.has_non_cube_blocks, "generated FIRE enables the non-cube appendix")
+	assert_true(chunk._height_map_dirty, "bulk-written blocks invalidate the empty heightmap")
+	assert_false(chunk.is_sky_exposed(4, 64, 4), "the bedrock roof blocks sky queries")
+	assert_eq(chunk.height_map[4 * Chunk.SIZE_X + 4], 128, "the rebuilt column reaches the roof")
+
+
 func test_generated_chunks_carry_only_registered_project_blocks() -> void:
 	Worldgen.apply_world_seed(12345)
 	var chunk: Chunk = WorldgenNether.generate_chunk(2, -2)

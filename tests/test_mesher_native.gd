@@ -229,6 +229,39 @@ func test_parity_full_worldgen_chunk() -> void:
 	_assert_parity(both[0], both[1], "worldgen chunk (0,0)")
 
 
+func test_bulk_remapped_nether_fire_reaches_the_production_appendix() -> void:
+	# Player placement goes through Chunk.set_block and always sets the
+	# non-cube flag, so ordinary mesher parity fixtures could not reproduce
+	# naturally generated fire disappearing. Build through the real raw-id
+	# remap instead and compare against the identical support-only chunk.
+	var support_raw := PackedByteArray()
+	support_raw.resize(Chunk.TOTAL_BLOCKS)
+	support_raw[WorldgenNether.alpha_index(8, 63, 8)] = WorldgenNether.ALPHA_NETHERRACK
+	var fire_raw: PackedByteArray = support_raw.duplicate()
+	fire_raw[WorldgenNether.alpha_index(8, 64, 8)] = WorldgenNether.ALPHA_FIRE
+	var support := Chunk.new()
+	var fire := Chunk.new()
+	WorldgenNether.remap_to_chunk(support_raw, support)
+	WorldgenNether.remap_to_chunk(fire_raw, fire)
+	Lighting.fill_sky_light(support)
+	Lighting.fill_block_light(support)
+	Lighting.fill_sky_light(fire)
+	Lighting.fill_block_light(fire)
+	var support_mesh: Dictionary = Mesher.mesh_chunk_fast(support)
+	var fire_mesh: Dictionary = Mesher.mesh_chunk_fast(fire)
+	assert_true(fire.has_non_cube_blocks, "the remap advertises its fire cell")
+	assert_eq(
+		fire_mesh.vertices.size() - support_mesh.vertices.size(),
+		32,
+		"one floor-supported fire emits eight four-vertex flame planes"
+	)
+	assert_eq(
+		fire_mesh.plant_faces.size() - support_mesh.plant_faces.size(),
+		36,
+		"and one selection AABB (six faces, two triangles each)"
+	)
+
+
 func test_parity_offset_worldgen_chunk() -> void:
 	# Second worldgen chunk at a different coord to exercise different
 	# ore/tree/cave-lava placements. Independent sanity check.

@@ -8,7 +8,9 @@ extends "res://scripts/entities/mob_base.gd"
 # no entry of its own — `mn.java:37` registers `nt.class → new m(new
 # ck(), 0.5f)` and the lookup walks superclasses, so a pigman is drawn
 # with ModelZombie's locked-horizontal arms and RenderBiped's held-item
-# pass. That is why it holds its sword straight out in front of it.
+# pass. The arm points forward, but ItemRenderer's additional rotations
+# leave the gold sword almost upright across it rather than aimed at the
+# player (see MobBase.held_item_basis_full_3d).
 #
 # Neutrality is the whole character of this mob, and it is three small
 # pieces of `pt.java` working together:

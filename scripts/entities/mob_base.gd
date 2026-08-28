@@ -75,6 +75,10 @@ const _DEATH_TILT_ANGLE: float = -PI * 0.5  # 90° fall to left (vanilla)
 # sampler emits 16 discrete LUT levels scaled by time-of-day; 32
 # buckets keeps every step distinct while bounding the variant cache.
 const _BRIGHTNESS_BUCKETS: int = 32
+# `lw.java::a(float)` samples world brightness 66% of the way up the
+# entity bounding box, not at its geometric centre. The difference is
+# visible whenever a mob straddles two vertically adjacent light cells.
+const _LIGHT_SAMPLE_HEIGHT_FACTOR: float = 0.66
 
 # Knockback magnitudes when hit. Vanilla applies `xz × 0.4, y × 0.4` to
 # the entity's velocity (scaled by attacker's knockback enchant — we
@@ -1371,39 +1375,35 @@ static func held_item_material(tex: Texture2D) -> StandardMaterial3D:
 #     glTranslatef(0, 0.1875, 0); glScalef(f, -f, f);
 #     glRotatef(-100, 1,0,0); glRotatef(45, 0,1,0);   // f = 0.625
 #
-# Rather than transcribe that GL stack through two coordinate-system
-# flips (MC's limb-local +Y points DOWN the limb; Godot's points up, and
-# mob forward is local -Z), this states the resulting pose directly in
-# ARM-LOCAL space, which is what the mesh is parented to:
+# Those are not the complete item rotations. `m.java:44` then calls
+# `ku.a(ItemStack)`, whose sprite branch adds:
 #
-#   * grip→tip runs FORWARD out of the hand, tilted `tilt_degrees` up —
-#     with the arm locked horizontal, arm-local -Y is mob forward and
-#     arm-local -Z is mob up;
-#   * the blade is then rolled 45° about its own long axis, which is what
-#     vanilla's `glRotatef(45, 0,1,0)` achieves and what stops the sprite
-#     reading as a flat cutout edge-on to the camera.
+#     glScalef(1.5, 1.5, 1.5);
+#     glRotatef(50, 0,1,0); glRotatef(335, 0,0,1);
 #
-# `diagonal` is the grip→tip vector in the 16x16 sprite, measured after
-# SpriteExtruder's Y flip. The default suits the shared MC tool diagonal
-# (lower-left grip, upper-right tip).
-static func held_item_basis_full_3d(
-	pixel_scale: float, tilt_degrees: float = 10.0, diagonal := Vector2(11.0, 13.0)
-) -> Basis:
-	# Orthonormal frame in MESH space: `long` down the blade, `flat`
-	# perpendicular to it inside the sprite plane, `normal` out of it.
-	var long_mesh := Vector3(diagonal.x, diagonal.y, 0.0).normalized()
-	var flat_mesh := Vector3(diagonal.y, -diagonal.x, 0.0).normalized()
-	var normal_mesh := Vector3(0.0, 0.0, 1.0)
-	# The same frame's destination in ARM-LOCAL space.
-	var tilt: float = deg_to_rad(tilt_degrees)
-	var long_arm := Vector3(0.0, -cos(tilt), -sin(tilt))
-	var normal_arm := Vector3(1.0, 0.0, 0.0)
-	var flat_arm: Vector3 = long_arm.cross(normal_arm)
-	# Map mesh frame → arm frame, then roll about the blade.
-	var to_frame := Basis(long_mesh, flat_mesh, normal_mesh).transposed()
-	var from_frame := Basis(long_arm, flat_arm, normal_arm)
-	var rotated: Basis = from_frame.rotated(long_arm, deg_to_rad(45.0))
-	var combined: Basis = rotated * to_frame
+# OpenGL post-multiplies, so a sprite vertex sees the -25° Z rotation,
+# then the 50° Y rotation, before RenderBiped's 45° Y / -100° X
+# rotations. The previous implementation omitted `ku` entirely and
+# hand-authored the blade along arm-local -Y. ModelZombie then raises the
+# arm horizontally, mapping -Y to mob-forward: the sword tip consequently
+# pointed straight at the player.
+#
+# Reproduce the complete rotation stack here. SpriteExtruder's texture is
+# not mirrored on X like `ku`'s unit quad, so the final 180° Y rotation
+# supplies that X flip while also swapping the equivalent front/back faces
+# to keep this Basis right-handed (and therefore safe with back-face
+# culling). Vanilla's held-item Y reflection and our model-space Y flip
+# cancel one another. Uniform 1.5 / 0.625 sizing is deliberately represented
+# by the caller's pixel scale; neither changes the angle.
+static func held_item_basis_full_3d(pixel_scale: float) -> Basis:
+	var mesh_to_vanilla_quad := Basis(Vector3.UP, PI)
+	var item_renderer := (
+		Basis(Vector3.UP, deg_to_rad(50.0)) * Basis(Vector3(0.0, 0.0, 1.0), deg_to_rad(-25.0))
+	)
+	var render_biped := (
+		Basis(Vector3.RIGHT, deg_to_rad(-100.0)) * Basis(Vector3.UP, deg_to_rad(45.0))
+	)
+	var combined: Basis = render_biped * item_renderer * mesh_to_vanilla_quad
 	# Bake the scale into the column lengths — assigning `node.scale`
 	# separately would be silently discarded by the basis write.
 	return Basis(combined.x * pixel_scale, combined.y * pixel_scale, combined.z * pixel_scale)
@@ -1656,28 +1656,30 @@ func _clear_hurt_flash() -> void:
 
 
 # Vanilla `EntityRenderer.setBrightness` — entity colors are texture ×
-# world.getBrightnessForRender(cell). Mirror that by sampling the cell
-# at the mob's body center every frame and, when the quantized level
-# changes, swapping every mesh onto the cached brightness VARIANT of
-# its material (see _brightness_variant). Materials are never mutated:
+# world.getBrightnessForRender(cell). Mirror that by sampling the source
+# cell 66% up the mob's bounding box every frame and, when the quantized
+# level changes, swapping every mesh onto the cached brightness VARIANT
+# of its material (see _brightness_variant). Materials are never mutated:
 # most are shared across the whole species, and writing per-mob state
 # into a shared instance made every herd member flip to the last
 # ticker's light level.
+#
+# A renderer may deliberately replace the sampled colour. Alpha's ghast
+# renderer (`jz.java`) calls glColor4f(1,1,1,1) after RenderManager has
+# applied the normal brightness, so `_renders_fullbright()` feeds the
+# same material path a final brightness of one for that species.
 #
 # Skipped during hurt flash — the red flash material temporarily owns
 # every mesh's material_override, and swapping it would visibly kill
 # the flash. Resumes on the next frame after _clear_hurt_flash.
 func _tick_world_brightness() -> void:
-	if _chunk_manager == null:
-		return
 	if _hurt_flash_remaining > 0.0:
 		return
-	var cell := Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z))
-	)
-	var lit: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	var lit: float = 1.0
+	if not _renders_fullbright():
+		if _chunk_manager == null:
+			return
+		lit = EntityLighting.sample_brightness(_chunk_manager, _lighting_sample_cell())
 	var bucket: int = clampi(
 		int(round(lit * float(_BRIGHTNESS_BUCKETS - 1))), 0, _BRIGHTNESS_BUCKETS - 1
 	)
@@ -1704,6 +1706,25 @@ func _tick_world_brightness() -> void:
 			# caching variants keyed by short-lived materials would pin
 			# them in the static dict forever as mobs despawn.
 			_tint_private_material(base, lit_q)
+
+
+# Exact `lw.java::a(float)` sample point. Godot mob origins sit at the
+# feet, equivalent to Alpha's `posY - yOffset` term.
+func _lighting_sample_cell() -> Vector3i:
+	return Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + _get_body_height() * _LIGHT_SAMPLE_HEIGHT_FACTOR)),
+		int(floor(global_position.z))
+	)
+
+
+# Runtime visual-state changes (charge textures, equipment, skins) can
+# replace a material without changing the mob's light bucket. Force the
+# policy through the new material immediately so the cache cannot leave
+# it at the wrong brightness until the mob crosses a light boundary.
+func _refresh_world_brightness() -> void:
+	_last_lit_bucket = -1
+	_tick_world_brightness()
 
 
 # One brightness-tinted duplicate per (base material, bucket), shared
@@ -1748,6 +1769,12 @@ func current_world_brightness() -> float:
 	if _last_lit_bucket < 0:
 		return 1.0
 	return float(_last_lit_bucket) / float(_BRIGHTNESS_BUCKETS - 1)
+
+
+# Renderer-level colour override. Most species retain the sampled world
+# brightness; ghast.gd mirrors Alpha `jz.java` by returning true.
+func _renders_fullbright() -> bool:
+	return false
 
 
 # Species override hook — return true when the subclass animates its
