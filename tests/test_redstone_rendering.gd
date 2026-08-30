@@ -507,10 +507,10 @@ func test_a_floor_torch_sits_on_the_ground_not_above_it() -> void:
 		assert_almost_eq(lowest, box_bottom, 0.001, "%s renders from its box's floor" % _label(id))
 
 
-func test_a_torch_never_renders_outside_its_own_selection_box() -> void:
-	# The placed model uses only the narrow body strip. Keeping that tight
-	# geometry inside the selection box prevents Pixel Perfection's wider
-	# item-art pixels from becoming extra geometry around the torch head.
+func test_torch_body_uses_the_source_clipped_vertical_envelope() -> void:
+	# Cropping Alpha's full planes to texture rows 6..16 leaves a floor
+	# body at y 0..0.625 and a wall body at y 0.2..0.825. The latter puts
+	# the visible head directly under ob.java's y=0.92 particle origin.
 	for id: int in [Blocks.TORCH, Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF]:
 		for mount: int in [
 			Redstone.MOUNT_FLOOR,
@@ -527,18 +527,34 @@ func test_a_torch_never_renders_outside_its_own_selection_box() -> void:
 			for v: Vector3 in Mesher.mesh_chunk(chunk).vertices:
 				lowest = minf(lowest, v.y)
 				highest = maxf(highest, v.y)
-			var sel: AABB = Blocks.selection_aabb(id, mount)
-			assert_between(
+			var expected_low: float = 0.0 if mount == Redstone.MOUNT_FLOOR else 0.2
+			var expected_high: float = 0.625 if mount == Redstone.MOUNT_FLOOR else 0.825
+			assert_almost_eq(
 				lowest - float(Y),
-				sel.position.y - 0.001,
-				sel.position.y + sel.size.y,
-				"%s mount %d starts inside its box" % [_label(id), mount]
+				expected_low,
+				0.001,
+				"%s mount %d starts at the clipped source bottom" % [_label(id), mount]
 			)
-			assert_lte(
+			assert_almost_eq(
 				highest - float(Y),
-				sel.position.y + sel.size.y + 0.001,
-				"%s mount %d ends inside its box" % [_label(id), mount]
+				expected_high,
+				0.001,
+				"%s mount %d ends beneath its particle origin" % [_label(id), mount]
 			)
+
+
+func test_placed_torch_uvs_hide_pixel_perfections_extra_head_artwork() -> void:
+	# The pack has opaque gray pixels as far out as columns 5 and 10.
+	# Placed geometry must sample only Alpha's central columns 7..9.
+	var chunk := Chunk.new()
+	chunk.set_block(8, Y, 8, Blocks.TORCH)
+	chunk.set_block_meta(8, Y, 8, Redstone.MOUNT_WEST_WALL)
+	var data: Dictionary = Mesher.mesh_chunk(chunk)
+	var tile: Rect2 = BlockAtlas.uv_rect_for(Blocks.TORCH, BlockAtlas.FACE_SIDE)
+	var expected_u0: float = tile.position.x + tile.size.x * 7.0 / 16.0
+	var expected_u1: float = tile.position.x + tile.size.x * 9.0 / 16.0
+	for uv: Vector2 in data.uvs:
+		assert_between(uv.x, expected_u0 - 0.0001, expected_u1 + 0.0001, "central strip only")
 
 
 # --- Break / place / step audio ----------------------------------------

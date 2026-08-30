@@ -432,12 +432,12 @@ func _ai_tick() -> void:
 		player = null if bright else _find_player()
 	# be.a() performs its 1/100 bright abandon roll whenever the shared
 	# EntityCreature attack hook runs, which itself requires line of sight.
-	if (
-		player != null
-		and bright
-		and has_line_of_sight(player)
-		and randf() < _AI_DAYTIME_ABANDON_CHANCE
-	):
+	var visibility_known: bool = false
+	var target_visible: bool = false
+	if player != null and bright:
+		target_visible = has_line_of_sight(player)
+		visibility_known = true
+	if target_visible and randf() < _AI_DAYTIME_ABANDON_CHANCE:
 		_ai_path.clear()
 		_ai_player_cache = null
 		_tick_idle()
@@ -445,21 +445,26 @@ func _ai_tick() -> void:
 	# EntityCreature retains a living target regardless of distance. Its
 	# separate despawn rules bound lifetime; there is no 40-block aggro leash.
 	if player != null:
-		_tick_chase(player)
+		_tick_chase(player, visibility_known, target_visible)
 		return
 	# No target — wander. Vanilla `fc.b_()` inherited from EntityCreature.
 	_tick_idle()
 
 
 # Chase tick — runs only when we have a valid in-range target.
-func _tick_chase(player: Node3D) -> void:
+func _tick_chase(
+	player: Node3D, visibility_known: bool = false, target_visible: bool = false
+) -> void:
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
 	# Spider's c_() may acquire through a wall, but EntityCreature only calls
 	# the species attack hook when canEntityBeSeen(target) is true. It can keep
 	# pathing toward an obscured target; it cannot bite or pounce through cover.
-	var visible: bool = has_line_of_sight(player)
+	# Neither hook can run at six blocks or farther, so darkness-mode pursuit
+	# skips LOS entirely there. Bright-mode abandon already supplied one result.
+	if not visibility_known and dist_sq < _AI_POUNCE_RANGE_MAX * _AI_POUNCE_RANGE_MAX:
+		target_visible = has_line_of_sight(player)
 	# In melee range — face target, brake horizontal velocity, attack.
-	if visible and dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
+	if target_visible and dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -468,11 +473,10 @@ func _tick_chase(player: Node3D) -> void:
 	# Pounce — vanilla `be.java::a` lines 45-52. 10 % per 20 Hz tick
 	# when 2 m < dist < 6 m AND on ground. Vanilla onGround check skips
 	# the pounce roll mid-air; we mirror via mob_is_on_floor().
-	var dist: float = sqrt(dist_sq)
 	if (
-		visible
-		and dist > _AI_POUNCE_RANGE_MIN
-		and dist < _AI_POUNCE_RANGE_MAX
+		target_visible
+		and dist_sq > _AI_POUNCE_RANGE_MIN * _AI_POUNCE_RANGE_MIN
+		and dist_sq < _AI_POUNCE_RANGE_MAX * _AI_POUNCE_RANGE_MAX
 		and mob_is_on_floor()
 		and randf() < _AI_POUNCE_CHANCE
 	):
@@ -589,6 +593,17 @@ func _is_brightly_lit() -> bool:
 
 func _repath_toward(player: Node3D) -> void:
 	if _chunk_manager == null:
+		return
+	# Keep retained MID/FAR targets cheap; full A* resumes in NEAR.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [
+			Vector3i(
+				int(floor(player.global_position.x)),
+				int(floor(player.global_position.y)),
+				int(floor(player.global_position.z))
+			)
+		]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))

@@ -188,23 +188,21 @@ func test_full_glow_cycle_can_relight_after_revert() -> void:
 	assert_eq(TickScheduler.pending_count(), 1, "fresh revert scheduled for cycle 2")
 
 
-# --- FX plumbing (real Node parent — exercises the pooled emitter) ---
+# --- FX plumbing (real Node parent — exercises EntityReddustFX) ---
 
 
 func test_spawn_reddust_builds_a_particle_under_the_parent() -> void:
 	var parent := Node3D.new()
 	add_child_autofree(parent)
-	BlockFx.spawn_reddust(parent, Vector3i(1, 2, 3), Vector3(0, 1, 0))
-	var found: CPUParticles3D = null
-	for child in parent.get_children():
-		if child is CPUParticles3D:
-			found = child
-	assert_not_null(found, "reddust emitter attached to the parent")
-	assert_true(found.one_shot and found.amount == 1, "one mote per contact event")
-	assert_almost_eq(found.position.y, 2.0 + 0.5 + 0.57, 0.001, "sits just outside the +Y face")
-	assert_eq(
-		found.emission_box_extents, Vector3(0.35, 0.0, 0.35), "jitter spans the face plane only"
-	)
+	var found := BlockFx.spawn_reddust(parent, Vector3i(1, 2, 3), Vector3.UP)
+	assert_not_null(found, "reddust entity attached to the parent")
+	if found == null:
+		return
+	assert_eq(parent.get_child_count(), 1, "one mote per contact event")
+	assert_true(found is Sprite3D, "source-style billboard entity")
+	assert_almost_eq(found.position.y, 3.0625, 0.0001, "exactly 1/16 outside the +Y face")
+	assert_between(found.position.x, 1.0, 2.0, "random X spans the full face")
+	assert_between(found.position.z, 3.0, 4.0, "random Z spans the full face")
 
 
 func test_touch_with_node_manager_emits_fx_without_errors() -> void:

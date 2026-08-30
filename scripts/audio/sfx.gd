@@ -344,6 +344,10 @@ const _WATER_SWIM_SOUNDS: Array = [
 const _PORTAL_AMBIENT_SOUND: String = "res://assets/audio/sfx/portal/portal.ogg"
 const _PORTAL_TRIGGER_SOUND: String = "res://assets/audio/sfx/portal/trigger.ogg"
 const _PORTAL_TRAVEL_SOUND: String = "res://assets/audio/sfx/portal/travel.ogg"
+# qg.java:170-184 applies an extra 0.25 gain to local sound effects after
+# the caller's volume argument. Both bq.java portal events use that local
+# path with volume 1.0, so their effective gain is 20*log10(0.25).
+const _PORTAL_LOCAL_VOLUME_DB: float = -12.0412
 
 # Zombie pigman — `pt.java` names four events. Alpha's SoundManager
 # resolves an event name to any file matching it plus a number, so
@@ -697,7 +701,7 @@ func play_arrow_hit() -> void:
 
 
 # soft but audible. Pitch jitter is `1.0 + (rand - rand) * 0.4`.
-func play_splash(velocity: Vector3) -> void:
+func play_splash(velocity: Vector3, world_pos: Variant = null) -> void:
 	var weighted: float = (
 		velocity.x * velocity.x * 0.2 + velocity.y * velocity.y + velocity.z * velocity.z * 0.2
 	)
@@ -706,7 +710,14 @@ func play_splash(velocity: Vector3) -> void:
 		return
 	var volume_db: float = linear_to_db(f)
 	var pitch: float = 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER) * 0.4
-	_play_one(_WATER_SPLASH_SOUND, volume_db, pitch)
+	# World entities call World.makeSound(entity, ...) in Alpha, so their
+	# splash attenuates from that entity. Only the local player's own entry
+	# uses the 2D pool. The old all-2D path made a pig bobbing in a distant
+	# pool sound as though it were splashing directly in the player's ears.
+	if world_pos is Vector3:
+		_play_optional_3d(_WATER_SPLASH_SOUND, world_pos as Vector3, volume_db, pitch)
+	else:
+		_play_one(_WATER_SPLASH_SOUND, volume_db, pitch)
 
 
 # Ongoing swim cadence — one random swim sample per stride while the
@@ -1152,20 +1163,27 @@ func play_creeper_death(pos: Vector3) -> void:
 # humming — the plan's "without allowing particles or audio voices to grow
 # without bound".
 func play_portal_ambient(pos: Vector3) -> void:
-	_play_optional_3d(_PORTAL_AMBIENT_SOUND, pos, 0.0, randf() * 0.4 + 0.8)
+	_play_optional_3d(_PORTAL_AMBIENT_SOUND, pos, 0.0, _portal_pitch())
 
 
 # bq.java:36-38 — fires on the tick the exposure meter leaves zero, i.e.
-# the moment the player steps in, not once per tick inside.
-func play_portal_trigger(pos: Vector3) -> void:
-	_play_optional_3d(_PORTAL_TRIGGER_SOUND, pos, 0.0, 1.0)
+# the moment the player steps in, not once per tick inside. It calls the
+# client's LOCAL sound path, which qg.java scales to 0.25 and does not
+# spatialize; the supplied player position is retained for caller parity.
+func play_portal_trigger(_pos: Vector3) -> void:
+	_play_optional_2d(_PORTAL_TRIGGER_SOUND, _PORTAL_LOCAL_VOLUME_DB, _portal_pitch())
 
 
 # bq.java:41 — fires on the tick travel happens. Non-positional: it is a
 # thing that happens TO the local player, and their position is about to
 # change dimension anyway.
 func play_portal_travel() -> void:
-	_play_optional_2d(_PORTAL_TRAVEL_SOUND, 0.0, 1.0)
+	_play_optional_2d(_PORTAL_TRAVEL_SOUND, _PORTAL_LOCAL_VOLUME_DB, _portal_pitch())
+
+
+# x.java:131 and bq.java:37/43 all pass `nextFloat() * 0.4 + 0.8`.
+func _portal_pitch() -> float:
+	return randf() * 0.4 + 0.8
 
 
 # Pool variant of _play_optional_3d. Alpha's SoundManager resolves an

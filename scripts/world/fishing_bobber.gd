@@ -24,7 +24,8 @@ extends Node3D
 #     the ref; ItemFishingRod.use_item checks for non-null.
 #   * Vanilla bite chance simplified to a precomputed wait-for-bite count
 #     in [200, 800] ticks (10-40s at 20 TPS, matches vanilla average).
-#   * Particles via FluidFx.spawn_water_bubble (existing pool).
+#   * Water-entry and bite particles use Alpha's individual bubble/splash
+#     entities, including their exact width-scaled counts and motion.
 
 const GRAVITY: float = -3.0  # m/s² (mapped from vanilla 0.04/tick * 20² scale)
 const DRAG_AIR: float = 0.92
@@ -44,10 +45,6 @@ var _owner_player: Node3D = null
 var _chunk_manager: Node = null
 var _bite_active: int = 0  # ticks of active-bite remaining
 var _in_water: bool = false
-# Set true the first tick the bobber transitions out-of-water →
-# in-water so we play "random.splash" once at impact (vanilla
-# Entity.N() handleWaterMovement behavior).
-var _splash_played: bool = false
 var _sprite: Sprite3D
 var _tick_accum: float = 0.0
 var _last_light_brightness: float = -1.0
@@ -161,15 +158,14 @@ func _tick_in_water_check() -> void:
 	_in_water = (id == Blocks.WATER_STILL or id == Blocks.WATER_FLOWING)
 	if not _in_water:
 		return
-	# First-tick transition out-of-water → in-water: play the impact
-	# splash that vanilla's Entity.N() (handleWaterMovement) fires for
-	# any Entity entering a water cell. Velocity-scaled so a steep cast
-	# splashes louder than a gentle one. _splash_played gates so we
-	# only fire once even if the bobber wobbles across the surface for
-	# several ticks before settling.
-	if not was_in_water and not _splash_played:
-		_splash_played = true
-		SFX.play_splash(velocity)
+	# lw.java's shared dry→wet edge applies to the hook too. Width 0.25
+	# produces exactly six bubbles followed by six splash droplets at
+	# floor(AABB.minY)+1, inheriting the hook's blocks-per-tick motion.
+	if not was_in_water:
+		SFX.play_splash(velocity, global_position)
+		FluidFx.spawn_water_entry(
+			_chunk_manager, global_position, global_position.y - 0.125, 0.25, velocity / 20.0
+		)
 	# Bite active — count down remaining bite ticks.
 	if _bite_active > 0:
 		_bite_active -= 1
@@ -181,21 +177,18 @@ func _tick_in_water_check() -> void:
 		_trigger_bite()
 
 
-# Bite trigger — vanilla plays "random.splash" + emits bubble + splash
-# particles. We map splash to "liquid.water" (closest in our pool) and
-# spawn a small puff of bubble particles via the existing FluidFx pool.
+# Bite trigger — hj.java:232-250 plays "random.splash", subtracts 0.2
+# blocks/tick from vertical motion, then runs the same six-bubble and
+# six-splash loops as a width-0.25 water entry.
 func _trigger_bite() -> void:
 	_bite_active = BITE_DURATION_MIN + BITE_DURATION_RANGE  # full duration
 	# Splash sfx — vanilla "random.splash" plays at 0.25 vol; play_splash
 	# scales by velocity^2 internally. Feed a 2.0 Y impulse so the
 	# resulting volume is ~-8 dB instead of the -16 dB the previous 0.8
 	# magnitude produced (was inaudible over ambient water/footstep).
-	SFX.play_splash(Vector3(0, 2.0, 0))
-	# Spawn 6-8 bubbles at the bobber surface so the player sees a
-	# tell when the bite starts. Existing pool handles emit + cleanup.
-	# Upward motion (Y=0.6) — without explicit motion, the bubbles
-	# spawn with near-zero velocity and barely move, defeating the
-	# "look, fish biting!" cue. Vanilla emits a 1-tall stack of bubble
-	# + splash particles that floats up over ~1s, then re-settles.
-	var n: int = 6 + randi() % 3
-	FluidFx.spawn_water_bubble(_chunk_manager, global_position, Vector3(0, 0.6, 0), n)
+	SFX.play_splash(Vector3(0, 2.0, 0), global_position)
+	var source_motion: Vector3 = velocity / 20.0
+	source_motion.y -= 0.2
+	FluidFx.spawn_water_entry(
+		_chunk_manager, global_position, global_position.y - 0.125, 0.25, source_motion
+	)

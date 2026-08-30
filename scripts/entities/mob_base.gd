@@ -95,35 +95,39 @@ const _STUCK_ARROW_DECAY_SEC: float = 30.0
 # (water/lava-aware movement) + hf.java::B (air ticks + contact damage).
 # All passive mobs inherit; hostile mobs will too when they land.
 
-# In-fluid movement — replaces normal gravity. Vanilla water:
-# `velocity *= 0.8 / tick`, gravity = 0.02 m/tick downward; lava:
-# `velocity *= 0.5 / tick`, gravity = 0.02. Effective terminal velocity
-# is small enough that the swim-impulse below dominates and the mob
-# bobs at the surface.
+# In-fluid movement — replaces normal gravity. Vanilla stores velocity
+# in blocks/tick; this project stores blocks/second. Its post-drag
+# `motionY -= 0.02` therefore changes our velocity by -0.4 m/s once per
+# 20 Hz source tick. Fractional-frame application below preserves that
+# exact affine recurrence instead of treating 0.4 as an acceleration.
 const _WATER_DRAG_PER_TICK: float = 0.8
 const _LAVA_DRAG_PER_TICK: float = 0.5
 # `ot.java:27` — EntityFlying damps all three axes by this every tick.
 const _FLYING_DRAG_PER_TICK: float = 0.91
-const _FLUID_GRAVITY: float = -0.4  # 0.02 m/tick × 20 = 0.4 m/s² down
+const _FLUID_FALL_DELTA_PER_TICK: float = -0.4
 
 # Swim assist — vanilla `hf.java:588-592` toggles the jumping flag with
 # 80 % probability per tick while submerged, and `hf.java:518-525` then
 # adds 0.04 m/tick (= 0.8 m/s instant) upward to motionY when the
-# jumping flag is set AND the entity is in water or lava. Net effect:
-# ~+0.06 m/tick average upward drift, enough to overcome FLUID_GRAVITY
-# and float the mob to the surface.
+# jumping flag is set AND the entity is in water or lava. The impulse is
+# applied after our continuous drag step, so `_env_tick`
+# multiplies it by that fluid's source drag to preserve Alpha's actual
+# order: add 0.04, then damp by 0.8 (water) / 0.5 (lava).
 const _SWIM_IMPULSE: float = 0.8
 const _SWIM_CHANCE: float = 0.8
+# `lw.java::h_` calls `aG.b(0, -0.4, 0)`. `co.java::b` subtracts the
+# argument from the minimum and adds it to the maximum, so a negative
+# value INSETS both Y faces by 0.4. It does not translate the box down.
+const _FLUID_PROBE_Y_INSET: float = 0.4
 
 # Drowning — vanilla `hf.java:114-126`. The entity's `bk` (air) field
 # decrements 1 / tick while the EYE cell is water. When `bk <= -20`
 # (20 ticks past zero) vanilla deals 2 damage and resets to 0, so
-# damage continues at 1 Hz until the head clears water. Max air `bh`
-# is 300 ticks (15 s) in vanilla; we use 200 ticks (10 s) — the value
-# that ships in the v1.2.6 EntityHuman and most mob subclasses inherit
-# unchanged. Damage is dealt through `take_damage`, so the 1 s invuln
-# cooldown applies and the visible cadence stays at the vanilla rate.
-const _MAX_AIR_TICKS: int = 200
+# damage continues at 1 Hz until the head clears water. Base Entity
+# `lw.java:56,59` initializes both max air (`bh`) and air (`bk`) to 300
+# ticks (15 s), inherited unchanged by Alpha's animals. Damage is dealt
+# through `take_damage`, so the visible cadence remains one hit/second.
+const _MAX_AIR_TICKS: int = 300
 const _DROWN_INTERVAL_TICKS: int = 20
 const _DROWN_DAMAGE: int = 2
 
@@ -361,15 +365,16 @@ var _stuck_seconds: float = 0.0
 # only saved base-class physics but skeletons / creepers kept running
 # expensive A* + target search every frame anyway.
 var _physics_gated: bool = false
-# Current LOD tier (LOD_NEAR..LOD_GATED). Recomputed each frame in
-# _physics_process. Subclasses use this to scale AI tick rate and
-# decide whether to run pathfinding vs simple wander.
+# Current LOD tier (LOD_NEAR..LOD_GATED). Recomputed each active physics
+# frame; GATED mobs are revisited by NaturalMobSpawner's shared 4 Hz wake
+# sweep. Subclasses use this to scale AI tick rate and decide whether to
+# run pathfinding vs simple wander.
 var _lod_tier: int = LOD_NEAR
 # Bounds total population. Without this, passive mobs accumulate
 # forever (24+ per km of exploration). When the mob enters GATED,
 # arm a SceneTreeTimer; if the timer fires before the mob is
-# re-ungated, queue_free. The mob keeps its extremely cheap distance
-# heartbeat while gated so it can notice the player returning.
+# re-ungated, queue_free. GATED mobs disable their own processing entirely;
+# NaturalMobSpawner's shared wake sweep notices the player returning.
 var _despawn_timer: SceneTreeTimer = null
 # Frame skip counter for move_and_slide throttling — see
 # _physics_process. Resets every time move_and_slide actually fires.
@@ -414,6 +419,33 @@ var _last_attacker: Node = null
 # loops to avoid the extra Array allocation.
 static func active_mobs() -> Dictionary:
 	return _active_mobs
+
+
+# Shared wake pass for fully-disabled GATED mobs. NaturalMobSpawner calls
+# this at 4 Hz, replacing one `_physics_process` callback per mob per frame
+# with a single bounded scan of the active-mob registry. Horizontal distance
+# matches `_update_distance_lod`; waking within 250 ms is imperceptible at
+# 96+ blocks while restoring the gate's intended zero per-mob tick cost.
+static func wake_gated_mobs(player: Node3D) -> int:
+	if player == null or not is_instance_valid(player):
+		return 0
+	var woken: int = 0
+	var player_pos: Vector3 = player.global_position
+	for instance_id: Variant in _active_mobs:
+		var value: Variant = _active_mobs[instance_id]
+		if not is_instance_valid(value) or not value is MobBase:
+			continue
+		var mob: MobBase = value as MobBase
+		if not mob._physics_gated:
+			continue
+		var dx: float = mob.global_position.x - player_pos.x
+		var dz: float = mob.global_position.z - player_pos.z
+		var distance_sq: float = dx * dx + dz * dz
+		if distance_sq > _LOD_FAR_RADIUS_SQ:
+			continue
+		mob._leave_distance_gate(distance_sq)
+		woken += 1
+	return woken
 
 
 # Returns a cached StandardMaterial3D for the given texture path.
@@ -805,9 +837,9 @@ static func _cached_box(size: Vector3) -> BoxShape3D:
 
 
 # Updates the performance LOD and returns true while this mob should skip
-# expensive simulation. It intentionally remains callable every physics
-# frame: disabling the node here also disabled the only code capable of
-# noticing that the player had returned.
+# expensive simulation. Crossing beyond FAR disables this node completely;
+# NaturalMobSpawner's shared 4 Hz registry sweep calls `_leave_distance_gate`
+# when the player returns within range.
 func _update_distance_lod() -> bool:
 	var player: Node3D = _cached_player()
 	if player != null:
@@ -815,31 +847,46 @@ func _update_distance_lod() -> bool:
 		var dz: float = global_position.z - player.global_position.z
 		var distance_sq: float = dx * dx + dz * dz
 		if distance_sq > _LOD_FAR_RADIUS_SQ:
-			velocity = Vector3.ZERO
-			_physics_gated = true
-			_lod_tier = LOD_GATED
-			visible = false
-			if _despawn_timer == null:
-				_despawn_timer = get_tree().create_timer(_DESPAWN_GATED_SECONDS, true, false, true)
-				_despawn_timer.timeout.connect(_on_gated_despawn_check)
+			_enter_distance_gate()
 			return true
-		# Back in range: cancel the old callback. Merely dropping the
-		# reference lets that timer delete a mob during a later gate cycle.
-		if _despawn_timer != null:
-			var despawn_callback := Callable(self, "_on_gated_despawn_check")
-			if _despawn_timer.timeout.is_connected(despawn_callback):
-				_despawn_timer.timeout.disconnect(despawn_callback)
-			_despawn_timer = null
-		if distance_sq > _LOD_MID_RADIUS_SQ:
-			_lod_tier = LOD_FAR
-		elif distance_sq > _LOD_NEAR_RADIUS_SQ:
-			_lod_tier = LOD_MID
-		else:
-			_lod_tier = LOD_NEAR
-	if _physics_gated:
-		visible = true
-	_physics_gated = false
+		_leave_distance_gate(distance_sq)
 	return false
+
+
+func _enter_distance_gate() -> void:
+	velocity = Vector3.ZERO
+	_physics_gated = true
+	_lod_tier = LOD_GATED
+	visible = false
+	if _despawn_timer == null:
+		_despawn_timer = get_tree().create_timer(_DESPAWN_GATED_SECONDS, true, false, true)
+		_despawn_timer.timeout.connect(_on_gated_despawn_check)
+	# Set this last so the current callback can unwind and close its probe.
+	# The shared wake sweep invokes `_leave_distance_gate` directly even
+	# while this node is disabled.
+	process_mode = Node.PROCESS_MODE_DISABLED
+
+
+func _leave_distance_gate(distance_sq: float) -> void:
+	var was_gated: bool = _physics_gated
+	# Cancel the old callback before a later gate cycle reuses the field.
+	# Merely dropping the reference lets the old timer delete a newly-gated
+	# mob when its original 30-second deadline arrives.
+	if _despawn_timer != null:
+		var despawn_callback := Callable(self, "_on_gated_despawn_check")
+		if _despawn_timer.timeout.is_connected(despawn_callback):
+			_despawn_timer.timeout.disconnect(despawn_callback)
+		_despawn_timer = null
+	if distance_sq > _LOD_MID_RADIUS_SQ:
+		_lod_tier = LOD_FAR
+	elif distance_sq > _LOD_NEAR_RADIUS_SQ:
+		_lod_tier = LOD_MID
+	else:
+		_lod_tier = LOD_NEAR
+	_physics_gated = false
+	if was_gated:
+		visible = true
+		process_mode = Node.PROCESS_MODE_INHERIT
 
 
 # Subclasses override to add per-mob AI in _process. The base only handles
@@ -855,7 +902,7 @@ func _physics_process(delta: float) -> void:
 		PerfProbe.end("mob.physics", pp)
 		return
 	# Distance gate — the helper returns true while expensive work is
-	# suspended, but keeps enough processing alive to detect re-entry.
+	# suspended and disables this node. A shared 4 Hz sweep detects re-entry.
 	if _update_distance_lod():
 		PerfProbe.end("mob.physics", pp)
 		return
@@ -887,11 +934,24 @@ func _physics_process(delta: float) -> void:
 	# refreshed inside the while-loop below at the same 50 ms cadence.
 	_env_sample_accum += delta
 	if _env_sample_accum >= _ENV_TICK_DT or not _env_sampled_once:
+		var first_environment_sample: bool = not _env_sampled_once
+		var was_in_water: bool = _in_water
 		_env_sample_accum = 0.0
 		_env_sampled_once = true
 		_in_water = _check_in_water()
 		_in_lava = _check_in_lava()
 		_in_fire_cached = _check_in_fire()
+		# lw.java:155-185. First-update water is silent; every later dry→wet
+		# edge emits width-scaled bubble and splash loops at the AABB floor.
+		if _in_water and not was_in_water and not first_environment_sample:
+			SFX.play_splash(velocity, global_position + Vector3(0.0, _get_body_height() * 0.5, 0.0))
+			FluidFx.spawn_water_entry(
+				_chunk_manager,
+				global_position,
+				global_position.y,
+				_get_body_width(),
+				velocity / 20.0
+			)
 	var in_fire: bool = _in_fire_cached
 	# Gravity / drag — fluid cells replace normal gravity entirely.
 	# Vanilla water: velocity *= 0.8/tick, gravity -0.02/tick.
@@ -903,12 +963,12 @@ func _physics_process(delta: float) -> void:
 		# ot.java's liquid branch is drag-only — a flying mob does not
 		# sink. Every grounded mob keeps the gravity term.
 		if _uses_gravity():
-			velocity.y += _FLUID_GRAVITY * delta
+			velocity.y += _alpha_fluid_fall_delta(_WATER_DRAG_PER_TICK, k)
 	elif _in_lava:
 		var k: float = pow(_LAVA_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
 		if _uses_gravity():
-			velocity.y += _FLUID_GRAVITY * delta
+			velocity.y += _alpha_fluid_fall_delta(_LAVA_DRAG_PER_TICK, k)
 	elif not _uses_gravity():
 		# `ot.java` (EntityFlying) overrides moveEntityWithHeading to drop
 		# the gravity term entirely and damp all three axes EQUALLY —
@@ -1198,18 +1258,20 @@ func _env_tick(in_fire: bool) -> void:
 	if _dying:
 		return
 	# Swim assist — vanilla hf.java:588-592 + 518-525. 80 % chance to
-	# push up by SWIM_IMPULSE when in either water or lava. The drag
-	# applied in _physics_process counters most of this each frame so
-	# the net rise rate stays at ~0.06 m/tick (= 1.2 m/s ceiling drift).
+	# push up by 0.04 blocks/tick when in either water or lava. Alpha adds
+	# that impulse BEFORE the liquid branch damps velocity. Our environment
+	# tick runs after movement, so store the equivalent post-drag impulse.
 	if _in_water or _in_lava:
 		if randf() < _SWIM_CHANCE:
-			velocity.y += _SWIM_IMPULSE
+			var source_drag: float = _WATER_DRAG_PER_TICK if _in_water else _LAVA_DRAG_PER_TICK
+			velocity.y += _SWIM_IMPULSE * source_drag
 	# Drowning — vanilla hf.java:114-126. Check the EYE cell (top of BB)
 	# specifically rather than the body center, so a tall mob with feet
 	# submerged + head above water keeps breathing.
 	if _check_head_in_water():
 		_air_ticks -= 1
 		if _air_ticks <= -_DROWN_INTERVAL_TICKS:
+			FluidFx.spawn_drowning_bubbles(_chunk_manager, global_position, velocity / 20.0)
 			take_damage(_DROWN_DAMAGE, Vector3.ZERO)
 			_air_ticks = 0
 	else:
@@ -1265,39 +1327,98 @@ func _env_tick(in_fire: bool) -> void:
 # (..., y=64+eye_height, ...) for its head. The chunk-manager call is
 # guarded against the singleton not being mounted (headless tests).
 func _check_in_water() -> bool:
-	if _chunk_manager == null:
-		return false
-	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z)),
+	return body_touches_fluid(
+		_chunk_manager, global_position, _get_body_width(), _get_body_height(), true
 	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.WATER_FLOWING or b == Blocks.WATER_STILL
 
 
 func _check_in_lava() -> bool:
-	if _chunk_manager == null:
+	return body_touches_fluid(
+		_chunk_manager, global_position, _get_body_width(), _get_body_height(), false
+	)
+
+
+# Alpha cy.java::a(AABB, Material, Entity), reached by lw.java::h_ / L.
+# Scan the same integer cell range as cy.java: floor(min) through
+# floor(max + 1), exclusive, after insetting both Y faces by 0.4.
+# cy.java also compares its integer upper scan bound with BlockFluid's
+# metadata-dependent surface before accepting the material.
+# `feet_position` follows this project's mob convention: the node origin is
+# at the feet while the collision capsule is offset upward by half-height.
+static func body_touches_fluid(
+	manager, feet_position: Vector3, body_width: float, body_height: float, water: bool
+) -> bool:
+	if manager == null or not manager.has_method("get_world_block"):
+		return false
+	var half_width: float = body_width * 0.5
+	var min_pos := Vector3(
+		feet_position.x - half_width,
+		feet_position.y + _FLUID_PROBE_Y_INSET,
+		feet_position.z - half_width
+	)
+	var max_pos := Vector3(
+		feet_position.x + half_width,
+		feet_position.y + body_height - _FLUID_PROBE_Y_INSET,
+		feet_position.z + half_width
+	)
+	var min_cell := Vector3i(floori(min_pos.x), floori(min_pos.y), floori(min_pos.z))
+	var max_exclusive := Vector3i(
+		floori(max_pos.x + 1.0), floori(max_pos.y + 1.0), floori(max_pos.z + 1.0)
+	)
+	for x: int in range(min_cell.x, max_exclusive.x):
+		for y: int in range(min_cell.y, max_exclusive.y):
+			for z: int in range(min_cell.z, max_exclusive.z):
+				var cell := Vector3i(x, y, z)
+				var id: int = int(manager.call("get_world_block", cell))
+				if (water and not Blocks.is_water(id)) or (not water and not Blocks.is_lava(id)):
+					continue
+				var meta: int = 0
+				if manager.has_method("get_world_block_meta"):
+					meta = int(manager.call("get_world_block_meta", cell))
+				var level: int = 0 if meta >= 8 else (meta & 7)
+				# ld.java::b(meta): surface = y + 1 - (level + 1) / 9.
+				var surface_y: float = float(y + 1) - float(level + 1) / 9.0
+				if float(max_exclusive.y) >= surface_y:
+					return true
+	return false
+
+
+# Alpha `lw.java::a(Material)` tests the exact eye point against the
+# metadata-dependent liquid surface. A block-ID-only test incorrectly
+# drowns an animal whose eye occupies the dry portion of a shallow-flow
+# voxel. Note the source's extra `- 1/9` in `ld.b(meta) - 1/9`: the eye
+# surface is `cellY + 1 - level/9`, not the rendered surface formula used
+# by the body overlap query.
+static func point_is_submerged_in_fluid(manager, point: Vector3, water: bool) -> bool:
+	if manager == null or not manager.has_method("get_world_block"):
 		return false
 	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z)),
+		int(floor(point.x)),
+		int(floor(point.y)),
+		int(floor(point.z)),
 	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.LAVA_FLOWING or b == Blocks.LAVA_STILL
+	var id: int = int(manager.call("get_world_block", cell))
+	if (water and not Blocks.is_water(id)) or (not water and not Blocks.is_lava(id)):
+		return false
+	var meta: int = 0
+	if manager.has_method("get_world_block_meta"):
+		meta = int(manager.call("get_world_block_meta", cell))
+	var level: int = 0 if meta >= 8 else (meta & 7)
+	var surface_y: float = float(cell.y + 1) - float(level) / 9.0
+	return point.y < surface_y
 
 
 func _check_head_in_water() -> bool:
-	if _chunk_manager == null:
-		return false
-	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_eye_height())),
-		int(floor(global_position.z)),
-	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.WATER_FLOWING or b == Blocks.WATER_STILL
+	var eye_position := global_position + Vector3(0.0, _get_eye_height(), 0.0)
+	return point_is_submerged_in_fluid(_chunk_manager, eye_position, true)
+
+
+# Convert Alpha's once-per-tick affine liquid rule to an arbitrary render
+# delta. If one full tick elapsed, `drag_factor == drag_per_tick` and this
+# returns exactly -0.4 m/s. Splitting that tick across multiple frames
+# composes to the same result, avoiding frame-rate-dependent sinking.
+static func _alpha_fluid_fall_delta(drag_per_tick: float, drag_factor: float) -> float:
+	return _FLUID_FALL_DELTA_PER_TICK * (1.0 - drag_factor) / (1.0 - drag_per_tick)
 
 
 func _check_in_fire() -> bool:

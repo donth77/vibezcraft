@@ -79,13 +79,17 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 			continue
 		var id: int = chunk_here.get_block(wx & 15, wy, wz & 15)
 		if Blocks.is_lava(id):
-			_lava(manager, wx, wy, wz)
+			_lava(manager, wx, wy, wz, player_pos)
 		elif id == Blocks.FIRE:
 			_fire(manager, wx, wy, wz)
 		elif id == Blocks.TORCH:
-			_torch(manager, wx, wy, wz)
+			_torch(manager, wx, wy, wz, player_pos)
+		elif id == Blocks.REDSTONE_WIRE:
+			_redstone_wire(manager, wx, wy, wz, player_pos)
+		elif id == Blocks.REDSTONE_TORCH:
+			_redstone_torch(manager, wx, wy, wz, player_pos)
 		elif id == Blocks.REDSTONE_REPEATER_ON:
-			_repeater(manager, wx, wy, wz)
+			_repeater(manager, wx, wy, wz, player_pos)
 
 
 # Lava-cell ambient: only fires when the cell directly above is AIR
@@ -93,7 +97,7 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 # rolls `nextInt(100) == 0` (1/100 per cell per scan). We previously used
 # 1/4 which produced ~25× too many sparks for large pools — visual was a
 # "fountain of specks" instead of vanilla's occasional lazy popper.
-static func _lava(manager: Node, wx: int, wy: int, wz: int) -> void:
+static func _lava(manager: Node, wx: int, wy: int, wz: int, player_pos: Vector3) -> void:
 	var above: int = manager.call("get_world_block", Vector3i(wx, wy + 1, wz)) as int
 	if above != Blocks.AIR:
 		return
@@ -101,7 +105,7 @@ static func _lava(manager: Node, wx: int, wy: int, wz: int) -> void:
 	if randi() % 100 != 0:
 		return
 	# Vanilla ld.java:197 spawns the "lava" particle silently — no SFX.
-	FluidFx.spawn_lava_spark(manager, Vector3i(wx, wy, wz))
+	FluidFx.spawn_lava_spark(manager, Vector3i(wx, wy, wz), player_pos)
 
 
 # Fire-cell ambient: crackle sound + smoke puff. qh.java:186-188 rolls
@@ -148,15 +152,58 @@ static func _fire_about_to_die(manager: Node, wx: int, wy: int, wz: int) -> bool
 # torches' particles end up on the leaning side. ob.java:140-162 emits one
 # smoke + one flame every time World's display-tick scan selects the cell;
 # there is no additional per-torch probability gate.
-static func _torch(manager: Node, wx: int, wy: int, wz: int) -> void:
-	var meta: int = manager.call("get_world_block_meta", Vector3i(wx, wy, wz)) as int
-	FluidFx.spawn_torch_particles(manager, Vector3i(wx, wy, wz), meta)
+static func _torch(manager: Node, wx: int, wy: int, wz: int, player_pos: Vector3) -> void:
+	var cell := Vector3i(wx, wy, wz)
+	var meta: int = manager.call("get_world_block_meta", cell) as int
+	# f.java:963-970 discards every requested particle farther than 16
+	# blocks from the player. The random-display scan itself is a cube,
+	# so without this second spherical gate its corners emit extra pairs.
+	var origin: Vector3 = FluidFx.torch_particle_origin(cell, meta)
+	if player_pos.distance_squared_to(origin) > 16.0 * 16.0:
+		return
+	FluidFx.spawn_torch_particles(manager, cell, meta)
+
+
+# Powered Alpha redstone wire display tick. lu.java:286-292 emits one mote
+# at y+1/16 with X/Z jitter only; metadata zero emits nothing.
+static func _redstone_wire(manager: Node, wx: int, wy: int, wz: int, player_pos: Vector3) -> void:
+	var pos := Vector3i(wx, wy, wz)
+	var power: int = manager.call("get_world_block_meta", pos) as int
+	if power <= 0:
+		return
+	(
+		BlockFx
+		. spawn_reddust_at(
+			manager,
+			Vector3(pos) + Vector3(0.5, 0.0625, 0.5),
+			Vector3(0.1, 0.0, 0.1),
+			player_pos,
+		)
+	)
+
+
+# Lit Alpha redstone torch display tick. bo.java:148-168 uses the same
+# metadata-aware base point as a normal torch, but emits one reddust mote
+# with ±0.1 jitter rather than a smoke/flame pair. The OFF block has no arm
+# in the scanner and therefore never reaches this function.
+static func _redstone_torch(manager: Node, wx: int, wy: int, wz: int, player_pos: Vector3) -> void:
+	var pos := Vector3i(wx, wy, wz)
+	var meta: int = manager.call("get_world_block_meta", pos) as int
+	(
+		BlockFx
+		. spawn_reddust_at(
+			manager,
+			FluidFx.torch_particle_origin(pos, meta),
+			Vector3.ONE * 0.1,
+			player_pos,
+		)
+	)
 
 
 # Powered Beta 1.3 repeater display tick. BlockRedstoneRepeater chooses
 # either the fixed output torch or the movable delay torch with equal
-# probability, then jitters one fullbright reddust mote around its tip.
-static func _repeater(manager: Node, wx: int, wy: int, wz: int) -> void:
+# probability, then jitters one light-sampled reddust mote around its tip.
+static func _repeater(manager: Node, wx: int, wy: int, wz: int, player_pos: Variant = null) -> void:
 	var pos := Vector3i(wx, wy, wz)
 	var meta: int = manager.call("get_world_block_meta", pos) as int
 	var output: Vector3 = Vector3(Redstone.repeater_output_offset(meta))
@@ -165,4 +212,13 @@ static func _repeater(manager: Node, wx: int, wy: int, wz: int) -> void:
 		local_offset = output * 0.3125
 	else:
 		local_offset = -output * Redstone.repeater_torch_offset(meta)
-	BlockFx.spawn_reddust_at(manager, Vector3(pos) + Vector3(0.5, 0.4, 0.5) + local_offset)
+	(
+		BlockFx
+		. spawn_reddust_at(
+			manager,
+			Vector3(pos) + Vector3(0.5, 0.4, 0.5) + local_offset,
+			Vector3.ONE * 0.1,
+			player_pos,
+			BlockFx.RedDustProfile.BETA_1_3,
+		)
+	)

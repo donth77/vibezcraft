@@ -13,10 +13,16 @@ extends GutTest
 
 const ChunkManagerScript := preload("res://scripts/world/chunk_manager.gd")
 const ChunkNodeScript := preload("res://scripts/world/chunk_node.gd")
+const InteractionScript := preload("res://scripts/player/interaction.gd")
 
 const Y: int = 64
 
 var _cm: Node3D
+
+
+class PlacementPlayer:
+	extends Node3D
+	var inventory := Inventory.new()
 
 
 func before_each() -> void:
@@ -50,6 +56,17 @@ func _bind_chunk(coord: Vector2i) -> Chunk:
 func _pump_wire() -> void:
 	while Redstone.has_pending_wire_work():
 		Redstone.drain_wire_work(_cm, Redstone.WIRE_STEPS_PER_DRAIN)
+
+
+func _build_live_wire(at: Vector3i, source_offset: Vector3i) -> void:
+	var source: Vector3i = at + source_offset
+	_cm.set_world_block(at + Vector3i(0, -1, 0), Blocks.STONE)
+	_cm.set_world_block(source + Vector3i(0, -1, 0), Blocks.STONE)
+	_cm.set_world_block(at, Blocks.REDSTONE_WIRE, 0)
+	_cm.set_world_block(source, Blocks.LEVER, Redstone.MOUNT_FLOOR | Redstone.POWERED_BIT)
+	Redstone.update_wire(_cm, at)
+	_drain_everything()
+	assert_eq(_cm.get_world_block_meta(at), 15, "fixture wire is fully powered")
 
 
 # --- Atomic id + metadata ----------------------------------------------
@@ -103,6 +120,66 @@ func test_an_unchanged_state_write_reports_no_change() -> void:
 		_cm.set_world_block_state(pos, Blocks.WOOL_WHITE, 7, false),
 		"writing the same id and meta is a no-op"
 	)
+
+
+# --- Production placement regressions ---------------------------------
+
+
+func test_repeater_placement_on_live_wire_queues_one_fast_transition() -> void:
+	var repeater := Vector3i(8, Y, 8)
+	var rear := repeater + Vector3i(0, 0, 1)  # meta 0 reads south, outputs north
+	_build_live_wire(rear, Vector3i(0, 0, 1))
+	_cm.set_world_block(repeater + Vector3i(0, -1, 0), Blocks.STONE)
+	TickScheduler.reset_for_tests()
+
+	var placed_at: int = Time.get_ticks_usec()
+	_cm.set_world_block_state(repeater, Blocks.REDSTONE_REPEATER_OFF, 0)
+	Redstone.on_repeater_placed(_cm, repeater)
+	var placement_usec: int = Time.get_ticks_usec() - placed_at
+	assert_eq(TickScheduler.pending_count(), 1, "placement deduplicates the pending transition")
+
+	var activated_at: int = Time.get_ticks_usec()
+	TickScheduler.advance(TickScheduler.SECONDS_PER_TICK, _cm)
+	_drain_everything()
+	var activation_usec: int = Time.get_ticks_usec() - activated_at
+	assert_eq(_cm.get_world_block(repeater), Blocks.REDSTONE_REPEATER_ON, "fast tick powers it")
+	assert_eq(TickScheduler.pending_count(), 0, "no stale duplicate tick survives activation")
+	gut.p(
+		(
+			"[perf] live-wire repeater placement %.3f ms, activation %.3f ms"
+			% [float(placement_usec) / 1000.0, float(activation_usec) / 1000.0]
+		)
+	)
+
+
+func test_real_door_placement_on_live_wire_opens_both_halves() -> void:
+	var door := Vector3i(8, Y, 12)
+	var wire := door + Vector3i(1, 0, 0)
+	_build_live_wire(wire, Vector3i(1, 0, 0))
+	_cm.set_world_block(door + Vector3i(0, -1, 0), Blocks.STONE)
+
+	var player := PlacementPlayer.new()
+	add_child_autofree(player)
+	var camera := Camera3D.new()
+	camera.name = "Camera3D"
+	player.add_child(camera)
+	var interaction: Node = InteractionScript.new()
+	interaction.set_process(false)
+	player.add_child(interaction)
+	interaction._chunk_manager = _cm
+	player.inventory.slots[0] = ItemStack.new(Items.IRON_DOOR, 1)
+	var hit := {
+		"block_pos": door + Vector3i(0, -1, 0),
+		"normal_i": Vector3i(0, 1, 0),
+	}
+
+	assert_true(interaction._try_place_door(hit, player.inventory.selected()), "door places")
+	_drain_everything()
+	var upper: Vector3i = door + Vector3i(0, 1, 0)
+	assert_eq(_cm.get_world_block(door), Blocks.IRON_DOOR)
+	assert_eq(_cm.get_world_block(upper), Blocks.IRON_DOOR)
+	assert_eq(_cm.get_world_block_meta(door) & 4, 4, "powered lower half opens")
+	assert_eq(_cm.get_world_block_meta(upper) & 4, 4, "upper half matches lower")
 
 
 # --- Notification queue ------------------------------------------------
@@ -380,7 +457,7 @@ func test_a_dropped_entity_presses_a_wooden_plate_but_not_a_stone_one() -> void:
 
 func test_contact_only_fires_when_the_entity_changes_cell() -> void:
 	# The throttle. Without it every physics frame would re-enter the
-	# plate path, and TickScheduler permits duplicates.
+	# plate path even though the scheduler now deduplicates its recheck.
 	var plate := Vector3i(11, Y, 11)
 	_cm.set_world_block(plate + Vector3i(0, -1, 0), Blocks.STONE)
 	_cm.set_world_block(plate, Blocks.WOODEN_PRESSURE_PLATE, 0)

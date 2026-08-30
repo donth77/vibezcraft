@@ -183,6 +183,11 @@ var _inside_fluid_notify: bool = false
 # so the id has to survive the queue. Dedup is on the whole pair — two
 # different sources touching one cell are two different events.
 var _notify_queue: Array[Vector4i] = []
+# Ring head: removing index zero from a Godot Array shifts every remaining
+# event. A large redstone zero-crossing fanout therefore made the nominally
+# bounded 4,096-event drain quadratic and could stall the frame. Consumed
+# prefixes are compacted only occasionally, as in Redstone's wire worklist.
+var _notify_head: int = 0
 var _notify_queued: Dictionary = {}
 var _notify_draining: bool = false
 # Vanilla `cy.i` (editingBlocks) — true while a multi-block structure is
@@ -403,7 +408,7 @@ func _process(_delta: float) -> void:
 	# Resume any block-update fanout that hit its per-drain budget last
 	# frame. No-op (one array check) when the queue is empty, which is
 	# the case for every frame that isn't mid-cascade.
-	if not _notify_queue.is_empty():
+	if _notify_head < _notify_queue.size():
 		drain_block_notifications()
 	# Same deal one level down: a wire burst too large for a single frame
 	# pauses with its worklist intact and resumes here. Its deferred
@@ -560,12 +565,19 @@ func _update_chunk_set() -> void:
 	# that's still 240 chunks/sec which dwarfs the boundary-cross rate.
 	const _MAX_EVICTIONS_PER_FRAME: int = 4
 	var evicted: int = 0
+	# Snapshot the same union used by autosave once per eviction batch. In
+	# particular, a FLOWING<->STILL swap may have armed only Chunk's sticky
+	# bit, and tile-entity contents can change without a block setter. Both
+	# still need the destructive save path before their node is retired.
+	var chunks_needing_save: Dictionary = {}
+	if not to_remove.is_empty():
+		chunks_needing_save = _collect_chunks_needing_save()
 	for coord: Vector2i in to_remove:
 		if evicted >= _MAX_EVICTIONS_PER_FRAME:
 			break
-		# If the chunk was edited while loaded, compress and persist its
-		# blocks before freeing the ChunkNode.
-		if _dirty_loaded.has(coord):
+		# If any persisted state changed while loaded, compress and save it
+		# before freeing the ChunkNode.
+		if chunks_needing_save.has(coord):
 			_persist_chunk(coord, _chunks[coord].chunk)
 			_dirty_loaded.erase(coord)
 		# Faces previously culled against this chunk must reappear on every
@@ -929,6 +941,11 @@ func _materialize_chunk(coord: Vector2i, data: Dictionary) -> void:
 	var t_add := PerfProbe.begin("chunk_mgr.materialize.add_child")
 	add_child(node)
 	PerfProbe.end("chunk_mgr.materialize.add_child", t_add)
+	# Generation/decode is the baseline, not a player edit. Some decorators
+	# use Chunk's checked setters while building (dungeons/chests), so reset
+	# the sticky persistence bit exactly when that data becomes resident.
+	# Any reconciliation or simulation write after this point re-arms it.
+	data.chunk.modified_since_save = false
 	_chunks[coord] = node
 	chunks_generated_total += 1
 	_index_portals_in_chunk(coord, data.chunk)
@@ -1476,7 +1493,8 @@ func _persist_chunk(coord: Vector2i, chunk: Chunk) -> void:
 	# layer in front; on next dispatch we'll hit it before disk. SaveLoad's
 	# region cache means subsequent edits in the same region only pay one
 	# file rewrite per evict, not one full deserialize + reserialize cycle.
-	_SAVE_LOAD.save_chunk(coord, entry)
+	if _SAVE_LOAD.save_chunk(coord, entry):
+		chunk.modified_since_save = false
 
 
 # Persist every dirty live chunk to disk WITHOUT freeing it. Called by
@@ -1531,6 +1549,7 @@ func _clear_dimension_owned_state() -> void:
 	_dirty_loaded.clear()
 	# Deferred block-update bookkeeping.
 	_notify_queue.clear()
+	_notify_head = 0
 	_notify_queued.clear()
 	_deferred_sky_seeds.clear()
 	_deferred_block_seeds.clear()
@@ -1677,15 +1696,42 @@ func transition_to_dimension(target_dimension: int, arrival_position: Vector3) -
 func flush_dirty_loaded() -> int:
 	if not _disk_writes_allowed():
 		return 0
-	# Union _dirty_loaded with chunks that have live tile entities.
+	var coords_to_flush: Dictionary = _collect_chunks_needing_save()
+	var written: int = 0
+	for coord: Vector2i in coords_to_flush.keys():
+		if not _chunks.has(coord):
+			continue
+		var chunk: Chunk = _chunks[coord].chunk
+		var entry: Dictionary = _build_chunk_save_entry(coord, chunk, false)
+		if not _SAVE_LOAD.save_chunk(coord, entry):
+			# Leave both persistence signals armed so a later autosave/quit
+			# retries instead of silently declaring a failed write clean.
+			continue
+		chunk.modified_since_save = false
+		_dirty_loaded.erase(coord)
+		written += 1
+	return written
+
+
+# Union every independent reason a resident chunk needs a snapshot. The
+# Chunk-level sticky bit is a safety net for mutations that intentionally
+# bypass ChunkManager's notification-heavy setter (notably fluid
+# FLOWING<->STILL swaps). It also makes save correctness independent of the
+# render-only `chunk.dirty` flag, which ChunkNode clears after each re-mesh.
+func _collect_chunks_needing_save() -> Dictionary:
+	var coords_to_flush: Dictionary = {}
+	for coord: Vector2i in _dirty_loaded.keys():
+		coords_to_flush[coord] = true
+	for coord: Vector2i in _chunks.keys():
+		var live_chunk: Chunk = _chunks[coord].chunk
+		if live_chunk != null and live_chunk.modified_since_save:
+			coords_to_flush[coord] = true
+	# Union _dirty_loaded / sticky block data with chunks that have live tile entities.
 	# Chest / furnace content changes mutate the singletons directly via
 	# the inventory UI — there's no set_world_block hook to flag the
 	# chunk dirty. So we'd miss content-only edits if we only looked at
 	# _dirty_loaded. get_active_chunks() on each singleton is O(N) over
 	# its entries; small for realistic worlds.
-	var coords_to_flush: Dictionary = {}
-	for coord: Vector2i in _dirty_loaded.keys():
-		coords_to_flush[coord] = true
 	for coord: Vector2i in ChestStorage.get_active_chunks():
 		coords_to_flush[coord] = true
 	for coord: Vector2i in FurnaceManager.get_active_chunks():
@@ -1694,18 +1740,7 @@ func flush_dirty_loaded() -> int:
 		coords_to_flush[coord] = true
 	for coord: Vector2i in JukeboxStorage.get_active_chunks():
 		coords_to_flush[coord] = true
-	var written: int = 0
-	for coord: Vector2i in coords_to_flush.keys():
-		if not _chunks.has(coord):
-			continue
-		var chunk: Chunk = _chunks[coord].chunk
-		var entry: Dictionary = _build_chunk_save_entry(coord, chunk, false)
-		_SAVE_LOAD.save_chunk(coord, entry)
-		written += 1
-	# Clear the dirty set — these chunks are now in sync with disk. If
-	# the player edits more cells later, set_world_block re-flags them.
-	_dirty_loaded.clear()
-	return written
+	return coords_to_flush
 
 
 # Build the saved entry dict for a chunk. `destructive=true` (eviction
@@ -2740,8 +2775,9 @@ func drain_block_notifications() -> void:
 		return
 	_notify_draining = true
 	var budget: int = _NOTIFY_BUDGET_PER_DRAIN
-	while not _notify_queue.is_empty() and budget > 0:
-		var event: Vector4i = _notify_queue.pop_front()
+	while _notify_head < _notify_queue.size() and budget > 0:
+		var event: Vector4i = _notify_queue[_notify_head]
+		_notify_head += 1
 		_notify_queued.erase(event)
 		budget -= 1
 		var cell := Vector3i(event.x, event.y, event.z)
@@ -2756,10 +2792,16 @@ func drain_block_notifications() -> void:
 		# worlds that contain no portal at all.
 		NetherPortal.on_neighbor_change(self, cell)
 	_notify_draining = false
+	if _notify_head >= _notify_queue.size():
+		_notify_queue.clear()
+		_notify_head = 0
+	elif _notify_head >= 1024 and _notify_head * 2 >= _notify_queue.size():
+		_notify_queue = _notify_queue.slice(_notify_head)
+		_notify_head = 0
 
 
 func pending_notification_count() -> int:
-	return _notify_queue.size()
+	return _notify_queue.size() - _notify_head
 
 
 # Redstone's contract check: this manager pumps paused wire bursts from
@@ -2924,17 +2966,10 @@ func play_redstone_click(_block_pos: Vector3i, on: bool) -> void:
 # wide pitch jitter and puffs five smoke particles.
 func play_torch_burnout(block_pos: Vector3i) -> void:
 	SFX.play_fizz()
-	# Five motes spread over the faces around the torch, standing in for
-	# vanilla's smoke puff — we have no generic smoke emitter yet, and
-	# the reddust mote reads correctly at the torch tip.
-	for normal: Vector3 in [
-		Vector3(0, 1, 0),
-		Vector3(1, 0, 0),
-		Vector3(-1, 0, 0),
-		Vector3(0, 0, 1),
-		Vector3(0, 0, -1),
-	]:
-		_BLOCK_FX.spawn_reddust(self, block_pos, normal)
+	var viewer_position: Variant = null
+	if is_instance_valid(_player):
+		viewer_position = _player.global_position
+	FluidFx.spawn_redstone_torch_burnout_smoke(self, block_pos, viewer_position)
 
 
 # Reports whether the chunk at the given chunk-space coord has fully

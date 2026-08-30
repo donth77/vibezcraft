@@ -418,6 +418,7 @@ func _ai_tick() -> void:
 	# fuse for smooth visual deformation. Mirror at the top here.
 	_prev_fuse_ticks = _fuse_ticks
 	_ai_repath_counter += 1
+	var target_was_retained: bool = _ai_player_cache != null and is_instance_valid(_ai_player_cache)
 	var player: Node3D = _find_player()
 	# No target in detect range — wander + decay any leftover fuse.
 	if player == null:
@@ -428,17 +429,23 @@ func _ai_tick() -> void:
 	# fc.b_() retains a living acquired target regardless of distance.
 	# EntityCreature only invokes the attack hook while the target remains
 	# visible. Retain the target behind cover, but decay the fuse and pursue
-	# instead of hissing through a wall.
-	if not has_line_of_sight(player):
+	# instead of hissing through a wall. Sight has no effect at or beyond the
+	# seven-block fuse-abort radius, so skip the trace there entirely.
+	if dist_sq >= _FUSE_ABORT_RANGE * _FUSE_ABORT_RANGE:
+		_tick_fuse_decay()
+		_pursue_player(player)
+		return
+	# A newly acquired target already passed the sight check in `_find_player`.
+	var visible: bool = true if not target_was_retained else has_line_of_sight(player)
+	if not visible:
 		_tick_fuse_decay()
 		_pursue_player(player)
 		return
 	# Vanilla `dq.a(lw, float)`: ignite at < 3 m (NEW) or sustain at
 	# < 7 m (ONGOING). Two-band check so a hissing creeper doesn't
 	# abort the moment the player backs off by 0.1 m.
-	var dist: float = sqrt(dist_sq)
-	var in_ignite_band: bool = dist < _FUSE_IGNITE_RANGE
-	var in_sustain_band: bool = dist < _FUSE_ABORT_RANGE and _fuse_dir > 0
+	var in_ignite_band: bool = dist_sq < _FUSE_IGNITE_RANGE * _FUSE_IGNITE_RANGE
+	var in_sustain_band: bool = _fuse_dir > 0
 	if in_ignite_band or in_sustain_band:
 		_tick_fuse_ignite(player)
 		return
@@ -539,6 +546,17 @@ func _find_player() -> Node3D:
 
 func _repath_toward(player: Node3D) -> void:
 	if _chunk_manager == null:
+		return
+	# Keep retained MID/FAR targets cheap; full A* resumes in NEAR.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [
+			Vector3i(
+				int(floor(player.global_position.x)),
+				int(floor(player.global_position.y)),
+				int(floor(player.global_position.z))
+			)
+		]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))

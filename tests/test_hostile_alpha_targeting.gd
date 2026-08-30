@@ -13,8 +13,10 @@ class SightWorld:
 	extends Node
 
 	var blocks: Dictionary = {}
+	var block_reads: int = 0
 
 	func get_world_block(pos: Vector3i) -> int:
+		block_reads += 1
 		return int(blocks.get(pos, Blocks.AIR))
 
 
@@ -125,11 +127,77 @@ func test_distance_gated_mob_can_wake_when_player_returns() -> void:
 	assert_true(zombie.call("_update_distance_lod"), "far mob gates expensive work")
 	assert_true(bool(zombie.get("_physics_gated")))
 	assert_false(zombie.visible)
-	assert_ne(zombie.process_mode, Node.PROCESS_MODE_DISABLED, "wake heartbeat remains active")
+	assert_eq(zombie.process_mode, Node.PROCESS_MODE_DISABLED, "gated mob has zero tick cost")
+	var spawner: Node = load("res://scripts/world/natural_mob_spawner.gd").new()
+	_parent.add_child(spawner)
+	spawner.set_process(false)
 	_player.global_position = Vector3(100.0, 0.0, 0.0)
-	assert_false(zombie.call("_update_distance_lod"), "returning player ungates immediately")
-	assert_false(bool(zombie.get("_physics_gated")))
+	spawner.call("_process", 0.24)
+	assert_true(bool(zombie.get("_physics_gated")), "shared sweep has not reached 250 ms")
+	spawner.call("_process", 0.011)
+	assert_false(bool(zombie.get("_physics_gated")), "shared 4 Hz sweep wakes returning mob")
 	assert_true(zombie.visible)
+	assert_eq(zombie.process_mode, Node.PROCESS_MODE_INHERIT)
+
+
+func test_mid_and_far_hostile_chases_use_one_direct_waypoint() -> void:
+	_player.global_position = Vector3(9.8, 65.2, -3.1)
+	var world := SightWorld.new()
+	_parent.add_child(world)
+	var expected := Vector3i(9, 65, -4)
+	for mob_name: String in ["zombie", "creeper", "spider", "zombie_pigman"]:
+		var mob: Node3D = _mob(mob_name, Vector3.ZERO)
+		mob.set("_chunk_manager", world)
+		for tier: int in [MobBase.LOD_MID, MobBase.LOD_FAR]:
+			mob.set("_lod_tier", tier)
+			mob.call("_repath_toward", _player)
+			assert_eq(mob.get("_ai_path"), [expected], "%s tier %d skips A*" % [mob_name, tier])
+			assert_false(bool(mob.get("_ai_path_failed")))
+	var skeleton: Node3D = _mob("skeleton", Vector3.ZERO)
+	skeleton.set("_chunk_manager", world)
+	for tier: int in [MobBase.LOD_MID, MobBase.LOD_FAR]:
+		skeleton.set("_lod_tier", tier)
+		skeleton.call("_repath_to", _player.global_position)
+		assert_eq(skeleton.get("_ai_path"), [expected], "skeleton keeps the same LOD policy")
+
+
+func test_los_traces_are_reused_and_range_gated() -> void:
+	_player.global_position = Vector3(0.0, 64.0, 0.0)
+	var world := SightWorld.new()
+	_parent.add_child(world)
+	var skeleton: Node3D = _mob("skeleton", Vector3(8.0, 64.0, 0.0))
+	skeleton.set("_chunk_manager", world)
+	assert_true(skeleton.call("has_line_of_sight", _player))
+	var one_trace_reads: int = world.block_reads
+	assert_gt(one_trace_reads, 0)
+	world.block_reads = 0
+	skeleton.set("_ai_player_cache", null)
+	skeleton.set("_ai_shot_cooldown_sec", 1.0)
+	skeleton.call("_ai_tick")
+	assert_eq(world.block_reads, one_trace_reads, "acquire + aim reuse one LOS result")
+
+	# Retained targets outside each attack hook's range need no visibility
+	# result: cover cannot change the decision to pursue on this tick.
+	skeleton.global_position = Vector3(12.0, 64.0, 0.0)
+	skeleton.set("_lod_tier", MobBase.LOD_MID)
+	world.block_reads = 0
+	skeleton.call("_ai_tick")
+	assert_eq(world.block_reads, 0, "skeleton pursuit outside 10 skips LOS")
+
+	var creeper: Node3D = _mob("creeper", Vector3(8.0, 64.0, 0.0))
+	creeper.set("_chunk_manager", world)
+	creeper.set("_ai_player_cache", _player)
+	creeper.set("_lod_tier", MobBase.LOD_MID)
+	world.block_reads = 0
+	creeper.call("_ai_tick")
+	assert_eq(world.block_reads, 0, "creeper pursuit outside 7 skips LOS")
+
+	var spider: Node3D = _mob("spider", Vector3(8.0, 64.0, 0.0))
+	spider.set("_chunk_manager", world)
+	spider.set("_lod_tier", MobBase.LOD_MID)
+	world.block_reads = 0
+	spider.call("_tick_chase", _player)
+	assert_eq(world.block_reads, 0, "spider pursuit outside pounce range skips LOS")
 
 
 func test_enclosed_player_is_not_visible_to_a_skeleton() -> void:

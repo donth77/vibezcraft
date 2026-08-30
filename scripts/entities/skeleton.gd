@@ -450,6 +450,7 @@ func _ai_tick() -> void:
 	if roll_idle_sfx_tick():
 		_play_idle_sfx()
 	_ai_repath_counter += 1
+	var target_was_retained: bool = _ai_player_cache != null and is_instance_valid(_ai_player_cache)
 	var player: Node3D = _find_player()
 	if player == null:
 		_ai_aiming = false
@@ -457,19 +458,25 @@ func _ai_tick() -> void:
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
 	# fc.b_() retains a living acquired target regardless of distance.
-	var dist: float = sqrt(dist_sq)
-	var visible: bool = has_line_of_sight(player)
-	if dist >= _AI_SHOOT_RANGE or not visible:
+	# Sight cannot change the decision outside bow range, so do not trace
+	# retained targets while merely pursuing them. A newly acquired target
+	# already passed the sight check inside `_find_player` this same tick.
+	if dist_sq >= _AI_SHOOT_RANGE * _AI_SHOOT_RANGE:
 		_ai_aiming = false
 		_pursue_player(player)
-	else:
-		_ai_path.clear()
-		_face_target(player)
-		_velocity_brake()
-		_ai_aiming = true
-		if _ai_shot_cooldown_sec <= 0.0:
-			_fire_arrow_at(player)
-			_ai_shot_cooldown_sec = _AI_SHOT_COOLDOWN_SEC
+		return
+	var visible: bool = true if not target_was_retained else has_line_of_sight(player)
+	if not visible:
+		_ai_aiming = false
+		_pursue_player(player)
+		return
+	_ai_path.clear()
+	_face_target(player)
+	_velocity_brake()
+	_ai_aiming = true
+	if _ai_shot_cooldown_sec <= 0.0:
+		_fire_arrow_at(player, true)
+		_ai_shot_cooldown_sec = _AI_SHOT_COOLDOWN_SEC
 
 
 func _find_player() -> Node3D:
@@ -603,12 +610,13 @@ func _tick_walk_path() -> void:
 # player's torso (eye height - 0.4 m). Velocity = unit vector toward
 # target × _AI_ARROW_SPEED. Mirrors vanilla `dh.java::a(Entity, distance)`
 # which spawns an `EntityArrow(this, target, speed)`.
-func _fire_arrow_at(player: Node3D) -> void:
+func _fire_arrow_at(player: Node3D, visibility_confirmed: bool = false) -> void:
 	if _chunk_manager == null:
 		return
-	# Defensive second gate: cover can appear on the firing tick, and
-	# direct callers must never bypass Alpha's canEntityBeSeen check.
-	if not has_line_of_sight(player):
+	# Direct callers must never bypass Alpha's canEntityBeSeen check. The AI
+	# reaches this synchronously after its own check and passes that result so
+	# one decision tick does not trace the same segment twice.
+	if not visibility_confirmed and not has_line_of_sight(player):
 		return
 	# The clone stores Player.global_position at its 1.8 m capsule center;
 	# Alpha's target posY is feet. Keep both representations here because

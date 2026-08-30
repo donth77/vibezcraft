@@ -45,6 +45,25 @@ func test_drop_config_gunpowder_0_to_2() -> void:
 	assert_eq(creeper.get("drop_count_max"), 2)
 
 
+# Prove that a positive Alpha roll reaches the concrete world-item path.
+# The zero end of the 0-2 range is intentional; pinning both bounds to one
+# isolates the wiring from RNG and catches a missing ChunkManager or setup().
+func test_positive_drop_roll_spawns_real_gunpowder_item() -> void:
+	var creeper: Node = _instantiate_offscreen()
+	creeper.set("_chunk_manager", _parent)
+	creeper.set("drop_count_min", 1)
+	creeper.set("drop_count_max", 1)
+	var child_count_before: int = _parent.get_child_count()
+
+	creeper.call("_spawn_drops")
+
+	assert_eq(_parent.get_child_count(), child_count_before + 1)
+	var drop := _parent.get_child(_parent.get_child_count() - 1) as DroppedItem
+	assert_not_null(drop, "a positive roll must create a pickup entity")
+	assert_eq(drop.item_id, Items.GUNPOWDER)
+	assert_eq(drop.get_child_count(), 1, "setup() must build the dropped-item mesh")
+
+
 # BB dims — modern MC 0.6 × 1.7 (deviation from Alpha's 0.6 × 1.8
 # default for tighter hit registration on the 1.625 m visual model).
 # Same deviation pattern as zombie.gd which overrides Alpha 1.8 →

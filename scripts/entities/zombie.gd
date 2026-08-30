@@ -382,6 +382,7 @@ func _ai_tick() -> void:
 	if roll_idle_sfx_tick():
 		_play_idle_sfx()
 	_ai_repath_counter += 1
+	var target_was_retained: bool = _ai_player_cache != null and is_instance_valid(_ai_player_cache)
 	var player: Node3D = _find_player()
 	if player == null:
 		# No target — wander. Vanilla zombies inherit EntityCreature's
@@ -395,7 +396,13 @@ func _ai_tick() -> void:
 	# In-melee? Vanilla EntityMob.l(EntityLiving target) attacks when
 	# `distSqr < e²` where e is the attack-range setting (~2.0² for
 	# zombies). Skip pathing this tick if we're already adjacent.
-	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE and has_line_of_sight(player):
+	# A target acquired above has already passed canEntityBeSeen; only a
+	# retained/retaliation target needs a new trace at melee range.
+	var melee_visible: bool = (
+		dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE
+		and (not target_was_retained or has_line_of_sight(player))
+	)
+	if melee_visible:
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -441,6 +448,19 @@ func _find_player() -> Node3D:
 
 func _repath_toward(player: Node3D) -> void:
 	if _chunk_manager == null:
+		return
+	# Retained targets can remain 40-96 blocks away. Match Skeleton's LOD
+	# policy there: distant mobs steer at one direct waypoint and defer A*
+	# until the player enters NEAR, where obstacle-aware routing is visible.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [
+			Vector3i(
+				int(floor(player.global_position.x)),
+				int(floor(player.global_position.y)),
+				int(floor(player.global_position.z))
+			)
+		]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))

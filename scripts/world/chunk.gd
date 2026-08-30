@@ -36,6 +36,12 @@ var block_light: PackedByteArray
 # This is runtime-only derived state and deliberately is not persisted.
 var lighting_revision: int = 0
 var dirty: bool = true
+# Independent of `dirty`, which ChunkNode clears as soon as it dispatches a
+# re-mesh. Save-and-quit may happen long after that visual work completed, so
+# persistence needs a sticky bit that only a successful chunk save clears.
+# Keeping the bit in the data container also catches direct fluid id swaps
+# (FLOWING <-> STILL), which deliberately bypass ChunkManager notifications.
+var modified_since_save: bool = false
 # Highest Y at which a non-AIR block exists. Lets the mesher skip the empty
 # upper layers entirely. Monotonically increases — a player breaking the
 # topmost block won't shrink it, but the cost of meshing 1 extra layer is
@@ -253,6 +259,7 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 		return
 	var idx: int = index(x, y, z)
 	var old_id: int = blocks[idx]
+	var old_meta: int = block_meta[idx]
 	blocks[idx] = id
 	if old_id != id:
 		lighting_revision += 1
@@ -260,6 +267,8 @@ func set_block(x: int, y: int, z: int, id: int) -> void:
 	# the new block starts in its default state (meta=0). Callers that
 	# need a non-default meta use set_block_with_meta.
 	block_meta[idx] = 0
+	if old_id != id or old_meta != 0:
+		modified_since_save = true
 	if id != Blocks.AIR and y > max_y:
 		max_y = y
 	if Blocks.needs_gdscript_mesher(id):
@@ -282,10 +291,14 @@ func set_block_with_meta(x: int, y: int, z: int, id: int, meta: int) -> void:
 		return
 	var idx: int = index(x, y, z)
 	var old_id: int = blocks[idx]
+	var old_meta: int = block_meta[idx]
+	var masked_meta: int = meta & 0xF
 	blocks[idx] = id
 	if old_id != id:
 		lighting_revision += 1
-	block_meta[idx] = meta & 0xF
+	block_meta[idx] = masked_meta
+	if old_id != id or old_meta != masked_meta:
+		modified_since_save = true
 	if id != Blocks.AIR and y > max_y:
 		max_y = y
 	if Blocks.needs_gdscript_mesher(id):
@@ -414,7 +427,11 @@ func get_block_meta(x: int, y: int, z: int) -> int:
 func set_block_meta(x: int, y: int, z: int, value: int) -> void:
 	if x < 0 or x >= SIZE_X or y < 0 or y >= SIZE_Y or z < 0 or z >= SIZE_Z:
 		return
-	block_meta[index(x, y, z)] = clampi(value, 0, 15)
+	var idx: int = index(x, y, z)
+	var masked: int = clampi(value, 0, 15)
+	if block_meta[idx] != masked:
+		block_meta[idx] = masked
+		modified_since_save = true
 
 
 # Trusted-coord variants — worldgen / flow algorithm inner loops promise

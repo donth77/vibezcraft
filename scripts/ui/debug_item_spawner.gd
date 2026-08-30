@@ -152,6 +152,10 @@ const _ITEMS: Array = [
 	Items.BONEMEAL,
 	Items.GUNPOWDER,
 	Items.REDSTONE,
+	# Beta 1.3 redstone repeater — keep it beside dust so the two circuit
+	# items are discoverable together. It places the unpowered world state;
+	# RMB on the placed component cycles its four delay settings.
+	Items.REDSTONE_REPEATER,
 	Items.COMPASS,
 	Items.CLOCK,
 	Items.BUCKET_EMPTY,
@@ -286,9 +290,6 @@ const _ITEMS: Array = [
 	# Glowstone dust — glowstone's only drop, and the sole reagent in the
 	# nine-dust block recipe.
 	Items.GLOWSTONE_DUST,
-	# Beta 1.3 redstone repeater — places the unpowered world state; RMB
-	# on the placed component cycles its four delay settings.
-	Items.REDSTONE_REPEATER,
 ]
 
 var _player: Node

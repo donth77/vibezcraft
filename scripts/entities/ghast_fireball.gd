@@ -259,13 +259,13 @@ func _in_water() -> bool:
 
 
 func _emit_bubbles() -> void:
-	# The source spawns four discrete bubble particles behind the
-	# projectile each tick. The trail emitter already provides a
-	# continuous stream; retinting it while submerged reads the same and
-	# keeps the node count flat, which is what §8.3's bounded-particle
-	# requirement is protecting.
-	if _smoke != null:
-		_smoke.color = Color(0.7, 0.8, 1.0)
+	# az.java:128-134 creates four actual EntityBubbleFX instances at
+	# position-motion*0.25 before acceleration and water drag are applied.
+	# _velocity is already stored in Alpha blocks-per-tick units here.
+	if _chunk_manager == null:
+		return
+	var origin: Vector3 = global_position - _velocity * 0.25
+	FluidFx.spawn_water_bubble(_chunk_manager, origin, _velocity, _BUBBLES_PER_TICK)
 
 
 # Walk the segment and return the last clear point before the first

@@ -90,6 +90,20 @@ func test_both_states_drop_the_dedicated_item() -> void:
 	assert_eq(Items.max_stack_size(Items.REDSTONE_REPEATER), 64)
 
 
+func test_debug_spawner_lists_the_item_once_beside_redstone_dust() -> void:
+	var script: GDScript = load("res://scripts/ui/debug_item_spawner.gd") as GDScript
+	assert_not_null(script, "debug item spawner loads")
+	if script == null:
+		return
+	var items: Array = script.get_script_constant_map()["_ITEMS"]
+	assert_eq(items.count(Items.REDSTONE_REPEATER), 1, "one dedicated repeater entry")
+	assert_eq(
+		items.find(Items.REDSTONE_REPEATER),
+		items.find(Items.REDSTONE) + 1,
+		"repeater is discoverable beside redstone dust"
+	)
+
+
 func test_repeater_has_beta_bounds_light_and_material_properties() -> void:
 	for id: int in [Blocks.REDSTONE_REPEATER_OFF, Blocks.REDSTONE_REPEATER_ON]:
 		assert_eq(Blocks.mesh_shape(id), Blocks.MESH_SHAPE_REDSTONE_REPEATER)
@@ -304,6 +318,46 @@ func test_item_icon_uses_the_beta_inventory_sprite() -> void:
 	if icon != null:
 		assert_eq(icon.get_width(), 16)
 		assert_eq(icon.get_height(), 16)
+
+
+func test_item_sprite_builds_held_and_dropped_visuals() -> void:
+	var icon: Texture2D = ItemIcons.icon_for(Items.REDSTONE_REPEATER)
+	assert_not_null(icon, "inventory/debug icon exists")
+	if icon == null:
+		return
+	var held: ArrayMesh = SpriteExtruder.build(icon)
+	assert_not_null(held, "held repeater extrudes from the item sprite")
+	if held != null:
+		assert_gt(held.get_surface_count(), 0, "held repeater has geometry")
+
+	var dropped := DroppedItem.new()
+	add_child_autofree(dropped)
+	dropped.set_process(false)
+	dropped.global_position = Vector3(0.5, 65.0, 0.5)
+	dropped.setup(Items.REDSTONE_REPEATER)
+	assert_true(dropped._is_sprite_item, "dropped repeater uses the item-sprite path")
+	assert_not_null(dropped._mesh.mesh, "dropped repeater has a visible mesh")
+	if dropped._mesh.mesh != null:
+		assert_gt(dropped._mesh.mesh.get_surface_count(), 0, "dropped repeater mesh has geometry")
+
+
+func test_both_placed_states_survive_the_full_mesher_dispatch() -> void:
+	BlockAtlas.build()
+	for id: int in [Blocks.REDSTONE_REPEATER_OFF, Blocks.REDSTONE_REPEATER_ON]:
+		var chunk := Chunk.new()
+		chunk.set_block(POS.x, POS.y, POS.z, id)
+		chunk.set_block_meta(POS.x, POS.y, POS.z, 3 | (2 << 2))
+		var emitted: Dictionary = Mesher.mesh_chunk_fast(chunk)
+		assert_gt(
+			(emitted["vertices"] as PackedVector3Array).size(),
+			0,
+			"state %d renders through native/GDScript dispatch" % id
+		)
+		assert_gt(
+			(emitted["collision_faces"] as PackedVector3Array).size(),
+			0,
+			"state %d keeps its placed collision" % id
+		)
 
 
 func _emit_mesh(id: int, meta: int) -> Dictionary:

@@ -34,6 +34,7 @@ const LADDER_MAX_DESCENT: float = 3.0
 # the half-height here so the post-slide voxel guard can sweep the capsule's
 # bottom point without depending on a scene-tree lookup in the hot path.
 const _CAPSULE_HALF_HEIGHT: float = 0.9
+const _CAPSULE_WIDTH: float = 0.6
 # Position correction and exact-cell-seam tolerance for the downward voxel
 # guard. Large enough to dominate float32 drift at normal world coordinates,
 # but far too small to broaden an actual ledge.
@@ -2289,20 +2290,19 @@ func _physics_process(delta: float) -> void:
 			):
 				_last_splash_time = now
 				SFX.play_splash(velocity)
-				# Vanilla Entity.N() (lw.java:170-183) spawns `1 + width * 20`
-				# bubbles AND `1 + width * 20` splash droplets at the water
-				# surface on entry. For player width 0.6 that's 13 of each;
-				# we use 8 each to keep frame cost predictable while keeping
-				# the visual read. Both bursts inherit the entry velocity so
-				# fast plunges throw droplets farther.
+				# lw.java:165-183 creates 1 + width*20 bubbles, then the same
+				# number of splash particles. Player width 0.6 means exactly
+				# 13 of each at floor(AABB.minY)+1. FluidFx owns the source RNG,
+				# atlas sprites, and per-tick particle physics.
 				var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 				if cm != null:
-					var surface_y: float = floor(global_position.y) + 1.0
-					var splash_pos: Vector3 = Vector3(
-						global_position.x, surface_y, global_position.z
+					FluidFx.spawn_water_entry(
+						cm,
+						global_position,
+						global_position.y - _CAPSULE_HALF_HEIGHT,
+						_CAPSULE_WIDTH,
+						velocity / 20.0
 					)
-					FluidFx.spawn_water_bubble(cm, splash_pos, velocity, 8)
-					FluidFx.spawn_water_splash(cm, splash_pos, velocity, 8)
 		_was_in_water = true
 		_update_water_physics(delta)
 		_report_block_contact()
@@ -2316,15 +2316,6 @@ func _physics_process(delta: float) -> void:
 		if _swim_distance >= _SWIM_INTERVAL_M:
 			_swim_distance = 0.0
 			SFX.play_swim()
-			# Beta Entity.handleWaterMovement spawns bubble particles
-			# trailing the entity each swim tick. We piggy-back on the
-			# swim cadence so bubbles emit at the same per-distance
-			# rate as the swim sound. Position offset behind the player
-			# so they trail rather than spawn on the body.
-			var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
-			if cm != null:
-				var trail: Vector3 = global_position - velocity.normalized() * 0.3
-				FluidFx.spawn_water_bubble(cm, trail, velocity * 0.2, 3)
 		# Auto-step gated by three vanilla-matching conditions (see
 		# EntityLiving.e() `positionChanged && this.c(...)`):
 		#   1. is_on_wall — touched something horizontally
@@ -2943,6 +2934,9 @@ func _tick_air(delta: float) -> void:
 			_drown_tick += delta
 			if _drown_tick >= _DROWN_DAMAGE_INTERVAL_SEC:
 				_drown_tick = 0.0
+				var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+				if cm != null:
+					FluidFx.spawn_drowning_bubbles(cm, global_position, velocity / 20.0)
 				take_damage(_DROWN_DAMAGE, DAMAGE_DROWN)
 	else:
 		# Not submerged — vanilla snaps air back to full instantly.

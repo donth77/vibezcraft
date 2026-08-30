@@ -53,6 +53,9 @@ class FakeWorld:
 	func get_world_block_meta(_pos: Vector3i) -> int:
 		return 0
 
+	func get_world_effective_light(_pos: Vector3i, _sky_subtraction: int = -1) -> int:
+		return 15
+
 	func set_world_block_with_meta(pos: Vector3i, id: int, _meta: int) -> void:
 		blocks[pos] = id
 
@@ -197,6 +200,22 @@ func test_water_drag_is_heavier_than_air_drag() -> void:
 		1e-8,
 		"0.8 in water, not 0.95"
 	)
+
+
+func test_submerged_tick_emits_four_real_bubbles_behind_the_fireball() -> void:
+	var w: FakeWorld = _fake_world()
+	w.fill(Vector3i(-4, 68, -4), Vector3i(4, 72, 4), Blocks.WATER_STILL)
+	var ball: Node3D = _fireball(Vector3(0, 70, 0), w)
+	ball.set("acceleration", Vector3.ZERO)
+	ball.call("set_velocity_per_tick", Vector3(0.0, 0.0, 0.2))
+
+	ball.call("_tick")
+
+	assert_eq(w.get_child_count(), 4, "az.java emits four bubbles per submerged tick")
+	for child: Node in w.get_children():
+		assert_true(child is AlphaWaterParticle)
+		assert_eq(int(child.get("_kind")), AlphaWaterParticle.Kind.BUBBLE)
+		assert_eq((child as Node3D).global_position, Vector3(0.0, 70.0, 0.15))
 
 
 func test_terminal_speed_is_finite() -> void:

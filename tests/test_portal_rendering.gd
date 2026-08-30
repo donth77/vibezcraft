@@ -387,12 +387,42 @@ func test_the_renderer_bounds_its_particle_emitters() -> void:
 	assert_eq(emitters, PortalRenderer.EFFECT_CELLS, "but only six of them emit")
 
 
-func test_the_ambient_gate_is_one_in_a_hundred_per_cell_per_tick() -> void:
-	# Not a statistical test of the RNG — a statement about the CONSTANT,
-	# which is the thing x.java pins and the thing a refactor can silently
-	# change into "once a second".
+func test_the_ambient_gate_is_one_in_a_hundred_after_a_cell_is_sampled() -> void:
+	# x.java's constant is conditional: cy.m must randomly select the portal
+	# coordinate before this one-in-100 block callback roll even happens.
 	assert_eq(NetherPortal.AMBIENT_SOUND_CHANCE, 100, "x.java:129 — nextInt(100) == 0")
 	assert_eq(NetherPortal.PARTICLES_PER_TICK, 4, "x.java:133 — four particles per tick")
+
+
+func test_display_sampling_uses_alphas_triangular_sixteen_block_distribution() -> void:
+	assert_almost_eq(
+		PortalRenderer._axis_display_sample_probability(0), 16.0 / 256.0, 1e-9, "center"
+	)
+	assert_almost_eq(
+		PortalRenderer._axis_display_sample_probability(1), 15.0 / 256.0, 1e-9, "one away"
+	)
+	assert_almost_eq(PortalRenderer._axis_display_sample_probability(15), 1.0 / 256.0, 1e-9, "edge")
+	assert_eq(PortalRenderer._axis_display_sample_probability(16), 0.0, "outside span")
+
+
+func test_a_nearby_standard_portal_hums_at_the_random_display_rate() -> void:
+	# cy.java samples 1000 triangular-offset cells each tick. For this 2x3
+	# portal beside the player, combining that sampler with x.java's 1/100
+	# roll gives 0.01321574 per tick: 0.264 starts/s, or one every 3.78 s.
+	# The old direct per-cell roll was 1.2 starts/s and layered the five-second
+	# clip continuously.
+	var cells: Array = []
+	for x: int in range(2):
+		for y: int in range(64, 67):
+			cells.append({"pos": Vector3i(x, y, 0)})
+	var probability: float = PortalRenderer._ambient_tick_probability(Vector3i(0, 64, 0), cells)
+	assert_almost_eq(probability, 0.013215740205, 1e-9, "source-derived per-tick chance")
+	assert_almost_eq(probability * 20.0, 0.264314804, 1e-8, "about one start per 3.78 s")
+	assert_eq(
+		PortalRenderer._ambient_tick_probability(Vector3i(32, 64, 0), cells),
+		0.0,
+		"a portal outside the 16-block sample span cannot hum"
+	)
 
 
 func test_particles_orient_across_the_sheet_not_along_it() -> void:

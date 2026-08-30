@@ -25,7 +25,9 @@ var _local_brightness: float = 1.0
 var _atlas: AtlasTexture
 
 
-func configure(kind: Kind, world_position: Vector3, local_brightness: float) -> void:
+func configure(
+	kind: Kind, world_position: Vector3, local_brightness: float, smoke_size_multiplier: float = 1.0
+) -> void:
 	_kind = kind
 	_age_ticks = 0
 	_tick_accumulator = 0.0
@@ -57,9 +59,12 @@ func configure(kind: Kind, world_position: Vector3, local_brightness: float) -> 
 		modulate = Color.WHITE
 	else:
 		# pi.java:14-23. Ordinary smoke is 0.75 of pp.java's random scale,
-		# dark gray, and shorter-lived than the similarly named largesmoke.
-		_max_age_ticks = int(8.0 / (randf() * 0.8 + 0.2))
-		_base_scale = (randf() * 0.5 + 0.5) * 2.0 * 0.75
+		# dark gray, and shorter-lived than largesmoke. pi.java's f2 overload
+		# multiplies both its stored scale and its already-rounded lifetime;
+		# Alpha passes 2.5 for the Nether water-evaporation puffs.
+		var base_lifetime: int = int(8.0 / (randf() * 0.8 + 0.2))
+		_max_age_ticks = int(float(base_lifetime) * smoke_size_multiplier)
+		_base_scale = (randf() * 0.5 + 0.5) * 2.0 * 0.75 * smoke_size_multiplier
 		_motion_per_tick = initial_motion * 0.1
 		_set_atlas_frame(7)
 		var gray: float = randf() * 0.3 * _local_brightness

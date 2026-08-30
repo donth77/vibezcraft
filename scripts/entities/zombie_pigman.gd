@@ -420,6 +420,7 @@ func _ai_tick() -> void:
 		if angry_sound_countdown == 0:
 			_play_angry_sfx()
 	_ai_repath_counter += 1
+	var target_was_retained: bool = _ai_target != null and is_instance_valid(_ai_target)
 	var player: Node3D = _find_target()
 	if player == null:
 		_ai_target = null
@@ -429,7 +430,13 @@ func _ai_tick() -> void:
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
 	# Pigmen still inherit EntityCreature's sight gate around the attack hook.
 	# A retained target may be pursued through cover but never struck through it.
-	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE and has_line_of_sight(player):
+	# Re-acquisition inside `_find_target` already passed canEntityBeSeen;
+	# retained targets need one fresh trace only when close enough to strike.
+	var melee_visible: bool = (
+		dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE
+		and (not target_was_retained or has_line_of_sight(player))
+	)
+	if melee_visible:
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -493,6 +500,17 @@ func _walk_speed() -> float:
 
 func _repath_toward(player: Node3D) -> void:
 	if _chunk_manager == null:
+		return
+	# Keep retained MID/FAR targets cheap; full A* resumes in NEAR.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [
+			Vector3i(
+				int(floor(player.global_position.x)),
+				int(floor(player.global_position.y)),
+				int(floor(player.global_position.z))
+			)
+		]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))

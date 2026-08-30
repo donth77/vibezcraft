@@ -1766,7 +1766,7 @@ func _try_bucket(hit: Dictionary, hit_id: int) -> bool:
 			item_id == Items.BUCKET_WATER
 			and not DimensionContext.active_provider().allows_water_placement
 		):
-			FluidFx.spawn_fizz(_chunk_manager, place_pos)
+			FluidFx.spawn_nether_water_evaporation(_chunk_manager, place_pos)
 			inv.replace_selected(Items.BUCKET_EMPTY, 1)
 			_trigger_player_use_swing()
 			return true
@@ -2364,8 +2364,23 @@ func _try_place_door(hit: Dictionary, stack: ItemStack) -> bool:
 	if flip_hinge:
 		n6 = (n6 - 1) & 3
 		n6 += 4
+	# A door is one logical block written into two cells. Suppress the
+	# synchronous redstone fanout until both halves exist; otherwise a live
+	# wire can open the lower half between these writes and the second write
+	# then installs a stale, closed upper half. Publish one fanout afterward
+	# so an already-powered neighbour still opens the completed pair.
+	var atomic_notify: bool = (
+		_chunk_manager.has_method("begin_block_edit")
+		and _chunk_manager.has_method("end_block_edit")
+		and _chunk_manager.has_method("enqueue_block_notification")
+	)
+	if atomic_notify:
+		_chunk_manager.begin_block_edit()
 	_chunk_manager.set_world_block_with_meta(place, block_id, n6)
 	_chunk_manager.set_world_block_with_meta(above, block_id, n6 + 8)
+	if atomic_notify:
+		_chunk_manager.end_block_edit()
+		_chunk_manager.enqueue_block_notification(place, block_id)
 	SFX.play_place(block_id)
 	var inv: Inventory = _player_inventory()
 	if inv != null:

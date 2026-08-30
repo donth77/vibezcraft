@@ -2871,41 +2871,13 @@ static func _emit_floor_torch_wall(
 	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
 
 
-# Vanilla `ao.a(angle)` — rotation around X axis (sin/cos lookup in fi.java
-# resolves to standard sin/cos). Mirrors:
-#   new_y = y*cos + z*sin
-#   new_z = z*cos - y*sin
-static func _torch_rotate_x(v: Vector3, angle: float) -> Vector3:
-	var c: float = cos(angle)
-	var s: float = sin(angle)
-	return Vector3(v.x, v.y * c + v.z * s, v.z * c - v.y * s)
-
-
-# Vanilla `ao.b(angle)` — rotation around Y axis.
-#   new_x = x*cos + z*sin
-#   new_z = z*cos - x*sin
-static func _torch_rotate_y(v: Vector3, angle: float) -> Vector3:
-	var c: float = cos(angle)
-	var s: float = sin(angle)
-	return Vector3(v.x * c + v.z * s, v.y, v.z * c - v.x * s)
-
-
-# Vanilla-faithful unified torch geometry — closed 8-vert box of size
-# 0.125 × 0.625 × 0.125 per ob.java + bk.java:142-185, with tight UV
-# sub-rects on every face. Handles BOTH floor torches (meta 0 / 5) AND
-# wall torches (meta 1-4) by applying the full vanilla transformation
-# pipeline:
-#   1. Z shift +1/16              (bk.java:158, bl3=false branch)
-#   2. Rotate X by -40°            (bk.java:159)
-#   3. (wall only) Y shift -3/8    (bk.java:170)
-#   4. (wall only) Rotate X +90°   (bk.java:171)
-#   5. (wall only) Rotate Y per-meta — meta 1=-90°, 2=+90°, 3=180°, 4=0°
-#   6. Translate by cell-center + (0.5, 0.125 floor / 0.5 wall, 0.5)
-#
-# Faces follow vanilla's i3=0..5 ordering and per-vert UV mapping
-# (ao2=BL, ao3=TL, ao4=TR, ao5=BR per bk.java:225-228). Normals are
-# computed from the rotated verts so they stay correct after every
-# transform.
+# Pack-safe form of Alpha's bk.java:673-715 torch geometry. Alpha maps a
+# complete 16×16 tile onto four leaning planes. We clip those planes to
+# the placed model's center strip (columns 7..9, rows 6..16), preserving
+# exactly the same visible coordinates while hiding Pixel Perfection's
+# wider item-only head artwork. In particular, wall torch tips land at
+# x/z .25 or .75 and y .825, directly beneath ob.java's particle origins
+# at x/z .23 or .77 and y .92.
 # gdlint: disable=function-arguments-number
 static func _emit_torch_box(
 	verts: PackedVector3Array,
@@ -2921,62 +2893,37 @@ static func _emit_torch_box(
 	rect: Rect2,
 	face_light: Color
 ) -> void:
-	var d15: float = 0.0625  # 1/16
-	var d16: float = 0.625  # 10/16
-	# Local-space box vertices (vanilla bk.java:151-158). ao[0..3] bottom,
-	# ao[4..7] top; ordering (-x,-z), (+x,-z), (+x,+z), (-x,+z).
-	var ao: Array[Vector3] = [
-		Vector3(-d15, 0.0, -d15),
-		Vector3(d15, 0.0, -d15),
-		Vector3(d15, 0.0, d15),
-		Vector3(-d15, 0.0, d15),
-		Vector3(-d15, d16, -d15),
-		Vector3(d15, d16, -d15),
-		Vector3(d15, d16, d15),
-		Vector3(-d15, d16, d15),
-	]
-	var is_wall: bool = meta == 1 or meta == 2 or meta == 3 or meta == 4
-	var ymeta: float = 0.0
+	var half_width: float = 0.0625
+	var bottom_center := Vector3(float(x) + 0.5, float(y), float(z) + 0.5)
+	var top_center := bottom_center + Vector3(0.0, 0.625, 0.0)
+	# These are the full-plane positions at V=1 (row 16) and V=6/16.
+	# Cropping the geometry and UV together makes this visually identical
+	# to Alpha for the center strip without exposing the pack's side pixels.
 	match meta:
 		1:
-			ymeta = -PI * 0.5
+			bottom_center = Vector3(float(x), float(y) + 0.2, float(z) + 0.5)
+			top_center = Vector3(float(x) + 0.25, float(y) + 0.825, float(z) + 0.5)
 		2:
-			ymeta = PI * 0.5
+			bottom_center = Vector3(float(x) + 1.0, float(y) + 0.2, float(z) + 0.5)
+			top_center = Vector3(float(x) + 0.75, float(y) + 0.825, float(z) + 0.5)
 		3:
-			ymeta = PI
+			bottom_center = Vector3(float(x) + 0.5, float(y) + 0.2, float(z))
+			top_center = Vector3(float(x) + 0.5, float(y) + 0.825, float(z) + 0.25)
 		4:
-			ymeta = 0.0
-	var cx_off: float = float(x) + 0.5
-	var cz_off: float = float(z) + 0.5
-	# Floor torches sit FLUSH with the ground. ob.java:135 gives the floor
-	# variant bounds of (0.4, 0.0, 0.4)..(0.6, 0.6, 0.6) — bottom at y=0 —
-	# and `Blocks.selection_aabb` already encodes that. The render used
-	# +0.125, so the pillar hovered 2/16 above its own selection box and
-	# above the block it stands on: visibly floating.
-	# Vertical placement, from vanilla's renderBlockTorch call sites:
-	# a floor torch is rendered at `d1` unchanged, a wall torch at
-	# `d1 + 0.2`. Ours used +0.125 and +0.5, which floated the floor torch
-	# above the ground and pushed the wall torch up out of its own
-	# selection box (ob.java:122-136 puts wall bounds at y 0.2..0.8).
-	var cy_off: float = float(y) + (0.2 if is_wall else 0.0)
-	for i in range(8):
-		var v: Vector3 = ao[i]
-		if is_wall:
-			# Vanilla bk.java:158-185 wall-torch pipeline. Steps 1-2 (Z+1/16
-			# + rotate-X -40°) are part of the wall transform — step 4
-			# (rotate-X +90°) rotates the leaning column horizontal so it
-			# can extend into the support wall. For floor torches there's
-			# no step 4 to undo it, so applying steps 1-2 leaves them
-			# leaning forward like a fallen cigarette. Skipping steps 1-2
-			# for floor torches gives an upright box (the visually correct
-			# look players expect from MC torches).
-			v.z += 0.0625
-			v = _torch_rotate_x(v, -0.69813174)
-			v.y -= 0.375
-			v = _torch_rotate_x(v, 1.5707964)
-			v = _torch_rotate_y(v, ymeta)
-		# Final translate to world cell.
-		ao[i] = Vector3(v.x + cx_off, v.y + cy_off, v.z + cz_off)
+			bottom_center = Vector3(float(x) + 0.5, float(y) + 0.2, float(z) + 1.0)
+			top_center = Vector3(float(x) + 0.5, float(y) + 0.825, float(z) + 0.75)
+	# ao[0..3] are the bottom square and ao[4..7] the top square;
+	# ordering is (-x,-z), (+x,-z), (+x,+z), (-x,+z).
+	var ao: Array[Vector3] = [
+		bottom_center + Vector3(-half_width, 0.0, -half_width),
+		bottom_center + Vector3(half_width, 0.0, -half_width),
+		bottom_center + Vector3(half_width, 0.0, half_width),
+		bottom_center + Vector3(-half_width, 0.0, half_width),
+		top_center + Vector3(-half_width, 0.0, -half_width),
+		top_center + Vector3(half_width, 0.0, -half_width),
+		top_center + Vector3(half_width, 0.0, half_width),
+		top_center + Vector3(-half_width, 0.0, half_width),
+	]
 	var u0: float = rect.position.x
 	var u1: float = rect.position.x + rect.size.x
 	var v0: float = rect.position.y

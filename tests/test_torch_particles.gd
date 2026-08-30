@@ -7,6 +7,9 @@ class BrightWorld:
 	func get_world_effective_light(_pos: Vector3i, _sky_subtraction: int = -1) -> int:
 		return 15
 
+	func get_world_block_meta(_pos: Vector3i) -> int:
+		return Redstone.MOUNT_FLOOR
+
 
 const CELL := Vector3i(10, 20, 30)
 
@@ -46,6 +49,46 @@ func test_each_display_tick_spawns_one_smoke_then_one_flame() -> void:
 	assert_eq((flame.texture as AtlasTexture).region, Rect2(0, 24, 8, 8), "flame stays on tile 48")
 	assert_eq(smoke.texture_filter, BaseMaterial3D.TEXTURE_FILTER_NEAREST)
 	assert_eq(flame.texture_filter, BaseMaterial3D.TEXTURE_FILTER_NEAREST)
+
+
+func test_display_particles_obey_alphas_sixteen_block_visibility_limit() -> void:
+	var world := BrightWorld.new()
+	add_child_autofree(world)
+	var origin: Vector3 = FluidFx.torch_particle_origin(CELL, Redstone.MOUNT_FLOOR)
+
+	AmbientFx._torch(world, CELL.x, CELL.y, CELL.z, origin + Vector3(16.01, 0.0, 0.0))
+	assert_eq(world.get_child_count(), 0, "f.java rejects a distant pair")
+	AmbientFx._torch(world, CELL.x, CELL.y, CELL.z, origin + Vector3(16.0, 0.0, 0.0))
+	assert_eq(world.get_child_count(), 2, "a selected visible torch emits exactly one pair")
+
+
+func test_wall_particle_origins_sit_directly_over_the_rendered_heads() -> void:
+	var expected_heads: Dictionary = {
+		Redstone.MOUNT_WEST_WALL: Vector3(10.25, 20.825, 30.5),
+		Redstone.MOUNT_EAST_WALL: Vector3(10.75, 20.825, 30.5),
+		Redstone.MOUNT_NORTH_WALL: Vector3(10.5, 20.825, 30.25),
+		Redstone.MOUNT_SOUTH_WALL: Vector3(10.5, 20.825, 30.75),
+	}
+	for meta: int in expected_heads:
+		var chunk := Chunk.new()
+		chunk.set_block(CELL.x & 15, CELL.y, CELL.z & 15, Blocks.TORCH)
+		chunk.set_block_meta(CELL.x & 15, CELL.y, CELL.z & 15, meta)
+		var vertices: PackedVector3Array = Mesher.mesh_chunk(chunk).vertices
+		# _emit_torch_box emits its top face second, at vertices 4..7.
+		var head_center := Vector3.ZERO
+		for i in range(4, 8):
+			head_center += vertices[i]
+		head_center /= 4.0
+		# Chunk-local X/Z need the world chunk origin added back for CELL.z=30.
+		head_center += Vector3(CELL.x & ~15, 0.0, CELL.z & ~15)
+		assert_eq(head_center, expected_heads[meta], "rendered head follows bk.java")
+		var particle: Vector3 = FluidFx.torch_particle_origin(CELL, meta)
+		assert_lt(
+			Vector2(particle.x - head_center.x, particle.z - head_center.z).length(),
+			0.021,
+			"particle stays horizontally over the head"
+		)
+		assert_almost_eq(particle.y - head_center.y, 0.095, 0.001, "sprite overlaps tip")
 
 
 func test_particle_lifetimes_and_base_sizes_follow_the_source_ranges() -> void:

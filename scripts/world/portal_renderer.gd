@@ -31,10 +31,14 @@ const REBUILD_INTERVAL: float = 0.2
 # and full width along it.
 const _HALF_THICKNESS: float = 0.125
 
-# Vanilla's randomDisplayTick runs per frame per visible cell. Sampling at
-# a fixed 20 Hz instead keeps the one-in-100 hum gate at its source rate
-# regardless of framerate — the same reasoning as MobBase's idle SFX.
+# Minecraft.java calls cy.m once per 20 Hz client tick. That method samples
+# 1000 nearby coordinates with a triangular `nextInt(16)-nextInt(16)` offset;
+# only sampled portal cells reach x.java's one-in-100 sound roll. The fixed
+# cadence here preserves that source clock, while _ambient_tick_probability
+# below preserves the random-coordinate gate instead of ticking every cell.
 const _DISPLAY_TICK_INTERVAL: float = 1.0 / 20.0
+const _DISPLAY_SAMPLE_COUNT: int = 1000
+const _DISPLAY_SAMPLE_SPAN: int = 16
 
 # Hard cap on drawn cells. A player who walls a room in portals cannot
 # make this unbounded; the plan asks for particle and voice counts that
@@ -216,17 +220,92 @@ func _sync_multimesh() -> void:
 		mm.set_instance_transform(i, Transform3D(basis, Vector3(pos) + Vector3(0.5, 0.5, 0.5)))
 
 
-# x.java:129 — the per-cell display tick's audio half: one roll in a
-# hundred, per cell, per tick.
-#
-# Only the effect cells roll. Vanilla rolls every visible cell, but
-# vanilla is also not at risk of a player building a wall of portals and
-# pinning every audio voice in the mixer.
+# x.java:129-132, reached through cy.java:1460-1470. Alpha first samples
+# 1000 nearby coordinates, then rolls one-in-100 only when a sampled cell is
+# a portal. The previous direct roll for all six cells made a standard portal
+# start about 1.2 five-second hums per second and kept four voices layered.
+# This collapse preserves Alpha's at-least-one-event probability; the chance
+# of two hums in one 20 Hz tick is below 0.01% for a standard nearby portal.
 func _display_tick() -> void:
+	if _effect_cells.is_empty():
+		return
+	var center: Vector3i = _display_center_cell()
+	if randf() >= _ambient_tick_probability(center, _effect_cells):
+		return
+	var entry: Dictionary = _weighted_ambient_entry(center)
+	if entry.is_empty():
+		return
+	var pos: Vector3i = entry["pos"]
+	SFX.play_portal_ambient(Vector3(pos) + Vector3(0.5, 0.5, 0.5))
+
+
+# Exact probability that one Alpha display sample lands on this offset.
+# For nextInt(16)-nextInt(16), delta d has (16-|d|) of 256 equally likely
+# integer pairs. Offsets outside -15..15 cannot be sampled.
+static func _axis_display_sample_probability(delta: int) -> float:
+	var distance: int = absi(delta)
+	if distance >= _DISPLAY_SAMPLE_SPAN:
+		return 0.0
+	return (
+		float(_DISPLAY_SAMPLE_SPAN - distance) / float(_DISPLAY_SAMPLE_SPAN * _DISPLAY_SAMPLE_SPAN)
+	)
+
+
+static func _display_sample_weight(center: Vector3i, entry: Dictionary) -> float:
+	var pos: Vector3i = entry["pos"]
+	var offset: Vector3i = pos - center
+	return (
+		_axis_display_sample_probability(offset.x)
+		* _axis_display_sample_probability(offset.y)
+		* _axis_display_sample_probability(offset.z)
+	)
+
+
+# Probability of one or more hums this tick. Each of the 1000 independent
+# coordinate samples must both land on a portal cell and pass x.java's
+# conditional one-in-100 roll.
+static func _ambient_tick_probability(center: Vector3i, effect_cells: Array) -> float:
+	var portal_sample_probability: float = 0.0
+	for entry: Dictionary in effect_cells:
+		portal_sample_probability += _display_sample_weight(center, entry)
+	if portal_sample_probability <= 0.0:
+		return 0.0
+	var event_per_sample: float = (
+		portal_sample_probability / float(NetherPortal.AMBIENT_SOUND_CHANCE)
+	)
+	return 1.0 - pow(1.0 - event_per_sample, float(_DISPLAY_SAMPLE_COUNT))
+
+
+# Once the aggregate roll succeeds, choose which portal cell owns the sound
+# with the same triangular spatial weighting as cy.m's coordinate sampler.
+func _weighted_ambient_entry(center: Vector3i) -> Dictionary:
+	var total_weight: float = 0.0
 	for entry: Dictionary in _effect_cells:
-		if randi() % NetherPortal.AMBIENT_SOUND_CHANCE == 0:
-			var pos: Vector3i = entry["pos"]
-			SFX.play_portal_ambient(Vector3(pos) + Vector3(0.5, 0.5, 0.5))
+		total_weight += _display_sample_weight(center, entry)
+	if total_weight <= 0.0:
+		return {}
+	var cursor: float = randf() * total_weight
+	for entry: Dictionary in _effect_cells:
+		cursor -= _display_sample_weight(center, entry)
+		if cursor <= 0.0:
+			return entry
+	return _effect_cells.back() as Dictionary
+
+
+# cy.m centers its triangular sample cloud on the player entity, not the
+# camera. The camera fallback keeps isolated renderer tests and unusual scene
+# setups deterministic without coupling this presentation node to Player.gd.
+func _display_center_cell() -> Vector3i:
+	var viewpoint := Vector3.ZERO
+	if is_inside_tree():
+		var player := get_tree().get_first_node_in_group(&"player") as Node3D
+		if player != null:
+			viewpoint = player.global_position
+		else:
+			var camera: Camera3D = get_viewport().get_camera_3d()
+			if camera != null:
+				viewpoint = camera.global_position
+	return Vector3i(floori(viewpoint.x), floori(viewpoint.y), floori(viewpoint.z))
 
 
 # Point the fixed emitter pool at the nearest EFFECT_CELLS cells.

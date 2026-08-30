@@ -1167,6 +1167,12 @@ static func display_name(item_id: int) -> String:
 			return "Leaves"
 		Blocks.SAND:
 			return "Sand"
+		Blocks.NETHERRACK:
+			return "Netherrack"
+		Blocks.SOUL_SAND:
+			return "Soul Sand"
+		Blocks.GLOWSTONE:
+			return "Glowstone"
 		Blocks.BRICK:
 			return "Bricks"
 		Blocks.OBSIDIAN:

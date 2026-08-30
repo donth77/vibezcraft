@@ -37,6 +37,18 @@ func test_schedule_enqueues() -> void:
 	assert_eq(TickScheduler.pending_count(), 1)
 
 
+func test_duplicate_position_and_block_schedule_keeps_the_first_entry() -> void:
+	var pos := Vector3i(0, 64, 0)
+	TickScheduler.schedule(pos, Blocks.WATER_STILL, 5)
+	TickScheduler.schedule(pos, Blocks.WATER_STILL, 1)
+	assert_eq(TickScheduler.pending_count(), 1, "Alpha HashSet deduplicates position + block id")
+	TickScheduler.advance(0.05, _manager)
+	assert_eq(TickScheduler.pending_count(), 1, "later shorter request does not replace the first")
+	for _i in range(4):
+		TickScheduler.advance(0.05, _manager)
+	assert_eq(TickScheduler.pending_count(), 0, "the original five-tick entry fires")
+
+
 func test_advance_drains_at_20hz() -> void:
 	# 5-tick delay = 5 × 50 ms = 250 ms of wall-clock.
 	TickScheduler.schedule(Vector3i(0, 64, 0), Blocks.WATER_STILL, 5)
@@ -96,9 +108,9 @@ func test_cancel_removes_matching_entries() -> void:
 	TickScheduler.schedule(pos, Blocks.WATER_STILL, 10)
 	# Unrelated entry must survive.
 	TickScheduler.schedule(Vector3i(5, 64, 5), Blocks.LAVA_STILL, 5)
-	assert_eq(TickScheduler.pending_count(), 3)
+	assert_eq(TickScheduler.pending_count(), 2, "duplicate water tick was never inserted")
 	TickScheduler.cancel(pos, Blocks.WATER_STILL)
-	assert_eq(TickScheduler.pending_count(), 1, "both water entries removed")
+	assert_eq(TickScheduler.pending_count(), 1, "the water entry is removed")
 
 
 func test_cancel_ignores_mismatched_block_id() -> void:

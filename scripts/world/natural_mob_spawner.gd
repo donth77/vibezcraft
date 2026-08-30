@@ -60,6 +60,12 @@ const _SPAWN_Y_BAND: int = 12
 # keeps per-tick cost bounded.
 const _SPAWN_INTERVAL_SEC: float = 1.0
 
+# Fully GATED mobs have process_mode DISABLED, so one shared registry sweep
+# owns their reactivation. Four checks per second keeps the worst-case wake
+# latency at 250 ms while replacing up to 100 per-mob physics callbacks every
+# rendered frame. This is deliberately independent of the 1 Hz spawn cadence.
+const _LOD_WAKE_INTERVAL_SEC: float = 0.25
+
 # Per-tick candidate-group origins. Alpha evaluates eligible chunks rather
 # than sampling a player-centred ring, but once an origin is chosen each
 # group follows bg.java's exact 3×4 nearby-attempt structure below.
@@ -98,6 +104,7 @@ var _hostile_pool_cache: Dictionary = {}
 # _species_descriptor.
 var _species_cache: Dictionary = {}
 var _spawn_accum: float = 0.0
+var _lod_wake_accum: float = 0.0
 # Per-tick spawn counter, reset at the top of each spawn pass and
 # incremented inside _spawn_mob_at. Caps the actual mob-instantiation
 # work per tick so a lucky pack expansion can't pile 32 mob _ready()
@@ -125,6 +132,12 @@ func grant_spawn_grace(seconds: float) -> void:
 
 
 func _process(delta: float) -> void:
+	_lod_wake_accum += delta
+	if _lod_wake_accum >= _LOD_WAKE_INTERVAL_SEC:
+		_lod_wake_accum = fmod(_lod_wake_accum, _LOD_WAKE_INTERVAL_SEC)
+		# Avoid even the cached Main/Player lookup on menus and empty worlds.
+		if not _MOB_BASE.active_mobs().is_empty():
+			_MOB_BASE.wake_gated_mobs(_get_player())
 	if _spawn_grace_remaining > 0.0:
 		_spawn_grace_remaining = maxf(0.0, _spawn_grace_remaining - delta)
 	_spawn_accum += delta

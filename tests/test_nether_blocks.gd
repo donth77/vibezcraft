@@ -68,6 +68,18 @@ func test_names_resolve_both_directions() -> void:
 	assert_eq(Items.display_name(Items.GLOWSTONE_DUST), "Glowstone Dust")
 
 
+func test_every_nether_inventory_form_has_tooltip_text() -> void:
+	var expected: Dictionary = {
+		Blocks.NETHERRACK: "Netherrack",
+		Blocks.SOUL_SAND: "Soul Sand",
+		Blocks.GLOWSTONE: "Glowstone",
+		Items.GLOWSTONE_DUST: "Glowstone Dust",
+	}
+	for id: int in expected:
+		assert_eq(Items.display_name(id), expected[id], "item id %d has tooltip text" % id)
+	assert_eq(Items.display_name(Blocks.PORTAL), "", "world-only portal has no tooltip")
+
+
 # --- Hardness and tools ---
 
 

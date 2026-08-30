@@ -35,11 +35,11 @@ class CropManager:
 
 
 func before_each() -> void:
-	TickScheduler._pending.clear()
+	TickScheduler.clear_all()
 
 
 func after_each() -> void:
-	TickScheduler._pending.clear()
+	TickScheduler.clear_all()
 
 
 func test_crops_require_farmland_support() -> void:

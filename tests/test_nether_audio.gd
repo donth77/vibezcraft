@@ -45,6 +45,37 @@ func test_the_three_portal_events_resolve() -> void:
 	)
 
 
+func test_local_portal_events_use_alphas_quarter_volume_and_pitch_range() -> void:
+	# bq.java supplies volume 1.0, but qg.java:183 multiplies every LOCAL
+	# effect by 0.25 before playback. Godot dB = 20*log10(linear gain).
+	var expected_db: float = linear_to_db(0.25)
+	var sfx := _RecordingSfx.new()
+	sfx.play_portal_trigger(Vector3(4.0, 70.0, -2.0))
+	assert_eq(sfx.optional_route, "2d", "trigger follows qg's non-positional local path")
+	assert_eq(sfx.optional_path, _PORTAL + "trigger.ogg")
+	assert_almost_eq(sfx.optional_volume_db, expected_db, 0.0001, "trigger is quarter gain")
+	assert_between(sfx.optional_pitch, 0.8, 1.2, "bq.java trigger pitch")
+	sfx.reset_recording()
+	sfx.play_portal_travel()
+	assert_eq(sfx.optional_route, "2d", "travel is also local")
+	assert_eq(sfx.optional_path, _PORTAL + "travel.ogg")
+	assert_almost_eq(sfx.optional_volume_db, expected_db, 0.0001, "travel is quarter gain")
+	assert_between(sfx.optional_pitch, 0.8, 1.2, "bq.java travel pitch")
+	sfx.free()
+
+
+func test_portal_ambient_keeps_full_positional_gain_and_source_pitch_range() -> void:
+	var sfx := _RecordingSfx.new()
+	var pos := Vector3(3.5, 65.5, 9.5)
+	sfx.play_portal_ambient(pos)
+	assert_eq(sfx.optional_route, "3d", "x.java emits from the portal cell")
+	assert_eq(sfx.optional_path, _PORTAL + "portal.ogg")
+	assert_eq(sfx.optional_position, pos)
+	assert_almost_eq(sfx.optional_volume_db, 0.0, 0.0001, "world volume 1.0 remains 0 dB")
+	assert_between(sfx.optional_pitch, 0.8, 1.2, "x.java ambient pitch")
+	sfx.free()
+
+
 # --- Blocks ---
 
 
@@ -223,13 +254,36 @@ class _RecordingSfx:
 
 	var random_material: String = ""
 	var direct_path: String = ""
+	var optional_route: String = ""
+	var optional_path: String = ""
+	var optional_position: Vector3 = Vector3.ZERO
+	var optional_volume_db: float = 0.0
+	var optional_pitch: float = 0.0
 
 	func reset_recording() -> void:
 		random_material = ""
 		direct_path = ""
+		optional_route = ""
+		optional_path = ""
+		optional_position = Vector3.ZERO
+		optional_volume_db = 0.0
+		optional_pitch = 0.0
 
 	func _play_random(material: String, _base_pitch: float) -> void:
 		random_material = material
 
 	func _play_one(path: String, _volume_db: float, _pitch: float) -> void:
 		direct_path = path
+
+	func _play_optional_2d(path: String, volume_db: float, pitch: float) -> void:
+		optional_route = "2d"
+		optional_path = path
+		optional_volume_db = volume_db
+		optional_pitch = pitch
+
+	func _play_optional_3d(path: String, pos: Vector3, volume_db: float, pitch: float) -> void:
+		optional_route = "3d"
+		optional_path = path
+		optional_position = pos
+		optional_volume_db = volume_db
+		optional_pitch = pitch

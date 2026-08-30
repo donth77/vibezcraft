@@ -499,13 +499,20 @@ static func _update_door(manager, pos: Vector3i, id: int) -> void:
 		is_block_indirectly_powered(manager, lower) or is_block_indirectly_powered(manager, upper)
 	)
 	var is_open: bool = (lower_meta & 4) != 0
-	if powered == is_open:
-		return
-	var new_lower: int = lower_meta ^ 4
-	manager.set_world_block_state(lower, id, new_lower)
-	if manager.get_world_block(upper) == id:
-		manager.set_world_block_state(upper, id, new_lower + 8)
-	if manager.has_method("play_door_sound"):
+	var desired_lower: int = (lower_meta | 4) if powered else (lower_meta & ~4)
+	var state_changed: bool = powered != is_open
+	if state_changed:
+		manager.set_world_block_state(lower, id, desired_lower)
+	# Keep the two render/collision halves coherent even when a legacy save
+	# or an interrupted two-cell placement left only one open bit updated.
+	# The old early return compared only the lower half, so a powered lower
+	# half made a closed upper half permanent until the input toggled again.
+	if (
+		manager.get_world_block(upper) == id
+		and manager.get_world_block_meta(upper) != desired_lower + 8
+	):
+		manager.set_world_block_state(upper, id, desired_lower + 8)
+	if state_changed and manager.has_method("play_door_sound"):
 		manager.call("play_door_sound", lower)
 
 
@@ -1085,6 +1092,12 @@ static func on_repeater_placed(manager, pos: Vector3i) -> void:
 	if manager.get_world_block(pos) != Blocks.REDSTONE_REPEATER_OFF:
 		return
 	if repeater_input_powered(manager, pos):
+		# ChunkManager includes the changed cell in its production fanout,
+		# so `_update_repeater` may already have queued the normal 2-tick
+		# delay before the placement hook runs. Beta's onBlockAdded path is
+		# explicitly the one-tick fast path; replace that entry rather than
+		# retaining a stale second callback.
+		TickScheduler.cancel(pos, Blocks.REDSTONE_REPEATER_OFF)
 		TickScheduler.schedule(pos, Blocks.REDSTONE_REPEATER_OFF, 1)
 
 
