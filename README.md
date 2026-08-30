@@ -3,21 +3,31 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/donth77/vibezcraft/releases/latest"><img src="https://img.shields.io/github/v/release/donth77/vibezcraft?label=release" alt="Latest release"></a>
   <a href="https://godotengine.org"><img src="https://img.shields.io/badge/Godot-4.x-478CBF?logo=godotengine&logoColor=white" alt="Godot 4.x"></a>
   <a href="https://github.com/donth77/vibezcraft"><img src="https://img.shields.io/badge/language-GDScript%20%2B%20C%2B%2B-blue" alt="GDScript + C++"></a>
+  <a href="https://vibezcraft.net"><img src="https://img.shields.io/badge/website-vibezcraft.net-62b47a" alt="VibezCraft website"></a>
   <a href="https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c"><img src="https://img.shields.io/badge/music-Suno%20playlist-9333EA" alt="Suno playlist"></a>
 </p>
 
-A single-player clone of MC Alpha, built in **Godot 4, GDScript, and C++**. 
+A single-player clone of MC Alpha, built in **Godot 4, GDScript, and C++**.
 
-Gameplay and scene-graph logic is pure GDScript; chunk meshing and worldgen base-terrain are native C++ via GDExtension (with byte-identical GDScript fallbacks). 
+Gameplay and scene-graph logic is GDScript. Six performance-critical paths—chunk meshing, terrain generation, lighting, water effects, pathfinding, and voxel collision—run in native C++ via GDExtension, with GDScript fallbacks.
+
+## Download
+
+**[Download VibezCraft v1.1.0](https://vibezcraft.net/#download)** for macOS or Windows. The universal macOS build is signed and notarized for Apple Silicon and Intel Macs; Windows is available as an installer or portable ZIP.
+
+[Release notes](https://github.com/donth77/vibezcraft/releases/tag/v1.1.0) · [All releases](https://github.com/donth77/vibezcraft/releases)
 
 ## Features
 
 - **Infinite procedural world** — 2D Perlin heightmap, stratified terrain layers, oak trees, caves, ore veins (coal/iron/gold/diamond)
-- **88 block types** — stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, ladders, flowing water & lava, fire, beds, bookshelves, jukeboxes, slabs, sugar cane, mushrooms, pumpkins / jack-o-lanterns, snow, ice, cactus, TNT, mob spawners, mossy cobblestone, slime block, rails, signs, wool (16 colors), iron / gold / diamond / sponge / clay blocks
-- **80+ items** — full tool tiers (pickaxe/axe/shovel/sword/hoe × wood/stone/iron/diamond/gold), armor sets (leather/iron/gold/diamond), bow + arrows, buckets, flint & steel, shears, fishing rod, food (apple/bread/porkchop/fish/mushroom stew/golden apple), raw materials (coal/iron/gold/diamond ingots, gunpowder, redstone, bone, slimeball, snowball, leather, feather, string, sugar, paper, book), 8 music discs, minecart family
-- **9 mob species** — passive: pig, cow, chicken, sheep (with shearing). Hostile: zombie (melee + daylight burn), skeleton (bow combat, kites at range), spider (light-gated, pounce), creeper (3 m fuse ignite + 1.5 s charge + power-3 explosion + flash anim + music disc drop on skeleton-arrow kill), slime (size 1/2/4, hop physics, splits on death, slime-chunk gated)
+- **The Nether** — working obsidian portals, dimension travel, lava seas, netherrack, soul sand, glowstone, ghasts, and zombie pigmen
+- **Redstone circuits** — dust, torches, levers, buttons, pressure plates, doors, TNT, rails, and four-delay repeaters with directional full-strength output
+- **100+ block types and states** — stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, flowing fluids, fire, beds, jukeboxes, slabs, plants, snow, TNT, redstone, Nether blocks, rails, signs, wool (16 colors), and metal blocks
+- **80+ items** — full tool tiers (pickaxe/axe/shovel/sword/hoe × wood/stone/iron/diamond/gold), armor sets (leather/iron/gold/diamond), bow + arrows, buckets, flint & steel, shears, fishing rod, food, raw materials, redstone repeaters, glowstone dust, 8 music discs, and the minecart family
+- **11 mob species** — pigs, cows, chickens, sheep, zombies, skeletons, spiders, creepers, slimes, zombie pigmen, and ghasts
 - **Crafting & smelting** — recipe registry (shaped + shapeless) from `data/recipes.json`, 2×2 inventory grid + 3×3 crafting table. Furnace with fuel/input/output slots, burn-time tracking
 - **Day/night cycle** — 20-minute day, sky color gradient, sun direction, dynamic lighting
 - **Light propagation** — sky light + block light with BFS flood fill, per-face brightness LUT in shader
