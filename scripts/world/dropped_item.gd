@@ -9,6 +9,8 @@ extends Node3D
 #   - Pickup: at PICKUP_RADIUS the item plays "pop", removes self, adds to
 #     the player's inventory. PICKUP_DELAY_SEC prevents instant re-grab off
 #     your own break.
+#   - Five source health points: fire/lava contact and the trailing burn
+#     damage that follows it destroy the entity without producing a drop.
 
 const MESH_SIZE: float = 0.25
 const PICKUP_DELAY_SEC: float = 0.5  # default for break-spawned items
@@ -32,12 +34,34 @@ const GRAVITY: float = -22.0  # vanilla feel — items arc and settle quickly, n
 const TERMINAL_VELOCITY: float = -32.0
 const HORIZONTAL_DRAG: float = 2.5  # 1/s — quickly damps thrown velocity
 
+# Alpha 1.2.6 EntityItem (`eo.java`). The item starts with five health and
+# inherits Entity's 20 Hz fire bookkeeping: burning-block contact deals one
+# damage every source tick, and an active Fire counter deals another point
+# whenever it is divisible by 20. `cy.java::c(AABB)` treats FIRE and both
+# lava states as burning blocks, so either hazard eventually calls J()/die.
+const _SOURCE_TICKS_PER_SEC: float = 20.0
+const _SOURCE_TICK_SEC: float = 1.0 / _SOURCE_TICKS_PER_SEC
+const _SOURCE_HEALTH: int = 5
+const _CONTACT_DAMAGE: int = 1
+const _BURN_DURATION_TICKS: int = 300
+const _BURN_DAMAGE_INTERVAL_TICKS: int = 20
+const _CONTACT_FIRE: int = 1
+const _CONTACT_LAVA: int = 2
+const _CONTACT_WATER: int = 4
+const _AABB_EPSILON: float = 0.0001
+
 var item_id: int = 0
 var _spawn_time: float = 0.0
 var _hover_phase: float = 0.0
 var _velocity: Vector3 = Vector3.ZERO  # full 3D so thrown items arc forward
 var _pickup_delay: float = PICKUP_DELAY_SEC
 var _picked_up: bool = false
+var _health: int = _SOURCE_HEALTH
+# `lw.bg` starts at 0, settles to -fireResistance while safe, and becomes
+# 300 after entering a burning block. Preserve the signed state because the
+# -1 -> 0 edge is what seeds the full trailing-burn duration in the source.
+var _fire_ticks: int = 0
+var _hazard_tick_accum: float = 0.0
 var _is_sprite_item: bool = false  # vanilla af.java RenderItem "item" branch
 var _mesh: MeshInstance3D
 var _player: Node3D
@@ -62,20 +86,23 @@ func setup(
 	_velocity = p_initial_velocity
 	_pickup_delay = p_pickup_delay
 	_spawn_time = Time.get_ticks_msec() / 1000.0
+	_health = _SOURCE_HEALTH
+	_fire_ticks = 0
+	_hazard_tick_accum = 0.0
 	# Mesh is a child Node3D so we can bob its local Y without fighting the
-	# root's gravity-controlled global Y. Block IDs render as a real cube
-	# via BlockMesh; non-block items (coal, ingots, sticks, tools — id >=
-	# 100) get the voxel-extruded sprite mesh used by held items, which
+	# root's gravity-controlled global Y. Registered blocks render as a
+	# real cube via BlockMesh; non-block items (coal, ingots, sticks,
+	# tools) get the voxel-extruded sprite mesh used by held items, which
 	# would otherwise show as a textureless cube. Non-cube blocks (sapling,
 	# future torches/plants) take the sprite path too — vanilla draws them
 	# as flat 2D billboards on the ground, not as textured cubes with the
 	# icon tiled on every face.
 	_mesh = MeshInstance3D.new()
-	# Sprite path: items (id ≥ 100) and flat-billboard blocks (cross-quads
+	# Sprite path: non-block items and flat-billboard blocks (cross-quads
 	# like sapling/fire, and torches). MESH_SHAPE_EXTERNAL blocks (chest)
 	# read as cubes in inventory and on the ground — same fix as the
 	# held-item routing in player.gd::_update_held_item.
-	_is_sprite_item = p_item_id >= Items.STICK or Blocks.has_sprite_tile(p_item_id)
+	_is_sprite_item = (not Blocks.is_registered(p_item_id) or Blocks.has_sprite_tile(p_item_id))
 	if _is_sprite_item:
 		_build_sprite_mesh(p_item_id)
 	else:
@@ -114,6 +141,11 @@ func _process(delta: float) -> void:
 	var elapsed: float = Time.get_ticks_msec() / 1000.0 - _spawn_time
 	if elapsed > LIFETIME_SEC:
 		queue_free()
+		return
+	# EntityItem runs at the source's fixed 20 Hz. Hazard damage precedes
+	# pickup/movement, so an item already burning cannot be rescued on the
+	# same tick that exhausts its five health points.
+	if _tick_environment(delta):
 		return
 
 	# Magnet / pickup. Vanilla rule: skip the pull entirely if the player's
@@ -159,6 +191,98 @@ func _process(delta: float) -> void:
 		# +amp bias keeps the bob non-negative so the sprite never dips
 		# below its resting Y and clips through the floor.
 		_mesh.position.y = sin(_hover_phase) * HOVER_AMPLITUDE + HOVER_AMPLITUDE
+
+
+# Advance Alpha's Entity fire bookkeeping at 20 Hz. Returns true once the
+# item has been destroyed so `_process` stops before pickup or physics can
+# touch a node already queued for deletion.
+func _tick_environment(delta: float) -> bool:
+	_resolve_chunk_manager()
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return false
+	_hazard_tick_accum += delta
+	while _hazard_tick_accum >= _SOURCE_TICK_SEC:
+		_hazard_tick_accum -= _SOURCE_TICK_SEC
+		if _environment_tick():
+			return true
+	return false
+
+
+# One `eo.e_()` source tick. `lw.B()` handles water + an existing Fire
+# counter first; movement then calls `cy.c(AABB)`, whose burning set is
+# exactly fire plus flowing/still lava. EntityItem's five-point health makes
+# sustained contact destructive in a handful of ticks, while a brief touch
+# can keep damaging the item after it leaves the block.
+func _environment_tick() -> bool:
+	_resolve_chunk_manager()
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return false
+	var contacts: int = _environment_contacts()
+	var in_water: bool = (contacts & _CONTACT_WATER) != 0
+	if in_water:
+		# `lw.B()` extinguishes before the periodic burn-damage branch.
+		_fire_ticks = 0
+	elif _fire_ticks > 0:
+		if _fire_ticks % _BURN_DAMAGE_INTERVAL_TICKS == 0:
+			if _take_environment_damage(_CONTACT_DAMAGE):
+				return true
+		_fire_ticks -= 1
+
+	var touching_burning_block: bool = (contacts & (_CONTACT_FIRE | _CONTACT_LAVA)) != 0
+	if touching_burning_block:
+		# `cy.c(AABB)` -> `lw.a(1)` -> EntityItem.a(entity, damage).
+		if _take_environment_damage(_CONTACT_DAMAGE):
+			return true
+		if not in_water:
+			_fire_ticks += 1
+			if _fire_ticks == 0:
+				_fire_ticks = _BURN_DURATION_TICKS
+	elif _fire_ticks <= 0:
+		# fireResistance is one tick for ordinary entities (`lw.bf = 1`).
+		_fire_ticks = -1
+	return false
+
+
+func _take_environment_damage(amount: int) -> bool:
+	_health -= amount
+	if _health > 0:
+		return false
+	queue_free()
+	return true
+
+
+# Sample every block cell touched by the item's 0.25 m AABB. Center-cell
+# sampling misses the common edge case where a scattered death drop straddles
+# a fire/lava boundary, while this mirrors `cy.c(AABB)` without a physics
+# query or per-frame allocation.
+func _environment_contacts() -> int:
+	var half: float = MESH_SIZE * 0.5
+	var min_pos: Vector3 = global_position - Vector3.ONE * half
+	var max_pos: Vector3 = global_position + Vector3.ONE * half - Vector3.ONE * _AABB_EPSILON
+	var min_cell := Vector3i(floori(min_pos.x), floori(min_pos.y), floori(min_pos.z))
+	var max_cell := Vector3i(floori(max_pos.x), floori(max_pos.y), floori(max_pos.z))
+	var contacts: int = 0
+	for x: int in range(min_cell.x, max_cell.x + 1):
+		for y: int in range(min_cell.y, max_cell.y + 1):
+			for z: int in range(min_cell.z, max_cell.z + 1):
+				var id: int = _chunk_manager.get_world_block(Vector3i(x, y, z))
+				if id == Blocks.FIRE:
+					contacts |= _CONTACT_FIRE
+				elif Blocks.is_lava(id):
+					contacts |= _CONTACT_LAVA
+				elif Blocks.is_water(id):
+					contacts |= _CONTACT_WATER
+	return contacts
+
+
+func _resolve_chunk_manager() -> void:
+	if _chunk_manager != null and is_instance_valid(_chunk_manager):
+		return
+	var parent: Node = get_parent()
+	if parent != null and parent.has_method("get_world_block"):
+		_chunk_manager = parent
+		return
+	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 
 
 func _apply_physics(delta: float) -> void:
@@ -396,6 +520,11 @@ func to_save_dict() -> Dictionary:
 		"item_id": item_id,
 		"age_seconds": age,
 		"pickup_delay": _pickup_delay,
+		# EntityItem writes Health while Entity writes Fire in Alpha. Keeping
+		# both prevents a dimension round-trip from healing a singed drop or
+		# extinguishing its trailing burn.
+		"health": _health,
+		"fire_ticks": _fire_ticks,
 	}
 
 
@@ -411,3 +540,5 @@ func restore_from_dict(dict: Dictionary) -> void:
 	setup(item, vel, delay)
 	var age: float = float(dict.get("age_seconds", 0.0))
 	_spawn_time = Time.get_ticks_msec() / 1000.0 - age
+	_health = int(dict.get("health", _SOURCE_HEALTH))
+	_fire_ticks = int(dict.get("fire_ticks", 0))

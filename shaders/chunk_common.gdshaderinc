@@ -19,6 +19,12 @@ const float FIRE_FPS = 24.0;
 // Alpha's integer skyLightSubtracted value, driven by WorldTime (0 by day,
 // 11 at night). Default 0 keeps editor/test previews at full daylight.
 uniform float sky_subtraction : hint_range(0.0, 11.0, 1.0) = 0.0;
+// Ambient floor of the brightness LUT — the ONLY per-dimension term in
+// vanilla's curve. oz.java:23 uses 0.05 in the Overworld, om.java:21
+// uses 0.1 in the Nether. Pushed by day_night_driver from the active
+// WorldProvider; the default keeps the Overworld value for any material
+// that never gets the write.
+uniform float ambient_floor : hint_range(0.0, 1.0) = 0.05;
 
 // Debug visualization, cycled at runtime via F8 (see debug_stats.gd).
 //   0 = normal (Alpha lighting model)
@@ -168,13 +174,16 @@ void fragment() {
 	//     float f2 = 0.05;  // floor
 	//     float f3 = 1 - i/15;
 	//     brightness[i] = (1 - f3) / (f3*3 + 1) * (1 - f2) + f2;
-	// Restored vanilla's 0.05 floor so cells with sky=block=0 render at 5%
-	// brightness instead of pure black. Earlier 0.0 made under-overhang
-	// faces and unlit cave ceilings unreadably dark on modern monitors.
+	// The floor is per-DIMENSION and arrives as a uniform: 0.05 in the
+	// Overworld, 0.1 in the Nether. Hardcoding 0.05 here rendered every
+	// unlit Nether cell at half vanilla's brightness — and because the
+	// Nether has no sky channel at all, most of it sits at the low end
+	// of the curve where that difference is widest. The result was the
+	// harsh light/dark staggering reported from playtest.
 	// One cell away from a torch (light=14) the LUT still hits ~78%, so
 	// torches remain strong sources and the non-linear roll-off in
 	// vanilla's curve is preserved for steps 1..15.
-	float f2 = 0.05;
+	float f2 = ambient_floor;
 	float f3 = 1.0 - light;
 	float lit = (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - f2) + f2;
 	// Entity override: dropped cube items sample EntityLighting per-tick

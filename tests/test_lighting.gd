@@ -1,4 +1,5 @@
 # gdlint: disable=max-public-methods
+# gdlint: disable=max-file-lines
 extends GutTest
 
 # Lighting slice 3: sky-light fill on chunk gen. Vanilla reference is
@@ -726,27 +727,62 @@ func test_relight_chunk_borders_lights_sky_at_seam() -> void:
 	Lighting.fill_block_light(c00)
 	Lighting.fill_block_light(c10)
 	assert_eq(c00.get_sky_light(15, 63, 0), 0, "edge cell starts dark")
-	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager, true)
 	assert_gt(c00.get_sky_light(15, 63, 0), 0, "relight pulls light in from neighbor c10")
 
 
-func test_relight_chunk_borders_lights_block_across_seam() -> void:
+func test_relight_chunk_borders_propagates_block_light_inward() -> void:
 	# Block-channel equivalent: lava in c00 just inside the east edge.
 	# Initial fill of c10 sees no emitter, so c10's edge stays dark.
-	# After relight, c10's edge brightens.
-	var manager := _StubManager.new()
-	var c00 := Chunk.new()
-	var c10 := Chunk.new()
-	manager.chunks[Vector2i(0, 0)] = c00
-	manager.chunks[Vector2i(1, 0)] = c10
-	c00.set_block(15, 64, 0, Blocks.LAVA_STILL)
-	Lighting.fill_sky_light(c00)
-	Lighting.fill_sky_light(c10)
-	Lighting.fill_block_light(c00)
-	Lighting.fill_block_light(c10)
-	assert_eq(c10.get_block_light(0, 64, 0), 0, "neighbor edge dark before relight")
-	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
-	assert_eq(c10.get_block_light(0, 64, 0), 14, "relight propagates lava emission across seam")
+	# After relight, the 14 -> 13 -> 12 gradient must continue inward.
+	# The old seed path pre-wrote x=0 before queueing it; the drain then saw
+	# no change and stopped, producing 14 -> 0 -> 0. Exercise both ports.
+	var saved_native: RefCounted = Lighting._native_lighting
+	for use_native: bool in [false, true]:
+		if use_native and saved_native == null:
+			continue
+		Lighting._native_lighting = saved_native if use_native else null
+		var manager := _StubManager.new()
+		var c00 := Chunk.new()
+		var c10 := Chunk.new()
+		manager.chunks[Vector2i(0, 0)] = c00
+		manager.chunks[Vector2i(1, 0)] = c10
+		c00.set_block(15, 64, 0, Blocks.LAVA_STILL)
+		Lighting.fill_sky_light(c00)
+		Lighting.fill_sky_light(c10)
+		Lighting.fill_block_light(c00)
+		Lighting.fill_block_light(c10)
+		assert_eq(c10.get_block_light(0, 64, 0), 0, "neighbor edge starts dark")
+		Lighting.relight_chunk_borders(Vector2i(1, 0), manager, true)
+		var path: String = "native" if use_native else "GDScript"
+		assert_eq(c10.get_block_light(0, 64, 0), 14, "%s seam cell" % path)
+		assert_eq(c10.get_block_light(1, 64, 0), 13, "%s first inland cell" % path)
+		assert_eq(c10.get_block_light(2, 64, 0), 12, "%s second inland cell" % path)
+	Lighting._native_lighting = saved_native
+
+
+func test_relight_chunk_borders_respects_no_sky_policy() -> void:
+	# Deliberately retain Chunk.new's all-zero heightmap, the exact stale
+	# state produced by the old Nether bulk remap. A no-sky dimension must
+	# stay at sky=0 even if its heightmap claims every cell is exposed.
+	# This policy is authoritative and is tested in both implementations.
+	var saved_native: RefCounted = Lighting._native_lighting
+	for use_native: bool in [false, true]:
+		if use_native and saved_native == null:
+			continue
+		Lighting._native_lighting = saved_native if use_native else null
+		var manager := _StubManager.new()
+		var c00 := Chunk.new()
+		var c10 := Chunk.new()
+		c00.sky_light.fill(0)
+		c10.sky_light.fill(0)
+		manager.chunks[Vector2i(0, 0)] = c00
+		manager.chunks[Vector2i(1, 0)] = c10
+		Lighting.relight_chunk_borders(Vector2i(0, 0), manager, false)
+		var path: String = "native" if use_native else "GDScript"
+		assert_eq(c00.sky_light.count(0), Chunk.TOTAL_BLOCKS, "%s target stays sky-dark" % path)
+		assert_eq(c10.sky_light.count(0), Chunk.TOTAL_BLOCKS, "%s neighbor stays sky-dark" % path)
+	Lighting._native_lighting = saved_native
 
 
 func test_relight_chunk_borders_no_op_with_no_loaded_neighbors() -> void:
@@ -759,7 +795,7 @@ func test_relight_chunk_borders_no_op_with_no_loaded_neighbors() -> void:
 	Lighting.fill_block_light(chunk)
 	# Snapshot pre-relight state.
 	var before := chunk.sky_light.duplicate()
-	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager, true)
 	assert_true(chunk.sky_light == before, "isolated chunk's sky_light unchanged by relight")
 
 
@@ -820,8 +856,8 @@ func test_relight_overhang_spanning_seam_propagates_into_covered_chunk() -> void
 	# amount of light from chunk A's open sky, and the gradient should
 	# decay smoothly toward the far side instead of dropping to 0 at the
 	# seam.
-	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
-	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager, true)
+	Lighting.relight_chunk_borders(Vector2i(1, 0), manager, true)
 	var post_edge: int = c10.get_sky_light(0, 65, 8)
 	var post_far: int = c10.get_sky_light(15, 65, 8)
 	# Seam-edge cell: chunk A has sky=7 at x=15 (decay 15→7 across columns
@@ -890,8 +926,8 @@ func test_relight_overhang_phantom_light_from_unloaded_neighbour() -> void:
 			c10.set_block(x, 71, z, Blocks.STONE)
 	Lighting.fill_sky_light(c00)
 	Lighting.fill_sky_light(c10)
-	Lighting.relight_chunk_borders(Vector2i(0, 0), manager)
-	Lighting.relight_chunk_borders(Vector2i(1, 0), manager)
+	Lighting.relight_chunk_borders(Vector2i(0, 0), manager, true)
+	Lighting.relight_chunk_borders(Vector2i(1, 0), manager, true)
 	# After fix: chunk B's south-edge corner is no longer flood-lit by
 	# a phantom-15 source from unloaded chunk (1, -1). Cell at (15, 65, 0)
 	# is far from chunk A's seam AND at a chunk corner — should stay dark.

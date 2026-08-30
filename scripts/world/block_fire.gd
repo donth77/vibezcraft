@@ -128,8 +128,7 @@ static func _try_to_catch_block_on_fire(manager, target: Vector3i, var5: int) ->
 		return
 	var was_tnt: bool = id == Blocks.TNT
 	if randi() % 2 == 0:
-		manager.set_world_block_with_meta(target, Blocks.FIRE, 0)
-		TickScheduler.schedule(target, Blocks.FIRE, TICK_RATE)
+		place(manager, target)
 	else:
 		manager.set_world_block(target, Blocks.AIR)
 	if was_tnt:
@@ -158,19 +157,32 @@ static func update(manager, pos: Vector3i) -> void:
 	if current_id != Blocks.FIRE:
 		return
 	var age: int = manager.get_world_block_meta(pos)
+	# Vanilla qh.java:52 — `boolean bl2 = world.getBlockId(x, y-1, z) ==
+	# Block.netherrack.blockID`. Netherrack fire is eternal, and this one
+	# flag is the whole mechanism: it gates BOTH extinguish paths below.
+	# It deliberately does not gate ageing or spreading, so the age
+	# counter still climbs and the fire still spreads normally.
+	var on_netherrack: bool = manager.get_world_block(pos + Vector3i(0, -1, 0)) == Blocks.NETHERRACK
 	# Step 1 — age bump.
 	if age < MAX_AGE:
 		manager.set_world_block_with_meta(pos, Blocks.FIRE, age + 1)
 		TickScheduler.schedule(pos, Blocks.FIRE, TICK_RATE)
-	# Step 2 — no neighbor to burn: maybe extinguish.
-	if not _can_neighbor_burn(manager, pos):
+	# Step 2 — no neighbor to burn: maybe extinguish. Skipped entirely on
+	# netherrack, which also means execution falls through to the spread
+	# pass below rather than returning early (qh.java does the same).
+	if not on_netherrack and not _can_neighbor_burn(manager, pos):
 		var below: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
 		if not Blocks.is_opaque(below) or age > 3:
 			manager.set_world_block(pos, Blocks.AIR)
 		return
 	# Step 3 — high-age burnout when nothing flammable below.
 	var below_id: int = manager.get_world_block(pos + Vector3i(0, -1, 0))
-	if not _can_block_catch_fire(below_id) and age == MAX_AGE and randi() % 4 == 0:
+	if (
+		not on_netherrack
+		and not _can_block_catch_fire(below_id)
+		and age == MAX_AGE
+		and randi() % 4 == 0
+	):
 		manager.set_world_block(pos, Blocks.AIR)
 		return
 	# Step 4 — only spread on every-other-tick after age 2.
@@ -198,8 +210,7 @@ static func update(manager, pos: Vector3i) -> void:
 					rand_max += (dy - 1) * 100
 				var chance: int = _get_chance_of_neighbors_encouraging_fire(manager, target)
 				if chance > 0 and randi() % rand_max <= chance:
-					manager.set_world_block_with_meta(target, Blocks.FIRE, 0)
-					TickScheduler.schedule(target, Blocks.FIRE, TICK_RATE)
+					place(manager, target)
 
 
 # Place a fresh FIRE cell at `pos` and schedule its first tick. Called
@@ -207,5 +218,31 @@ static func update(manager, pos: Vector3i) -> void:
 static func ignite(manager, pos: Vector3i) -> void:
 	if manager.get_world_block(pos) != Blocks.AIR:
 		return
+	place(manager, pos)
+
+
+# Vanilla qh.java::e — BlockFire.onBlockAdded. Every route that creates a
+# fire cell goes through here, because the FIRST thing Alpha's fire does
+# on being added is try to light a Nether portal:
+#
+#     if (world.getBlock(x, y - 1, z) == Block.obsidian.id
+#             && Block.portal.tryToCreatePortal(world, x, y, z)) return;
+#
+# When that succeeds the six portal cells have already overwritten this
+# one, so no fire block is written and no spread tick is scheduled. The
+# obsidian-below gate is the source's, not an optimisation: it is why a
+# frame is lit from its bottom row and not from anywhere inside.
+#
+# Returns true when a portal was lit instead of a fire placed.
+static func place(manager, pos: Vector3i) -> bool:
+	if manager.get_world_block(pos + Vector3i(0, -1, 0)) == Blocks.OBSIDIAN:
+		if NetherPortal.try_create(manager, pos):
+			# No sound here: the flint-and-steel click already played from
+			# the interaction, and `portal.trigger` belongs to the
+			# EXPOSURE meter leaving zero (bq.java:36) — playing it on
+			# ignition doubled the audio and misused the event (audit
+			# finding #12).
+			return true
 	manager.set_world_block_with_meta(pos, Blocks.FIRE, 0)
 	TickScheduler.schedule(pos, Blocks.FIRE, TICK_RATE)
+	return false

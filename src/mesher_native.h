@@ -135,6 +135,20 @@ public:
 	static constexpr int STONE_BUTTON = 94;
 	static constexpr int STONE_PRESSURE_PLATE = 95;
 	static constexpr int WOODEN_PRESSURE_PLATE = 96;
+	// Alpha soul sand: visually/selection-wise a full cube, but its entity
+	// collision AABB ends at y+7/8 (`it.java::d`). It stays on the cube render
+	// hot path; only collision + selection soup are specialized.
+	static constexpr int SOUL_SAND = 98;
+	// Nether portal — WORLD-ONLY and mesh-invisible. The chunk mesh emits
+	// NOTHING for it (PortalRenderer draws the animated sheet), and it is
+	// non-opaque so neighbours keep their faces and fluids keep their
+	// boundary faces against it. Mirrors Blocks.MESH_SHAPE_NONE +
+	// Blocks.is_opaque()'s exclusion.
+	static constexpr int PORTAL = 206;
+	// Beta 1.3 repeater state pair. Both are non-cube world-only blocks;
+	// the GDScript special-cell appendix owns their render type 15 mesh.
+	static constexpr int REDSTONE_REPEATER_OFF = 207;
+	static constexpr int REDSTONE_REPEATER_ON = 208;
 	// Beta 1.3 wood + cobblestone slab variants — same half-height
 	// mesh as HALF_SLAB but with planks / cobblestone textures.
 	// Native skips the cube pass so GDScript _emit_slab_geometry owns

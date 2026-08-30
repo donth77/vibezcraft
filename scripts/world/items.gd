@@ -344,6 +344,144 @@ const SNOWBALL: int = 203
 # it's just a collectible item with no further use until pistons land.
 const SLIMEBALL: int = 204
 
+# Glowstone dust — vanilla `dx.aR = new dx(92).a(73)`, so item id 348
+# (92 + the 256 item offset) and sprite tile 73. Dropped one-per-block by
+# glowstone (hk.java::a) and crafted back into a block by a full 3x3 grid
+# of nine (en.java:32). Alpha has no four-dust recipe and no other use.
+const GLOWSTONE_DUST: int = 205
+
+# Redstone repeater [BETA 1.3 exception] — vanilla item 356
+# (`Item.field_22018_aZ`) places the unpowered repeater block. The two
+# world-state block IDs live at 207/208; this dedicated item stays separate
+# so powered repeaters never leak into inventories or save data as items.
+# Vanilla stack size is the default 64.
+const REDSTONE_REPEATER: int = 209
+
+# --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
+#
+# The authoritative list of every item id this build defines, and the
+# item-side half of the block/item split that used to be inferred from
+# `id >= 100`. That arithmetic breaks the moment a block is reserved
+# above the item floor, which is exactly what the Nether portal (block
+# id 206) does — so kind decisions now consult `Items.is_registered` and
+# `Blocks.is_registered` instead of comparing against 100.
+#
+# Append new ids here in the same commit that adds the const;
+# tests/test_content_registry.gd sweeps this script's constants and fails
+# if an item const is ever missing from the list.
+#
+# Reserved-but-not-yet-defined (plan §3.1): 205 glowstone dust. Ids
+# 207-255 stay free for future content in the same unified byte space.
+const REGISTERED_IDS: Array[int] = [
+	STICK,
+	WOODEN_PICKAXE,
+	STONE_PICKAXE,
+	IRON_PICKAXE,
+	DIAMOND_PICKAXE,
+	WOODEN_SHOVEL,
+	WOODEN_AXE,
+	WOODEN_SWORD,
+	WOODEN_HOE,
+	STONE_AXE,
+	STONE_SHOVEL,
+	STONE_SWORD,
+	IRON_AXE,
+	IRON_SHOVEL,
+	IRON_SWORD,
+	DIAMOND_AXE,
+	DIAMOND_SHOVEL,
+	DIAMOND_SWORD,
+	GOLD_PICKAXE,
+	GOLD_AXE,
+	COAL,
+	IRON_INGOT,
+	GOLD_INGOT,
+	DIAMOND,
+	LEATHER,
+	CHARCOAL,
+	GOLD_SHOVEL,
+	GOLD_SWORD,
+	FLINT,
+	BONEMEAL,
+	IRON_HELMET,
+	IRON_CHESTPLATE,
+	IRON_LEGGINGS,
+	IRON_BOOTS,
+	GOLD_HELMET,
+	GOLD_CHESTPLATE,
+	GOLD_LEGGINGS,
+	GOLD_BOOTS,
+	DIAMOND_HELMET,
+	DIAMOND_CHESTPLATE,
+	DIAMOND_LEGGINGS,
+	DIAMOND_BOOTS,
+	BUCKET_EMPTY,
+	BUCKET_WATER,
+	BUCKET_LAVA,
+	FLINT_AND_STEEL,
+	WOODEN_DOOR,
+	IRON_DOOR,
+	GUNPOWDER,
+	SUGAR_CANE,
+	COMPASS,
+	CLOCK,
+	REDSTONE,
+	APPLE,
+	BREAD,
+	WHEAT,
+	WHEAT_SEEDS,
+	STRING,
+	FEATHER,
+	PAPER,
+	BOOK,
+	BRICK,
+	SADDLE,
+	BOWL,
+	MUSHROOM_STEW,
+	LEATHER_HELMET,
+	LEATHER_CHESTPLATE,
+	LEATHER_LEGGINGS,
+	LEATHER_BOOTS,
+	RAW_PORKCHOP,
+	COOKED_PORKCHOP,
+	GOLDEN_APPLE,
+	FISHING_ROD,
+	RAW_FISH,
+	COOKED_FISH,
+	EGG,
+	MILK_BUCKET,
+	SUGAR,
+	CLAY_BALL,
+	SIGN,
+	SHEARS,
+	BOAT,
+	BOW,
+	ARROW,
+	PAINTING,
+	RAIL,
+	MINECART,
+	MINECART_CHEST,
+	MINECART_FURNACE,
+	BED,
+	MUSIC_DISC_FIRST_LIGHT,
+	MUSIC_DISC_GREEN_DISTANCE,
+	MUSIC_DISC_LONG_SHADOW,
+	MUSIC_DISC_HOLLOW_EARTH,
+	MUSIC_DISC_BEDROCK,
+	MUSIC_DISC_OPEN_SKY,
+	MUSIC_DISC_HEARTHSTONE,
+	MUSIC_DISC_STILL_WATER,
+	BONE,
+	STONE_HOE,
+	IRON_HOE,
+	DIAMOND_HOE,
+	GOLD_HOE,
+	SNOWBALL,
+	SLIMEBALL,
+	GLOWSTONE_DUST,
+	REDSTONE_REPEATER,
+]
+
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
 # 36..39 in the flat array). Zero is "not armor".
 const ARMOR_SLOT_NONE: int = 0
@@ -484,6 +622,10 @@ const _TOOL_DATA: Dictionary = {
 	# Stack size 1.
 	BOW: [TOOL_TYPE_BOW, 1.0, 0, 384],
 }
+
+# Lazy-init content-kind table, one byte per uint8 id — 1 when the id is
+# a registered item. Mirrors `Blocks._registry_lut`; see `is_registered`.
+static var _registry_lut: PackedByteArray
 
 
 # Unified name → id lookup. Covers BOTH non-block items and blocks so recipe
@@ -844,6 +986,16 @@ static func id_from_name(item_name: String) -> int:
 			return MUSIC_DISC_STILL_WATER
 		"slimeball":
 			return SLIMEBALL
+		"glowstone_dust":
+			return GLOWSTONE_DUST
+		"redstone_repeater":
+			return REDSTONE_REPEATER
+		"netherrack":
+			return Blocks.NETHERRACK
+		"soul_sand":
+			return Blocks.SOUL_SAND
+		"glowstone":
+			return Blocks.GLOWSTONE
 		"slime_block":
 			return Blocks.SLIME_BLOCK
 		"stone_button":
@@ -1015,6 +1167,12 @@ static func display_name(item_id: int) -> String:
 			return "Leaves"
 		Blocks.SAND:
 			return "Sand"
+		Blocks.NETHERRACK:
+			return "Netherrack"
+		Blocks.SOUL_SAND:
+			return "Soul Sand"
+		Blocks.GLOWSTONE:
+			return "Glowstone"
 		Blocks.BRICK:
 			return "Bricks"
 		Blocks.OBSIDIAN:
@@ -1207,6 +1365,10 @@ static func display_name(item_id: int) -> String:
 			return "Music Disc - Hearthstone"
 		MUSIC_DISC_STILL_WATER:
 			return "Music Disc - Still Water"
+		GLOWSTONE_DUST:
+			return "Glowstone Dust"
+		REDSTONE_REPEATER:
+			return "Redstone Repeater"
 	return ""
 
 
@@ -1221,6 +1383,26 @@ static func display_name(item_id: int) -> String:
 # _MELEE_DAMAGE above. Used by interaction.gd::_try_attack_mob.
 static func melee_damage(item_id: int) -> int:
 	return _MELEE_DAMAGE.get(item_id, 1) as int
+
+
+# --- Content registry query (plan §3.1) ---
+#
+# True when `item_id` is a non-block item this build defines. Block ids
+# answer false here and true from `Blocks.is_registered` — the two
+# registries are disjoint, which `tests/test_content_registry.gd` pins.
+static func is_registered(item_id: int) -> bool:
+	if _registry_lut.is_empty():
+		_build_registry_lut()
+	if item_id < 0 or item_id >= _registry_lut.size():
+		return false
+	return _registry_lut[item_id] != 0
+
+
+static func _build_registry_lut() -> void:
+	_registry_lut = PackedByteArray()
+	_registry_lut.resize(256)
+	for id: int in REGISTERED_IDS:
+		_registry_lut[id] = 1
 
 
 static func is_tool_item(item_id: int) -> bool:

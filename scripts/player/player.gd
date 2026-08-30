@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 # gdlint: disable=max-file-lines
 # gdlint: disable=class-definitions-order
 # gdlint: disable=max-returns
@@ -33,6 +34,7 @@ const LADDER_MAX_DESCENT: float = 3.0
 # the half-height here so the post-slide voxel guard can sweep the capsule's
 # bottom point without depending on a scene-tree lookup in the hot path.
 const _CAPSULE_HALF_HEIGHT: float = 0.9
+const _CAPSULE_WIDTH: float = 0.6
 # Position correction and exact-cell-seam tolerance for the downward voxel
 # guard. Large enough to dominate float32 drift at normal world coordinates,
 # but far too small to broaden an actual ledge.
@@ -103,6 +105,8 @@ const KNOCKBACK_VERTICAL: float = 4.0
 # every 4 seconds while below max and not currently dying. No food
 # gating — just a constant background heal rate.
 const HEALTH_REGEN_INTERVAL_SEC: float = 4.0
+# One vanilla tick. Portal exposure is defined per tick, not per second.
+const PORTAL_TICK_INTERVAL: float = 1.0 / 20.0
 
 # Damage types — affects whether armor reduction kicks in. Vanilla Alpha
 # `DamageSource.ignoresArmor` returns true for FALL, DROWN, and FIRE_TICK
@@ -371,6 +375,15 @@ var _regen_accum: float = 0.0
 # armor drip through over many hits instead of being permanently
 # absorbed (and turning the player invincible). Cleared on respawn.
 var _armor_damage_carry: int = 0
+# Nether portal exposure — vanilla bq.java's three fields, kept as their
+# own object so the timeline (trigger tick, travel tick, cooldown) is
+# testable without a scene. See PortalExposure.
+var _portal_exposure := PortalExposure.new()
+# Fixed-rate accumulator for the above. The fill rate is 0.0125 PER TICK,
+# not per second — running it off `delta` would make travel time depend on
+# framerate, so this drives it at a hard 20 Hz the same way the mob AI
+# tick does.
+var _portal_tick_accum: float = 0.0
 
 # Tunable at runtime via the FP Tool Tuner panel. These defaults are the
 # user's hand-tuned best preset (closest match to vanilla MC) — keep in
@@ -501,6 +514,11 @@ var _pre_mount_collision_disabled: bool = false
 
 
 func _ready() -> void:
+	# Anything that needs to ask "is this node the player" can, without
+	# depending on player.gd — which declares no class_name, so a bare
+	# `Player` reference fails to parse at script load. ZombiePigman's
+	# group-aggro check is the first caller (vanilla `lw2 instanceof eb`).
+	add_to_group(ZombiePigman.PLAYER_GROUP)
 	# Touch mode never captures: pointer lock doesn't exist on touch
 	# browsers, and a stray grant (Android Chrome) would route emulated
 	# mouse motion into the look path on top of TouchControls' deltas.
@@ -676,16 +694,17 @@ func _update_held_item() -> void:
 	# TP orient is a child of TP pivot; queue_free above already disposed it.
 	_held_tool_tp_orient = null
 	if id != Blocks.AIR:
-		# Block IDs live in [1..99]; non-block items (sticks, tools, coal,
-		# ingots, diamond) start at Items.STICK = 100. Block-IDs get a 3D
-		# cube held in the hand; everything else uses the sprite-extruded
+		# Registered blocks get a 3D cube held in the hand; non-block
+		# items (sticks, tools, coal, ingots, diamond) take the sprite-
+		# extruded path. That split is a registry query, not an id
+		# compare — see Blocks.is_registered. Everything else uses the
 		# mesh (vanilla MC's ItemModelGenerator path). Non-cube blocks
 		# (sapling, future torches/plants) also route through the sprite
 		# path — vanilla renders them as flat 2D billboards in the held
 		# position via RenderItem.renderItemIn2D, not as a textured cube.
 		# Without this, the sapling icon tiles onto all six faces of the
 		# held cube, which reads as obviously wrong.
-		# Sprite path: items (id ≥ 100), cross-quads (sapling, fire), and
+		# Sprite path: non-block items, cross-quads (sapling, fire), and
 		# torch — vanilla MC renders all of these as a flat 2D billboard in
 		# the held position via RenderItem.renderItemIn2D. CHEST is also
 		# routed through the GDScript mesher (MESH_SHAPE_EXTERNAL) but
@@ -701,7 +720,8 @@ func _update_held_item() -> void:
 		# have a bespoke pillar mesh that reads far better in the hand
 		# than a flat sprite, so they stay on the block path.
 		var as_sprite: bool = (
-			id >= Items.STICK or (Blocks.has_sprite_tile(id) and shape != Blocks.MESH_SHAPE_TORCH)
+			not Blocks.is_registered(id)
+			or (Blocks.has_sprite_tile(id) and shape != Blocks.MESH_SHAPE_TORCH)
 		)
 		if as_sprite:
 			_build_held_tool(id)
@@ -1697,12 +1717,19 @@ func _play_footstep() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_step(block_id)
-	# Shared entity-contact hook (redstone-plan.md §7.3) — vanilla
-	# Entity.move fires Block.b(world, …, entity) for the cell underfoot.
-	# Footstep cadence ≈ vanilla's per-move-tick rate while walking, and
-	# standing still fires nothing, so lit redstone ore reverts under a
-	# stationary player exactly like vanilla.
-	Blocks.on_entity_walking(chunk_manager, block_pos, self)
+
+
+# Invoke the world's entity/block contact sweep after this frame's movement
+# velocity has been prepared. In particular, soul sand must scale the actual
+# velocity passed to move_and_slide; the old footstep-only callback ran after
+# movement and its result was overwritten by the next frame's input speed.
+func _report_block_contact() -> void:
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().root.get_node_or_null("Main/ChunkManager")
+		_chunk_manager_ref = cm
+	if cm != null and cm.has_method("report_entity_contact"):
+		cm.report_entity_contact(self)
 
 
 func _cancel_bow_if_charging() -> void:
@@ -2214,6 +2241,9 @@ func _physics_process(delta: float) -> void:
 	# consistently whether the player is swimming, walking, or flying.
 	_tick_air(delta)
 	_tick_lava(delta)
+	# Portal exposure, likewise before branch dispatch: a portal is walked
+	# into, swum into and flown into, and all three have to fill the meter.
+	_tick_portal(delta)
 	# Creative flight — double-tap jump toggles. Detected here (not in
 	# _unhandled_input) so the jump press still triggers a normal ground
 	# jump on the first tap; the second tap within FLY_DOUBLE_TAP_SEC
@@ -2228,6 +2258,7 @@ func _physics_process(delta: float) -> void:
 
 	if creative_mode and _is_flying:
 		_update_flight_physics()
+		_report_block_contact()
 		move_and_slide()
 		# Airborne — no footstep cadence, no fall tracking while flying.
 		# (fall tracking is disarmed because _is_flying disables gravity and
@@ -2259,22 +2290,22 @@ func _physics_process(delta: float) -> void:
 			):
 				_last_splash_time = now
 				SFX.play_splash(velocity)
-				# Vanilla Entity.N() (lw.java:170-183) spawns `1 + width * 20`
-				# bubbles AND `1 + width * 20` splash droplets at the water
-				# surface on entry. For player width 0.6 that's 13 of each;
-				# we use 8 each to keep frame cost predictable while keeping
-				# the visual read. Both bursts inherit the entry velocity so
-				# fast plunges throw droplets farther.
+				# lw.java:165-183 creates 1 + width*20 bubbles, then the same
+				# number of splash particles. Player width 0.6 means exactly
+				# 13 of each at floor(AABB.minY)+1. FluidFx owns the source RNG,
+				# atlas sprites, and per-tick particle physics.
 				var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
 				if cm != null:
-					var surface_y: float = floor(global_position.y) + 1.0
-					var splash_pos: Vector3 = Vector3(
-						global_position.x, surface_y, global_position.z
+					FluidFx.spawn_water_entry(
+						cm,
+						global_position,
+						global_position.y - _CAPSULE_HALF_HEIGHT,
+						_CAPSULE_WIDTH,
+						velocity / 20.0
 					)
-					FluidFx.spawn_water_bubble(cm, splash_pos, velocity, 8)
-					FluidFx.spawn_water_splash(cm, splash_pos, velocity, 8)
 		_was_in_water = true
 		_update_water_physics(delta)
+		_report_block_contact()
 		var attempted_vx: float = velocity.x
 		var attempted_vz: float = velocity.z
 		_move_and_slide_with_voxel_floor_guard()
@@ -2285,15 +2316,6 @@ func _physics_process(delta: float) -> void:
 		if _swim_distance >= _SWIM_INTERVAL_M:
 			_swim_distance = 0.0
 			SFX.play_swim()
-			# Beta Entity.handleWaterMovement spawns bubble particles
-			# trailing the entity each swim tick. We piggy-back on the
-			# swim cadence so bubbles emit at the same per-distance
-			# rate as the swim sound. Position offset behind the player
-			# so they trail rather than spawn on the body.
-			var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
-			if cm != null:
-				var trail: Vector3 = global_position - velocity.normalized() * 0.3
-				FluidFx.spawn_water_bubble(cm, trail, velocity * 0.2, 3)
 		# Auto-step gated by three vanilla-matching conditions (see
 		# EntityLiving.e() `positionChanged && this.c(...)`):
 		#   1. is_on_wall — touched something horizontally
@@ -2346,6 +2368,7 @@ func _physics_process(delta: float) -> void:
 		var climbing: bool = _move_pressed("move_forward") or _move_pressed("jump")
 		if climbing:
 			velocity.y = LADDER_CLIMB_SPEED
+	_report_block_contact()
 	var was_grounded: bool = is_on_floor()
 	var pre_slide_vel: Vector3 = velocity
 	_move_and_slide_with_voxel_floor_guard()
@@ -2751,8 +2774,34 @@ func _build_debug_report() -> String:
 	return "\n".join(lines) + "\n\n=== event log ===\n" + DebugLog.dump()
 
 
+# Death in a non-Overworld dimension sends the player home.
+#
+# Alpha has no Nether respawn: the bed / world-spawn point the player
+# returns to is an Overworld coordinate, so the dimension switch has to
+# happen first. Batch 1 wires the scaffolding; the portal work in Batch 7
+# shares the same ChunkManager transaction.
+func _return_to_overworld_on_death() -> void:
+	if DimensionContext.is_overworld():
+		return
+	var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+	if cm == null or not cm.has_method("transition_to_dimension"):
+		# No manager (unit tests, teardown) — still correct the recorded
+		# dimension so a save written now does not claim the Nether.
+		DimensionContext.set_active(DimensionContext.OVERWORLD)
+		return
+	cm.call("transition_to_dimension", DimensionContext.OVERWORLD, _safe_spawn_position())
+
+
 func _respawn() -> void:
 	Music.set_paused(false)
+	# Dying in the Nether returns the player to the Overworld BEFORE the
+	# usual bed / world-spawn selection runs (Nether plan §5.2). Ordering
+	# matters: _safe_spawn_position consults WorldMeta's spawn and the
+	# bed-respawn point, both of which are Overworld coordinates, and
+	# _teleport_to_safe_spawn sync-loads chunks around wherever it lands.
+	# Doing the dimension switch afterwards would stream a ring of Nether
+	# chunks around an Overworld coordinate first.
+	_return_to_overworld_on_death()
 	_teleport_to_safe_spawn()
 	velocity = Vector3.ZERO
 	_fall_peak_y = global_position.y
@@ -2885,12 +2934,120 @@ func _tick_air(delta: float) -> void:
 			_drown_tick += delta
 			if _drown_tick >= _DROWN_DAMAGE_INTERVAL_SEC:
 				_drown_tick = 0.0
+				var cm: Node = get_tree().root.get_node_or_null("Main/ChunkManager")
+				if cm != null:
+					FluidFx.spawn_drowning_bubbles(cm, global_position, velocity / 20.0)
 				take_damage(_DROWN_DAMAGE, DAMAGE_DROWN)
 	else:
 		# Not submerged — vanilla snaps air back to full instantly.
 		_air_sec = _AIR_MAX_SEC
 		_drown_tick = 0.0
 	air_changed.emit(clampf(_air_sec / _AIR_MAX_SEC, 0.0, 1.0))
+
+
+# Nether portal exposure — bq.java:33-57 through PortalExposure.
+#
+# Fixed 20 Hz, not per-frame: 0.0125 is a per-TICK rate, and running it
+# off delta would make a 144 fps player travel in the same wall-clock time
+# as a 30 fps one only by accident. The while-loop catches up if a frame
+# ran long, so a stutter cannot lose exposure.
+func _tick_portal(delta: float) -> void:
+	if PortalTravel.in_progress():
+		return
+	_portal_tick_accum += delta
+	if _portal_tick_accum < PORTAL_TICK_INTERVAL:
+		return
+	var standing_in_portal: bool = _is_in_portal()
+	while _portal_tick_accum >= PORTAL_TICK_INTERVAL:
+		_portal_tick_accum -= PORTAL_TICK_INTERVAL
+		_portal_exposure.in_portal = standing_in_portal
+		var travel: bool = _portal_exposure.advance()
+		if _portal_exposure.triggered_this_tick:
+			SFX.play_portal_trigger(global_position)
+		if travel:
+			DebugLog.add(
+				"PORTAL",
+				(
+					"travel fired at %v exposure=%.3f cooldown=%d"
+					% [global_position, _portal_exposure.exposure, _portal_exposure.cooldown]
+				)
+			)
+			_portal_tick_accum = 0.0
+			_begin_portal_travel()
+			return
+
+
+# True when any cell the player's body occupies is a portal. Two samples —
+# feet and eye level — because the body is 1.8 m tall and a portal is 3,
+# so a single centre sample would miss a player crouched at the bottom of
+# the sheet.
+func _is_in_portal() -> bool:
+	# No cooldown filtering here — the detector reports the raw truth and
+	# PortalExposure.advance applies vanilla's setInPortal gate (refresh
+	# the cooldown, tick as outside). Filtering here is what caused the
+	# arrival ping-pong loop: with in_portal forced false, the cooldown
+	# counted DOWN under the player's feet instead of refreshing, the
+	# meter refilled, and travel re-fired every ~2.5 s.
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().get_root().find_child("ChunkManager", true, false)
+		_chunk_manager_ref = cm
+	if cm == null or not cm.has_method("get_world_block"):
+		return false
+	for offset: Vector3 in [Vector3(0.0, 0.2, 0.0), Vector3(0.0, 1.5, 0.0)]:
+		var cell: Vector3i = Vector3i(
+			floori(global_position.x + offset.x),
+			floori(global_position.y + offset.y),
+			floori(global_position.z + offset.z)
+		)
+		if cm.call("get_world_block", cell) == Blocks.PORTAL:
+			return true
+	return false
+
+
+func _begin_portal_travel() -> void:
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().get_root().find_child("ChunkManager", true, false)
+		_chunk_manager_ref = cm
+	if cm == null:
+		return
+	# Fire and forget: PortalTravel is a coroutine (it yields between
+	# destination chunks so the loading screen paints), and Game.is_loading
+	# freezes this body for the duration, so there is nothing to await for.
+	PortalTravel.travel(self, cm)
+
+
+# Camera pitch back to level. Plan §7.2 step 8 — arriving through a portal
+# preserves yaw but zeroes pitch, so the player is looking at the horizon
+# rather than at the ceiling they happened to be facing.
+func reset_pitch() -> void:
+	if _camera != null:
+		_camera.rotation.x = 0.0
+
+
+# The HUD's portal overlay polls this each frame. Vanilla draws the
+# portal texture over the whole screen at alpha equal to the exposure
+# meter — plan §7.1's screen overlay.
+func portal_overlay_strength() -> float:
+	return clampf(_portal_exposure.exposure, 0.0, 1.0)
+
+
+# Called by PortalTravel once the player is placed. Vanilla does NOT
+# zero the meter on arrival — `bq.java`'s `c` rides through the
+# dimension switch at 1.0 and the ordinary 0.05/tick drain pulls it
+# down, which is the one-second purple fade-out the overlay shows in
+# the new world. Only the in-portal latch resets, and the cooldown
+# stops the destination portal from refilling the meter immediately —
+# stand still in it and it refills after the cooldown, which is
+# vanilla's portal ping-pong.
+func reset_portal_exposure() -> void:
+	_portal_exposure.in_portal = false
+	_portal_exposure.triggered_this_tick = false
+	_portal_exposure.travelled_this_tick = false
+	_portal_exposure.exposure = 1.0
+	_portal_exposure.cooldown = PortalExposure.COOLDOWN_TICKS
+	_portal_tick_accum = 0.0
 
 
 # Lava contact damage. Mirrors vanilla Entity.burn (Alpha source at

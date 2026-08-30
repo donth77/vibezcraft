@@ -64,6 +64,10 @@ func setup(thrower: Node, vel: Vector3) -> void:
 
 
 func _ready() -> void:
+	# Swept by ChunkManager._free_dimension_scene on dimension travel —
+	# transient projectiles are non-persistable, so without the group a
+	# live one crossed portals as a ghost node (audit finding #5).
+	add_to_group("transient_projectile")
 	_chunk_manager = get_tree().root.get_node_or_null("Main/ChunkManager")
 	_build_sprite()
 

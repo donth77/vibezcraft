@@ -240,7 +240,7 @@ func _build_version_label() -> void:
 # hygiene (see legal.md).
 func _build_footer_label() -> void:
 	var label := Label.new()
-	label.text = "Unofficial MC Alpha-era clone."
+	# label.text = "Unofficial MC Alpha-era clone."
 	label.add_theme_font_override("font", MinecraftFont.get_font())
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER

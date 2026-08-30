@@ -1,70 +1,19 @@
-# VibezCraft v1.0
+# VibezCraft 1.1.0
 
-A single-player clone of MC Alpha, built in Godot 4, GDScript, and C++.
-
-## Downloads
-
-- **macOS** (Apple Silicon + Intel, universal binary) — `VibezCraft-macOS-universal.dmg`
-- **Windows installer** (x86_64) — `VibezCraft-Windows-Setup.exe` (recommended)
-- **Windows portable** (x86_64) — `VibezCraft-Windows-x86_64.zip` (no install, just unzip + run)
+This release opens the Nether and adds complete, usable redstone circuits, along with a substantial round of gameplay, visual, and performance polish.
 
 ## Highlights
 
-- **Infinite procedural world** with 88 block types, oak trees, caves, and ore veins (coal/iron/gold/diamond)
-- **80+ items** — full tool tiers, armor sets, bow + arrows, buckets, flint & steel, shears, fishing rod, food, music discs
-- **9 mob species** — pigs, cows, chickens, sheep (passive); zombies, skeletons, spiders, creepers, slimes (hostile)
-- **Crafting & smelting** — 2×2 inventory grid, 3×3 crafting table, furnace with burn-time tracking
-- **Day/night cycle** with dynamic lighting, sky light + block light BFS flood fill
-- **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement
-- **Combat** — melee + ranged (bow charge + critical hits), knockback, armor, fall damage, drowning, fire/lava
-- **Dungeons** — cobble/mossy cobble rooms with mob spawner cages + chest loot
-- **Beds + sleep mechanic** — fast-forward to dawn, set spawn point
-- **Jukeboxes + 8 music discs**
-- **Farming + fishing**
-- **Minecart family** — straight + curve rails, boost rails, passenger/chest/furnace carts
-- **World save/load** — purpose-built binary format, multi-world select, crash-safe recovery
-- **Creative mode** + rebindable controls
-- **Native C++ fast paths** (chunk mesher, worldgen, lighting, water FX, pathfinder A*, voxel collider) with GDScript fallback
+- Travel through working obsidian portals into an Alpha-faithful Nether with netherrack, soul sand, glowstone, lava seas, ghasts, and zombie pigmen.
+- Build redstone circuits with dust, torches, levers, buttons, pressure plates, doors, TNT, rails, and four-delay repeaters.
+- Improved Nether lighting, fire visibility, mob lighting, portal effects, and water/lava/redstone particles.
+- Dropped items now survive normal deaths but are destroyed by fire and lava as expected.
+- Fixed powered-repeater stutter, split-state iron doors, portal edge cases, and several combat and mob-rendering issues.
 
-## Run
+## Downloads
 
-### macOS
+- **macOS:** `VibezCraft-macOS-universal.dmg` — signed and notarized for Apple Silicon and Intel Macs.
+- **Windows installer:** `VibezCraft-Windows-Setup.exe`.
+- **Windows portable:** `VibezCraft-Windows-x86_64.zip`.
 
-The app is ad-hoc signed but not notarized (no Apple Developer Program). On first launch macOS will refuse to open it.
-
-1. Open `VibezCraft-macOS-universal.dmg`
-2. Drag **VibezCraft.app** onto the **Applications** shortcut
-3. **Remove quarantine** (one-time, in Terminal):
-   ```
-   xattr -dr com.apple.quarantine /Applications/VibezCraft.app
-   ```
-   Or: try launching the app, click **Done** on the warning, then go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**.
-4. Double-click thereafter
-
-### Windows
-
-**Installer (recommended):**
-1. Download `VibezCraft-Windows-Setup.exe`
-2. Run it — installs to `C:\Program Files\VibezCraft` with Start Menu + Desktop shortcuts and an Add/Remove Programs entry
-3. Windows SmartScreen may warn — click **More info** → **Run anyway** (binary isn't code-signed)
-
-**Portable (no install):**
-1. Download + unzip `VibezCraft-Windows-x86_64.zip`
-2. Run `VibezCraft.exe` from anywhere
-3. SmartScreen prompt as above on first launch
-
-## Controls
-
-All gameplay actions are configurable in **Main Menu → Settings → Controls**. Defaults:
-
-- **WASD** — move, **Space** — jump, **Shift** — sneak
-- **Left-click** — break, **Right-click** — place/interact
-- **E** — inventory, **1-9** — hotbar
-- **G** / **F1** — toggle Creative mode
-- **`** (backtick) — toggle Debug mode (adds stats panel + dev shortcuts)
-
-## Notes
-
-- Save files live under your user app data directory (`~/Library/Application Support/Godot/app_userdata/VibezCraft/` on macOS, `%APPDATA%\Godot\app_userdata\VibezCraft\` on Windows).
-- Binaries are unsigned. macOS requires right-click → Open on first launch; Windows requires SmartScreen override.
-- Source: https://github.com/donth77/vibezcraft
+Save files from earlier releases remain in the normal VibezCraft application-data folder.

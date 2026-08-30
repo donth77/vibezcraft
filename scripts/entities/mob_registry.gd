@@ -29,19 +29,19 @@ const _ENTRIES: Dictionary = {
 	# wool ONCE on first damage (Alpha first-hit shed mechanic) OR via
 	# right-click with Beta SHEARS item (no damage variant).
 	"sheep": "res://scripts/entities/sheep.gd",
-	# M3 — vanilla lk.java (EntityZombie). First hostile mob. 20 HP,
-	# 3-damage melee, daylight burn, drops 0-2 feather (Alpha 1.2.6
+	# M3 — vanilla nt.java (EntityZombie). First hostile mob. 20 HP,
+	# 5-damage melee, daylight burn, drops 0-2 feather (Alpha 1.2.6
 	# vanilla; Beta 1.8 swapped to rotten flesh). HostileAI = target +
 	# chase + melee, reuses Pathfinder.find_path from the passives.
 	"zombie": "res://scripts/entities/zombie.gd",
-	# M4 — vanilla nq.java (EntitySkeleton). Second hostile, RANGED.
-	# 20 HP, kites at bow range [4, 10] m, charges 1.5 s then fires an
-	# Arrow at the player's torso. Drops 0-2 bone + 0-2 arrow.
+	# M4 — vanilla dh.java (EntitySkeleton). Second hostile, RANGED.
+	# 20 HP, closes inside 10 m, fires immediately when attackTime is
+	# zero, then waits 30 ticks. Drops 0-2 arrows only.
 	# Daylight burn (same as zombie).
 	"skeleton": "res://scripts/entities/skeleton.gd",
 	# M5 — vanilla be.java (EntitySpider). Light-gated hostile (neutral
 	# in bright light, targets nearest player ≤ 16 m when brightness
-	# < 0.5). 16 HP, 2-damage melee, drops 0-2 string. No daylight burn.
+	# < 0.5). 20 HP, 2-damage melee, drops 0-2 string. No daylight burn.
 	# Pounces toward the player at 2-6 m range instead of Beta's wall
 	# climb (Alpha be.java has no climbable-block flag).
 	"spider": "res://scripts/entities/spider.gd",
@@ -56,6 +56,25 @@ const _ENTRIES: Dictionary = {
 	# at 3 m proximity, detonates 30 ticks later at power 3.0. Drops
 	# 0-2 gunpowder. Iconic + dangerous; standard hostile spawn.
 	"creeper": "res://scripts/entities/creeper.gd",
+	# N1 — vanilla pt.java (EntityPigZombie), the Nether's neutral
+	# hostile. 20 HP, 5-damage melee, fire-immune, holds a gold sword,
+	# drops 0-2 cooked porkchop. Neutral until a PLAYER hits it, which
+	# also angers every pigman within 32 blocks on each axis; Alpha never
+	# decrements the anger, so that is permanent.
+	#
+	# The registry key is "zombie_pigman" but vanilla `fq.java:92`
+	# persists the entity as "PigZombie". EntitySave stores this key, not
+	# the vanilla string, which is consistent with every other entry here.
+	"zombie_pigman": "res://scripts/entities/zombie_pigman.gd",
+	# N2 — vanilla am.java (EntityGhast). The Nether's flying hostile.
+	# 10 HP, fire-immune, no gravity, drifts toward a random waypoint
+	# within 16 blocks and only engages a player inside 64 with line of
+	# sight. Charge counter climbs to 20, fires a fireball, resets to -40.
+	# Drops 0-2 gunpowder; ghast tears do not exist in Alpha.
+	#
+	# `k.java` — the Hell biome's spawn list is exactly this and the
+	# zombie pigman, which Batch 10 consumes.
+	"ghast": "res://scripts/entities/ghast.gd",
 }
 
 

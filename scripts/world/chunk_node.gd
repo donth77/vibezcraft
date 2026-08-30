@@ -49,6 +49,7 @@ var _collision_shape: CollisionShape3D
 # (collision bbox, null for plants) and Block.e() (selection bbox).
 var _plants_body: StaticBody3D
 var _plants_shape: CollisionShape3D
+var _plant_faces_cache: PackedVector3Array = PackedVector3Array()
 # Worker-built collision face soup, cached so ChunkManager can toggle
 # physics on/off as the player walks near/far without a remesh. At FAR
 # only a small inner ring needs a live ConcavePolygonShape3D — the rest
@@ -396,6 +397,9 @@ func _apply_mesh_data(data: Dictionary) -> void:
 	if data.vertices.is_empty():
 		_mesh_instance.mesh = null
 		_collision_shape.shape = null
+		_collision_faces_cache = PackedVector3Array()
+		_collision_shape_cache = null
+		_collision_cook_pending = false
 	else:
 		var arrays := []
 		arrays.resize(Mesh.ARRAY_MAX)
@@ -437,37 +441,40 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		# When the GDScript fallback ran (e.g. chunk has water cells),
 		# collision_faces isn't in the dict and we re-derive on the main
 		# thread.
+		var next_collision_faces: PackedVector3Array
 		if data.has("collision_faces"):
-			_collision_faces_cache = data.collision_faces
+			next_collision_faces = data.collision_faces
 		else:
 			# Legacy fallback — derive from the mesh itself so we have
 			# something to re-apply when collision toggles back on.
 			var derived := array_mesh.create_trimesh_shape()
-			_collision_faces_cache = (
+			next_collision_faces = (
 				derived.get_faces() if derived != null else PackedVector3Array()
 			)
-		# Defer the physics cook to the NEXT frame instead of paying it
-		# alongside the ArrayMesh upload. set_faces() rebuilds the shape
-		# BVH inside PhysicsServer3D (3-8 ms native, noticeably worse in
-		# wasm) and must stay on the main thread (worker-built shapes may
-		# never reach the physics server — ghost-block bug), but nothing
-		# requires it to share a frame with the mesh: the previous shape
-		# stays live for the ≤1-frame gap, and vanilla block edits lagged
-		# collision by a tick anyway. Callers that need same-frame
-		# collision (teleports via force_apply_pending, falling-block
-		# landings via _flush_immediate_rebuild) flush explicitly with
-		# _cook_pending_collision().
-		_collision_cook_pending = true
+		# Redstone power/meta changes and repeater OFF↔ON swaps alter only
+		# presentation. Their remesh carries byte-identical collision soup;
+		# preserve the existing shape + BVH instead of paying another 3-8 ms
+		# PhysicsServer cook for geometry that did not move.
+		if next_collision_faces != _collision_faces_cache:
+			_collision_faces_cache = next_collision_faces
+			# Defer a genuinely changed physics cook to the NEXT frame instead
+			# of paying it alongside the ArrayMesh upload. The previous shape
+			# stays live for the ≤1-frame gap. Callers that require same-frame
+			# collision flush explicitly with _cook_pending_collision().
+			_collision_cook_pending = true
 	# Plant selection collision soup — only present when the GDScript
 	# mesher ran (native skips non-cube blocks today). Empty soup ⇒ clear
 	# the shape so the chunk doesn't keep stale plant hitboxes after the
 	# last sapling is broken.
-	if data.has("plant_faces") and not data.plant_faces.is_empty():
-		var pshape := ConcavePolygonShape3D.new()
-		pshape.set_faces(data.plant_faces)
-		_plants_shape.shape = pshape
-	else:
-		_plants_shape.shape = null
+	var next_plant_faces: PackedVector3Array = data.get("plant_faces", PackedVector3Array())
+	if next_plant_faces != _plant_faces_cache:
+		_plant_faces_cache = next_plant_faces
+		if not next_plant_faces.is_empty():
+			var pshape := ConcavePolygonShape3D.new()
+			pshape.set_faces(next_plant_faces)
+			_plants_shape.shape = pshape
+		else:
+			_plants_shape.shape = null
 	# Water sub-mesh — only present when the GDScript mesher ran. Keys are
 	# absent on the native path (which never writes water), so a missing
 	# key means "no water to render this rebuild."

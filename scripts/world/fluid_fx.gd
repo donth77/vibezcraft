@@ -9,47 +9,30 @@ extends RefCounted
 # cap and to give the fluid subsystem a clean seam for future effects
 # (bubble column on water, splash on entry, etc.).
 #
-# Pooling: first-time allocation of a GPUParticles3D + ParticleProcessMaterial
-# triggers a GPU shader/pipeline compile that shows up as a visible frame
-# hitch — bad news when 6 lava cells solidify in one frame (water-on-lava
-# cascade). `warm_pool` pre-builds a handful of inert emitters at boot so
-# the shader is already compiled, and `spawn_fizz` cycles them via a FIFO
-# pool with a lifetime timer. Overflow falls back to fresh allocation.
+# Pooling: generic smoke keeps a pre-warmed GPUParticles3D pool. Source-
+# sensitive lava, fizz, bubble, and splash particles use individual Sprite3D
+# lifecycles because the GPU path cannot reproduce their exact 8x8 frames,
+# randomized lifetimes, collision checks, or per-tick motion.
 
 const _PARTICLES_ATLAS_PATH: String = "res://assets/textures/particles/particles.png"
 const _POOL_SIZE: int = 6
+const _ALPHA_TORCH_PARTICLE: GDScript = preload("res://scripts/world/alpha_torch_particle.gd")
+const _ALPHA_LAVA_PARTICLE: GDScript = preload("res://scripts/world/alpha_lava_particle.gd")
+const _ALPHA_WATER_PARTICLE: GDScript = preload("res://scripts/world/alpha_water_particle.gd")
+const _PARTICLE_VISIBILITY_DISTANCE_SQUARED: float = 16.0 * 16.0
+const _TORCH_WALL_RISE: float = 0.22
+const _TORCH_WALL_OFFSET: float = 0.27
 
-# Cached material — built once on first call. All fizz instances share
-# the same StandardMaterial3D since the atlas + settings are identical.
+# Cached material retained for generic smoke and the ghast trail. The
+# source-faithful fizz paths below use AtlasTexture-backed Sprite3Ds instead.
 static var _largesmoke_material: StandardMaterial3D = null
 # Pre-warmed GPUParticles3D pool. Emitters here are already parented under
-# the ChunkManager and have their shader compiled; spawn_fizz pops one,
-# repositions, and calls restart().
+# the ChunkManager and have their shader compiled; generic pooled effects
+# pop one, reposition it, and call restart().
 static var _pool: Array = []
 # Last parent we warmed against. Used to lazily warm the pool on first
 # spawn if `warm_pool` wasn't called at boot (harmless safety net).
 static var _pool_parent: Node = null
-# Lava-spark material cache — see get_lava_spark_material below. Kept at
-# the top of the file to satisfy gdlint's class-definitions-order rule.
-static var _lava_spark_material: StandardMaterial3D = null
-# Splash droplet material cache — solid-blue tiny quad. AtlasTexture
-# stretched the whole particles.png across the quad on GPUParticles3D
-# draw passes (Godot 4 quirk, same issue lava_spark hit), so we render
-# a flat-color quad sized to match vanilla's 0.01 m sprite footprint.
-static var _splash_material: StandardMaterial3D = null
-# Torch-flame material cache — small yellow-orange billboard, vanilla
-# `EntityFlameFX` (db.java's flame entry). Lifetime ~1 s, slight upward
-# drift, no gravity.
-static var _torch_flame_material: StandardMaterial3D = null
-# Bubble (EntityBubbleFX) — particles.png tile 32 = (0, 16, 8, 8). Drifts
-# upward at 0.002/tick gravity, dies on leaving water.
-static var _bubble_material: StandardMaterial3D = null
-# Static gray puff used as sub-emitter smoke for lava sparks. Avoids
-# BILLBOARD_PARTICLES + particles_anim_* which interact badly with
-# sub_emitter_keep_velocity (the inherited parent INSTANCE_CUSTOM
-# corrupts the per-particle animation frame, manifesting as
-# horizontal-streak artifacts).
-static var _smoke_subparticle_material: StandardMaterial3D = null
 
 
 # Builds / returns the shared largesmoke material. Sprite source is
@@ -81,9 +64,8 @@ static func get_largesmoke_material() -> StandardMaterial3D:
 	return mat
 
 
-# Pre-warm the pool at boot so the first water-on-lava doesn't pay the
-# GPU shader compile as a frame spike. Safe to call once in Game._ready
-# once a persistent Node is available (we pass ChunkManager in practice).
+# Pre-warm the generic fluid-particle pool at boot. Safe to call once in
+# Game._ready once a persistent Node is available (ChunkManager in practice).
 static func warm_pool(parent: Node) -> void:
 	_pool_parent = parent
 	get_largesmoke_material()
@@ -99,22 +81,84 @@ static func warm_pool(parent: Node) -> void:
 # Parent is expected to be the ChunkManager so the particles stay in
 # world space.
 #
-# Vanilla numbers (pi.java + ld.java): 8 particles emitted at once,
-# upward drift, ~2 s lifetime.
+# ld.java:256-261: eight `largesmoke` particles at random X/Z points
+# exactly 0.2 blocks above the converted lava cell's top face.
 static func spawn_fizz(parent: Node, pos: Vector3i) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
 	SFX.play_fizz(true)
-	var particles := _acquire(parent, 8, Vector3(0.35, 0.1, 0.35))
-	particles.position = Vector3(pos) + Vector3(0.5, 1.0, 0.5)
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+	_spawn_lava_conversion_smoke(parent, pos)
 
 
-# Generic smoke puff at a Vector3 world position. Bit-identical pool
-# call to spawn_fizz minus the SFX — same 8 particles, same extents,
-# same upward drift. Identical extents matter: tighter values cluster
-# particles at the same point and read as a clumpy blob, not the
-# spread-out cloud lava-fizz produces.
+# ag.java:64-68. A water bucket used in the Nether never places a block;
+# it creates eight independent `largesmoke` (pi.java with f2=2.5) particles
+# at random XYZ points throughout the attempted destination cell.
+static func spawn_nether_water_evaporation(parent: Node, pos: Vector3i) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
+	SFX.play_fizz(true)
+	for _i in range(8):
+		var origin := Vector3(pos) + Vector3(randf(), randf(), randf())
+		spawn_largesmoke_particle(parent, origin)
+
+
+# One ordinary Alpha EntitySmokeFX (`pi.java`) with optional size/lifetime
+# multiplier. A multiplier of 2.5 is the named `largesmoke` path; 1.0 is the
+# regular `smoke` used by torches and redstone-torch burnout.
+static func spawn_smoke_particle(
+	parent: Node,
+	world_position: Vector3,
+	size_multiplier: float = 1.0,
+	viewer_position: Variant = null
+) -> Sprite3D:
+	if parent == null or not is_instance_valid(parent):
+		return null
+	if not _named_particle_visible(parent, world_position, viewer_position):
+		return null
+	var cell := Vector3i(
+		floori(world_position.x),
+		floori(world_position.y),
+		floori(world_position.z),
+	)
+	var brightness: float = EntityLighting.sample_brightness(parent, cell)
+	var smoke: Sprite3D = _ALPHA_TORCH_PARTICLE.new() as Sprite3D
+	parent.add_child(smoke)
+	smoke.call("configure", 1, world_position, brightness, size_multiplier)
+	return smoke
+
+
+# pi.java's `largesmoke` constructor is ordinary animated smoke with a 2.5
+# multiplier on both scale and lifetime. Sprite3D preserves the actual 8x8
+# atlas cells; the GPU draw-pass path stretched the sheet into visual dashes.
+static func spawn_largesmoke_particle(parent: Node, world_position: Vector3) -> Sprite3D:
+	return spawn_smoke_particle(parent, world_position, 2.5)
+
+
+# bo.java:113-120. On the eighth rapid off-transition, a redstone torch
+# emits five ordinary smoke motes at independent points inside the central
+# 60% of its cell. This is a one-shot burnout effect, not its ambient dust.
+static func spawn_redstone_torch_burnout_smoke(
+	parent: Node, cell_pos: Vector3i, viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	var particles: Array[Sprite3D] = []
+	for _i in range(5):
+		var origin := (
+			Vector3(cell_pos)
+			+ Vector3(
+				randf() * 0.6 + 0.2,
+				randf() * 0.6 + 0.2,
+				randf() * 0.6 + 0.2,
+			)
+		)
+		var smoke := spawn_smoke_particle(parent, origin, 1.0, viewer_position)
+		if smoke != null:
+			particles.append(smoke)
+	return particles
+
+
+# Generic eight-particle GPU smoke puff at a Vector3 world position. This
+# intentionally remains a cheap pooled effect for non-source-sensitive
+# callers; lava conversion and Nether evaporation use real Sprite3D motes.
 static func spawn_smoke(parent: Node, pos: Vector3) -> void:
 	var particles := _acquire(parent, 8, Vector3(0.35, 0.1, 0.35))
 	particles.position = pos
@@ -145,38 +189,22 @@ static func flush_deferred_fizz(manager, fizz_positions: Array) -> void:
 		spawn_fizz_cluster(manager, fizz_positions)
 
 
-# Coalesced variant. When multiple lava cells solidify in one
-# water-neighbor fanout, emit ONE particle system sized to the cluster
-# (box extents cover the cluster AABB) instead of N systems. One fizz
-# SFX per burst — vanilla only plays fizz once per World.applyPhysics
-# anyway. `positions` is the raw list of solidified cells.
+# Batched variant for a water-neighbor fanout. Audio remains coalesced into
+# one fizz, but every converted cell retains Alpha's own eight smoke motes;
+# merging their positions into one box was both visually wrong and unable to
+# use pi.java's per-particle frame/lifetime sequence.
 static func spawn_fizz_cluster(parent: Node, positions: Array) -> void:
-	if positions.is_empty():
+	if parent == null or not is_instance_valid(parent) or positions.is_empty():
 		return
 	SFX.play_fizz(true)
-	# Compute AABB + centroid. Centroid anchors the emitter; extents size
-	# the emission_box so particles spawn across the full cluster volume.
-	var min_p: Vector3 = Vector3(positions[0])
-	var max_p: Vector3 = Vector3(positions[0])
 	for p: Vector3i in positions:
-		var v: Vector3 = Vector3(p)
-		min_p = Vector3(minf(min_p.x, v.x), minf(min_p.y, v.y), minf(min_p.z, v.z))
-		max_p = Vector3(maxf(max_p.x, v.x), maxf(max_p.y, v.y), maxf(max_p.z, v.z))
-	var centroid: Vector3 = (min_p + max_p) * 0.5 + Vector3(0.5, 1.0, 0.5)
-	# 16-particle cap — 6 cells × 8 would be 48 for the worst cascade,
-	# which is more smoke than vanilla's per-cell puff implies and reads
-	# as a pyro column. 16 keeps the visual dense but readable.
-	var amount: int = mini(positions.size() * 4, 16)
-	# Base extents = half the cluster span, padded so a single-cell
-	# cluster still picks up the default 0.35 / 0.1 / 0.35 per-axis
-	# extents from the uncoalesced spawn.
-	var span: Vector3 = (max_p - min_p) * 0.5
-	var extents := Vector3(maxf(span.x, 0.35), maxf(span.y, 0.1), maxf(span.z, 0.35))
-	var particles := _acquire(parent, amount, extents)
-	particles.position = centroid
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+		_spawn_lava_conversion_smoke(parent, p)
+
+
+static func _spawn_lava_conversion_smoke(parent: Node, pos: Vector3i) -> void:
+	for _i in range(8):
+		var origin := Vector3(pos) + Vector3(randf(), 1.2, randf())
+		spawn_largesmoke_particle(parent, origin)
 
 
 # --- Pool internals ---
@@ -274,357 +302,205 @@ static func _build_particles(amount: int, extents: Vector3) -> GPUParticles3D:
 	return particles
 
 
-# Lava spark material — port of vanilla `db.java` (ParticleLava). Vanilla
-# spawns these via ld.java:193-197 on air-above-lava cells at 1/100 per
-# random tick. Lifetime `16 / rand(0.2..1.0)` = 16-80 ticks ≈ 0.8-4 s in
-# vanilla; we run ~1 s for a crisp pop. Initial upward drift + gravity
-# so the spark arcs back down. Orange-red tint approximates the "b=49"
-# tile in vanilla's particles.png sheet without needing a separate atlas.
-static func get_lava_spark_material() -> StandardMaterial3D:
-	if _lava_spark_material != null:
-		return _lava_spark_material
-	# Vanilla db.java:21 sets `this.b = 49` which points at a 4×4 solid
-	# orange block (RGB 255,180,37) sitting on an 8×8 transparent tile
-	# in particles.png. Using AtlasTexture on a quad caused visible
-	# aspect warping (it read as "strings"); rendering a flat orange
-	# quad directly gives the same 4-pixel orange square visual without
-	# the atlas/UV interaction. Quad size below is tuned so the rendered
-	# particle matches the apparent size of vanilla's `0.1 * g` render
-	# half-width.
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	mat.albedo_color = Color(1.0, 0.706, 0.145, 1.0)  # 255/180/37 → linear
-	_lava_spark_material = mat
-	return mat
-
-
-# Tiny blue water droplet — sprite indices 20-23 in vanilla particles.png
-# (mf.java does `++this.b` over pc.java's `b = 19 + rand(4)`, so splash
-# lands on cells 20-23). Sampled avg color across those four cells is
-# sRGB (33, 80, 204) ≈ #2150CC; we plug the linear equivalent here so
-# Godot's framebuffer encode lands on that hue on screen. Flat quad
-# (no atlas) — same reasoning as lava_spark above.
-static func get_splash_material() -> StandardMaterial3D:
-	if _splash_material != null:
-		return _splash_material
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	# StandardMaterial3D treats albedo_color floats as sRGB (Godot
-	# linearizes internally), so pass the raw sRGB-normalized values —
-	# NOT the linear conversion. Vanilla splash sprite avg = #2150CC =
-	# (33, 80, 204) sRGB → /255 → (0.129, 0.314, 0.800). Plugging in
-	# linear-space values here (0.015, 0.080, 0.604) made the splash
-	# render almost-black because Godot double-converted.
-	mat.albedo_color = Color(33.0 / 255.0, 80.0 / 255.0, 204.0 / 255.0, 1.0)
-	_splash_material = mat
-	return mat
-
-
-# Single-particle upward arc, Alpha-faithful to ld.java:193-197. Uses the
-# pool via _acquire so lava-heavy caves don't allocate new GPUParticles3D
-# on every spark; amount=1 per call, position = cell top.
-# Builds / returns a simple static gray puff for use as a sub-emitter
-# sub-particle. Vanilla pi.java cycles through 8 smoke frames over a
-# particle's life (`b = 7 - e*8/f`); reproducing that on a sub-emitter
-# requires INSTANCE_CUSTOM coordination that Godot doesn't provide
-# correctly when sub_emitter_keep_velocity inherits parent custom data.
-# A single static frame from the smoke sprite strip — frame 0 (the
-# densest puff) — at full opacity reads cleanly.
-static func get_smoke_subparticle_material() -> StandardMaterial3D:
-	if _smoke_subparticle_material != null:
-		return _smoke_subparticle_material
-	# Vanilla-faithful smoke. AtlasTexture + BILLBOARD_PARTICLES +
-	# particles_anim_* combo was producing horizontally-squished sprites
-	# (the 64×8 strip got stretched onto the 0.4×0.4 quad as if it were
-	# a single frame). Switched to: full particles.png as albedo, UV
-	# transform crops to a single 8×8 smoke frame, no per-particle
-	# animation. Single dense smoke frame is acceptable divergence from
-	# vanilla's 8-frame cycle — frames are visually similar enough that
-	# losing the animation isn't a major fidelity hit.
-	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = sheet
-	# Crop UVs to a single 8×8 smoke tile at (0, 0) on the 128×128 sheet.
-	# uv_scale = 8/128 = 0.0625 — only that tile's worth of the texture
-	# samples onto the quad; uv_offset = (0, 0, 0) for top-left tile.
-	mat.uv1_scale = Vector3(8.0 / 128.0, 8.0 / 128.0, 1.0)
-	mat.uv1_offset = Vector3.ZERO
-	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
-	# BILLBOARD_ENABLED — full camera-facing, no INSTANCE_CUSTOM animation
-	# dependency. Quad stays square (0.4 × 0.4 m) regardless of texture.
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	# Beta pi.java `j = k = rand * 0.3` (gray 0..0.3); we use top of range
-	# 0.3 so smoke reads against grass/lava without being washed out.
-	mat.albedo_color = Color(0.3, 0.3, 0.3, 1.0)
-	_smoke_subparticle_material = mat
-	return mat
-
-
-# Builds / returns the shared bubble material. Sprite source is
-# particles.png tile 32 (col 0, row 2 → region (0, 16, 8, 8)). Vanilla
-# Beta EntityBubbleFX renders this with 1.0 r/g/b tint, scaled
-# 0.2..0.8 (rand*0.6+0.2 in EntityBubbleFX:14).
-static func get_bubble_material() -> StandardMaterial3D:
-	if _bubble_material != null:
-		return _bubble_material
-	# Flat light-cyan quad — vanilla bubble sprite (bh.java:12 sets
-	# `this.b = 32`, particles.png cell (0, 16, 8, 8)) averages sRGB
-	# (97, 205, 255). AtlasTexture on GPUParticles3D draw passes
-	# stretches the whole 128×128 sheet across the quad (same Godot 4
-	# quirk hit by lava_spark + splash), so we flat-color it instead.
-	# Pass the raw sRGB-normalized floats — Godot linearizes albedo_color
-	# internally; pre-linearizing here would double-darken.
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_DISABLED
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	mat.albedo_color = Color(97.0 / 255.0, 205.0 / 255.0, 255.0 / 255.0, 1.0)
-	_bubble_material = mat
-	return mat
-
-
-# Spawns N water bubbles drifting up from `world_pos`. Mirrors Beta
-# EntityBubbleFX: motY += 0.002/tick (upward acceleration), motXYZ *=
-# 0.85/tick damping, lifetime 8..40 ticks (0.4..2 s), dies on leaving
-# water. Used for swim-trail bubbles and water-surface ambient bubbles.
+# One or more source `bh.java` bubble entities. Motion is explicitly in
+# Alpha blocks-per-tick units; callers whose simulation uses m/s divide by 20.
 static func spawn_water_bubble(
-	parent: Node, world_pos: Vector3, motion: Vector3 = Vector3.ZERO, count: int = 1
-) -> void:
-	var particles := _acquire(parent, count, Vector3(0.05, 0.05, 0.05))
-	var proc := ParticleProcessMaterial.new()
-	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	proc.emission_box_extents = Vector3(0.05, 0.05, 0.05)
-	# Vanilla EntityBubbleFX initial motion = caller_motion * 0.2 + jitter,
-	# Y also has * 0.2 + jitter. We replicate via direction + initial vel.
-	if motion.length_squared() > 0.0001:
-		proc.direction = motion.normalized()
-		proc.initial_velocity_min = motion.length() * 0.18
-		proc.initial_velocity_max = motion.length() * 0.22
-	else:
-		proc.direction = Vector3(0, 1, 0)
-		proc.initial_velocity_min = 0.0
-		proc.initial_velocity_max = 0.05
-	proc.spread = 25.0
-	# motY += 0.002/tick = +0.04/sec/tick acceleration up.
-	proc.gravity = Vector3(0, 0.04, 0)
-	# motXYZ *= 0.85/tick — strong damping.
-	proc.damping_min = 1.5
-	proc.damping_max = 1.5
-	# rand.nextFloat() * 0.6 + 0.2 → 0.2..0.8 base scale * 0.02 set_size.
-	# Quad below is 0.06 m, so net visible bubble is 0.012..0.048 m.
-	proc.scale_min = 0.4
-	proc.scale_max = 1.4
-	proc.particle_flag_align_y = false
-	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	particles.process_material = proc
-	var draw := QuadMesh.new()
-	draw.size = Vector2(0.06, 0.06)
-	draw.material = get_bubble_material()
-	particles.draw_pass_1 = draw
-	# Lifetime 8..40 ticks (0.4..2 s) — pick midpoint.
-	particles.lifetime = 1.0
-	particles.position = world_pos
-	particles.sub_emitter = NodePath("")  # clear any leftover from pool reuse
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+	parent: Node,
+	world_pos: Vector3,
+	source_motion_per_tick: Vector3 = Vector3.ZERO,
+	count: int = 1,
+	viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	return _spawn_water_particles(
+		parent,
+		_ALPHA_WATER_PARTICLE.Kind.BUBBLE,
+		world_pos,
+		source_motion_per_tick,
+		count,
+		viewer_position
+	)
 
 
-# Spawn N water-droplet splash particles arcing up + outward from world_pos.
-# Vanilla Entity.N() (vendor/alpha-1.2.6-src/src/lw.java:170-183) fires
-# `1 + width * 20` of these at the water surface every time an entity's
-# inWater flag flips false → true; the "splash" particle is mf.java —
-# a pc.java subclass with `h = 0.04` gravity and a +0.1 Y kick injected
-# when called with horizontal-only motion. We approximate that with
-# directional-up spawn + spread + gravity. Caller passes the entity's
-# pre-impact velocity so high-speed entries throw droplets farther
-# (matches vanilla's `* width` and `entity.az / aA / aB` references).
+# One or more source `mf.java` splash entities, with the same units and
+# visibility gate as spawn_water_bubble.
 static func spawn_water_splash(
-	parent: Node, world_pos: Vector3, motion: Vector3 = Vector3.ZERO, count: int = 8
-) -> void:
-	var particles := _acquire(parent, count, Vector3(0.3, 0.05, 0.3))
-	var proc := ParticleProcessMaterial.new()
-	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	# Flat disc at the water surface — vanilla samples y = floor(box.y) + 1
-	# (line 169) so all 13 splash particles spawn in the same XZ plane.
-	proc.emission_box_extents = Vector3(0.3, 0.02, 0.3)
-	# Outward "burst" — primary +Y kick (the +0.1 vanilla adds) plus spread
-	# so droplets fan into a dome. Faster entries throw farther.
-	var entry_kick: float = clampf(motion.length() * 0.5, 0.0, 3.0)
-	proc.direction = Vector3(0, 1, 0)
-	proc.initial_velocity_min = 1.0 + entry_kick
-	proc.initial_velocity_max = 2.5 + entry_kick
-	proc.spread = 55.0
-	# Vanilla pc.java: `h = 0.06f` per tick (20 TPS) = 1.2 m/s² downward.
-	# We use 2.5 m/s² to give the droplets a snappy arc that's clearly
-	# visible inside the 0.8 s lifetime at 60 fps — pure 1.2 m/s² read as
-	# too floaty in playtesting.
-	proc.gravity = Vector3(0, -2.5, 0)
-	# Vanilla pc.java::e_() multiplies motion by 0.98/tick = mild drag.
-	proc.damping_min = 0.3
-	proc.damping_max = 0.6
-	# Vanilla pc.java sets sprite size to 0.01×0.01 m, but vanilla also
-	# scales each particle's render size by `g *= rand*2 + 0.2` and
-	# again by 0.1 in the render pass — net visible width ≈ 0.05 m.
-	# We bake that into the quad size + scale jitter for the same look.
-	proc.scale_min = 0.6
-	proc.scale_max = 1.2
-	proc.particle_flag_align_y = false
-	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	particles.process_material = proc
-	var draw := QuadMesh.new()
-	# 0.05 m base — vanilla's effective on-screen splash droplet size.
-	# Falls inside the lava_spark / smoke range so the splash reads as
-	# the same particle "class" rather than a giant blue rectangle.
-	draw.size = Vector2(0.05, 0.05)
-	draw.material = get_splash_material()
-	particles.draw_pass_1 = draw
-	# Vanilla mf.java inherits from pc.java with lifetime 8..40 ticks
-	# (0.4..2.0 s). Midpoint feels right for splash specifically — the
-	# droplet has time to peak + fall back without lingering.
-	particles.lifetime = 0.8
-	particles.position = world_pos
-	particles.sub_emitter = NodePath("")
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
+	parent: Node,
+	world_pos: Vector3,
+	source_motion_per_tick: Vector3 = Vector3.ZERO,
+	count: int = 1,
+	viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	return _spawn_water_particles(
+		parent,
+		_ALPHA_WATER_PARTICLE.Kind.SPLASH,
+		world_pos,
+		source_motion_per_tick,
+		count,
+		viewer_position
+	)
 
 
-static func spawn_lava_spark(parent: Node, pos: Vector3i) -> void:
-	var particles := _acquire(parent, 1, Vector3(0.4, 0.0, 0.4))
-	# Vanilla db.java / Beta EntityLavaFX: initial Y velocity rand*0.4+0.05
-	# (per-tick units → 1.0..9.0 m/s at 20 TPS). Y gravity: aA -= 0.03/tick
-	# = -0.6/sec/tick → -12 m/s². XZ damping 0.999/tick. Lifetime 16..80
-	# ticks (0.8..4 s). Initial scale `g *= rand*2+0.2` with parabolic
-	# fade `g = a * (1 - f²)` per render.
-	var proc := ParticleProcessMaterial.new()
-	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	proc.emission_box_extents = Vector3(0.4, 0.0, 0.4)
-	proc.direction = Vector3(0, 1, 0)
-	proc.spread = 10.0
-	proc.initial_velocity_min = 1.2
-	proc.initial_velocity_max = 2.5
-	proc.gravity = Vector3(0, -6.0, 0)
-	# DEBUG: lock spark scale so it's unambiguously the right size — no
-	# random variation, no parabolic shrink. If user still sees "specks",
-	# they're not the spark (which renders as a clean 0.3 m square).
-	proc.scale_min = 1.0
-	proc.scale_max = 1.0
-	proc.particle_flag_align_y = false
-	# Beta EntityLavaFX.onUpdate: per-tick smoke sub-particle spawn at
-	# the spark's CURRENT world position with its CURRENT velocity, with
-	# probability decaying from 1.0 → 0.0 over lifetime. Godot's GPU
-	# sub_emitter at SUB_EMITTER_CONSTANT mode emits sub-particles at
-	# the parent particle's position throughout its life. We can't gate
-	# spawn rate per-particle on age in GPU mode, but a constant 8 Hz
-	# emission averages to roughly the same density across the spark's
-	# 1 s lifetime as vanilla's decaying probability over 16-80 ticks.
-	# DEBUG: sub-emitter temporarily disabled to disambiguate what the
-	# user is seeing. With this off, the only thing rendered should be
-	# the orange lava-spark square itself — no gray smoke at all.
-	# Re-enable once we've identified whether the "glitchy specks" are
-	# the spark or the sub-emitter smoke.
-	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	particles.process_material = proc
-	var draw := QuadMesh.new()
-	# DEBUG: bumped from 0.15 to 0.3 so spark is unmistakably visible.
-	draw.size = Vector2(0.3, 0.3)
-	draw.material = get_lava_spark_material()
-	particles.draw_pass_1 = draw
-	particles.lifetime = 1.0
-	particles.position = Vector3(pos) + Vector3(0.5, 1.0, 0.5)
-	# Build the smoke sub-emitter as a child of the spark particles so
-	# it survives the spark's lifetime + cleanup. Reused across calls
-	# via _ensure_lava_smoke_subemitter — no per-call allocation cost.
-	# Sub-emitter abandoned — Godot 4's GPU sub_emitter coordination
-	# (parent INSTANCE_CUSTOM passing, sub_emitter_keep_velocity binary
-	# inheritance, position tracking) doesn't expose enough hooks to
-	# reproduce vanilla pi.java's "spawn smoke at parent's CURRENT pos
-	# with 0.1× parent velocity" behavior cleanly. Instead, co-spawn a
-	# separate dedicated smoke emitter that fires independently and
-	# uses simple, debuggable parameters.
-	particles.visible = true
-	particles.restart()
-	_schedule_return(parent, particles)
-	_spawn_lava_smoke_burst(parent, Vector3(pos) + Vector3(0.5, 1.0, 0.5))
+# lw.java:165-183, shared by every entity on an air→water transition.
+# Alpha emits two independent loops of `1 + width*20`: bubbles first, then
+# splash. Each loop rolls its own X/Z point across the entity's full width.
+static func spawn_water_entry(
+	parent: Node,
+	entity_position: Vector3,
+	aabb_min_y: float,
+	entity_width: float,
+	source_motion_per_tick: Vector3,
+	viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	var particles: Array[Sprite3D] = []
+	var count: int = ceili(1.0 + entity_width * 20.0)
+	var surface_y: float = floorf(aabb_min_y) + 1.0
+	for _i in range(count):
+		var origin := Vector3(
+			entity_position.x + (randf() * 2.0 - 1.0) * entity_width,
+			surface_y,
+			entity_position.z + (randf() * 2.0 - 1.0) * entity_width,
+		)
+		var bubble_motion: Vector3 = source_motion_per_tick
+		bubble_motion.y -= randf() * 0.2
+		particles.append_array(
+			spawn_water_bubble(parent, origin, bubble_motion, 1, viewer_position)
+		)
+	for _i in range(count):
+		var origin := Vector3(
+			entity_position.x + (randf() * 2.0 - 1.0) * entity_width,
+			surface_y,
+			entity_position.z + (randf() * 2.0 - 1.0) * entity_width,
+		)
+		particles.append_array(
+			spawn_water_splash(parent, origin, source_motion_per_tick, 1, viewer_position)
+		)
+	return particles
 
 
-# Standalone smoke burst that co-spawns with each lava spark.
-# Approximates Beta EntityLavaFX.onUpdate's per-tick smoke-spawn
-# behavior by emitting ~12 smoke particles continuously over the
-# spark's typical 1-second lifetime. Each smoke gets a random upward
-# velocity (matches the spread of velocities the spark passes through
-# during its arc), so the smokes form a vertical column from the
-# lava surface — visually similar to a per-tick trail.
-static func _spawn_lava_smoke_burst(parent: Node, world_pos: Vector3) -> void:
-	# Vanilla-faithful smoke trail. Beta EntityLavaFX.onUpdate spawns one
-	# `EntitySmokeFX` per tick with `nextFloat() > age/maxAge` probability
-	# — average ~10 smokes over a 1-2 second spark life. We emit 4 over
-	# the burst (lower density to avoid the prior "fountain" complaint).
-	var smoke := _acquire(parent, 4, Vector3(0.05, 0.0, 0.05))
-	var proc := ParticleProcessMaterial.new()
-	proc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	proc.emission_box_extents = Vector3(0.05, 0.0, 0.05)
-	proc.direction = Vector3(0, 1, 0)
-	proc.spread = 30.0
-	# Vanilla pi.java inherits caller velocity at 0.1× scale. Avg spark
-	# velocity 1.85 m/s × 0.1 = 0.185 m/s base upward drift, with spread.
-	proc.initial_velocity_min = 0.1
-	proc.initial_velocity_max = 0.35
-	# pi.java:47 `aA += 0.004/tick` = +0.08 m/s²/tick acceleration up.
-	proc.gravity = Vector3(0, 0.08, 0)
-	# pi.java:53 `motXYZ *= 0.96/tick` damping. Godot damping is unit/sec;
-	# 0.96/tick at 20 TPS = 0.96^20 ≈ 0.44 over 1 second → effective
-	# damping ~0.6/sec.
-	proc.damping_min = 0.6
-	proc.damping_max = 0.6
-	# Vanilla scale: g = (rand*0.5+0.5)*2 * 0.75 ≈ 0.75..1.5 unscaled.
-	# pi.java:35 `g = a * f8` where f8 climbs 0→1 over first ~3% of life
-	# then stays — effectively pops to full scale instantly. We use
-	# scale_min/max 0.7..1.4 against a 0.3 m base quad → final 0.21..0.42 m.
-	proc.scale_min = 0.7
-	proc.scale_max = 1.4
-	# Vanilla's f8 is essentially a step function — full scale by 3% of
-	# life. Match with a near-instant ramp so smokes pop in cleanly.
-	var sc := Curve.new()
-	sc.add_point(Vector2(0.0, 0.0))
-	sc.add_point(Vector2(0.03, 1.0))
-	sc.add_point(Vector2(1.0, 1.0))
-	var sct := CurveTexture.new()
-	sct.curve = sc
-	proc.scale_curve = sct
-	# Material uses BILLBOARD_ENABLED + UV-transform crop, NOT the
-	# particles_anim_* path. Anim speed irrelevant — keep zero so we
-	# don't accidentally drive INSTANCE_CUSTOM.z toward garbage.
-	proc.anim_speed_min = 0.0
-	proc.anim_speed_max = 0.0
-	proc.particle_flag_align_y = false
-	proc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	smoke.process_material = proc
-	var draw := QuadMesh.new()
-	# Vanilla EntitySmokeFX nominal size ~0.3 m, but at typical FP camera
-	# distance (3-10 m) that reads as a single pixel. Bumped to 0.4 m
-	# base × scale 0.7..1.4 = 0.28..0.56 m — top of vanilla's visible
-	# size range, closer to what vanilla looks like in-game.
-	draw.size = Vector2(0.4, 0.4)
-	draw.material = get_smoke_subparticle_material()
-	smoke.draw_pass_1 = draw
-	# pi.java:22 — lifetime `8 / (rand*0.8 + 0.2)` ticks → 8..40 ticks
-	# = 0.4..2.0 s. Use 1.0 s midpoint.
-	smoke.lifetime = 1.0
-	smoke.one_shot = true
-	smoke.explosiveness = 0.0
-	smoke.position = world_pos
-	smoke.sub_emitter = NodePath("")  # clear leftover sub_emitter from pool reuse
-	smoke.visible = true
-	smoke.restart()
-	_schedule_return(parent, smoke)
+# hf.java:117-124. Each drowning-damage pulse emits eight bubbles from a
+# triangular random cube around the living entity, inheriting its motion.
+static func spawn_drowning_bubbles(
+	parent: Node,
+	entity_position: Vector3,
+	source_motion_per_tick: Vector3,
+	viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	var particles: Array[Sprite3D] = []
+	for _i in range(8):
+		var origin := (
+			entity_position
+			+ Vector3(
+				randf() - randf(),
+				randf() - randf(),
+				randf() - randf(),
+			)
+		)
+		particles.append_array(
+			spawn_water_bubble(parent, origin, source_motion_per_tick, 1, viewer_position)
+		)
+	return particles
+
+
+# dp.java:184-203. A moving boat creates one wake batch per Alpha tick once
+# horizontal motion exceeds 0.15 blocks/tick. Half of the droplets are cast
+# along either side of the hull; the other half trail one block behind it.
+static func spawn_boat_wake(
+	parent: Node,
+	entity_position: Vector3,
+	yaw_radians: float,
+	source_motion_per_tick: Vector3,
+	viewer_position: Variant = null
+) -> Array[Sprite3D]:
+	var particles: Array[Sprite3D] = []
+	var horizontal_speed := Vector2(source_motion_per_tick.x, source_motion_per_tick.z).length()
+	if horizontal_speed <= 0.15:
+		return particles
+	var forward := Vector2(-sin(yaw_radians), -cos(yaw_radians))
+	var count: int = ceili(1.0 + horizontal_speed * 60.0)
+	for _i in range(count):
+		var longitudinal: float = randf() * 2.0 - 1.0
+		var side: float = float(randi() % 2 * 2 - 1) * 0.7
+		var origin: Vector3
+		if randi() % 2 == 0:
+			origin = Vector3(
+				entity_position.x - forward.x * longitudinal * 0.8 + forward.y * side,
+				entity_position.y - 0.125,
+				entity_position.z - forward.y * longitudinal * 0.8 - forward.x * side,
+			)
+		else:
+			origin = Vector3(
+				entity_position.x + forward.x + forward.y * longitudinal * 0.7,
+				entity_position.y - 0.125,
+				entity_position.z + forward.y - forward.x * longitudinal * 0.7,
+			)
+		particles.append_array(
+			spawn_water_splash(parent, origin, source_motion_per_tick, 1, viewer_position)
+		)
+	return particles
+
+
+static func _spawn_water_particles(
+	parent: Node,
+	kind: int,
+	world_pos: Vector3,
+	source_motion_per_tick: Vector3,
+	count: int,
+	viewer_position: Variant
+) -> Array[Sprite3D]:
+	var particles: Array[Sprite3D] = []
+	if parent == null or not is_instance_valid(parent) or count <= 0:
+		return particles
+	if not _named_particle_visible(parent, world_pos, viewer_position):
+		return particles
+	for _i in range(count):
+		var particle: Sprite3D = _ALPHA_WATER_PARTICLE.new() as Sprite3D
+		parent.add_child(particle)
+		particle.call("configure", kind, world_pos, source_motion_per_tick)
+		particles.append(particle)
+	return particles
+
+
+# f.java:963-970 rejects all named particles outside a 16-block sphere.
+# Tests and detached preview worlds have no player, so absence of a viewer
+# means "render"; production always resolves Main/Player here.
+static func _named_particle_visible(
+	parent: Node, world_pos: Vector3, viewer_position: Variant
+) -> bool:
+	var viewer: Variant = viewer_position
+	if viewer == null and parent.get_tree() != null:
+		var player := parent.get_tree().root.get_node_or_null("Main/Player") as Node3D
+		if player != null:
+			viewer = player.global_position
+	if viewer == null:
+		return true
+	return (
+		(viewer as Vector3).distance_squared_to(world_pos) <= _PARTICLE_VISIBILITY_DISTANCE_SQUARED
+	)
+
+
+static func lava_particle_origin(cell_pos: Vector3i) -> Vector3:
+	# ld.java:193-197 chooses any X/Z point across the full exposed lava
+	# surface. Y is the block's full-height upper bound, exactly cell.y + 1.
+	return Vector3(cell_pos) + Vector3(randf(), 1.0, randf())
+
+
+# One Alpha EntityLavaFX at a random point on the selected lava cell. The
+# particle itself owns the 20 Hz arc, exact sprite, lifetime, shrink, and
+# age-weighted smoke trail; none of those can be represented faithfully by
+# the shared GPU burst pool.
+static func spawn_lava_spark(
+	parent: Node, cell_pos: Vector3i, viewer_position: Vector3
+) -> Sprite3D:
+	if parent == null or not is_instance_valid(parent):
+		return null
+	var origin: Vector3 = lava_particle_origin(cell_pos)
+	# f.java:963-970 rejects a requested particle outside the 16-block sphere.
+	if viewer_position.distance_squared_to(origin) > 16.0 * 16.0:
+		return null
+	var spark: Sprite3D = _ALPHA_LAVA_PARTICLE.new() as Sprite3D
+	parent.add_child(spark)
+	spark.call("configure", origin, viewer_position)
+	return spark
 
 
 # Fire smoke — vanilla qh.java:189-236 BlockFire.randomDisplayTick's
@@ -633,94 +509,33 @@ static func spawn_fire_smoke(parent: Node, pos: Vector3i) -> void:
 	spawn_smoke(parent, Vector3(pos) + Vector3(0.5, 0.5, 0.5))
 
 
-# Vanilla EntityFlameFX (ko.java:23) samples particles.png tile 48 — an
-# 8×8 sprite at pixel (0, 24, 8, 8) on the 128×128 atlas, NOT a solid
-# block. The sprite has a soft yellow-orange flame shape with translucent
-# edges. Solid-yellow billboards read as "yellow boxes" — wrong look.
-static func get_torch_flame_material() -> StandardMaterial3D:
-	if _torch_flame_material != null:
-		return _torch_flame_material
-	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = sheet
-	# Crop UVs to the 8×8 flame tile at (0, 24) on the 128×128 sheet.
-	# uv_scale = 8/128 = 0.0625; uv_offset.y = 24/128 = 0.1875.
-	mat.uv1_scale = Vector3(8.0 / 128.0, 8.0 / 128.0, 1.0)
-	mat.uv1_offset = Vector3(0.0, 24.0 / 128.0, 0.0)
-	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	_torch_flame_material = mat
-	return mat
-
-
-# Torch tip particle — vanilla `bk.b` (BlockTorch.randomDisplayTick)
-# spawns ONE smoke + ONE flame at the torch tip per random-tick roll.
-# We emit just the flame for now: the smoke half wants vanilla's
-# `EntitySmokeFX` (pi.java, ~0.1 m, single 8×8 tile) but our existing
-# pool is wired for `largesmoke` (4× larger) which reads as a small
-# cloud over a torch. Adding a dedicated small-smoke pool is a follow-up.
-#
-# Sizing: vanilla `ko.java` (EntityFlameFX) renders sprite tile 48 at
-# parent default `g ≈ 0.1 × (rand·0.5 + 0.5)` → 0.05-0.15 m visible quad.
-# We render at 0.10 m flat — the tile is solid yellow (no alpha gradient)
-# so we don't need vanilla's parabolic shrink to read the same.
-#
-# Position: floor torches centered; wall torches (meta 1-4) lean toward
-# the supporting wall by 0.27 cells (vanilla bk.b `d4 = 0.27`).
-static func spawn_torch_particles(parent: Node, cell_pos: Vector3i, meta: int) -> void:
-	# Floor: particle at (cx+0.5, cy+0.7, cz+0.5) — just below box top.
-	# Wall: the rotation pipeline places the flame tip at cy+0.95 and
-	# ~0.064 blocks away from the wall in the lean direction. Offsets
-	# derived from tracing the vanilla bk.java rotation pipeline
-	# (Z+1/16, rotX-40°, Y-3/8, rotX+90°, rotY per-meta) through
-	# the top-face center vertex.
-	var tip := Vector3(cell_pos) + Vector3(0.5, 0.85, 0.5)
+# Exact position from ob.java:140-162 (BlockTorch.randomDisplayTick).
+# Keeping this pure makes the five metadata cases straightforward to test.
+static func torch_particle_origin(cell_pos: Vector3i, meta: int) -> Vector3:
+	var origin := Vector3(cell_pos) + Vector3(0.5, 0.7, 0.5)
 	match meta:
 		1:
-			tip.y += 0.18
+			origin += Vector3(-_TORCH_WALL_OFFSET, _TORCH_WALL_RISE, 0.0)
 		2:
-			tip.y += 0.18
+			origin += Vector3(_TORCH_WALL_OFFSET, _TORCH_WALL_RISE, 0.0)
 		3:
-			tip.y += 0.18
+			origin += Vector3(0.0, _TORCH_WALL_RISE, -_TORCH_WALL_OFFSET)
 		4:
-			tip.y += 0.18
-	# --- Flame particle (vanilla ko.java / EntityFlameFX) ---
-	# Spawns at exact tip position with zero velocity. Vanilla's ±0.05
-	# position jitter in the constructor is dead code (modifies locals
-	# after super() already set position). Quad size: vanilla base
-	# pp.g ∈ [1.0, 2.0], rendered at 0.1*g per half → full [0.2, 0.4].
-	var flame := _acquire(parent, 1, Vector3.ZERO)
-	var fproc := ParticleProcessMaterial.new()
-	fproc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINT
-	fproc.direction = Vector3.ZERO
-	fproc.spread = 0.0
-	fproc.initial_velocity_min = 0.0
-	fproc.initial_velocity_max = 0.0
-	fproc.gravity = Vector3.ZERO
-	fproc.scale_min = 0.8
-	fproc.scale_max = 1.0
-	fproc.particle_flag_align_y = false
-	fproc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	# Vanilla parabolic shrink: g = a * (1 - f8² * 0.5)
-	var sc := Curve.new()
-	for i in range(7):
-		var f8: float = float(i) / 6.0
-		sc.add_point(Vector2(f8, 1.0 - f8 * f8 * 0.5))
-	var sct := CurveTexture.new()
-	sct.curve = sc
-	fproc.scale_curve = sct
-	var fdraw := QuadMesh.new()
-	fdraw.size = Vector2(0.28, 0.28)
-	fdraw.material = get_torch_flame_material()
-	flame.draw_pass_1 = fdraw
-	flame.lifetime = 1.0
-	flame.one_shot = false
-	flame.position = tip
-	flame.visible = true
-	flame.emitting = true
-	flame.process_material = fproc
-	flame.restart()
-	_schedule_return(parent, flame)
-	# TODO: torch smoke particles — removed for now, needs proper tuning.
+			origin += Vector3(0.0, _TORCH_WALL_RISE, _TORCH_WALL_OFFSET)
+	return origin
+
+
+# ob.java emits one ordinary smoke particle followed by one flame at the
+# same point. Dedicated Sprite3D particles avoid mutating the shared fluid
+# GPUParticles pool and reproduce Alpha's tick-stepped size/frame changes.
+static func spawn_torch_particles(parent: Node, cell_pos: Vector3i, meta: int) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
+	var origin: Vector3 = torch_particle_origin(cell_pos, meta)
+	var brightness: float = EntityLighting.sample_brightness(parent, cell_pos)
+	var smoke: Sprite3D = _ALPHA_TORCH_PARTICLE.new() as Sprite3D
+	var flame: Sprite3D = _ALPHA_TORCH_PARTICLE.new() as Sprite3D
+	parent.add_child(smoke)
+	parent.add_child(flame)
+	smoke.call("configure", 1, origin, brightness)
+	flame.call("configure", 0, origin, brightness)

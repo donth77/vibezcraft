@@ -250,6 +250,14 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# `dx.aK(0).a(229)` → (229 % 16, 229 / 16). Extracted into the
 	# alpha_vanilla pack alongside the slime mob + slime block.
 	Items.SLIMEBALL: "slimeball",
+	# Glowstone dust — vanilla dx.java:101 `dx(92).a(73)`, so items.png
+	# tile (73 % 16, 73 / 16) = (9, 4). Extracted into the alpha_vanilla
+	# pack by the Nether pass; _load_item_sprite falls back to
+	# assets/textures/items/ for packs that don't ship it.
+	Items.GLOWSTONE_DUST: "glowstone_dust",
+	# Beta 1.3 ItemReed registration `.setIconCoord(6, 5)` — the
+	# dedicated repeater item sprite, distinct from either world-state ID.
+	Items.REDSTONE_REPEATER: "redstone_repeater",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.
@@ -396,7 +404,7 @@ static func icon_for(item_id: int) -> Texture2D:
 	var block_tile: String = ""
 	if _BLOCK_ICON_NAMES.has(item_id):
 		block_tile = _BLOCK_ICON_NAMES[item_id]
-	elif item_id > Blocks.AIR and item_id < 100:
+	elif Blocks.has_item_form(item_id):
 		block_tile = Blocks.get_face_texture(item_id, "side")
 	if block_tile != "":
 		var tile: String = block_tile
@@ -612,6 +620,8 @@ static func _get_player() -> Node3D:
 # correctly points toward spawn instead of 180° away (which led to
 # players following the compass into the wrong territory).
 static func _compass_target_angle() -> float:
+	if DimensionContext.active_provider().instruments_wander:
+		return _wander_angle()
 	var player: Node3D = _get_player()
 	if player == null:
 		return 0.0
@@ -628,7 +638,17 @@ static func _compass_target_angle() -> float:
 # Without this, the dial reads about 6 hours behind reality (e.g.
 # shows midnight when the world clock is at sunrise).
 static func _clock_target_angle() -> float:
+	if DimensionContext.active_provider().instruments_wander:
+		return _wander_angle()
 	return -(WorldTime.phase() - 0.25) * TAU
+
+
+# ae.java:68 / gp.java:41 — `Math.random() * 3.1415927410125732 * 2.0`.
+# A fresh random target per update, not a seeded one, which is why two
+# compasses in the same Nether disagree. The existing damped approach in
+# the renderers turns this into the familiar spin rather than a snap.
+static func _wander_angle() -> float:
+	return randf() * TAU
 
 
 # Ensure base sprites are loaded into Image buffers. The set_pixelv calls

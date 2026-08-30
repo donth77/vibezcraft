@@ -6,11 +6,7 @@ extends "res://scripts/entities/mob_base.gd"
 # day), 0-2 string drops, melee with the vanilla pounce.
 #
 # Differences vs vanilla Alpha:
-#   * Beta 1.5 wall-climb deliberately added (explicit carve-in on the
-#     Alpha baseline — be.java has no climb; it arrived in Beta 1.5 via
-#     EntitySpider.isOnLadder = isCollidedHorizontally and the ladder
-#     branch of EntityLiving.moveEntityWithHeading). See _CLIMB_SPEED.
-#   * No daylight burn (zombies have it via lk.java::B; vanilla spider
+#   * No daylight burn (zombies have it via nt.java::k; vanilla spider
 #     stays neutral in light but doesn't ignite — matches our impl).
 #   * Pounce kick strength halved from vanilla's per-tick × 20 scaling
 #     because vanilla's 8 m/s vertical sends the spider out of frame.
@@ -88,7 +84,9 @@ const _LEG_Z_FRONT: float = -0.0625
 # 1-wide doorways).
 const _BB_HEIGHT: float = 0.9
 const _BB_WIDTH: float = 1.4  # vanilla AABB X-Z extent
-const _EYE_HEIGHT: float = 0.175  # vanilla j() = aQ * 0.75 - 0.5
+# LOS uses EntityLiving.v() = height * 0.85. be.java::j() = 0.175 is
+# the mounted/riding Y offset, not the eye position.
+const _EYE_HEIGHT: float = _BB_HEIGHT * 0.85
 
 # AI cadence — 20 Hz tick rate matches vanilla integer-tick math.
 const _AI_TICK_DT: float = 1.0 / 20.0
@@ -97,14 +95,10 @@ const _AI_TICK_DT: float = 1.0 / 20.0
 # nearest player within 16 m IF `World.getBrightness(pos) < 0.5` (= night
 # or dark cell). Otherwise no target.
 const _AI_DETECT_RADIUS: float = 16.0
-const _AI_ABANDON_RADIUS: float = 40.0
-# Brightness threshold for hostile gate. Vanilla compares `f2 < 0.5f`
-# (the world's getBrightness output). For us the closest analogue is
-# the cell-light LUT at the entity's position; a sky_light < 8 gives
-# brightness ≈ 0.45 in the standard LUT — close enough to vanilla's
-# 0.5 cutoff. Block-light (torches) also counts: brightness is the max
-# of sky × time-of-day and block_light.
-const _AI_BRIGHTNESS_THRESHOLD: int = 8
+# Vanilla compares World.getBrightness against 0.5. Its oz.java LUT is
+# 0.437 at effective light 11 and 0.525 at 12, so 12 is the first bright
+# level. Block light and time-adjusted sky light both feed this value.
+const _AI_BRIGHTNESS_THRESHOLD: int = 12
 
 # Daytime "abandon target" roll — vanilla `be.java::a` lines 41-43:
 # `if (f3 > 0.5f && this.bd.nextInt(100) == 0) { this.g = null; return; }`.
@@ -112,13 +106,6 @@ const _AI_BRIGHTNESS_THRESHOLD: int = 8
 # spider is currently in lit space, even if it had previously acquired
 # a target while dark. The AI tick fires at 20 Hz so this is 1 %/tick.
 const _AI_DAYTIME_ABANDON_CHANCE: float = 0.01
-
-# Revenge duration — when shot/hit by the player, spider chases for
-# this many seconds regardless of light level. Vanilla
-# `hf.java::a(lw, int)` sets `this.g = this.aH` (target = attacker)
-# and the chase persists until next damage cooldown or 100 ticks
-# elapse, whichever sets a new target.
-const _AI_REVENGE_DURATION_SEC: float = 5.0
 
 # Pounce — vanilla `be.java::a` lines 45-52: if (distSq in 2..6) AND
 # `bd.nextInt(10) == 0` AND on ground → motX/Z toward target × 0.5 ×
@@ -158,35 +145,19 @@ const _AI_YAW_TWITCH_RANGE: float = PI / 18.0
 
 # Melee. Vanilla EntityMob default attackStrength = 2 HP (vanilla
 # difficulty.Easy is 2, Normal also 2 in Alpha — set in EntityMob.aS).
-const _AI_MELEE_RANGE: float = 1.5
+const _AI_MELEE_RANGE: float = 2.5
 const _AI_MELEE_DAMAGE: int = 2
-const _AI_MELEE_COOLDOWN_SEC: float = 0.5
+const _AI_MELEE_COOLDOWN_SEC: float = 1.0
 
-# Walk speed. Vanilla `am = 0.8f` per tick is much higher than zombie's
-# `am = 0.23f` — spider is ~3.5× faster in vanilla. With zombie at our
-# 1.0 m/s, vanilla-faithful spider speed is ~3.5 m/s. That's intentionally
-# aggressive; vanilla spider is faster than a walking player.
-const _AI_WALK_SPEED: float = 3.5
+# Walk speed preserves Alpha's relative movement fields: be.am = 0.8
+# versus nt.am = 0.5, so a spider is 1.6x the clone's 1.0 m/s zombie.
+const _AI_WALK_SPEED: float = 1.6
 const _AI_JUMP_VELOCITY: float = 6.0
 const _AI_STEP_BOOST_SPEED: float = 2.5
 const _AI_MAX_YAW_STEP: float = PI / 4.0
 const _AI_PATHFIND_RADIUS: float = 24.0
 const _AI_PATHFIND_MAX_ITERS: int = 300
 const _AI_ARRIVE_DIST: float = 0.7
-
-# Beta 1.5 wall-climb (mc-dev): EntitySpider.isOnLadder() returns the
-# horizontal-collision flag, and EntityLiving.moveEntityWithHeading
-# writes motY = 0.2/tick (= 4 m/s) AFTER the move whenever both hold —
-# so the climb velocity feeds the NEXT tick's move. fallDistance resets
-# while "on the ladder": a failed climb banks no fall damage. The
-# -0.15/tick descent cap is omitted — for spiders the climb write fires
-# under exactly the same flag, so the cap is unreachable in practice.
-const _CLIMB_SPEED: float = 4.0
-# Physics runs at 60 Hz but the AI re-applies the wall push at 20 Hz,
-# and the voxel collider zeroes the clipped horizontal velocity every
-# frame — the collision flag only latches on frames right after an AI
-# push. Hold the climb for ~2 AI ticks to bridge the gap.
-const _CLIMB_HOLD_FRAMES: int = 6
 
 # Walk-anim params — leg pairs sway around their pivot in opposing
 # phase pairs. Driven by walk distance; amplitude scales with speed.
@@ -222,14 +193,6 @@ var _ai_repath_counter: int = 0
 var _ai_path_failed: bool = false
 var _ai_melee_cooldown_sec: float = 0.0
 var _ai_player_cache: Node3D = null
-# Revenge timer — vanilla `hf.java::a(lw,int)` sets `this.g = this.aH`
-# (target = attacker) on damage, overriding the normal target gate.
-# Spider goes hostile FOR THIS DURATION regardless of light level. 5 s
-# matches vanilla EntityLiving's revenge persistence (~100 ticks).
-var _ai_revenge_remaining_sec: float = 0.0
-# Phys frames of climb remaining since the last horizontal collision.
-var _climb_hold_frames: int = 0
-
 # --- Walk-anim state ---
 var _walk_dist: float = 0.0
 var _walk_anim_amount: float = 0.0
@@ -249,9 +212,8 @@ func _get_body_width() -> float:
 
 
 func _ready() -> void:
-	# Vanilla EntitySpider has 16 HP (be.java inherits EntityMob's
-	# default after `aT = 16` override) — lower than zombie's 20.
-	max_health = 16
+	# be.java has no health override; ef.<init> sets J = 20.
+	max_health = 20
 	# Vanilla Alpha 1.2.6 be.java::g_() returns ITEM_STRING (id 31 vanilla;
 	# Items.STRING in ours). 0-2 per kill, same range zombie uses.
 	drop_item_id = Items.STRING
@@ -402,16 +364,6 @@ func _physics_process(delta: float) -> void:
 	super._physics_process(delta)
 	if _dying or _physics_gated:
 		return
-	# Beta wall-climb — applied AFTER the move, mirroring vanilla's
-	# ordering (this tick's collision flag drives next tick's motY).
-	if _was_collided_horizontally:
-		_climb_hold_frames = _CLIMB_HOLD_FRAMES
-	if _climb_hold_frames > 0:
-		_climb_hold_frames -= 1
-		velocity.y = _CLIMB_SPEED
-		# Vanilla zeroes fallDistance while on the "ladder" — re-base
-		# the fall tracker so a failed climb banks no fall damage.
-		_fall_peak_y = global_position.y
 	# LOD-scaled tick rate — same pattern as skeleton/creeper/zombie.
 	var tick_scale: float = 1.0
 	if _lod_tier == LOD_MID:
@@ -423,20 +375,14 @@ func _physics_process(delta: float) -> void:
 	while _ai_tick_accum >= effective_dt:
 		_ai_tick_accum -= effective_dt
 		_ai_tick()
-	# Melee cooldown ticks independently of the AI Hz so the cooldown
-	# expires precisely 0.5 s after the last hit landed.
+	# Melee cooldown ticks independently of the AI Hz so the 20-tick
+	# Alpha attack timer expires precisely 1.0 s after a landed hit.
 	if _ai_melee_cooldown_sec > 0.0:
 		_ai_melee_cooldown_sec = maxf(0.0, _ai_melee_cooldown_sec - delta)
-	# Revenge persists for _AI_REVENGE_DURATION_SEC after a hit.
-	if _ai_revenge_remaining_sec > 0.0:
-		_ai_revenge_remaining_sec = maxf(0.0, _ai_revenge_remaining_sec - delta)
 
 
-# Vanilla `hf.java::a(EntityLiving attacker, int damage)` — on damage,
-# set the attacker as the target and refresh the chase even in light.
-# Players are the only damage source against mobs in our impl, so the
-# revenge timer always retargets the player (no need for an explicit
-# attacker reference).
+# Vanilla `ef.a(attacker, damage)` assigns the actual attacker directly
+# as fc.g, bypassing darkness and the 16-block acquisition search.
 func take_damage(
 	amount: int,
 	knockback_dir: Vector3 = Vector3.ZERO,
@@ -445,9 +391,8 @@ func take_damage(
 ) -> bool:
 	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
 	if landed:
-		_ai_revenge_remaining_sec = _AI_REVENGE_DURATION_SEC
-		# Force re-acquisition next AI tick — drop any stale path so
-		# the spider repaths toward the player on the next tick.
+		if attacker is Node3D:
+			_ai_player_cache = attacker as Node3D
 		_ai_path.clear()
 		_ai_repath_counter = _AI_REPATH_TICKS  # trigger immediate repath
 	return landed
@@ -479,41 +424,47 @@ func _ai_tick() -> void:
 		_play_idle_sfx()
 	_ai_repath_counter += 1
 	var bright: bool = _is_brightly_lit()
-	var revenge_active: bool = _ai_revenge_remaining_sec > 0.0
-	# Daytime abandon — vanilla `be.java::a` lines 41-43. Suspended
-	# during revenge so a player who hits the spider in daylight can't
-	# kite + abandon-roll their way out.
-	if bright and not revenge_active and not _ai_path.is_empty() and _ai_player_cache != null:
-		if randf() < _AI_DAYTIME_ABANDON_CHANCE:
-			_ai_path.clear()
-			_ai_player_cache = null
-	# Acquire / re-acquire target. Vanilla c_() returns null in bright
-	# cells, but `hf.java::a` (revenge on damage) overrides that — once
-	# hit, the spider targets the attacker regardless of light. Caching
-	# logic: target ALWAYS resolves to the player while revenge is
-	# active; otherwise only resolves in darkness (or if we already had
-	# a cached target from an earlier dark moment).
-	var player: Node3D = _find_player() if (not bright or revenge_active) else _ai_player_cache
-	var has_chase_target: bool = false
+	# c_() only acquires a new player in darkness. A cached target may
+	# have been acquired earlier or assigned directly by incoming damage.
+	var player: Node3D = _ai_player_cache
+	if not is_instance_valid(player):
+		_ai_player_cache = null
+		player = null if bright else _find_player()
+	# be.a() performs its 1/100 bright abandon roll whenever the shared
+	# EntityCreature attack hook runs, which itself requires line of sight.
+	var visibility_known: bool = false
+	var target_visible: bool = false
+	if player != null and bright:
+		target_visible = has_line_of_sight(player)
+		visibility_known = true
+	if target_visible and randf() < _AI_DAYTIME_ABANDON_CHANCE:
+		_ai_path.clear()
+		_ai_player_cache = null
+		_tick_idle()
+		return
+	# EntityCreature retains a living target regardless of distance. Its
+	# separate despawn rules bound lifetime; there is no 40-block aggro leash.
 	if player != null:
-		var dist_sq: float = global_position.distance_squared_to(player.global_position)
-		if dist_sq <= _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-			has_chase_target = true
-		else:
-			_ai_path.clear()
-			_ai_player_cache = null
-	if has_chase_target:
-		_tick_chase(player)
+		_tick_chase(player, visibility_known, target_visible)
 		return
 	# No target — wander. Vanilla `fc.b_()` inherited from EntityCreature.
 	_tick_idle()
 
 
 # Chase tick — runs only when we have a valid in-range target.
-func _tick_chase(player: Node3D) -> void:
+func _tick_chase(
+	player: Node3D, visibility_known: bool = false, target_visible: bool = false
+) -> void:
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
+	# Spider's c_() may acquire through a wall, but EntityCreature only calls
+	# the species attack hook when canEntityBeSeen(target) is true. It can keep
+	# pathing toward an obscured target; it cannot bite or pounce through cover.
+	# Neither hook can run at six blocks or farther, so darkness-mode pursuit
+	# skips LOS entirely there. Bright-mode abandon already supplied one result.
+	if not visibility_known and dist_sq < _AI_POUNCE_RANGE_MAX * _AI_POUNCE_RANGE_MAX:
+		target_visible = has_line_of_sight(player)
 	# In melee range — face target, brake horizontal velocity, attack.
-	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
+	if target_visible and dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -522,10 +473,10 @@ func _tick_chase(player: Node3D) -> void:
 	# Pounce — vanilla `be.java::a` lines 45-52. 10 % per 20 Hz tick
 	# when 2 m < dist < 6 m AND on ground. Vanilla onGround check skips
 	# the pounce roll mid-air; we mirror via mob_is_on_floor().
-	var dist: float = sqrt(dist_sq)
 	if (
-		dist > _AI_POUNCE_RANGE_MIN
-		and dist < _AI_POUNCE_RANGE_MAX
+		target_visible
+		and dist_sq > _AI_POUNCE_RANGE_MIN * _AI_POUNCE_RANGE_MIN
+		and dist_sq < _AI_POUNCE_RANGE_MAX * _AI_POUNCE_RANGE_MAX
 		and mob_is_on_floor()
 		and randf() < _AI_POUNCE_CHANCE
 	):
@@ -543,11 +494,8 @@ func _tick_chase(player: Node3D) -> void:
 	if not _ai_path.is_empty():
 		_tick_walk_path()
 	else:
-		# No walkable route — the target is elevated or walled off (the
-		# voxel A* only expands ground cells, so a player on a pillar
-		# yields an empty path). Beta mobs crowd toward the target
-		# anyway; pressing into the obstruction is also what latches
-		# the horizontal-collision flag that arms the wall-climb.
+		# No walkable route — keep pressing toward the retained target
+		# instead of freezing at the last path node.
 		_press_toward(player)
 
 
@@ -606,35 +554,56 @@ func _pick_wander_target() -> bool:
 	return not _ai_path.is_empty()
 
 
-# Locate the player node under Main. Cached after first hit since the
-# Player scene is long-lived.
+# Spider overrides EntityMonster's normal sight-gated lookup: be.c_() only
+# checks darkness and nearest-player distance. The cache is this spider's
+# own active target; nearby pack-mates do not share or propagate it.
+# Damage retaliation does not call this helper; it assigns the attacker
+# directly, even when the hit came from beyond 16 blocks.
 func _find_player() -> Node3D:
 	if _ai_player_cache != null and is_instance_valid(_ai_player_cache):
 		return _ai_player_cache
 	var main: Node = get_tree().root.get_node_or_null("Main")
 	if main == null:
 		return null
-	_ai_player_cache = main.find_child("Player", true, false) as Node3D
-	return _ai_player_cache
+	var candidate: Node3D = main.find_child("Player", true, false) as Node3D
+	if candidate == null:
+		return null
+	if (
+		global_position.distance_squared_to(candidate.global_position)
+		>= _AI_DETECT_RADIUS * _AI_DETECT_RADIUS
+	):
+		return null
+	_ai_player_cache = candidate
+	return candidate
 
 
-# Sample the shared effective cell light at the spider's eye position.
-# The threshold remains the existing gameplay tuning, but the value now
-# agrees with terrain, spawning, and every other time-of-day consumer.
+# Entity.getBrightness samples 66% of the way up its AABB (`lw.a(float)`),
+# independently of both its LOS eye height and its riding offset.
 func _is_brightly_lit() -> bool:
 	if _chunk_manager == null:
 		return false  # treat as dark when CM not available (test envs)
-	var eye_cell := Vector3i(
+	var brightness_cell := Vector3i(
 		int(floor(global_position.x)),
-		int(floor(global_position.y + _EYE_HEIGHT)),
+		int(floor(global_position.y + _BB_HEIGHT * 0.66)),
 		int(floor(global_position.z))
 	)
-	var effective: int = _chunk_manager.get_world_effective_light(eye_cell)
+	var effective: int = _chunk_manager.get_world_effective_light(brightness_cell)
 	return effective >= _AI_BRIGHTNESS_THRESHOLD
 
 
 func _repath_toward(player: Node3D) -> void:
 	if _chunk_manager == null:
+		return
+	# Keep retained MID/FAR targets cheap; full A* resumes in NEAR.
+	if _lod_tier != LOD_NEAR:
+		_ai_path = [
+			Vector3i(
+				int(floor(player.global_position.x)),
+				int(floor(player.global_position.y)),
+				int(floor(player.global_position.z))
+			)
+		]
+		_ai_path_failed = false
 		return
 	var origin: Vector3i = Vector3i(
 		int(floor(global_position.x)), int(floor(global_position.y)), int(floor(global_position.z))
@@ -692,18 +661,16 @@ func _pounce(player: Node3D) -> void:
 
 
 func _attack_player(player: Node3D) -> void:
-	if not player.has_method("take_damage"):
-		return
 	# Vanilla EntityMob.l calls EntityHuman.attackEntityFrom(this, attackDamage).
-	# Player.take_damage(amount, source, knockback_dir) — "mob" matches
-	# Player.DAMAGE_MOB; the direction knocks the player back on the hit.
-	player.call("take_damage", _AI_MELEE_DAMAGE, "mob", player.global_position - global_position)
+	# The shared bridge also preserves actual-attacker retaliation if a
+	# skeleton's stray arrow makes this spider fight another mob.
+	_deal_melee_damage(player, _AI_MELEE_DAMAGE)
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
 
 
 # Direct horizontal drive toward the target — the no-path fallback.
-# Produces the sustained wall push that keeps the climb latched while
-# the spider scales the face under an elevated target.
+# Keeps the spider moving toward an obstructed retained target without
+# granting the Beta wall-climb behavior absent from be.java.
 func _press_toward(target: Node3D) -> void:
 	var to_target: Vector3 = target.global_position - global_position
 	to_target.y = 0.0

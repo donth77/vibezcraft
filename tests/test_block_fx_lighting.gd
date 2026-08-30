@@ -42,6 +42,10 @@ func test_particle_light_does_not_mutate_shared_block_material() -> void:
 	autofree(bright_particles)
 	var material: StandardMaterial3D = BlockFx.get_material(Blocks.STONE)
 	var base_color: Color = material.albedo_color
+	assert_true(
+		material.vertex_color_use_as_albedo,
+		"particle material must consume the emitter's voxel-light color"
+	)
 
 	manager.effective_light = 0
 	BlockFx._apply_voxel_light(dark_particles, manager, Vector3i.ZERO)

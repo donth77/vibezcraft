@@ -11,7 +11,17 @@ class_name EntityLighting
 
 # Entity and terrain consumers share Alpha's brightness floor so an entity
 # cannot glow against a level-0 cave wall.
-const _FLOOR: float = 0.05
+# Mirrors the terrain shader's `ambient_floor` uniform. Entities and the
+# blocks under them have to agree on the curve or a mob reads as lit
+# differently from the floor it stands on; in the Nether the terrain got
+# 0.1 while mobs were stuck on the Overworld's 0.05, so a ghast crossing
+# from lava-light into shadow swung twice as far as vanilla's does.
+static var _floor: float = 0.05
+
+
+# Pushed by day_night_driver alongside the shader uniform.
+static func set_ambient_floor(value: float) -> void:
+	_floor = clampf(value, 0.0, 1.0)
 
 
 # Vanilla LUT formula. Returns 0.05..1.0 — matches the LUT baked into
@@ -19,7 +29,7 @@ const _FLOOR: float = 0.05
 static func brightness_for_level(level: int) -> float:
 	var l: float = clampf(float(level), 0.0, 15.0)
 	var f3: float = 1.0 - l / 15.0
-	return (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - _FLOOR) + _FLOOR
+	return (1.0 - f3) / (f3 * 3.0 + 1.0) * (1.0 - _floor) + _floor
 
 
 # Sample the effective light at a world cell, accounting for day-night.

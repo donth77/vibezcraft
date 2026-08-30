@@ -26,6 +26,7 @@ constexpr double EPSILON = 0.0001;
 // horizontal motion to zero. Root cause of the "stuck chickens on flat
 // ground" bug. Must stay identical to voxel_collider.gd's _SKIN.
 constexpr double SKIN = 0.001;
+constexpr int SOUL_SAND = 98;
 
 inline int floor_div(int a, int b) {
 	// Matches GDScript int(floor(float(a) / float(b))) for b > 0.
@@ -44,12 +45,11 @@ inline double sign_of(double v) {
 	return 0.0;
 }
 
-inline bool cell_solid(
-		int x, int y, int z,
-		const ChunkEntry *chunks, int n_chunks,
-		const uint8_t *solid_lut) {
+inline int cell_id(
+			int x, int y, int z,
+			const ChunkEntry *chunks, int n_chunks) {
 	if (y < 0 || y >= SIZE_Y) {
-		return false;
+		return 0;
 	}
 	int cx = floor_div(x, SIZE_X);
 	int cz = floor_div(z, SIZE_Z);
@@ -61,13 +61,26 @@ inline bool cell_solid(
 		}
 	}
 	if (blocks == nullptr) {
-		return false; // unloaded / out-of-range chunk → AIR
+		return 0; // unloaded / out-of-range chunk → AIR
 	}
 	int local_x = x - cx * SIZE_X;
 	int local_z = z - cz * SIZE_Z;
 	int idx = y * SIZE_X * SIZE_Z + local_z * SIZE_X + local_x;
-	uint8_t id = blocks[idx];
-	return solid_lut[id] != 0;
+	return blocks[idx];
+}
+
+// Simple voxel collision height. Soul sand is visually a full cube but
+// `it.java::d` ends its entity box at y+7/8. Keep this byte-for-byte in sync
+// with VoxelCollider._cell_collision_height.
+inline double cell_collision_height(
+			int x, int y, int z,
+			const ChunkEntry *chunks, int n_chunks,
+			const uint8_t *solid_lut) {
+	const int id = cell_id(x, y, z, chunks, n_chunks);
+	if (solid_lut[id] == 0) {
+		return 0.0;
+	}
+	return id == SOUL_SAND ? 0.875 : 1.0;
 }
 
 // Walks the integer cells the AABB overlaps along the X axis and returns
@@ -92,9 +105,15 @@ double clip_x(
 	for (int cx = lo_x; cx <= hi_x; cx++) {
 		for (int cy = lo_y; cy <= hi_y; cy++) {
 			for (int cz = lo_z; cz <= hi_z; cz++) {
-				if (!cell_solid(cx, cy, cz, chunks, n_chunks, solid_lut)) {
-					continue;
-				}
+					const double block_height =
+							cell_collision_height(cx, cy, cz, chunks, n_chunks, solid_lut);
+					if (block_height <= 0.0) {
+						continue;
+					}
+					if (pos_y + half_y - SKIN <= (double)cy
+							|| pos_y - half_y + SKIN >= (double)cy + block_height) {
+						continue;
+					}
 				double face = (sign_motion > 0.0) ? (double)cx : (double)(cx + 1);
 				double allowed = (face - (pos_x + half_x * sign_motion)) * sign_motion;
 				allowed = std::fmax(0.0, allowed - EPSILON);
@@ -126,10 +145,13 @@ double clip_y(
 	for (int cy = lo_y; cy <= hi_y; cy++) {
 		for (int cx = lo_x; cx <= hi_x; cx++) {
 			for (int cz = lo_z; cz <= hi_z; cz++) {
-				if (!cell_solid(cx, cy, cz, chunks, n_chunks, solid_lut)) {
-					continue;
-				}
-				double face = (sign_motion > 0.0) ? (double)cy : (double)(cy + 1);
+					const double block_height =
+							cell_collision_height(cx, cy, cz, chunks, n_chunks, solid_lut);
+					if (block_height <= 0.0) {
+						continue;
+					}
+					double face =
+							(sign_motion > 0.0) ? (double)cy : (double)cy + block_height;
 				double allowed = (face - (pos_y + half_y * sign_motion)) * sign_motion;
 				allowed = std::fmax(0.0, allowed - EPSILON);
 				if (allowed * sign_motion < clipped * sign_motion) {
@@ -160,9 +182,15 @@ double clip_z(
 	for (int cz = lo_z; cz <= hi_z; cz++) {
 		for (int cx = lo_x; cx <= hi_x; cx++) {
 			for (int cy = lo_y; cy <= hi_y; cy++) {
-				if (!cell_solid(cx, cy, cz, chunks, n_chunks, solid_lut)) {
-					continue;
-				}
+					const double block_height =
+							cell_collision_height(cx, cy, cz, chunks, n_chunks, solid_lut);
+					if (block_height <= 0.0) {
+						continue;
+					}
+					if (pos_y + half_y - SKIN <= (double)cy
+							|| pos_y - half_y + SKIN >= (double)cy + block_height) {
+						continue;
+					}
 				double face = (sign_motion > 0.0) ? (double)cz : (double)(cz + 1);
 				double allowed = (face - (pos_z + half_z * sign_motion)) * sign_motion;
 				allowed = std::fmax(0.0, allowed - EPSILON);
@@ -184,10 +212,14 @@ bool is_on_floor_probe(
 	int hi_x = floord(pos_x + half_x);
 	int lo_z = floord(pos_z - half_z);
 	int hi_z = floord(pos_z + half_z);
-	int foot_y = floord(pos_y - half_y - 0.02);
+	const double feet = pos_y - half_y;
+	int foot_y = floord(feet - 0.02);
 	for (int cx = lo_x; cx <= hi_x; cx++) {
 		for (int cz = lo_z; cz <= hi_z; cz++) {
-			if (cell_solid(cx, foot_y, cz, chunks, n_chunks, solid_lut)) {
+			const double block_height =
+					cell_collision_height(cx, foot_y, cz, chunks, n_chunks, solid_lut);
+			if (block_height > 0.0
+					&& std::fabs(feet - ((double)foot_y + block_height)) <= 0.02) {
 				return true;
 			}
 		}

@@ -1,6 +1,8 @@
 class_name BlockFx
 extends RefCounted
 
+enum RedDustProfile { ALPHA_1_2_6, BETA_1_3 }
+
 # Vanilla Alpha block-break particles. Port of `bz.java:95-112` (RenderGlobal
 # destroyBlockParticles) + `ki.java` (EntityDiggingFX). Vanilla samples a
 # 4×4×4 = 64-particle grid across the cube's volume; each particle gets
@@ -16,8 +18,11 @@ extends RefCounted
 #   * CPU particle work for 24 quads is microseconds; well below the
 #     break frequency we'll ever sustain.
 #   * Identical visual output to GPU at this particle count.
-# (FluidFx still uses GPU because its smoke/spark systems run continuously
-# during fluid ticks, where per-particle CPU cost would matter.)
+# (FluidFx still uses GPU for its generic pooled effects. Source-sensitive
+# water, lava, torch, and reddust motes use individual Sprite3D entities.)
+
+const _ALPHA_REDDUST_PARTICLE: GDScript = preload("res://scripts/world/alpha_reddust_particle.gd")
+const _PARTICLE_VISIBILITY_DISTANCE_SQUARED: float = 16.0 * 16.0
 
 # Vanilla bz.java:101 hard-codes `n6 = 4` → 4×4×4 = 64 particles per break.
 const _PARTICLES_PER_BREAK: int = 64
@@ -39,12 +44,6 @@ const _POOL_SIZE: int = 4
 # 8 so the steady-state recycles cleanly without queue_free churn.
 const _MINING_POOL_SIZE: int = 8
 
-# Redstone-ore sparkle (Phase 8 B1b). One reddust mote per exposed face
-# per contact event — six emitters worst-case per touch, so the pool is
-# sized for two simultaneous full sparkles.
-const _REDDUST_LIFETIME_SEC: float = 0.55
-const _REDDUST_POOL_SIZE: int = 12
-
 # Per-block-id material cache. Key = block id, value = StandardMaterial3D
 # with the block's atlas region as albedo texture.
 static var _materials: Dictionary = {}
@@ -55,9 +54,6 @@ static var _pool: Array = []
 # at any given moment.
 static var _mining_pool: Array = []
 
-# Pool + shared material for the reddust sparkle.
-static var _reddust_pool: Array = []
-static var _reddust_material: StandardMaterial3D = null
 # Last parent we reused. Pool nodes stay parented under whichever node was
 # the first caller (typically ChunkManager, lives for the whole session).
 static var _pool_parent: Node = null
@@ -115,6 +111,10 @@ static func get_material(block_id: int) -> StandardMaterial3D:
 	var tile_tex := ImageTexture.create_from_image(tile_img)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	# CPUParticles3D.color arrives at the draw material as vertex COLOR.
+	# Consume it as albedo so the per-emitter voxel-light sample applied in
+	# _apply_voxel_light actually modulates the textured crumbs.
+	mat.vertex_color_use_as_albedo = true
 	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_texture = tile_tex
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -373,99 +373,72 @@ static func spawn_mining(
 	_schedule_return_mining(parent, particles)
 
 
-# Redstone-ore reddust mote (vanilla an.java i() → "reddust"). One call
-# emits ONE particle just outside `face_normal`'s face, jittered within
-# the face plane the way vanilla samples `x + rand` then snaps the
-# normal axis 1/16 outside the cube. Self-illuminated flat red — vanilla
-# reddust is fullbright (nk.java pins the sprite color, not the world
-# light), which is what makes ore sparkle readable in a dark cave.
-static func spawn_reddust(parent: Node, world_pos: Vector3i, face_normal: Vector3) -> void:
-	var particles: CPUParticles3D = _acquire_reddust(parent)
-	var face_abs: Vector3 = face_normal.abs()
-	# Span the face on the two non-normal axes (±0.35), zero on the
-	# normal axis; sit 1/16 + a hair outside the face plane.
-	particles.emission_box_extents = Vector3(0.35, 0.35, 0.35) - face_abs * 0.35
-	particles.position = Vector3(world_pos) + Vector3(0.5, 0.5, 0.5) + face_normal * 0.57
-	particles.visible = true
-	particles.restart()
-	_schedule_return_reddust(parent, particles)
+# Redstone-ore sparkle from an.java:65-90. The caller already proved the
+# face is exposed; sample all three axes in [0,1), then snap the face-normal
+# axis exactly 1/16 block outside the cube before constructing EntityReddustFX.
+static func spawn_reddust(
+	parent: Node, world_pos: Vector3i, face_normal: Vector3, viewer_position: Variant = null
+) -> Sprite3D:
+	var origin := Vector3(world_pos) + Vector3(randf(), randf(), randf())
+	if face_normal.x > 0.5:
+		origin.x = float(world_pos.x + 1) + 0.0625
+	elif face_normal.x < -0.5:
+		origin.x = float(world_pos.x) - 0.0625
+	elif face_normal.y > 0.5:
+		origin.y = float(world_pos.y + 1) + 0.0625
+	elif face_normal.y < -0.5:
+		origin.y = float(world_pos.y) - 0.0625
+	elif face_normal.z > 0.5:
+		origin.z = float(world_pos.z + 1) + 0.0625
+	elif face_normal.z < -0.5:
+		origin.z = float(world_pos.z) - 0.0625
+	return spawn_reddust_at(parent, origin, Vector3.ZERO, viewer_position)
 
 
-static func _acquire_reddust(parent: Node) -> CPUParticles3D:
-	if _pool_parent == null or not is_instance_valid(_pool_parent):
-		_pool_parent = parent
-	while not _reddust_pool.is_empty():
-		var raw: Variant = _reddust_pool.pop_back()
-		if is_instance_valid(raw):
-			return raw as CPUParticles3D
-	var fresh := _build_reddust_particles()
-	parent.add_child(fresh)
-	return fresh
+# One source `reddust` entity at a world-space point. Callers supply the
+# exact per-block jitter extents: torch/repeater use ±0.1 XYZ, powered wire
+# uses ±0.1 XZ with fixed Y, and ore has already sampled its face above.
+static func spawn_reddust_at(
+	parent: Node,
+	world_position: Vector3,
+	jitter_extents: Vector3 = Vector3.ZERO,
+	viewer_position: Variant = null,
+	color_profile: RedDustProfile = RedDustProfile.ALPHA_1_2_6
+) -> Sprite3D:
+	if parent == null or not is_instance_valid(parent):
+		return null
+	var origin := (
+		world_position
+		+ Vector3(
+			(randf() * 2.0 - 1.0) * jitter_extents.x,
+			(randf() * 2.0 - 1.0) * jitter_extents.y,
+			(randf() * 2.0 - 1.0) * jitter_extents.z,
+		)
+	)
+	if not _particle_visible(parent, origin, viewer_position):
+		return null
+	var particle: Sprite3D = _ALPHA_REDDUST_PARTICLE.new() as Sprite3D
+	parent.add_child(particle)
+	particle.call("configure", origin, color_profile)
+	return particle
 
 
-static func _schedule_return_reddust(parent: Node, particles: CPUParticles3D) -> void:
-	var tree: SceneTree = parent.get_tree()
-	if tree == null:
-		return
-	var cleanup := tree.create_timer(_REDDUST_LIFETIME_SEC + 0.2)
-	cleanup.timeout.connect(func() -> void: _return_reddust(particles))
-
-
-static func _return_reddust(particles: CPUParticles3D) -> void:
-	if not is_instance_valid(particles):
-		return
-	particles.emitting = false
-	particles.visible = false
-	if _reddust_pool.size() < _REDDUST_POOL_SIZE:
-		_reddust_pool.append(particles)
-	else:
-		particles.queue_free()
-
-
-static func _reddust_mat() -> StandardMaterial3D:
-	if _reddust_material == null:
-		var mat := StandardMaterial3D.new()
-		# Fullbright red dot — no texture, no world-light response.
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.albedo_color = Color(1.0, 0.15, 0.05)
-		mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
-		mat.vertex_color_use_as_albedo = true
-		_reddust_material = mat
-	return _reddust_material
-
-
-static func _build_reddust_particles() -> CPUParticles3D:
-	var particles := CPUParticles3D.new()
-	particles.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
-	particles.emission_box_extents = Vector3(0.35, 0, 0.35)
-	# Vanilla nk.java damps motion ×0.1 then floats — near-static mote
-	# with a whisper of drift, no gravity.
-	particles.direction = Vector3(0, 1, 0)
-	particles.spread = 180.0
-	particles.initial_velocity_min = 0.0
-	particles.initial_velocity_max = 0.08
-	particles.gravity = Vector3.ZERO
-	# Shrink over lifetime — reads as the vanilla fade-out.
-	particles.scale_amount_min = 0.5
-	particles.scale_amount_max = 0.8
-	particles.scale_amount_curve = _reddust_fade_curve()
-	var draw := QuadMesh.new()
-	draw.size = Vector2(0.12, 0.12)
-	draw.material = _reddust_mat()
-	particles.mesh = draw
-	particles.amount = 1
-	particles.lifetime = _REDDUST_LIFETIME_SEC
-	particles.one_shot = true
-	particles.explosiveness = 1.0
-	particles.emitting = false
-	return particles
-
-
-static func _reddust_fade_curve() -> Curve:
-	var curve := Curve.new()
-	curve.add_point(Vector2(0.0, 1.0))
-	curve.add_point(Vector2(1.0, 0.0))
-	return curve
+# f.java:963-970 rejects all named particles outside a 16-block sphere.
+# Detached test/preview worlds have no Player, so no viewer means render.
+static func _particle_visible(
+	parent: Node, world_position: Vector3, viewer_position: Variant
+) -> bool:
+	var viewer: Variant = viewer_position
+	if viewer == null and parent.get_tree() != null:
+		var player := parent.get_tree().root.get_node_or_null("Main/Player") as Node3D
+		if player != null:
+			viewer = player.global_position
+	if viewer == null:
+		return true
+	return (
+		(viewer as Vector3).distance_squared_to(world_position)
+		<= _PARTICLE_VISIBILITY_DISTANCE_SQUARED
+	)
 
 
 static func _acquire_mining(parent: Node) -> CPUParticles3D:
@@ -590,18 +563,35 @@ static func warm_pool(parent: Node) -> void:
 	# Defer until after all _readys (Player, Camera3D) so the active camera
 	# is set up. Without this, get_camera_3d returns null at boot and we'd
 	# spawn at origin where culling may skip the draw → no shader compile.
+	# Capture WEAK references, not the nodes. A deferred lambda that
+	# captures a Node directly errors at CALL time when that node has been
+	# freed in the meantime ("Lambda capture at index N was freed") — the
+	# is_instance_valid guard inside the body never gets the chance to
+	# run, because the failure happens while binding the captures. In the
+	# running game the ChunkManager outlives the frame; in tests it does
+	# not, and a suite that spins several managers up and down turns the
+	# warm-up into a wall of engine errors.
+	var parent_ref: WeakRef = weakref(parent)
+	var particles_ref: WeakRef = weakref(particles)
 	var warmer := func() -> void:
-		if not is_instance_valid(parent) or not is_instance_valid(particles):
+		var host: Node = parent_ref.get_ref() as Node
+		var emitter: CPUParticles3D = particles_ref.get_ref() as CPUParticles3D
+		if host == null or emitter == null:
 			return
-		var cam: Camera3D = parent.get_viewport().get_camera_3d()
+		var cam: Camera3D = host.get_viewport().get_camera_3d()
 		if cam != null:
-			particles.position = cam.global_position + (-cam.global_transform.basis.z) * 3.0
+			emitter.position = cam.global_position + (-cam.global_transform.basis.z) * 3.0
 		else:
-			particles.position = Vector3.ZERO
-		particles.visible = true
-		particles.restart()
-		var tree: SceneTree = parent.get_tree()
+			emitter.position = Vector3.ZERO
+		emitter.visible = true
+		emitter.restart()
+		var tree: SceneTree = host.get_tree()
 		if tree != null:
 			var cleanup := tree.create_timer(_LIFETIME_SEC + 0.2)
-			cleanup.timeout.connect(func() -> void: _return(particles))
+			cleanup.timeout.connect(
+				func() -> void:
+					var late: CPUParticles3D = particles_ref.get_ref() as CPUParticles3D
+					if late != null:
+						_return(late)
+			)
 	warmer.call_deferred()

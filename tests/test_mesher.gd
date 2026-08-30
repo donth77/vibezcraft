@@ -234,16 +234,28 @@ func test_complete_edge_binding_matches_canonical_slices() -> void:
 # WorkerThreadPool invokes the worker as `_compute_chunk_data.bind(...)`, so
 # its arity is only resolved at call time — a signature drift would surface
 # as a silent worker failure in-game rather than a parse error. Drive the
-# real bound callable once and assert what it publishes.
+# real bound callable once and assert what it publishes. (This caught the
+# Batch 1 dimension/epoch parameters being added, which is exactly the
+# drift it exists to catch.)
 func test_worker_entry_point_accepts_bound_complete_edge() -> void:
 	var manager: Node = ChunkManagerScript.new()
 	autofree(manager)
 	var plane: Array = _sealed_cave_chunk().west_edge_slices()
 	var coord := Vector2i(0, 0)
-	var task: Callable = manager._compute_chunk_data.bind(coord, {}, {"east": plane})
+	var task: Callable = manager._compute_chunk_data.bind(
+		coord, {}, {"east": plane}, DimensionContext.OVERWORLD, DimensionContext.epoch()
+	)
 	task.call()
 	var results: Dictionary = manager._ready_results
 	assert_true(results.has(coord), "worker published a result")
+	# The dimension/epoch tags ride along on every published result; the
+	# main-thread drain refuses anything that no longer matches, which is
+	# the only defence against a worker finishing after a portal
+	# transition (WorkerThreadPool cannot be cancelled).
+	assert_eq(
+		results[coord]["dimension"], DimensionContext.OVERWORLD, "result carries its dimension"
+	)
+	assert_eq(results[coord]["epoch"], DimensionContext.epoch(), "result carries its epoch")
 	var published: Chunk = results[coord]["chunk"]
 	assert_false(results[coord]["mesh"].is_empty(), "worker produced mesh data")
 	# The transient planes must not ride along onto the published chunk, or

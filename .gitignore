@@ -60,13 +60,31 @@ assets/icon/app_icon.iconset/
 build
 *.png
 *.png.import
+# ...except the game's own art, which has always been tracked (the blanket
+# rule above was added later and never applied retroactively — over a
+# thousand pack files are already in the index). Narrow allow-rules keep
+# newly extracted or authored tiles consistent with their siblings instead
+# of silently going missing on a fresh clone.
+!assets/textures/packs/**/*.png
+!assets/textures/packs/**/*.png.import
+!assets/textures/items/*.png
+!assets/textures/items/*.png.import
+!assets/textures/mob/*.png
+!assets/textures/mob/*.png.import
+!assets/textures/entities/**/*.png
+!assets/textures/entities/**/*.png.import
+!assets/textures/gui/*.png
+!assets/textures/gui/*.png.import
+!assets/textures/particles/*.png
+!assets/textures/particles/*.png.import
 test-screenshots/
 # `docs/*` rather than `docs/` so the negation below can take effect —
 # git will not re-include a file whose parent DIRECTORY is excluded.
-# Everything in docs/ stays ignored except the redstone documents,
-# which are release artefacts the plan and playtest gate depend on.
+# Everything in docs/ stays ignored except the tracked feature plans,
+# audit reports, and playtest guides selected below.
 docs/*
 !docs/redstone-*.md
+!docs/nether-*.md
 scripts/dev/internal
 scripts/dev/__pycache__/
 ./Library

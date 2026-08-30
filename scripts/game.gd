@@ -28,6 +28,19 @@ const _JS_FULLSCREEN_ENTER: String = """
 })();
 """
 
+# World difficulty — vanilla `World.difficultySetting`, read as `as.k` all
+# over the Alpha source. There is no UI for it yet; the constants exist
+# because several source behaviours are gated on the value and modelling
+# them as "always Normal" would quietly drop them:
+#
+#   * `am.b_()` (ghast) kills itself outright when the setting is 0;
+#   * `ef.e_()` (every hostile) does the same;
+#   * `am.a()` and the natural-spawn predicate require > 0.
+const DIFFICULTY_PEACEFUL: int = 0
+const DIFFICULTY_EASY: int = 1
+const DIFFICULTY_NORMAL: int = 2
+const DIFFICULTY_HARD: int = 3
+
 # Cached result of touch_controls_enabled() — feature tags and the env
 # override can't change mid-session, and the helper is polled from input
 # paths (player capture branch, interaction gate) where a per-call
@@ -84,6 +97,11 @@ var world_is_fresh: bool = true
 # can play SFX normally. LoadingScreen sets this true in its _ready,
 # false when chunk-gen completes (loaded >= total).
 var is_loading: bool = false
+
+# See the DIFFICULTY_* constants above. Normal is the default and the
+# only value gameplay currently produces, so nothing changes until
+# something sets it.
+var difficulty: int = DIFFICULTY_NORMAL
 
 # Global debug-mode flag. When false, debug hotkeys (Creative toggle, hotbar
 # fill, etc.) are inert. Toggle via the backtick key.
@@ -380,6 +398,10 @@ func _ready() -> void:
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
+	# Same reason, for the Nether: WorldgenNether builds seven octave
+	# generators from a shared JavaRandom on first use, and a chunk worker
+	# reaching that lazy step first would race another worker.
+	WorldgenNether.warm(Worldgen.WORLD_SEED)
 	# Opt in to the native mesher + worldgen base-terrain fill (GDExtension).
 	# Silently falls back to GDScript if the extension isn't loaded.
 	# Parity enforced by tests/test_mesher_native.gd and
@@ -392,6 +414,10 @@ func _ready() -> void:
 		print("[Game] using native WorldgenNative (GDExtension)")
 	else:
 		print("[Game] using GDScript Worldgen")
+	if WorldgenNether.enable_native():
+		print("[Game] using native WorldgenNetherNative (GDExtension)")
+	else:
+		print("[Game] using GDScript WorldgenNether")
 	if Lighting.enable_native():
 		print("[Game] using native LightingNative (GDExtension)")
 	else:
@@ -406,6 +432,12 @@ func _ready() -> void:
 		print("[Game] using GDScript Pathfinder")
 	# Load crafting recipes from disk once at boot.
 	Recipes.ensure_loaded()
+	# Bake the 32 portal animation frames + the strip texture the shader
+	# samples. ~8K pixels of float maths — cheap, but it belongs here for
+	# the same reason everything else in this function does: the first
+	# portal a player lights must not pay for it mid-frame, and nothing
+	# lazily-initialised may be first touched from a worker thread.
+	PortalTexture.strip_texture()
 	# Bake 3D-isometric block icons for the inventory. Setup is sync; the
 	# render loop is async (one frame per block) and runs in the background
 	# without awaiting — the inventory falls back to flat textures until

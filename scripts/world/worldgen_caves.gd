@@ -33,8 +33,12 @@ static func scatter(chunk: Chunk, chunk_x: int, chunk_z: int) -> void:
 	# Port of dl.java:10-20 — seed multipliers derived from world seed,
 	# then per-chunk re-seeding for each contributing seed chunk.
 	var rng: JavaRandom = JavaRandom.new(Worldgen.WORLD_SEED)
-	var l2: int = rng.next_long() / 2 * 2 + 1  # force odd
-	var l3: int = rng.next_long() / 2 * 2 + 1
+	# next_long_legacy_unsigned_low, not next_long: these two multipliers
+	# seed every cave in every Overworld world this project has generated.
+	# See java_random.gd for why the Alpha-correct nextLong is not used
+	# here — the Overworld caves are a known, documented deviation.
+	var l2: int = rng.next_long_legacy_unsigned_low() / 2 * 2 + 1  # force odd
+	var l3: int = rng.next_long_legacy_unsigned_low() / 2 * 2 + 1
 	for seed_cx in range(chunk_x - _RADIUS_CHUNKS, chunk_x + _RADIUS_CHUNKS + 1):
 		for seed_cz in range(chunk_z - _RADIUS_CHUNKS, chunk_z + _RADIUS_CHUNKS + 1):
 			rng.set_seed(seed_cx * l2 + seed_cz * l3 ^ Worldgen.WORLD_SEED)
@@ -129,7 +133,7 @@ static func _carve_worm(
 	# The worm uses ITS OWN Random for path noise. This is Alpha's
 	# mechanism for decoupling the worm's per-step drift from the
 	# outer chunk-decoration stream.
-	var worm_rng: JavaRandom = JavaRandom.new(rng.next_long())
+	var worm_rng: JavaRandom = JavaRandom.new(rng.next_long_legacy_unsigned_low())
 	var origin_x: float = float(chunk_x * 16 + 8)
 	var origin_z: float = float(chunk_z * 16 + 8)
 	# lx.java:22-23 — length when unset. `this.a = 8` in dl.java, so

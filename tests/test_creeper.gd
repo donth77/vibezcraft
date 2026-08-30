@@ -9,6 +9,19 @@ extends GutTest
 var _parent: Node = null
 
 
+class DetonationProbe:
+	extends Creeper
+
+	var drop_calls: int = 0
+	var death_sfx_calls: int = 0
+
+	func _spawn_drops() -> void:
+		drop_calls += 1
+
+	func _play_death_sfx() -> void:
+		death_sfx_calls += 1
+
+
 func before_each() -> void:
 	_parent = Node.new()
 	add_child_autofree(_parent)
@@ -30,6 +43,25 @@ func test_drop_config_gunpowder_0_to_2() -> void:
 	assert_eq(creeper.get("drop_item_id"), Items.GUNPOWDER)
 	assert_eq(creeper.get("drop_count_min"), 0)
 	assert_eq(creeper.get("drop_count_max"), 2)
+
+
+# Prove that a positive Alpha roll reaches the concrete world-item path.
+# The zero end of the 0-2 range is intentional; pinning both bounds to one
+# isolates the wiring from RNG and catches a missing ChunkManager or setup().
+func test_positive_drop_roll_spawns_real_gunpowder_item() -> void:
+	var creeper: Node = _instantiate_offscreen()
+	creeper.set("_chunk_manager", _parent)
+	creeper.set("drop_count_min", 1)
+	creeper.set("drop_count_max", 1)
+	var child_count_before: int = _parent.get_child_count()
+
+	creeper.call("_spawn_drops")
+
+	assert_eq(_parent.get_child_count(), child_count_before + 1)
+	var drop := _parent.get_child(_parent.get_child_count() - 1) as DroppedItem
+	assert_not_null(drop, "a positive roll must create a pickup entity")
+	assert_eq(drop.item_id, Items.GUNPOWDER)
+	assert_eq(drop.get_child_count(), 1, "setup() must build the dropped-item mesh")
 
 
 # BB dims — modern MC 0.6 × 1.7 (deviation from Alpha's 0.6 × 1.8
@@ -112,6 +144,17 @@ func test_vanilla_fuse_constants() -> void:
 	assert_true(
 		src.find("_FUSE_ABORT_RANGE: float = 7.0") != -1, "sustain band should reach vanilla 7.0 m"
 	)
+
+
+func test_self_detonation_bypasses_death_loot_and_uses_feet_origin() -> void:
+	var creeper := DetonationProbe.new()
+	_parent.add_child(creeper)
+	creeper.global_position = Vector3(3.5, 64.05, -7.5)
+	assert_eq(creeper.call("_explosion_origin"), creeper.global_position, "lw.ax is AABB-base Y")
+	creeper.call("_detonate")
+	assert_eq(creeper.drop_calls, 0, "dq calls setDead directly instead of onDeath")
+	assert_eq(creeper.death_sfx_calls, 0, "the explosion sound is the detonation cue")
+	assert_true(creeper.is_queued_for_deletion(), "self-detonation removes the creeper immediately")
 
 
 # Persistence round-trip — fuse_ticks + fuse_dir must survive a save.

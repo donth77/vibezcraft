@@ -204,6 +204,24 @@ const _LAYOUT := {
 	"lever": 107,
 	"redstone_torch_on": 108,
 	"redstone_torch_off": 109,
+	# Alpha Nether (docs/nether-alpha-1.2.6-implementation-plan.md §4.1).
+	# terrain.png tiles 103/104/105 -> (7,6) / (8,6) / (9,6); the portal's
+	# source tile is 14 -> (14,0). Append-only, same rule as everything
+	# above: slot indices are baked into mesher UVs and marshalled to the
+	# native extension, so never renumber.
+	#
+	# The portal slot is registered here in Batch 2 even though Batch 7
+	# owns its mesh and animation — its texture has to exist before the
+	# custom surface can sample it.
+	"netherrack": 110,
+	"soul_sand": 111,
+	"glowstone": 112,
+	"portal": 113,
+	# Beta 1.3 repeater top faces — terrain.png indices 131/147. The
+	# mesher rotates these per metadata; sides reuse stone_slab_side and
+	# the two raised torches reuse the existing redstone-torch tiles.
+	"redstone_repeater_off": 114,
+	"redstone_repeater_on": 115,
 }
 
 # Foliage tint variants.
@@ -258,6 +276,7 @@ static var _entity_material: ShaderMaterial
 # mesh. Owns no state — the shader is self-contained (see shaders/water.gdshader).
 static var _water_material: ShaderMaterial
 static var _lava_material: ShaderMaterial
+static var _portal_material: ShaderMaterial
 static var _slot_size: int = 32  # auto-detected on build()
 
 
@@ -665,6 +684,22 @@ static func lava_material() -> ShaderMaterial:
 	return _lava_material
 
 
+# Shared Nether-portal ShaderMaterial. The animation lives entirely in the
+# shader (TIME picks a row of PortalTexture's 32-frame strip), so this is
+# genuinely one material and one texture for every portal in the world —
+# the plan forbids a material or texture per portal block or chunk.
+static func portal_material() -> ShaderMaterial:
+	if _portal_material == null:
+		_portal_material = ShaderMaterial.new()
+		_portal_material.shader = load("res://shaders/portal.gdshader") as Shader
+		_portal_material.set_shader_parameter("frames", PortalTexture.strip_texture())
+		_portal_material.set_shader_parameter(
+			"frames_per_second", 1.0 / PortalTexture.FRAME_SECONDS
+		)
+		_portal_material.set_shader_parameter("frame_count", float(PortalTexture.FRAMES))
+	return _portal_material
+
+
 static func reset() -> void:
 	_texture = null
 	_uv_rects = {}
@@ -675,3 +710,4 @@ static func reset() -> void:
 	_entity_material = null
 	_water_material = null
 	_lava_material = null
+	_portal_material = null

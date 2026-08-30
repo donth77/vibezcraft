@@ -8,6 +8,7 @@ extends GutTest
 
 const _BLOCK_AIR: int = 0
 const _BLOCK_STONE: int = 1
+const _BLOCK_SOUL_SAND: int = 98
 
 
 # Build a minimal stand-in for ChunkManager that the GDScript VoxelCollider
@@ -51,6 +52,7 @@ func _solid_lut() -> PackedByteArray:
 	var lut := PackedByteArray()
 	lut.resize(256)
 	lut[_BLOCK_STONE] = 1
+	lut[_BLOCK_SOUL_SAND] = 1
 	return lut
 
 
@@ -61,6 +63,15 @@ func _make_floor_chunk() -> PackedByteArray:
 	for x in range(16):
 		for z in range(16):
 			blocks[63 * 16 * 16 + z * 16 + x] = _BLOCK_STONE
+	return blocks
+
+
+func _make_soul_sand_floor_chunk() -> PackedByteArray:
+	var blocks := PackedByteArray()
+	blocks.resize(16 * 128 * 16)
+	for x in range(16):
+		for z in range(16):
+			blocks[63 * 16 * 16 + z * 16 + x] = _BLOCK_SOUL_SAND
 	return blocks
 
 
@@ -143,6 +154,49 @@ func test_lands_on_floor_match() -> void:
 		1.0 / 60.0,
 		"land on floor"
 	)
+
+
+func test_lands_on_soul_sand_at_seven_eighths_in_both_paths() -> void:
+	var cm := FakeChunkManager.new()
+	cm.set_chunk(0, 0, _make_soul_sand_floor_chunk())
+	var pos := Vector3(2.0, 64.9, 2.0)
+	var half := Vector3(0.3, 0.95, 0.3)
+	var vel := Vector3(0.0, -1.0, 0.0)
+	var delta: float = 0.1
+	# Force the actual GDScript reference for one call; Game normally enables
+	# the native dispatcher during autoload startup.
+	var saved_native: RefCounted = VoxelCollider._native_collider
+	VoxelCollider._native_collider = null
+	var gd_result: Dictionary = VoxelCollider.move(cm, pos, half, vel, delta)
+	VoxelCollider._native_collider = saved_native
+	var native = ClassDB.instantiate("VoxelColliderNative")
+	var native_result: Dictionary = native.move(
+		pos, half, vel, delta, _chunk_data_for(cm, 0, 0, 0, 0), _solid_lut()
+	)
+	_assert_dicts_match(gd_result, native_result, "soul sand landing")
+	assert_almost_eq(
+		(gd_result.pos as Vector3).y - half.y, 63.8751, 0.0002, "feet settle on the 7/8 top plane"
+	)
+	assert_true(bool(gd_result.on_floor), "landing reports grounded")
+
+
+func test_horizontal_sweep_does_not_treat_soul_sand_below_feet_as_a_wall() -> void:
+	var cm := FakeChunkManager.new()
+	cm.set_chunk(0, 0, _make_soul_sand_floor_chunk())
+	var pos := Vector3(2.0, 64.825, 2.0)  # feet exactly at y=63+7/8
+	var half := Vector3(0.3, 0.95, 0.3)
+	var vel := Vector3(3.0, 0.0, 0.0)
+	var saved_native: RefCounted = VoxelCollider._native_collider
+	VoxelCollider._native_collider = null
+	var gd_result: Dictionary = VoxelCollider.move(cm, pos, half, vel, 0.1)
+	VoxelCollider._native_collider = saved_native
+	var native = ClassDB.instantiate("VoxelColliderNative")
+	var native_result: Dictionary = native.move(
+		pos, half, vel, 0.1, _chunk_data_for(cm, 0, 0, 0, 0), _solid_lut()
+	)
+	_assert_dicts_match(gd_result, native_result, "walk over soul sand")
+	assert_almost_eq((gd_result.pos as Vector3).x, 2.3, 0.0002, "horizontal motion survives")
+	assert_true(bool(gd_result.on_floor), "7/8 floor probe reports grounded")
 
 
 func test_walk_into_wall_match() -> void:

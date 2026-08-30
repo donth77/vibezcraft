@@ -1,21 +1,17 @@
 class_name Skeleton
 extends "res://scripts/entities/mob_base.gd"
 
-# Vanilla Alpha 1.2.6 EntitySkeleton (`nq.java`). Second hostile mob,
-# ranged. Targets the nearest player within 16 m, kites at bow range
-# (~4-10 m), charges a shot ~1.5 s, fires an arrow via the existing
-# Arrow entity, then re-aims. Burns in direct sunlight (same as
-# zombie).
+# Vanilla Alpha 1.2.6 EntitySkeleton (`dh.java`). Ranged hostile. Targets
+# the nearest visible player within 16 m, closes to 10 m, then stops and
+# fires while line of sight remains clear. Burns in direct sunlight.
 #
-# Vanilla AI summary (`nq.java::e(Entity)` + `EntityCreature`):
-#   * Target acquisition: nearest player ≤16 m.
+# Vanilla AI summary (`dh.java::a(Entity, distance)` + `fc.java`):
+#   * Target acquisition: nearest visible player <16 m.
 #   * If distance > 10 m: pathfind toward player (close in).
-#   * If 4 m ≤ distance ≤ 10 m: stop and charge bow. Fire when
-#     `attackTimer >= 30` (1.5 s @ 20 tps); reset timer post-shot.
-#   * If distance < 4 m: pathfind AWAY from player (kite).
-#   * Line-of-sight gate: vanilla skips the shot if the player isn't
-#     visible (raycast); we use the same Pathfinder.is_walkable
-#     reachability proxy.
+#   * If distance < 10 m and visible: stop and aim. Fire immediately when
+#     `attackTime == 0`, then set a 30-tick (1.5 s) shot cooldown.
+#   * If cover breaks visibility: retain the target and path toward it;
+#     never release an arrow through the obstruction.
 #
 # Visual model: vanilla 64×32 ModelBiped (Alpha `dc.java`), same UV
 # layout as zombie / player. UNLIKE ModelZombie, ModelSkeleton does
@@ -24,9 +20,8 @@ extends "res://scripts/entities/mob_base.gd"
 # arm raises horizontal and the left arm half-raises to grip the
 # string — Beta-era ModelSkeleton `aimedBow` flag.
 #
-# Drops (vanilla `nq.java::g_()`): bone × 0-2, arrow × 0-2. Both
-# rolls are independent so a kill can drop both, just one, or
-# neither — matches Alpha.
+# Drops (Alpha `dh.java::g_()`): arrow × 0-2. Bones did not enter the
+# skeleton drop table until Beta.
 
 const _SKELETON_TEXTURE_PATH: String = "res://assets/textures/mob/skeleton.png"
 const _SKELETON_TEXTURE_SIZE: Vector2i = Vector2i(64, 32)
@@ -74,33 +69,25 @@ const _AI_TICK_DT: float = 1.0 / 20.0
 
 # Vanilla 16 m detection radius (EntityMob.getClosestPlayerToEntity).
 const _AI_DETECT_RADIUS: float = 16.0
-const _AI_ABANDON_RADIUS: float = 40.0
 const _AI_REPATH_TICKS: int = 20
 
-# Kite range. Vanilla skeleton's `getAttackStrength` fires the bow
-# when distance² ≤ 100 (=10 m); below that and the AI flees. We
-# match — too-far → pursue, in-band → stand still and shoot,
-# too-close → retreat.
+# Alpha dh.a() fires whenever distance is below 10 m. It has no close-range
+# kiting branch; that behavior belongs to later Minecraft AI.
 const _AI_SHOOT_RANGE: float = 10.0
-const _AI_KITE_RANGE: float = 4.0  # < this → retreat away from player
 
-# Bow charge time. Vanilla skeleton fires when `attackTimer == 30`
-# (1.5 s @ 20 tps). Charge resets to 0 on shot AND on losing target.
-const _AI_BOW_CHARGE_SEC: float = 1.5
-# Vanilla bow shot speed at full charge: ~1.6 m/s/tick = 32 m/s.
-# Arrow.gd's bow_release path uses ~3 m/tick × MAX_SPEED scaling for
-# the player; the skeleton always shoots full-charge for simplicity.
-const _AI_ARROW_SPEED: float = 30.0
-# Vanilla arrow damage from skeleton: `random.nextInt(2) + 2` = 2-3
-# HP, scaled by `Arrow.b(2.0)`. Our Arrow computes damage from
-# velocity × BASE_DAMAGE — feeding it 30 m/s gives ~6 HP, which is
-# on the high end. We pass `is_critical=false` so the random bonus
-# doesn't fire on top.
+# Alpha's shared `hf.P` attack timer counts DOWN. `dh.a()` fires when it is
+# zero, then sets it to 30 ticks (1.5 s); losing sight does not reset it.
+const _AI_SHOT_COOLDOWN_SEC: float = 1.5
+# dh.java passes speed 0.6 blocks/tick and inaccuracy 12. lv.a converts
+# the latter into Gaussian sigma 0.0075 * 12 = 0.09 per direction axis.
+const _AI_ARROW_SPEED: float = 12.0
+const _AI_ARROW_INACCURACY: float = 0.09
+const _AI_ARROW_GRAVITY_PER_TICK: float = 0.03
+const _AI_ARROW_DAMAGE: int = 4
 
-# Walk speed. Vanilla `nq.java::A = 0.25F` per tick = 5 blocks/sec;
-# we use 1.0 m/s to match zombie's pace (vanilla skeletons feel
-# similar to zombies on the chase frontier).
-const _AI_WALK_SPEED: float = 1.0
+# Alpha's inherited hf.am = 0.7 versus nt.am = 0.5, preserving a 1.4x
+# movement ratio against the clone's 1.0 m/s zombie baseline.
+const _AI_WALK_SPEED: float = 1.4
 const _AI_JUMP_VELOCITY: float = 6.0
 const _AI_STEP_BOOST_SPEED: float = 2.5
 const _AI_MAX_YAW_STEP: float = PI / 4.0
@@ -108,7 +95,7 @@ const _AI_PATHFIND_RADIUS: float = 24.0
 const _AI_PATHFIND_MAX_ITERS: int = 300
 const _AI_ARRIVE_DIST: float = 0.6
 
-# Daylight burn — same as zombie. Vanilla nq.java::B() checks
+# Daylight burn — same as zombie. Vanilla dh.java::k() checks
 # skylight ≥ 15 + day + dry + not in water → setFire(8).
 const _AI_BURN_CHECK_INTERVAL: float = 1.0
 const _AI_BURN_DURATION_SEC: float = 8.0
@@ -164,10 +151,9 @@ var _ai_repath_counter: int = 0
 var _ai_path_failed: bool = false
 var _ai_burn_check_accum: float = 0.0
 var _ai_player_cache: Node3D = null
-# Bow charge. Counts UP to _AI_BOW_CHARGE_SEC while a target is in
-# the shoot band; resets on shot or target lost. `_ai_aiming` is the
-# render-side flag so the arm pose code can show the aim stance.
-var _ai_bow_charge_sec: float = 0.0
+# Alpha `hf.P`, expressed in seconds. It counts down independently of sight;
+# `_ai_aiming` is only the render-side flag for the current aim stance.
+var _ai_shot_cooldown_sec: float = 0.0
 var _ai_aiming: bool = false
 
 # --- Walk-anim state ---
@@ -192,9 +178,8 @@ func _get_body_width() -> float:
 
 func _ready() -> void:
 	max_health = 20  # vanilla EntityLiving default
-	# Primary drop = bone (0-2). Secondary arrow drop handled in
-	# _spawn_drops below since MobBase only does one item type.
-	drop_item_id = Items.BONE
+	# Alpha dh.g_() returns dx.j (item 262, arrow), and nothing else.
+	drop_item_id = Items.ARROW
 	drop_count_min = 0
 	drop_count_max = 2
 	_build_collision_shape()
@@ -202,20 +187,20 @@ func _ready() -> void:
 	super._ready()
 
 
-# Vanilla `nq.java::g_()` drops are 2 independent rolls: bone (0-2)
-# AND arrow (0-2). MobBase only handles a single drop type so we
-# inherit the bone roll via super._spawn_drops, then add arrows here.
-func _spawn_drops() -> void:
-	super._spawn_drops()
-	if _chunk_manager == null:
-		return
-	var arrow_count: int = randi_range(0, 2)
-	for _i in range(arrow_count):
-		var item := DroppedItem.new()
-		_chunk_manager.add_child(item)
-		var jitter := Vector3(randf_range(-0.2, 0.2), 0.3, randf_range(-0.2, 0.2))
-		item.global_position = global_position + Vector3(0, 0.4, 0) + jitter
-		item.setup(Items.ARROW)
+# Shared Alpha EntityMonster retaliation: a landed hit assigns its actual
+# attacker directly, without rerunning the visible-player search.
+func take_damage(
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
+	if landed and attacker is Node3D and attacker != self:
+		_ai_player_cache = attacker as Node3D
+		_ai_path.clear()
+		_ai_repath_counter = _AI_REPATH_TICKS
+	return landed
 
 
 func _build_collision_shape() -> void:
@@ -433,9 +418,9 @@ func _physics_process(delta: float) -> void:
 	while _ai_tick_accum >= effective_dt:
 		_ai_tick_accum -= effective_dt
 		_ai_tick()
-	# Bow charge ticks every frame so the shot timing is smooth.
-	if _ai_aiming:
-		_ai_bow_charge_sec = minf(_ai_bow_charge_sec + delta, _AI_BOW_CHARGE_SEC)
+	# Alpha decrements the shared attack timer every living-entity tick,
+	# whether or not the target remains visible.
+	_ai_shot_cooldown_sec = maxf(0.0, _ai_shot_cooldown_sec - delta)
 	# Daylight burn check.
 	_ai_burn_check_accum += delta
 	if _ai_burn_check_accum >= _AI_BURN_CHECK_INTERVAL:
@@ -465,36 +450,33 @@ func _ai_tick() -> void:
 	if roll_idle_sfx_tick():
 		_play_idle_sfx()
 	_ai_repath_counter += 1
+	var target_was_retained: bool = _ai_player_cache != null and is_instance_valid(_ai_player_cache)
 	var player: Node3D = _find_player()
 	if player == null:
 		_ai_aiming = false
-		_ai_bow_charge_sec = 0.0
 		_wander_tick()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
-	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
+	# fc.b_() retains a living acquired target regardless of distance.
+	# Sight cannot change the decision outside bow range, so do not trace
+	# retained targets while merely pursuing them. A newly acquired target
+	# already passed the sight check inside `_find_player` this same tick.
+	if dist_sq >= _AI_SHOOT_RANGE * _AI_SHOOT_RANGE:
 		_ai_aiming = false
-		_ai_bow_charge_sec = 0.0
-		_ai_player_cache = null
-		_wander_tick()
-		return
-	var dist: float = sqrt(dist_sq)
-	if dist > _AI_SHOOT_RANGE:
-		_ai_aiming = false
-		_ai_bow_charge_sec = 0.0
 		_pursue_player(player)
-	elif dist < _AI_KITE_RANGE:
+		return
+	var visible: bool = true if not target_was_retained else has_line_of_sight(player)
+	if not visible:
 		_ai_aiming = false
-		_ai_bow_charge_sec = 0.0
-		_kite_away_from_player(player)
-	else:
-		_ai_path.clear()
-		_face_target(player)
-		_velocity_brake()
-		_ai_aiming = true
-		if _ai_bow_charge_sec >= _AI_BOW_CHARGE_SEC:
-			_fire_arrow_at(player)
-			_ai_bow_charge_sec = 0.0
+		_pursue_player(player)
+		return
+	_ai_path.clear()
+	_face_target(player)
+	_velocity_brake()
+	_ai_aiming = true
+	if _ai_shot_cooldown_sec <= 0.0:
+		_fire_arrow_at(player, true)
+		_ai_shot_cooldown_sec = _AI_SHOT_COOLDOWN_SEC
 
 
 func _find_player() -> Node3D:
@@ -503,8 +485,18 @@ func _find_player() -> Node3D:
 	var main: Node = get_tree().root.get_node_or_null("Main")
 	if main == null:
 		return null
-	_ai_player_cache = main.find_child("Player", true, false) as Node3D
-	return _ai_player_cache
+	var candidate: Node3D = main.find_child("Player", true, false) as Node3D
+	if candidate == null:
+		return null
+	if (
+		global_position.distance_squared_to(candidate.global_position)
+		>= _AI_DETECT_RADIUS * _AI_DETECT_RADIUS
+	):
+		return null
+	if not has_line_of_sight(candidate):
+		return null
+	_ai_player_cache = candidate
+	return candidate
 
 
 func _pursue_player(player: Node3D) -> void:
@@ -570,26 +562,6 @@ func _pick_wander_target() -> bool:
 	return not _ai_path.is_empty()
 
 
-# Vanilla `EntityCreature.findRandomTargetBlock` retreats by picking
-# a random AIR cell in the opposite hemisphere from the player; we
-# project the player→self vector outward and pathfind there.
-func _kite_away_from_player(player: Node3D) -> void:
-	# Same failed-search backoff as _pursue_player.
-	var repath_due: bool = _ai_repath_counter >= _AI_REPATH_TICKS
-	if _ai_path.is_empty():
-		repath_due = not _ai_path_failed or _ai_repath_counter >= _AI_REPATH_TICKS / 2
-	if repath_due:
-		_ai_repath_counter = 0
-		var away: Vector3 = global_position - player.global_position
-		away.y = 0.0
-		if away.length_squared() < 0.0001:
-			away = Vector3(1, 0, 0)
-		away = away.normalized() * 8.0  # try ~8 m away
-		_repath_to(global_position + away)
-	if not _ai_path.is_empty():
-		_tick_walk_path()
-
-
 func _repath_to(target: Vector3) -> void:
 	if _chunk_manager == null:
 		return
@@ -636,17 +608,21 @@ func _tick_walk_path() -> void:
 
 # Spawn an Arrow projectile at the skeleton's bow hand, aimed at the
 # player's torso (eye height - 0.4 m). Velocity = unit vector toward
-# target × _AI_ARROW_SPEED. Mirrors vanilla `nq.java::e(Entity)`
+# target × _AI_ARROW_SPEED. Mirrors vanilla `dh.java::a(Entity, distance)`
 # which spawns an `EntityArrow(this, target, speed)`.
-func _fire_arrow_at(player: Node3D) -> void:
+func _fire_arrow_at(player: Node3D, visibility_confirmed: bool = false) -> void:
 	if _chunk_manager == null:
 		return
-	# Aim at the player's body center. CharacterBody3D's
-	# `global_position` is the capsule CENTER (Godot convention) —
-	# NOT the feet like vanilla MC's `entity.posY`. Adding a +1.22
-	# eye-offset like vanilla does to feet-pos would land us above
-	# the head. Just use global_position direct.
+	# Direct callers must never bypass Alpha's canEntityBeSeen check. The AI
+	# reaches this synchronously after its own check and passes that result so
+	# one decision tick does not trace the same segment twice.
+	if not visibility_confirmed and not has_line_of_sight(player):
+		return
+	# The clone stores Player.global_position at its 1.8 m capsule center;
+	# Alpha's target posY is feet. Keep both representations here because
+	# dh.java builds its vertical shot component from target feet.
 	var target_pos: Vector3 = player.global_position
+	var target_feet_y: float = target_pos.y if player is MobBase else target_pos.y - 0.9
 	# Spawn AT THE BOW. The bow mesh is parented to the right-arm
 	# pivot at arm-local (0, -0.75, 0) — the hand. With the arm raised
 	# to the aim pose (+π/2 X), the hand extends forward of the
@@ -669,29 +645,23 @@ func _fire_arrow_at(player: Node3D) -> void:
 		_bow_mesh.global_position if _bow_mesh != null else global_position + Vector3(0, 1.5, 0)
 	)
 	var spawn_pos: Vector3 = bow_world + spawn_forward
-	var to_target: Vector3 = target_pos - spawn_pos
+	var horiz := Vector3(target_pos.x - spawn_pos.x, 0.0, target_pos.z - spawn_pos.z)
+	var horiz_dist: float = horiz.length()
+	# dh.java: target.posY - 0.2 - arrow.posY + horizontalDistance * 0.2.
+	# This is a linear lead term, not modern parabolic compensation.
+	var to_target := Vector3(
+		target_pos.x - spawn_pos.x,
+		target_feet_y - 0.2 - spawn_pos.y + horiz_dist * 0.2,
+		target_pos.z - spawn_pos.z
+	)
 	if to_target.length_squared() < 0.01:
 		return
-	# Compensate for arrow gravity. Arrow.gd uses
-	# GRAVITY_PER_TICK = 0.05 → 1.0 m/s² effective. At our 30 m/s
-	# launch speed and ~8 m typical flight, drop is ~0.05 m — small
-	# but adds up at the upper kite range. Add an aim offset based on
-	# horizontal distance² (parabolic compensation).
-	var horiz := Vector3(to_target.x, 0, to_target.z)
-	var horiz_dist: float = horiz.length()
-	var time_to_target: float = horiz_dist / _AI_ARROW_SPEED
-	var drop_compensation: float = 0.5 * 1.0 * time_to_target * time_to_target
-	to_target.y += drop_compensation
 	var dir: Vector3 = to_target.normalized()
+	# lv.a adds independent Gaussian noise before multiplying by speed.
+	dir.x += randfn(0.0, _AI_ARROW_INACCURACY)
+	dir.y += randfn(0.0, _AI_ARROW_INACCURACY)
+	dir.z += randfn(0.0, _AI_ARROW_INACCURACY)
 	var vel: Vector3 = dir * _AI_ARROW_SPEED
-	# Vanilla scatter: small jitter so volleys don't all land on the
-	# same pixel. 0.02 = ±0.6 m/s lateral drift at our launch speed —
-	# noticeable but not so wild the skeleton can't hit a standing
-	# target at point-blank.
-	var jitter: float = 0.02
-	vel.x += randf_range(-jitter, jitter) * _AI_ARROW_SPEED
-	vel.y += randf_range(-jitter, jitter) * _AI_ARROW_SPEED
-	vel.z += randf_range(-jitter, jitter) * _AI_ARROW_SPEED
 	# Match interaction.gd::_release_bow order — call setup BEFORE
 	# add_child so Arrow._ready sees the correct velocity for the
 	# initial orientation pass. Then parent under Main (NOT
@@ -700,7 +670,7 @@ func _fire_arrow_at(player: Node3D) -> void:
 	# loading/unloading lifecycle of chunks they may not be in).
 	var arrow: Node3D = _ARROW_SCRIPT.new()
 	if arrow.has_method("setup"):
-		arrow.call("setup", self, vel, false)
+		arrow.call("setup", self, vel, false, _AI_ARROW_DAMAGE, _AI_ARROW_GRAVITY_PER_TICK)
 	var main: Node = get_tree().root.get_node_or_null("Main")
 	if main == null:
 		return
@@ -831,7 +801,7 @@ func _play_step() -> void:
 	SFX.play_skeleton_step(global_position)
 
 
-# Species SFX overrides — vanilla nq.java::{d, f_, f} return
+# Species SFX overrides — vanilla dh.java::{d, f_, f} return
 # mob.skeleton / mob.skeletonhurt / mob.skeletondeath.
 func _play_idle_sfx() -> void:
 	SFX.play_skeleton_say(global_position)

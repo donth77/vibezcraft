@@ -19,6 +19,8 @@ const REDSTONE_IDS: Array[int] = [
 	Blocks.STONE_BUTTON,
 	Blocks.STONE_PRESSURE_PLATE,
 	Blocks.WOODEN_PRESSURE_PLATE,
+	Blocks.REDSTONE_REPEATER_OFF,
+	Blocks.REDSTONE_REPEATER_ON,
 ]
 
 var _world_name: String
@@ -226,6 +228,8 @@ func test_redstone_components_are_washed_away_by_fluid() -> void:
 		Blocks.STONE_BUTTON,
 		Blocks.STONE_PRESSURE_PLATE,
 		Blocks.WOODEN_PRESSURE_PLATE,
+		Blocks.REDSTONE_REPEATER_OFF,
+		Blocks.REDSTONE_REPEATER_ON,
 	]:
 		assert_true(
 			Blocks.is_replaceable(id), "%s is flimsy enough to wash out" % Blocks.name_of(id)
@@ -256,9 +260,11 @@ func test_removing_a_source_depowers_surviving_wire() -> void:
 		assert_eq(w.get_world_block_meta(Vector3i(i, Y, 0)), 0, "cell %d de-powered" % i)
 
 
-func test_all_nine_ids_are_distinct_and_in_the_reserved_range() -> void:
+func test_all_nine_alpha_ids_are_distinct_and_in_the_reserved_range() -> void:
 	var seen := {}
 	for id: int in REDSTONE_IDS:
+		if id > 96:
+			continue  # Beta 1.3 repeater state pair is intentionally 207/208.
 		assert_between(id, 88, 96, "%s inside the reserved block range" % Blocks.name_of(id))
 		assert_false(seen.has(id), "id %d used once" % id)
 		seen[id] = true

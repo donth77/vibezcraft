@@ -1,0 +1,2763 @@
+# Minecraft Alpha 1.2.6-Faithful Nether Implementation Plan
+
+- Status: implementation-ready plan
+- Target: Minecraft Java Edition Alpha v1.2.6 behavior, adapted to this
+  project's architecture
+- Audience: a parallel implementation session working in this
+  repository
+- Last source audit: 2026-08-16
+
+## 1. Purpose and execution contract
+
+This document is the handoff contract for implementing the complete
+Alpha v1.2.6 Nether slice: dimension travel, Nether blocks and the one
+new inventory item, terrain and caves, population features, environment
+rules, portals, zombie pigmen, ghasts, ghast fireballs, natural
+spawning, assets, persistence, and performance hardening.
+
+The implementation session must:
+
+1. Read `CLAUDE.md`, `.claude/optimizations.md`, and
+   `.claude/alpha-1.2.6-mapping.md` before changing code.
+2. Treat the local Alpha source listed in section 16 as the behavioral
+   authority. Wiki pages are historical cross-checks, not substitutes
+   for source.
+3. Work in the batch order in section 11. Do not begin a later batch
+   until the current batch's acceptance criteria and tests pass.
+4. Preserve every existing persisted block and item ID. Never renumber
+   content to make room.
+5. Keep a simple, readable GDScript implementation as the reference
+   path. Add or extend native generation only after source fixtures pass
+   against that path, then require byte-for-byte native parity.
+6. Preserve the project's deterministic, order-independent world
+   generation contract even where the original client depended on a
+   shared mutable RNG. The deliberate deviation is specified in
+   section 6.5.
+7. Run the full test suite at each batch exit, not only the new tests.
+   Capture test counts, fixture hashes, and performance measurements in
+   the handoff.
+8. Keep unrelated worktree changes intact. Do not commit automatically;
+   leave each completed batch checkpoint-ready unless the operator asks
+   for commits.
+
+This plan has sequential architecture dependencies even if the work is
+performed in a parallel session. Before editing, claim the current
+batch and refresh `git status`. Never revert another session's changes.
+Parallelize independent fixture, asset, or test work only after the
+owning batch has frozen its interfaces; do not concurrently edit the
+content registries, `ChunkManager`, save formats, or native ABI from two
+sessions.
+
+If source and this document disagree, stop, record the source evidence,
+and update the plan before implementing the disputed behavior. If a
+performance optimization changes observable Alpha behavior, reject it
+unless the deviation is explicitly approved and documented.
+
+## 2. Definition of faithful
+
+“Alpha-faithful” means the released Java Alpha v1.2.6 behavior, not a
+modern Nether and not a reconstruction from memory. The implementation
+must reproduce the following observable contract:
+
+- Dimension ID `-1`, 16×128×16 chunks, an enclosed ceiling, large
+  netherrack caverns, a lava sea, bedrock at both vertical extremes,
+  Nether caves, soul-sand/gravel surface patches, lava springs, fire,
+  glowstone clusters, and both mushroom colors.
+- Netherrack, soul sand, glowstone, the portal world block, and
+  glowstone dust, with their Alpha hardness, drops, crafting, light,
+  collision, and fire behavior.
+- Classic 4×5-outer-footprint portals with a 2×3 interior and optional
+  corner cells, 8:1 horizontal coordinate scaling, bounded destination
+  search, and portal creation.
+- Nether-specific fog, darkness, absent sky/clouds/celestial lighting,
+  longer horizontal lava flow, water evaporation, and unreliable
+  compass/clock displays.
+- Zombie pigmen and ghasts as the only natural hostile Nether species,
+  including Alpha combat, aggro, fire immunity, drops, visuals, sounds,
+  and persistence semantics.
+- Every player-obtainable new block/item working in the debug spawner,
+  inventory and hotbar, held first-person and third-person views,
+  dropped form, pickup flow, and placed/use form.
+
+The project may make only these predetermined compatibility deviations:
+
+- Nether feature placement is canonicalized to be deterministic by
+  source chunk and independent of generation/load order (section 6.5).
+- The project can maintain a validated portal index as a transparent
+  acceleration structure; bounded raw portal search remains the
+  correctness fallback.
+- Because this project already has beds, attempting to use one in the
+  Nether is denied with “This dimension is unsuitable for sleeping.”
+  Do not add the later exploding-bed mechanic.
+- The extracted Alpha texture pack is the visual fidelity oracle.
+  Source sound-event names and any locally supplied Alpha sound set are
+  the audio oracle; default-pack fallbacks must preserve the same
+  silhouettes, animation states, and event coverage.
+
+### Explicitly out of scope
+
+- Nether fortresses, blazes, magma cubes, wither skeletons, quartz,
+  nether brick, biomes, modern ambient particles, respawn anchors, and
+  modern portal sizes.
+- Ghast tears, gold nuggets, zombie-pigman weapon drops, bartering, or
+  zombified-piglin forgiveness.
+- Modern four-dust glowstone crafting; Alpha v1.2.6 uses nine dust.
+- Modern entity-through-portal support. In the Alpha client source the
+  local player owns the dimension-change callback.
+- A general save-ID widening migration. The current byte namespace is
+  sufficient for this feature with the reservation below.
+- Rewriting unrelated Overworld terrain or changing established
+  Overworld behavior.
+
+## 3. Repository audit and blocking design decisions
+
+### 3.1 The content-ID range is already exhausted
+
+Chunks and inventories persist unsigned byte IDs. Current blocks use
+`0–49` and `51–96`; `50` is a burned legacy tall-grass value. Items use
+`100–204`. Four new world blocks do not fit below 100.
+
+Reserve the following globally unique IDs after re-auditing the live
+registries. Abort the batch if any reservation is no longer free.
+
+| Content | Project ID | Alpha source ID | Kind | Inventory form |
+|---|---:|---:|---|---|
+| Netherrack | 97 | 87 | block | yes |
+| Soul sand | 98 | 88 | block | yes |
+| Glowstone | 99 | 89 | block | yes |
+| Glowstone dust | 205 | 348 | item | yes |
+| Portal | 206 | 90 | block | no |
+
+Do not reuse ID 50: an older save containing that byte could silently
+turn removed tall grass into portals. Do not renumber existing IDs.
+Reserve `207–255` for future content in the same unified byte namespace.
+
+The engine currently infers content type from `id < 100`. Replace that
+assumption with explicit registry queries:
+
+- `Blocks.is_registered(id)`
+- `Blocks.has_item_form(id)` or
+  `Blocks.is_inventory_placeable(id)`
+- `Items.is_registered(id)`
+- one invariant test that every non-air ID belongs to exactly one
+  registry and that all IDs fit `0–255`
+
+At minimum audit and remove numeric classification from:
+
+- `scripts/player/interaction.gd`
+- `scripts/player/player.gd`
+- `scripts/world/dropped_item.gd`
+- `scripts/world/blocks.gd`
+- `scripts/ui/item_icons.gd`
+- `scripts/ui/debug_item_spawner.gd`
+- item placement, debug-tool, held-item, dropped-item, and redstone
+  rendering tests
+
+`BlockAtlas` already has a 256-entry lookup table and chunk/native
+storage is already byte-compatible with block ID 206. Test those facts;
+do not widen storage speculatively.
+
+### 3.2 Generation must remain worker-safe
+
+Chunk generation runs off-thread. It may return only voxel/data results;
+it must not touch scene nodes, resources, autoload state, or live
+neighbor chunks. Nether population crosses chunk edges, so use the
+existing source-chunk decoration ownership model and a sufficient voxel
+halo. Apply results on the main thread in a fixed order.
+
+Every queued job and result must carry:
+
+- dimension ID;
+- a monotonically increasing transition/generation epoch;
+- chunk coordinates;
+- generator/provider identity where useful for diagnostics.
+
+Discard a result if any of those no longer matches the active world.
+This prevents an old Overworld worker result from materializing after a
+portal transition.
+
+### 3.3 Save storage currently assumes one dimension
+
+Keep the existing Overworld layout byte-compatible. Add dimension-aware
+paths rather than moving old files:
+
+```text
+user://WorldN/
+  world.json
+  player.bin
+  entities.bin              # existing Overworld entities
+  region/                   # existing Overworld chunks
+  DIM-1/
+    entities.bin
+    region/
+    portal_index.bin        # optional, rebuildable acceleration data
+```
+
+Include dimension in region-cache keys and all APIs that resolve
+chunks, entities, scheduled ticks, or world-scoped block-entity data.
+Upgrade `player.bin` to a versioned format that stores the current
+dimension. A v1 player save migrates to dimension 0 without changing
+any other value.
+
+Use one `ChunkManager` and one resident dimension at a time. Portal
+travel must save and unload the source, clear or re-key every
+dimension-owned queue/cache, select the destination provider, load its
+chunks and entities, then place/unfreeze the player. Do not keep both
+dimension scene graphs resident.
+
+### 3.4 Spawning is not currently a complete integration path
+
+`NaturalMobSpawner` exists but is not wired into normal chunk-manager
+ticks; only the passive spawner is called for fresh chunks. Refactor or
+wire a single authoritative natural hostile spawn controller. Nether
+spawn predicates must not inherit an Overworld light-level gate.
+
+The F6 debug mob spawner currently searches for a topmost floor. Add
+species spawn descriptors:
+
+- zombie pigman: grounded, two-block creature clearance;
+- ghast: airborne search for a clear 4×4×4 volume, away from the
+  ceiling and floor;
+- cage spawning: apply the same species clearance rather than spawning
+  into blocks.
+
+### 3.5 Asset tooling is incomplete
+
+The local `vendor/mojang/alpha-1.2.6/client.jar` contains
+`terrain.png`, `gui/items.png`, `mob/ghast.png`,
+`mob/ghast_fire.png`, and `mob/pigzombie.png` — all five verified
+present during Batch 0.
+
+**Corrected 2026-08-16 (Batch 0).** This section previously said the
+extractor was missing. It is not. Commit `1d12a1b`
+("chore(tools): move vanilla-touching scripts to gitignored internal/")
+deliberately relocated it, with six other tools that read Mojang
+material, to `scripts/dev/internal/extract_alpha_pack.py`;
+`.gitignore` excludes that directory so the tools stay on disk but out
+of a public tree. Do not "restore" it to a tracked path — that would
+undo an intentional legal-hygiene decision.
+
+What the move *did* break was the tool's `ROOT` constant: the file went
+one directory deeper without the path walk being updated, so every input
+resolved under `scripts/` and the extractor could not run at all. Batch 0
+fixed `ROOT`, added a `--verify` dry run that reports required inputs,
+planned write targets and their ignore status, and pinned both in
+`tests/test_alpha_pack_extractor.gd`. `CLAUDE.md`'s layout section now
+points at the real location.
+
+Note for Batch 2: re-running the extractor writes two item sprites the
+pack does not currently carry (`boat`, `leather`), and the extracted
+`leather` differs from the `assets/textures/items/leather.png` fallback.
+Batch 0 deliberately left the pack untouched; choosing between the
+extracted sprite and the shipped fallback is Batch 2's call.
+
+Extract the required files into the pack layout expected by the runtime
+and provide default-pack fallbacks for every texture and sound. Because
+the repository globally ignores PNG files, add narrow allow-rules for
+the intended default-pack asset paths and verify the complete asset set
+from a clean checkout/build. The client JAR does not contain the Alpha
+sound library, so audit existing `assets/audio/sfx/` coverage and source
+the required event files separately from the texture extraction step.
+
+## 4. Source-derived block and item specification
+
+### 4.1 Content definitions
+
+| Content | Source behavior to reproduce |
+|---|---|
+| Netherrack | Terrain texture tile 103; rock material; hardness 0.4; stone step sound; mineable effectively by every pickaxe tier; supports fire forever. |
+| Soul sand | Terrain tile 104; sand material and sound; hardness 0.5; collision top at 0.875 blocks; colliding entities have horizontal X/Z velocity multiplied by 0.4. |
+| Glowstone | Terrain tile 105; glass material/sound; hardness 0.3; emitted light 15; always drops exactly one glowstone dust in Alpha v1.2.6. |
+| Glowstone dust | Item tile 73; stacks normally; a full 3×3 grid of nine dust crafts one glowstone block. |
+| Portal | Source block ID 90; project ID 206; no inventory form, collision, selection box, or drop; emitted light 11 from source emission 0.75; translucent animated world rendering. |
+
+The Alpha atlases are row-major 16×16 tile sheets:
+
+- netherrack 103 → tile `(7, 6)`;
+- soul sand 104 → `(8, 6)`;
+- glowstone 105 → `(9, 6)`;
+- portal source tile 14 → `(14, 0)`;
+- glowstone dust item 73 → `(9, 4)`.
+
+Use these coordinates in the local Alpha extraction mapping. Default
+fallback files must use semantic names and may be original art.
+
+### 4.2 Interaction details
+
+- Netherrack fire is persistent because fire checks its supporting
+  block. This is a fire-system rule, not a large random tick value.
+- Soul-sand slowdown applies to all colliding movable entities. It must
+  not alter vertical velocity and must work at chunk seams.
+- Soul sand's 0.875 collision top affects eye/foot height and movement;
+  do not fake it using only a speed modifier on a full-height cube.
+- Glowstone break/drop behavior is independent of tool tier in the
+  source and produces one dust, never the block.
+- The nine-dust recipe must consume all nine slots and produce exactly
+  one block.
+- Portal cannot appear in creative/debug item lists and cannot be
+  obtained through pick-block unless a separate developer-only raw-ID
+  tool is deliberately used.
+
+## 5. Dimension and environment specification
+
+Implement a small dimension/provider abstraction rather than adding
+`if nether` branches throughout unrelated systems. The provider should
+own or expose:
+
+- ID and save namespace;
+- generator;
+- sky/skylight policy;
+- fog and background colors;
+- celestial angle/time-display policy;
+- fluid-placement and flow rules;
+- natural spawn tables;
+- coordinate scale;
+- surface-spawn/respawn policy.
+
+### 5.1 Alpha Nether environment
+
+- Dimension ID: `-1`.
+- World height: 128, matching existing chunk storage.
+- No sky, sun, moon, stars, clouds, rain, or Overworld horizon.
+- Fixed celestial angle `0.5` for source-compatible queries, while
+  visual sky rendering remains disabled.
+- Fog color: `(0.2, 0.03, 0.03)` before engine color-space conversion.
+- Use the source no-sky brightness table with ambient floor 0.1;
+  Overworld uses 0.05. For level `i`, fixture
+  `f = 1 - i / 15` and
+  `brightness[i] = (1 - f) / (f * 3 + 1) * 0.9 + 0.1`.
+  Do not generate or propagate skylight in Nether chunks.
+- Do not allow Nether terrain to define a player spawn point.
+- World time can remain root/global for save compatibility, but it
+  must not visibly drive the Nether.
+
+### 5.2 Dimension-specific rules
+
+- Placing water from a bucket plays the fizz effect, emits eight large
+  smoke particles, places no fluid, and leaves the empty bucket.
+- Lava keeps the 30-tick lava update cadence. Its horizontal decay
+  increment is one in the Nether instead of the Overworld increment of
+  two, producing the Alpha v1.2.2-and-later longer reach. Do not
+  describe or implement this as faster ticking.
+- Compass and clock displays wander unpredictably in the Nether. Use a
+  stable per-instance animation process; do not mutate inventory data
+  or allocate a new texture every frame.
+- Bed use is denied, does not set spawn, does not pass time, and does
+  not explode.
+- Death while in the Nether switches to dimension 0 before applying
+  the existing bed/world-spawn respawn selection.
+- Existing Overworld lighting, water, lava, clock, compass, bed, spawn,
+  and day/night behavior must remain regression-identical.
+
+## 6. Terrain generation and shape
+
+### 6.1 Generator pipeline
+
+Add a dedicated `WorldgenNether` reference generator with these
+explicit stages:
+
+1. coarse density field;
+2. trilinear interpolation and base netherrack/lava fill;
+3. bedrock and surface replacement;
+4. Nether cave carving;
+5. source-chunk population/decorations;
+6. lighting inputs and chunk metadata.
+
+Do not fork the Overworld generator by sprinkling Nether conditions
+inside `worldgen.gd`. Shared Java RNG/noise helpers are appropriate;
+the dimension pipelines should remain separately testable.
+
+Use the project's Java-compatible RNG/noise implementation exclusively:
+preserve the 48-bit `Random` state, bounded-`nextInt` rejection,
+`nextDouble`, cached `nextGaussian` behavior, Java signed-64 overflow,
+and cast/truncation semantics. Do not substitute Godot RNG, native
+`rand`, or generic floor calls for negative-coordinate source casts.
+
+### 6.2 Density field and base fill
+
+`ChunkProviderHell` (`kj.java`) constructs all noise generators from one
+shared Java `Random` in this exact order:
+
+1. 16-octave field;
+2. 16-octave field;
+3. 8-octave selector;
+4. 4-octave surface field;
+5. 4-octave surface field;
+6. 10-octave auxiliary field;
+7. 16-octave auxiliary field.
+
+Preserve constructor consumption order. Generate a `5×17×5` coarse
+density grid and interpolate each coarse cell `4×8×4` to fill the
+`16×128×16` chunk.
+
+Source constants and transforms to lock into fixtures:
+
+- horizontal base scale `684.412 / 80`;
+- vertical base scale `2053.236 / 60`;
+- main-field X/Z scale `684.412`;
+- main-field Y scale `2053.236`;
+- selector divided by 10 before blending;
+- vertical bias `cos(y * PI * 6 / 17) * 2`;
+- the source cosine bias's cubic penalty within four samples of both
+  vertical boundaries;
+- the separate final-three-sample top blend toward `-10` (the
+  lower-bound blend branch is inactive because its source threshold is
+  zero);
+- density-positive cells become netherrack;
+- density-negative cells below Y 32 become still lava, otherwise air.
+
+The source array layout is `(x * 16 + z) * 128 + y`. The project chunk
+layout is `y * 256 + z * 16 + x`. Remap through named indexing helpers;
+never paste source index arithmetic into project storage.
+
+### 6.3 Surface replacement and bedrock
+
+For each X/Z column, reproduce `kj.java`'s RNG consumption and rules:
+
+- randomized bottom and top bedrock layers using `nextInt(5)`;
+- surface depth based on surface noise `/ 3 + 3 + random * 0.25`;
+- soul-sand and gravel patch selection around Y 60–65 from the two
+  0.03125-scale noise fields;
+- netherrack as the normal top/filler block;
+- if the selected surface is air below Y 64, substitute lava.
+
+Bedrock must prevent reaching the void or roof without making each
+boundary a perfectly flat slab.
+
+### 6.4 Nether caves
+
+Port `ju.java` as a dedicated Nether cave stage, including the
+`MapGenBase` source-neighborhood behavior it relies on.
+
+- Carve only the source-eligible netherrack, dirt, and grass IDs
+  (practically netherrack in normal Nether terrain).
+- Abort a candidate segment when lava is detected in its safety scan.
+- Clamp carving to Y 1–119.
+- Preserve source RNG, branch, radius, and interpolation order.
+- Make cross-chunk output independent of request order.
+
+### 6.5 Population, cross-chunk ownership, and deterministic deviation
+
+The source populates in this fixed order:
+
+1. eight lava-spring anchors at
+   `x/z = chunk * 16 + nextInt(16) + 8` and
+   `y = nextInt(120) + 4`;
+2. `nextInt(nextInt(10) + 1) + 1` fire-cluster anchors, with the same
+   X/Z and Y formulas;
+3. `nextInt(nextInt(10) + 1)` glowstone-A anchors, again with the same
+   X/Z and Y formulas;
+4. ten glowstone-B anchors at the same offset X/Z but
+   `y = nextInt(128)`;
+5. one brown-mushroom anchor at the same offset X/Z and
+   `y = nextInt(128)`;
+6. one red-mushroom anchor with that same coordinate formula.
+
+The mushroom guards use `nextInt(1) == 0` and are therefore always
+true. Keep that oddity.
+
+Feature rules:
+
+- Lava spring (`kf.java`): above must be netherrack; the candidate is
+  air or netherrack; among the four sides plus below, exactly four are
+  netherrack and one is air.
+- Fire cluster (`pm.java`): 64 attempts using triangular X/Z offsets
+  from two `nextInt(8)` calls and triangular Y offsets from two
+  `nextInt(4)` calls; place only in air with netherrack below.
+- Both glowstone entry points (`dt.java` and `lp.java`): anchor must be
+  air with netherrack above; place it, then make 1,500 attempts with
+  triangular X/Z offsets in ±7 and downward offsets 0–11; place in air
+  only when exactly one orthogonal neighbor is glowstone. Keep two
+  named entry points until parity proves their decompiled behavior is
+  identical.
+- Mushroom decorator (`aj.java`): 64 attempts using the same
+  triangular X/Z ±7 and Y ±3 formulas as fire; place only in air when
+  the existing mushroom block's source placement predicate succeeds.
+
+Decorators begin at a +8 X/Z offset and can spill across chunk
+boundaries. A source chunk owns its decoration RNG/results. Generate
+into a halo or deterministic write list, then merge source chunks in a
+fixed order. Never mutate a live neighbor from a worker.
+
+Important deliberate deviation: unlike the Overworld provider,
+`kj.java` does not reseed its shared RNG before population. Literal
+emulation would make decorations depend on which chunks happened to
+load first. For this project, reconstruct each source chunk's
+post-surface Java-Random state from
+`cx * 341873128712 + cz * 132897987541` and the exact surface RNG
+consumption, then run that source chunk's population sequence. This is
+the canonical expected output for both GDScript and native paths.
+Record this deviation in code comments and fixture metadata.
+
+## 7. Portals and dimension travel
+
+### 7.1 Frame validation and activation
+
+Reproduce `x.java`, not modern portal rules:
+
+- the tested outer footprint is exactly four blocks wide and five
+  blocks tall;
+- the two three-block vertical sides and the two two-block horizontal
+  edges must be obsidian;
+- the four outer corner cells are skipped by the Alpha validator and
+  are optional; they may be obsidian, air, or another block;
+- interior is exactly two wide by three tall;
+- orientation is along one horizontal axis;
+- every interior cell must be air or fire;
+- fire placement/update inside a valid frame fills all six cells with
+  portal blocks;
+- derive visual axis from adjacent portal cells as `x.java` does; do
+  not add modern portal-axis metadata that changes the save contract;
+- breaking/invalidating the frame causes its portal cells to remove
+  themselves.
+
+Portal cells have no collision or selection box. Render a thin,
+two-sided, translucent surface aligned to the frame axis, with the
+source 0.25-block visual thickness. Port `et.java`'s deterministic
+32-frame portal texture generator (`Random(100)`) or consume an exact
+fixture-equivalent 32-frame result, and preserve the source animation
+cadence. Use one shared material/texture resource, not one material per
+block or chunk. On random display ticks, use the source one-in-100
+`portal.portal` ambient-sound gate and four orientation-aware portal
+particles per portal cell. Add the screen overlay/transition effect
+without allowing particles or audio voices to grow without bound.
+
+### 7.2 Exposure and transition
+
+The local player accumulates portal exposure by `0.0125` per tick.
+Nominally that is 80 ticks (four seconds at 20 Hz) to travel; the
+source-supported figure is **81**, because `0.0125` is not exactly
+representable in binary and Alpha accumulates it into a Java `float`, so
+eighty additions land just short of 1.0. See §17.7. Outside a portal,
+exposure decays by `0.05` per tick. Completion sets a ten-tick cooldown.
+Play trigger and travel sounds at the source-compatible points and use
+the Alpha loading labels “Entering the Nether” and “Leaving the
+Nether.” Other entities pass through the non-colliding portal cells but
+do not change dimensions in this Alpha client target.
+
+Make travel a non-reentrant transaction:
+
+1. lock input and expose the loading UI;
+2. save player and source-dimension dirty chunks/entities;
+3. increment the generation epoch and cancel/discard stale work;
+4. unload source nodes and clear/re-key dimension-owned runtime state;
+5. select destination provider and derive scaled coordinates;
+6. find or create the destination portal;
+7. load/materialize a safe destination ring;
+8. place the player, zero velocity, preserve yaw, set pitch to zero,
+   set cooldown, persist the new dimension, and unlock input;
+9. on failure, restore a safe source state and report the error rather
+   than leaving a partially switched save.
+
+Entering `-1` divides X/Z by 8. Returning to `0` multiplies X/Z by 8.
+Use doubles/floats during scaling and floor rules consistent with
+negative coordinates; add explicit negative-coordinate tests.
+
+### 7.3 Destination search and construction
+
+- Search the inclusive 128-block horizontal X/Z radius and Y 127 down
+  through 0 for portal blocks, selecting the nearest squared 3D
+  distance. Preserve `no.java`'s X-major, then Z, then descending-Y scan
+  order as the tie-breaker.
+- Normalize candidates to the bottom portal cell before comparing or
+  placing the player.
+- If no portal exists, search a radius of 16 for a source-compatible
+  frame site with clearance.
+- If no normal site exists, clamp the fallback Y to 70–118, build a
+  safe obsidian platform/frame, and activate it.
+- Place the player at the source-compatible portal center, with zero
+  velocity, retained yaw, and pitch zero.
+
+A portal index may avoid loading every chunk in the radius, but it is
+rebuildable cache data, must validate indexed portals before use, must
+remove stale entries, and must fall back to bounded raw chunk search.
+Never make correctness depend on the cache.
+
+## 8. Mobs, projectiles, and spawning
+
+### 8.1 Zombie pigman
+
+Implement the Alpha `pt.java` behavior:
+
+- 20 health inherited from the hostile base, melee damage 5;
+- texture `/mob/pigzombie.png`;
+- movement speed 0.5 while neutral and 0.95 with a target;
+- immune to fire;
+- neutral while `Anger == 0`;
+- when attacked by a player, alert every zombie pigman in an AABB
+  expanded 32 blocks on X, Y, and Z, and target that player;
+- set `Anger = 400 + nextInt(400)` and delayed angry sound countdown
+  `nextInt(40)`; preserve the source edge case where an initial zero
+  countdown never enters the decrement-to-zero sound branch;
+- preserve Alpha's quirk: `Anger` is never decremented. Once angered it
+  remains nonzero and is persisted as a short. Do not implement modern
+  20–40-second forgiveness;
+- after load, a nonzero-anger pigman must be able to reacquire a valid
+  player target;
+- hold an existing golden sword, using a reusable mob-held-item render
+  path based on the skeleton implementation;
+- ambient/hurt/death/angry sounds use the source pig-zombie event
+  families;
+- drop 0–2 cooked porkchops; do not drop the sword or gold nuggets.
+
+Tests must cover group aggro at the edges and outside of the expanded
+32-block AABB, permanent anger over more than 800 ticks, save/reload,
+speed switching, fire/lava immunity, held-sword rendering, and drop
+bounds.
+
+### 8.2 Ghast
+
+Implement `am.java` and its model/renderer:
+
+- a 4×4 collision body, flying movement, fire immunity, 10 health, and
+  one-per-group limit;
+- normal and charged textures
+  `/mob/ghast.png` and `/mob/ghast_fire.png`;
+- immediately despawn/kill itself on Peaceful;
+- choose waypoints within ±16 on all axes; reroll when distance is
+  below 1 or above 60;
+- every 2–6 ticks, collision-scan the path and accelerate by 0.1 along
+  it, or reset the waypoint to the current position when blocked;
+- acquire the nearest player within 100 blocks and reacquire every 20
+  ticks;
+- engage within 64 blocks and line of sight;
+- face the target; play charge sound at counter 10; fire at counter 20;
+  spawn the projectile four blocks forward; reset the counter to -40;
+  decrement positive charge when line of sight/range is lost;
+- switch to the charged texture only when the charge counter is above
+  10;
+- use source moan/scream/death sounds at source volume 10;
+- drop 0–2 gunpowder, never ghast tears;
+- natural spawn predicate is one chance in 20 after normal collision
+  validity and difficulty greater than Peaceful.
+
+Model the 16×16×16 body and nine two-pixel tentacles from `hc.java`.
+Tentacle lengths are generated with `Random(1660)` and range from
+8–14; animate pitch as
+`0.2 * sin(age * 0.3 + tentacle_index) + 0.4`. Reproduce the
+charge squash/stretch from `jz.java` exactly. With interpolated charge
+`q = max(0, lerp(previous_charge, charge, partial_tick) / 20)`, compute
+`inv = 1 / (q^5 * 2 + 1)`, then scale Y by
+`(8 + inv) / 2` and X/Z by `(8 + 1 / inv) / 2`. Lock at least the idle,
+counter-10, and counter-20 poses in tests. Meshes and materials must be
+shared; animation must not allocate per frame. Apply the established
+mob LOD/collision policies.
+
+### 8.3 Ghast fireball
+
+Implement `az.java` as an ephemeral entity:
+
+- one-block collision size;
+- construct aim using Gaussian spread 0.4, normalize acceleration to
+  0.1;
+- integrate velocity and acceleration each tick;
+- drag 0.95 in air and 0.8 in water;
+- emit smoke each tick with bounded particle counts;
+- ignore collision with the shooter for the first 25 ticks;
+- on impact, apply the source direct-damage call (zero), create a
+  power-1 explosion with fire enabled, then free the projectile;
+- when attacked/deflected, take the attacker's look vector and reset
+  acceleration to magnitude 0.1; keep the original shooter reference,
+  because `az.java` does not transfer it to the deflector;
+- render as the source camera-facing, 2×-scaled item-tile billboard
+  from `gl.java`. The source tile is `dx.aB`, the snowball; reuse the
+  existing `Items.SNOWBALL` icon instead of inventing a fire-charge
+  texture. The projectile has no inventory/debug-spawner form;
+- while in water, emit four bubble particles per tick before applying
+  the 0.8 drag;
+- do not persist fireballs across save, matching the absence of a
+  source entity-registry entry.
+
+Test shooter grace, wall/entity collision, explosion radius/power and
+fire flag, deflection direction with unchanged shooter reference, drag,
+and impact/dimension-unload cleanup. Do not add an arbitrary
+time-to-live that is absent from `az.java`.
+
+### 8.4 Natural spawning
+
+The Hell biome source list is exactly ghast and zombie pigman, with no
+passive list. Reproduce the Alpha hostile loop where it affects
+observable distribution:
+
+- collect the 17×17 eligible chunk area around each player;
+- source hostile threshold is
+  `100 * eligible_chunk_count / 256`; `bg.java` skips spawning only
+  when the current hostile count is greater than this value, not when
+  it is equal, so a successful group may overshoot it;
+- keep the project's existing Overworld hostile cap at 70 unless a
+  separate, measured correction is approved;
+- each eligible chunk is considered only on the source one-in-50
+  random gate;
+- select one class for a candidate group;
+- choose X/Z within the chunk and Y in 0–127;
+- reject solid/fluid starting cells;
+- perform the source three group passes and four attempts, with
+  triangular X/Z spread from two `nextInt(6)` calls and the source's
+  effectively zero Y jitter;
+- reject locations within 24 blocks of a player or world spawn;
+- apply entity-specific collision and spawn predicates;
+- cap the group through the entity's source group-size method.
+
+Keep spawning deterministic enough for controlled tests but do not
+couple the simulation RNG to world-generation RNG. Difficulty Peaceful
+must remove/prevent both hostiles. Avoid a global Overworld light gate
+in the Nether.
+
+## 9. Asset and presentation matrix
+
+This is the acceptance contract for item/block icons and every other
+presentation context. Every row must be verified. “N/A by design” is
+an acceptance result, not missing implementation.
+
+| Content | Pack/default asset | Debug spawner | Inventory/hotbar | Held in hand | Dropped | Placed/in world |
+|---|---|---|---|---|---|---|
+| Netherrack | terrain tile 103 plus default fallback | block list | baked block icon | FP and TP cube | spinning/bobbing block cube | opaque terrain block; correct sound/hardness; persistent fire support |
+| Soul sand | tile 104 plus fallback | block list | baked block icon | FP and TP cube | block cube | 0.875 collision top and slowdown |
+| Glowstone | tile 105 plus fallback | block list | baked block icon | FP and TP cube | block cube | emits 15; breaks to one dust |
+| Glowstone dust | item tile 73 plus fallback | item list | sprite icon | FP and TP extruded sprite | item sprite/billboard and bob | N/A; used by 3×3 recipe |
+| Portal | animated local texture/fallback | excluded | excluded | excluded | excluded | thin translucent animated surface, particles, sound, light 11, no collision/drop |
+| Zombie pigman sword | existing golden-sword item asset | mob via F6 | existing behavior | existing player behavior | existing behavior | visibly held by mob |
+| Ghast | normal and charged mob textures/fallbacks | F6 airborne mode | N/A | N/A | drops gunpowder | model, tentacles, charge deformation and texture swap |
+| Ghast fireball | existing snowball item tile | excluded | excluded | excluded | excluded | 2× billboard, smoke/bubbles, collision, explosion |
+
+Required asset-system work:
+
+- map local Alpha atlas tiles into the `alpha_vanilla` pack;
+- add the project's default `programmer_art` files and either provide
+  `pixel_perfection` variants or verify its loader falls back to the
+  default pack for every new semantic asset;
+- add semantic pack paths under
+  `assets/textures/packs/{pack}/blocks`,
+  `.../items`, and `.../mobs` as expected by existing loaders;
+- use `BlockIconRenderer` for block inventory icons and
+  `SpriteExtruder` for glowstone dust/held item treatment;
+- make `ItemIcons`, player-held routing, `DroppedItem`, and the debug
+  item spawner use explicit registries, not numeric ranges;
+- use `MobBase._resolve_pack_mob_path` for mob overrides;
+- add default-pack fallback textures and sound assets;
+- register portal trigger/travel/ambient, ghast, pigman, charge,
+  fireball, fizz, and any missing impact events in
+  `scripts/audio/sfx.gd`;
+- provide silent-safe fallback if optional local Alpha audio is absent.
+
+The implementation is incomplete if an item works only after a console
+grant, appears as a placeholder in one view, or changes visual type
+when dropped.
+
+## 10. Target architecture and likely files
+
+Names may follow local conventions, but keep responsibilities separate.
+
+Likely new scripts:
+
+- `scripts/world/dimension_context.gd` or
+  `scripts/world/world_provider.gd`
+- `scripts/world/worldgen_nether.gd`
+- `scripts/world/worldgen_nether_caves.gd`
+- `scripts/world/nether_population.gd`
+- `scripts/world/nether_portal.gd`
+- `scripts/world/nether_teleporter.gd`
+- `scripts/entities/zombie_pigman.gd`
+- `scripts/entities/ghast.gd`
+- `scripts/entities/ghast_fireball.gd`
+- `shaders/portal.gdshader`
+
+Likely modified systems:
+
+- `scripts/world/blocks.gd`, `scripts/world/items.gd`, atlas, icons,
+  recipes, and block icon renderer;
+- player interaction and FP/TP held item routing;
+- dropped items and both debug spawners;
+- fire, fluids, lighting, clock/compass, beds, respawn;
+- `ChunkManager`, chunk views/meshing, world environment, sky dome,
+  day/night driver, loading screen;
+- region/player/entity save systems and block-entity/tick caches;
+- mob registry, AI/render base, spawner managers, SFX registry;
+- `src/worldgen_native.h/.cpp` after the reference generator passes.
+
+Dimension ownership must be explicit for:
+
+- chunk maps, region caches, dirty sets, worker queues/results;
+- lighting queues and pending relights;
+- scheduled block ticks;
+- chest, furnace, sign, jukebox, and spawner state;
+- active entities and serialized entity stores;
+- population/decor completion records;
+- portal index/cache;
+- transient particles/audio and debug selections.
+
+On transition, either clear these structures or key them by dimension.
+Add assertions that catch accidental cross-dimension access in debug
+builds.
+
+## 11. Ordered implementation batches
+
+### Batch 0 — Baseline, namespace runway, and source fixtures
+
+Goal: make later Nether content safe without changing existing
+gameplay.
+
+Work:
+
+- Record git status and preserve unrelated changes.
+- Run the full tests, format/lint checks, native build, and existing
+  performance probes. Save Overworld generation hashes for a fixed seed
+  and coordinate matrix.
+- Re-audit IDs 97–99, 205–206 and add documented reservations.
+- Replace `id < 100` / `id >= 100` content-kind decisions with explicit
+  registries throughout runtime and tests.
+- Add invariants for uniqueness, byte range, AIR, item-form policy, and
+  burned ID 50.
+- Restore/recreate the local Alpha pack extractor and test it against
+  the ignored client JAR without checking extracted assets into git.
+- Create a local Java/source oracle that emits compact generated facts:
+  voxel hashes, selected cells, feature counts, RNG checkpoints, and
+  entity constants. Check in fixture output and provenance rather than
+  source/JAR blobs.
+- Establish fixture seeds `0`, `1`, `-1`, `12345`, and `987654321`,
+  with positive, negative, origin, and seam-adjacent chunk coordinates.
+
+Acceptance criteria:
+
+- Every existing item/block behaves and renders exactly as before.
+- ID 206 can be registered as a non-item block in a focused test
+  without being classified as an item or truncated.
+- Existing saves and inventory bytes load unchanged.
+- Local extraction reports all required Alpha textures and never
+  writes into a tracked raw-asset path.
+- Fixture metadata records source version, class/method, coordinate
+  layout, seed, and deterministic-population deviation.
+- All baseline tests pass and Overworld fixture hashes are captured.
+
+Required tests:
+
+- `tests/test_content_registry.gd`
+- expanded item placement/debug/held/drop registry tests
+- save round-trip for IDs 0, 50, 99, 100, 205, 206, and 255 as raw
+  byte values where the format permits
+- extractor dry-run/path-safety test
+- full existing suite and native build
+
+Handoff evidence: ID table, affected range-assumption callsites,
+baseline test count, Overworld hashes, extractor inventory, and fixture
+manifest.
+
+### Batch 1 — Dimension and persistence foundation
+
+Goal: switch an empty/test provider between dimension 0 and -1 without
+data leakage or save corruption.
+
+Work:
+
+- Introduce provider/context interfaces and move existing Overworld
+  constants behind the default provider without behavior changes.
+- Make chunk, region, entity, block-entity, scheduled-tick, lighting,
+  and generation-job ownership dimension-aware.
+- Add `DIM-1` paths while preserving all existing root paths.
+- Version player save data and add current dimension with v1 migration.
+- Add transition epochs, stale-result rejection, and a test-only
+  dimension switch transaction.
+- Peek player dimension/position before constructing the initial chunk
+  ring.
+- Implement source-save, unload, destination-load, failure rollback,
+  and death-to-Overworld scaffolding.
+
+Acceptance criteria:
+
+- A v1 world opens in dimension 0 without rewritten chunk/entity data.
+- Identical chunk coordinates in dimensions 0 and -1 store different
+  bytes and cache entries.
+- Switching dimensions repeatedly leaves only one resident chunk set.
+- A delayed old-epoch worker result is rejected.
+- Save/restart in dimension -1 restores that dimension and position;
+  death returns to the correct Overworld respawn.
+- Overworld generation, environment, saving, and entity persistence
+  remain unchanged.
+
+Required tests:
+
+- `tests/test_dimension_context.gd`
+- `tests/test_dimension_save_load.gd`
+- v1→v2 player migration and corrupt/unknown-version handling
+- region cache-key isolation and entity-file isolation
+- scheduled tick/block-entity isolation
+- stale worker result and rollback fault injection
+- existing save/load, streaming, lighting, and worldgen suites
+
+Handoff evidence: save tree before/after, migration bytes, memory/node
+counts over ten switches, and rollback test output.
+
+### Batch 2 — Blocks, item economy, assets, and complete presentation
+
+Goal: add netherrack, soul sand, glowstone, and dust with every intended
+representation, and establish the portal block's world-only registry
+contract for Batch 7.
+
+Work:
+
+- Register the reserved IDs and source properties from section 4.
+- Add the three inventory blocks to atlas/meshing, debug block list,
+  icons, held cube path, dropped block path, placement, mining,
+  save/load, and pickup.
+- Add glowstone dust to item icons, debug item list, inventory/hotbar,
+  held sprite extrusion, dropped item path, and recipe system.
+- Implement glowstone's one-dust drop and nine-dust recipe.
+- Implement soul-sand collision height/slowdown and persistent
+  netherrack fire.
+- Register portal as a world-only block and ensure every item-facing
+  path excludes it. Prepare its texture input, but defer its custom
+  mesh, animation, particles, and travel behavior to Batch 7.
+- Finish local extraction mappings and default-pack fallbacks.
+
+Acceptance criteria:
+
+- Every applicable matrix cell for netherrack, soul sand, glowstone,
+  and dust is correct; the portal's item/debug/held/drop cells are
+  correctly excluded pending its Batch 7 world rendering.
+- No placeholder/missing textures in either the default pack or local
+  Alpha pack.
+- Glowstone emits light 15, relights on placement/break at a chunk
+  seam, and drops one dust.
+- Nine dust crafts one glowstone; no four-dust recipe exists.
+- Soul sand has a 0.875 top and multiplies horizontal motion by 0.4
+  without changing vertical motion.
+- Fire on netherrack persists through the normal extinguish path.
+- Portal ID 206 survives chunk/save/network-free internal byte paths
+  but is unobtainable as an item.
+
+Required tests:
+
+- `tests/test_nether_blocks.gd`
+- `tests/test_nether_rendering.gd`
+- recipe, drops, collision, fire, light, seam relight, save round-trip
+- snapshot/structural tests for debug lists, inventory icon kind, FP/TP
+  held kind, and dropped kind
+- manual visual matrix in both packs
+
+Handoff evidence: screenshots of each presentation context, recipe/drop
+results, collision measurements, and asset-manifest diff.
+
+### Batch 3 — GDScript base terrain, surfaces, and caves
+
+Goal: produce source-oracle-compatible Nether chunks without
+decorations.
+
+Work:
+
+- Implement `WorldgenNether` with exact Java RNG/noise construction,
+  coarse density interpolation, lava sea, surface replacement, and
+  bedrock.
+- Port Nether caves with source-neighborhood ownership.
+- Add explicit source-layout/project-layout conversion.
+- Integrate the generator through the provider and worker path.
+- Keep this path clear and unoptimized as the reference implementation.
+
+Acceptance criteria:
+
+- Reference fixtures match raw Alpha IDs before project-ID remapping,
+  then match project bytes after remapping.
+- Exact full-chunk hashes pass for the seed/coordinate fixture matrix.
+- Selected density, bedrock, lava-level, surface-patch, negative
+  coordinate, and cave cells match the independent oracle.
+- Requesting chunks in reversed/random order yields identical bytes.
+- No scene/resource access occurs on worker threads.
+- Overworld hashes are byte-identical to Batch 0.
+
+Required tests:
+
+- `tests/test_nether_worldgen.gd`
+- `tests/test_nether_worldgen_oracle.gd`
+- density/RNG checkpoints and index-remap tests
+- cave seam and lava-abort fixtures
+- request-order permutation and repeated-run hashes
+- worker-thread safety stress test
+
+Handoff evidence: fixture pass table, representative vertical slices,
+hash matrix, order permutation result, and generation timing baseline.
+
+### Batch 4 — Population, decorations, and seam determinism
+
+Goal: add all Alpha Nether decoration features without seams or
+load-order dependence.
+
+Work:
+
+- Implement lava springs, fire clusters, both glowstone entry points,
+  and both mushrooms in the exact source order.
+- Reconstruct the per-source-chunk post-surface RNG state.
+- Extend the source-chunk halo/merge pipeline for +8-offset features.
+- Define deterministic collision/merge precedence if two sources write
+  one cell; mirror existing project conventions and lock it in tests.
+
+Acceptance criteria:
+
+- Feature anchors, counts, selected coordinates, and final chunk hashes
+  match canonical fixtures.
+- Both glowstone generators perform 1,500 attempts and obey the
+  exactly-one-neighbor rule.
+- No decoration seam changes when neighboring chunks load later.
+- Generating a region in row-major, reverse, spiral, and randomized
+  order produces identical final bytes.
+- Reloading persisted chunks does not re-run or duplicate population.
+- Overworld generation remains byte-identical.
+
+Required tests:
+
+- population RNG/anchor fixtures
+- per-feature predicate unit tests
+- `tests/test_nether_population.gd`
+- four load-order permutations across at least a 5×5 region
+- negative-coordinate and four-way seam cases
+- persisted decoration-complete round-trip
+
+Handoff evidence: per-feature fixture report, seam diff report, order
+hashes, and screenshots of representative glowstone/fire/mushrooms.
+
+### Batch 5 — Native parity and generation performance
+
+Goal: make Nether generation production-ready without changing its
+reference output.
+
+Work:
+
+- Extend the native worldgen API with an explicit Nether entry point or
+  dimension enum; do not overload ambiguous Overworld parameters.
+- Port stages incrementally and compare after density, surface, caves,
+  and population.
+- Keep GDScript fallback functional for platforms without the
+  extension.
+- Profile before optimizing. Follow `.claude/optimizations.md` and
+  avoid per-cell allocations or scene calls.
+
+Acceptance criteria:
+
+- Native and GDScript output are byte-for-byte identical for every
+  fixture and order test.
+- A build without the extension produces the same world through the
+  fallback.
+- Native Nether worker generation p95 is no more than 1.25× the
+  existing native Overworld worker-generation p95 for the same sampled
+  chunk count, unless a documented density-complexity baseline proves
+  a different reviewed threshold is necessary.
+- No existing generation/materialization metric regresses by more than
+  10% across repeated comparable runs.
+- No leaks or unbounded buffers appear during a 20×20 traversal.
+
+Required tests:
+
+- `tests/test_nether_worldgen_native.gd`
+- all oracle, parity, seam, and order suites on both paths
+- debug and release native builds on the current platform
+- fallback run with native extension intentionally unavailable
+- PerfProbe cold/warm samples with seed/route/hardware recorded
+
+Handoff evidence: native/GDScript hash table, build logs, p50/p95/max
+timings, allocations/memory trend, and Overworld comparison.
+
+### Batch 6 — Nether environment, lighting, fluids, and item rules
+
+Goal: make the dimension look and behave like Alpha's Nether.
+
+Work:
+
+- Disable sky/cloud/celestial/weather rendering through provider
+  policy.
+- Add fixed fog/background and no-skylight lighting behavior.
+- Apply water-bucket evaporation, lava decay increment, compass/clock
+  wandering, bed denial, and respawn behavior.
+- Ensure glowstone, lava, fire, and portal emissive values relight
+  correctly without a sky channel.
+- Add particles/audio with pooling and limits.
+
+Acceptance criteria:
+
+- No sky/cloud/sun/moon/star/weather artifact appears from ground to
+  roof or after dimension switching.
+- Empty Nether darkness follows the 0.1 ambient-floor table; glowstone
+  is 15 and portal is 11.
+- Water never persists from a bucket; bucket state, fizz, and eight
+  smoke particles are correct.
+- A controlled flat test shows Nether lava advances one horizontal
+  decay level per block while Overworld lava still advances two, with
+  the same 30-tick update cadence.
+- Compass and clock wander in Nether and immediately resume correct
+  behavior after returning.
+- Beds neither sleep, set spawn, nor explode.
+- Ten repeated switches restore the exact Overworld environment each
+  time.
+
+Required tests:
+
+- `tests/test_nether_environment.gd`
+- no-skylight and emissive propagation/seam tests
+- fluid cadence/decay snapshots
+- water-bucket inventory/effect test
+- clock/compass dimension-policy tests
+- bed, death, and repeated-environment-switch tests
+- manual visual checks at multiple graphics settings
+
+Handoff evidence: before/after screenshots, light probes, fluid state
+timeline, and environment node/material counts.
+
+### Batch 7 — Portal rendering, activation, search, and round trip
+
+Goal: provide safe, persistent two-way travel using Alpha portal rules.
+
+Work:
+
+- Implement exact frame validation, activation by fire, self-removal,
+  world-only rendering, particles, sound, light, and player exposure.
+- Implement coordinate scaling, search, construction fallback, optional
+  validated index, and the Batch 1 transition transaction.
+- Add loading and failure recovery behavior.
+
+Acceptance criteria:
+
+- Only the exact 4×5 footprint with its ten required obsidian blocks
+  and 2×3 clear/fire interior activates; optional corner contents do
+  not affect activation, and both axis orientations work.
+- Invalidating any required frame block removes all connected portal
+  cells without unrelated flood-fill damage.
+- Portal has no collision, selection, item, drop, or debug-item entry.
+- Continuous exposure travels at 81 ticks (see §7.2 — 80 is the nominal
+  figure, 81 is what float accumulation of 0.0125 actually produces),
+  leaving decays at 0.05/tick, and cooldown prevents immediate
+  bounce-back for ten ticks.
+- Positive and negative 8:1 coordinate round trips find or create safe
+  portals using source bounds.
+- Existing portals win by nearest squared 3D distance; stale index
+  entries are rejected and raw search succeeds.
+- Failure injection cannot duplicate the player, lose inventory, mix
+  chunks, or strand a half-switched save.
+
+Required tests:
+
+- `tests/test_nether_portal.gd`
+- `tests/test_nether_teleporter.gd`
+- exhaustive frame cells/orientations and invalid-frame tests
+- deterministic 32-frame texture hashes/cadence and seeded
+  ambient-sound/particle display-tick tests
+- exposure/cooldown timelines
+- search tie, radius boundary, Y boundary, fallback platform, negative
+  coordinate, stale-index, and blocked-site tests
+- save/restart on each side and transition fault injection
+- portal material/mesh resource-sharing assertion
+
+Handoff evidence: round-trip coordinate log, search/create trace,
+failure recovery results, and portal visual/audio capture.
+
+### Batch 8 — Zombie pigman
+
+Goal: add a fully persistent, Alpha-faithful neutral hostile.
+
+Work:
+
+- Register entity ID/name without colliding with project entities.
+- Add model/texture, held golden sword, AI, combat, group aggro,
+  fire immunity, drops, sound, save data, and F6 spawning.
+- Add grounded species clearance to debug and cage spawning.
+
+Acceptance criteria:
+
+- All section 8.1 behavior and tests pass.
+- The mob can be spawned from F6, saved/unloaded/reloaded, fought, and
+  observed holding the sword at every LOD.
+- One player hit alerts exactly the qualifying nearby group.
+- Anger remains nonzero indefinitely and across restart.
+- No passive/hostile Overworld behavior changes.
+
+Required tests:
+
+- `tests/test_zombie_pigman.gd`
+- mob-registry and entity-save round-trip
+- aggro boundary, permanent anger, target reacquisition, combat/drop,
+  fire/lava, held-item pose, LOD, and debug-spawn clearance tests
+- bounded multi-mob performance sample
+
+Handoff evidence: save payload, aggro map, drop samples, render
+screenshots, and performance counters.
+
+### Batch 9 — Ghast and fireball
+
+Goal: add the Alpha flying hostile and its complete projectile loop.
+
+Work:
+
+- Implement model, shared meshes/materials, flight, targeting, charge,
+  texture/shape transition, sounds, drops, and debug airborne spawning.
+- Implement fireball movement, collision, deflection, explosion, fire,
+  visual, particles, and lifecycle.
+- Add LOD and collision policies appropriate to a 4×4 flying mob.
+
+Acceptance criteria:
+
+- All sections 8.2 and 8.3 behavior passes deterministic tests.
+- F6 finds valid open air and never embeds a ghast in roof/terrain.
+- Charge/firing counters, line of sight, four-block launch offset, and
+  -40 cooldown match fixtures.
+- Fireballs ignore their shooter for 25 ticks, can be deflected without
+  changing their stored shooter, make power-1 fiery explosions, and
+  clean themselves up on impact or dimension unload.
+- Peaceful removes ghasts; drops are only 0–2 gunpowder.
+- A sustained projectile/mob scene has stable node, material, mesh,
+  particle, audio-voice, and memory counts.
+
+Required tests:
+
+- `tests/test_ghast.gd`
+- `tests/test_ghast_fireball.gd`
+- model/tentacle deterministic structure and captured pose tests
+- waypoint obstruction, range, LOS, charge timeline, launch vector,
+  Peaceful, drops, shooter grace, impact, deflection, and cleanup
+- F6 airborne/cage spawn tests and performance stress scene
+
+Handoff evidence: charge timeline, pose images, collision traces,
+resource-count graph, and projectile stress results.
+
+### Batch 10 — Natural spawning, integration, playtest, and release gate
+
+Goal: connect all systems, audit fidelity, and prove the feature is
+ship-ready.
+
+Work:
+
+- Wire the natural hostile controller and Hell spawn table.
+- Exercise chunk streaming, portals, saves, lighting, fluids,
+  projectiles, deaths, and both mobs together.
+- Add `docs/nether-playtest-guide.md` with short, reproducible tracks
+  for every manual-only criterion.
+- Run a final Alpha-source audit and list every intentional deviation.
+- Profile representative travel and combat routes; fix measured
+  regressions.
+
+Acceptance criteria:
+
+- Nether natural spawns contain only zombie pigmen and ghasts, follow
+  the scaled source cap and species predicates, and stop on Peaceful.
+- No passive mobs naturally spawn in the Nether.
+- A new-world portal round trip, an existing-world migration round
+  trip, and a save/restart on both sides preserve inventory, entities,
+  blocks, portal destinations, and dimension.
+- All presentation-matrix cells and playtest tracks pass in the default
+  and local Alpha packs; selecting Pixel Perfection resolves every new
+  asset through its own files or the documented fallback.
+- Native and fallback generation stay fixture-identical.
+- No chunk seams, stuck lighting, stale workers, duplicate entities,
+  cross-dimension ticks, or portal-transition corruption appear in
+  stress tests.
+- Steady gameplay holds the project's frame budget; compared with the
+  Batch 0 route, unexplained p95 frame-time regression is at most 10%.
+- All tests, lint/format checks, native builds, asset-integrity checks,
+  and docs pass.
+
+Required tests:
+
+- `tests/test_nether_spawning.gd`
+- `tests/test_nether_integration.gd`
+- `tests/test_nether_performance.gd`
+- full test suite on native and GDScript-fallback paths
+- 30-minute automated portal/stream/save/load soak
+- manual `docs/nether-playtest-guide.md` completion
+- clean-install/default-pack, local-Alpha-pack, and
+  Pixel-Perfection-fallback smoke tests
+
+Handoff evidence: final test count, full command logs, playtest report,
+source/deviation checklist, staged-file asset audit, p50/p95/max frame
+and generation timings, memory trend, and remaining known issues.
+
+## 12. Test strategy and commands
+
+### 12.1 Independent oracle policy
+
+Never compare an implementation only with another translation of
+itself. Generate expected facts from the ignored Alpha source/JAR in a
+local harness:
+
+- raw source block IDs before project remapping;
+- chunk hashes plus selected coordinates;
+- RNG state/checkpoints after constructor, surface, and population
+  phases;
+- feature anchor/count summaries;
+- portal frame/search examples;
+- mob counter/state timelines.
+
+Checked-in fixture data must be small, factual, reproducible, and free
+of source/assets. Store the Alpha version, decompiler caveat, harness
+revision, seed, coordinates, byte order, and canonicalized population
+rule with each fixture set.
+
+### 12.2 Minimum worldgen matrix
+
+Use seeds:
+
+```text
+0
+1
+-1
+12345
+987654321
+```
+
+For each, cover at least:
+
+- chunks `(0,0)`, `(1,0)`, `(0,1)`, `(-1,0)`, `(0,-1)`,
+  `(-1,-1)`;
+- one positive and one negative distant coordinate;
+- a 5×5 seam region;
+- row-major, reverse, spiral, randomized, and concurrent request order;
+- GDScript reference, native implementation, and native-unavailable
+  fallback.
+
+### 12.3 Automated test layers
+
+| Layer | What it proves |
+|---|---|
+| Registry/unit | IDs, properties, recipes, drops, collision shapes, dimension policies, mob counters and predicates |
+| Fixture/oracle | Source-faithful RNG, terrain bytes, caves, population, portal and entity state |
+| Parity | GDScript/native and request-order equality |
+| Integration | inventory/held/drop/place, lighting, fluids, saves, portals, entity lifecycle and spawning |
+| Fault injection | stale workers, corrupt saves, failed portal creation/load, missing optional assets/native extension |
+| Performance/soak | frame time, generation time, leaks, resource sharing, queue bounds and repeated transitions |
+| Manual | appearance, animation, audio, controls, transition feel and large-world seams |
+
+Use deterministic injected RNG and clocks for unit tests. Do not expose
+test-only behavior in release paths; use dependency seams.
+
+### 12.4 Standard commands
+
+Run the repository's actual platform command if it differs, and record
+the command used:
+
+```sh
+godot --headless --path . -s addons/gut/gut_cmdln.gd \
+  -gdir=res://tests/ -gexit
+gdformat --check scripts/ tests/
+gdlint scripts/ tests/
+scons platform=macos target=template_debug
+```
+
+During development, focused tests are acceptable for iteration. Every
+batch exit requires the full suite. Also launch the desktop build:
+
+```sh
+godot --path . main.tscn
+```
+
+### 12.5 Manual playtest coverage
+
+The final playtest guide must include:
+
+1. Obtain each allowed block/item from F4 and inspect inventory,
+   hotbar, FP/TP held, dropped, pickup, and placed/use form.
+2. Verify portal is absent from item UI and has no pick/drop.
+3. Mine/craft/drop glowstone and dust; test netherrack fire and
+   soul-sand height/slowdown with player and mobs.
+4. Inspect terrain floor-to-roof, lava sea, caves, bedrock, all
+   decorators, chunk seams, and negative coordinates.
+5. Test water, lava reach, lighting, fog, missing sky, compass, clock,
+   bed, death, and return to Overworld.
+6. Build portals on both axes; test interrupted exposure, invalid
+   frames, positive/negative scaling, blocked destinations, reuse,
+   fallback creation, save/restart, and rapid attempted re-entry.
+7. Spawn and naturally encounter both mobs; verify pigman group anger,
+   ghast charge/fire/deflection, drops, Peaceful, save/load, and LOD.
+8. Traverse long enough to stream/unload both dimensions and watch
+   debug counters for stale work, node/resource growth, light queues,
+   entity counts, and frame spikes.
+
+## 13. Performance requirements
+
+Measure before optimizing and compare on the same machine, build,
+seed, route, view distance, and graphics settings.
+
+- Capture Batch 0 warm Overworld p50/p95/max for worker generation,
+  main-thread materialization, frame time, memory, nodes, materials,
+  meshes, particles, audio voices, and active entities.
+- GDScript is the clarity-first correctness reference. Native output
+  must match it exactly.
+- Do not allocate a `ShaderMaterial` per portal block/chunk or a unique
+  mob mesh/material per entity.
+- Pool/bound portal and fireball particles and cap simultaneous audio
+  voices.
+- Portal search is allowed behind the loading screen but must be
+  bounded, instrumented, and must not leave both dimensions resident.
+- A steady representative Nether scene should keep the project's
+  normal frame budget. Any p95 regression over 10% from its comparable
+  baseline needs a cause and fix or an explicitly reviewed waiver.
+- Native Nether chunk generation uses the Batch 5 relative gate;
+  absolute numbers are diagnostic because CI/developer hardware varies.
+- Stress tests must show stable memory/resource counts after warm-up,
+  not merely avoid a crash.
+
+Do not reduce source spawn caps, view distance, feature attempts, cave
+complexity, or portal radius silently to meet a performance target.
+Use LOD, shared resources, spatial queries, bounded scheduling, and
+native parity-preserving work first.
+
+## 14. Risk register and required mitigations
+
+| Risk | Consequence | Required mitigation |
+|---|---|---|
+| Numeric block/item classification | Portal 206 renders/behaves as an item; save corruption | Batch 0 explicit registries and exhaustive ID invariants |
+| Cross-dimension cache key omission | Chunks/entities/ticks leak between worlds | Dimension keying, unload assertions, repeated-switch tests |
+| Stale worker result | Overworld data appears in Nether or vice versa | Epoch + dimension tags and discard tests |
+| Source/project index mismatch | Transposed/corrupt terrain | Named indexing helpers and selected-cell fixtures |
+| Shared-RNG literal port | Load-order-dependent decorations | Canonical per-source post-surface RNG reconstruction |
+| Cross-chunk decorators | Seams or later overwrites | Source ownership, halo/write lists, fixed merge order |
+| Modern behavior creep | Wrong recipes, portals, lava, anger, drops | Source checklist and explicit out-of-scope list |
+| Portal search cost | Long freeze or unsafe spawn | Bounded search, validated cache, loading UI, profiling |
+| Per-entity resources | Ghast/portal performance collapse | Shared meshes/materials, LOD, resource-count tests |
+| Natural spawner not wired | Mobs only appear through debug tool | Batch 10 integration test from normal gameplay tick |
+| Debug ghast floor spawn | Ghast embeds in roof/terrain | Species-aware volume search |
+| Save migration failure | Existing worlds become unloadable | Versioned additive migration and golden save fixtures |
+
+## 15. Final release acceptance checklist
+
+The Nether is complete only when all statements are true:
+
+- [ ] Existing IDs and Alpha save bytes were not renumbered.
+- [ ] Dimension 0 is regression-identical in worldgen and gameplay.
+- [ ] Dimension -1 has isolated chunks, entities, ticks, caches, and
+      persistence.
+- [ ] Base terrain, surfaces, bedrock, caves, and every population
+      feature pass independent fixtures and load-order tests.
+- [ ] Native and GDScript output are byte-identical; fallback works.
+- [ ] Netherrack, soul sand, glowstone, dust, and portal match section
+      4.
+- [ ] Every presentation-matrix row is verified in both asset packs.
+- [ ] Portal validation, exposure, scaling, search, construction,
+      rollback, and persistence pass.
+- [ ] Nether lighting, fog, sky, water, lava, clock, compass, bed, and
+      respawn rules pass.
+- [ ] Zombie pigmen, ghasts, fireballs, debug spawning, and natural
+      spawning match section 8.
+- [ ] Full tests, format/lint, native build, soak, and playtest pass.
+- [ ] Performance gates pass without reducing Alpha behavior.
+- [ ] The complete texture/audio asset manifest passes in both packs.
+- [ ] Every deliberate deviation and remaining known issue is written
+      down.
+
+## 16. Reference ledger
+
+### 16.1 Repository guidance and engine references
+
+- `CLAUDE.md` — architecture, storage, threading, testing, and native
+  parity rules.
+- `.claude/optimizations.md` — measured optimization and mob/resource
+  constraints.
+- `.claude/alpha-1.2.6-mapping.md` — obfuscated Alpha class map.
+- `.claude/redstone-plan.md` and
+  `docs/redstone-playtest-guide.md` — batch-gate and playtest
+  documentation patterns.
+- `scripts/world/worldgen.gd` and `src/worldgen_native.*` — existing
+  deterministic reference/native generation pattern.
+- `scripts/world/chunk_manager.gd` — streaming, worker, generation, and
+  spawn integration point.
+- `scripts/world/natural_mob_spawner.gd` and
+  `scripts/world/passive_spawner.gd` — current spawning paths.
+- `scripts/ui/debug_item_spawner.gd` and
+  `scripts/ui/debug_mob_spawner.gd` — required debug access.
+- `scripts/player/player.gd`, `scripts/player/interaction.gd`,
+  `scripts/world/dropped_item.gd`, `scripts/ui/item_icons.gd`,
+  and `scripts/ui/block_icon_renderer.gd` — presentation and
+  interaction paths.
+
+### 16.2 Local Alpha v1.2.6 source authority
+
+The source is local, ignored reference material under
+`vendor/alpha-1.2.6-src/src/`:
+
+| Behavior | Source |
+|---|---|
+| Nether provider/environment | `om.java` |
+| Nether terrain and population order | `kj.java` |
+| Nether caves | `ju.java` |
+| Lava spring, fire, glowstone decorators | `kf.java`, `pm.java`, `dt.java`, `lp.java` |
+| Block registrations/properties | `nq.java` |
+| Netherrack, soul sand, glowstone | `qb.java`, `it.java`, `hk.java` |
+| Fire persistence and fluid rules | `qh.java`, `ja.java`, `ld.java` |
+| Glowstone dust and recipe | `dx.java`, `en.java` |
+| Portal block/frame | `x.java` |
+| Player portal exposure and dimension call | `bq.java`, `net/minecraft/client/Minecraft.java` |
+| Destination search/construction | `no.java` |
+| Portal frame texture generation | `et.java` |
+| Hell spawn lists and natural loop | `k.java`, `gy.java`, `bg.java` |
+| Ghast/model/renderer | `am.java`, `hc.java`, `jz.java` |
+| Ghast fireball/renderer | `az.java`, `gl.java` |
+| Zombie pigman | `pt.java` |
+| Entity registry | `fq.java` |
+| Water bucket, compass, clock | `ag.java`, `gp.java`, `ae.java` |
+
+Decompiled names can be imperfect. Verify any ambiguous expression
+against callsites and generated fixtures before coding.
+
+### 16.3 External historical cross-checks
+
+- [Minecraft Wiki: The Nether](https://minecraft.wiki/w/The_Nether) —
+  Nether content history, including the Alpha v1.2.0 addition and
+  Alpha v1.2.2 lava change.
+- [Minecraft Wiki: Java Edition Alpha v1.2.0](https://minecraft.wiki/w/Java_Edition_Alpha_v1.2.0)
+  and [Alpha v1.2.2](https://minecraft.wiki/w/Java_Edition_Alpha_v1.2.2)
+  — release chronology. Do not copy preview-only behavior.
+- [Minecraft Wiki: Nether portal](https://minecraft.wiki/w/Nether_portal),
+  [Ghast](https://minecraft.wiki/w/Ghast),
+  [Zombified Piglin](https://minecraft.wiki/w/Zombified_Piglin),
+  [Soul Sand](https://minecraft.wiki/w/Soul_Sand), and
+  [Glowstone](https://minecraft.wiki/w/Glowstone) — secondary behavior
+  cross-checks; use the local Alpha source for version-specific truth.
+- [Minecraft Wiki: pre-flattening data values](https://minecraft.wiki/w/Java_Edition_pre-flattening_data_values)
+  — historical fluid-level metadata cross-check.
+- [Minecraft.net: Block of the Week — Netherrack](https://www.minecraft.net/en-us/article/block-week-netherrack)
+  — official historical overview and persistent-fire description.
+External pages were last consulted on 2026-08-16. They may describe
+later behavior on their current pages, so every implementation constant
+must trace back to the Alpha source or a version-specific history entry.
+
+## 17. Batch findings log
+
+Recorded as each batch lands. Findings that contradict earlier
+sections are also corrected in place; this log is the chronological
+trail.
+
+### 17.1 Batch 0 (2026-08-16)
+
+**Confirmed against source.** `nq.java:110-113` registers the four
+Nether world blocks exactly as section 4 describes — netherrack
+`new qb(87, 103).c(0.4f)`, soul sand `new it(88, 104).c(0.5f)`,
+glowstone `new hk(89, 105, hb.o).c(0.3f).a(1.0f)`, portal
+`new x(90, 14).c(-1.0f).a(0.75f)`. `dx.java:101` gives glowstone dust
+`new dx(92).a(73)` → item 348, sprite tile 73. `it.java` confirms the
+0.125 collision inset (top at 0.875) and the `az *= 0.4 / aB *= 0.4`
+horizontal-only slowdown. `en.java:32` confirms the nine-dust recipe as
+a full 3×3. `kj.java:28-38` confirms the 16/16/8/4/4/10/16 constructor
+order. Section 4's one addition: the portal's hardness is `-1.0f`, the
+unbreakable sentinel.
+
+**`JavaRandom.next_long()` was wrong, and both implementations shared the
+bug.** OpenJDK's `nextLong` is `((long)next(32) << 32) + next(32)` with
+*both* halves sign-extended, so a negative low word subtracts. Our
+GDScript port and `src/worldgen_native.cpp` both treated the low word as
+unsigned, running 2³² high whenever it was negative. The GDScript↔native
+parity tests could never catch it because both sides were wrong
+identically — precisely the failure mode §12.1's independent-oracle rule
+exists to prevent. The new JDK-backed oracle caught it on its first run.
+
+`next_long()` is now correct. **The Overworld cave generator is not.**
+`worldgen_caves.gd` and the native cave path both call a new, explicitly
+named `next_long_legacy_unsigned_low()`, because those two seed
+multipliers determine every cave in every Overworld world this project
+has generated; switching them would re-carve unvisited chunks of
+existing saves into shapes that do not meet their already-persisted
+neighbours. Overworld output is therefore byte-identical to the Batch 0
+baseline, and the deviation is pinned by
+`tests/test_java_random.gd::test_legacy_next_long_preserves_shipped_overworld_caves`.
+
+> **Open decision for the operator.** Alpha-faithful Overworld caves
+> require the corrected `nextLong` in both the GDScript and native cave
+> paths, plus a regenerated Overworld baseline fixture and a story for
+> existing saves (accept the seam, or version the generator). Nothing in
+> the Nether depends on this — all new Nether code uses the corrected
+> `next_long()`.
+
+**`kj.java` is compilable for a real Batch 3 oracle.** Its dependency
+closure is only eight classes: `aj`, `cy`, `dt`, `ha`, `kf`, `lp`, `pm`,
+`pu`. `cy` (World) is the heavy one, but the density and surface stages
+only store it, so a stub `cy` should let the whole provider compile and
+run. That would upgrade Batch 3 from "reproduce the constructor order"
+to "diff against the real generator". `bs`/`z`/`nf` already compile
+standalone and the Batch 0 oracle runs them directly.
+
+**`scons` can skip the link.** During Batch 0 the debug dylib reported
+"is up to date" even after `src/worldgen_native.cpp` changed and its
+`.os` was rebuilt. Deleting `bin/libmesher_native.macos.template_debug.universal.dylib`
+forced a correct relink. Batch 5 must verify the dylib's mtime after
+building, not just scons' exit code, or a native parity run can silently
+test a stale library.
+
+**Deferred from Batch 0 by design.** `JavaRandom` still has no
+`next_gaussian`; the ghast fireball's 0.4 spread (§8.3) needs it, and the
+JDK's cached-pair behaviour is easy to get wrong, so the expected values
+are already captured in the oracle fixture for whichever batch adds it.
+
+### 17.2 Batch 1 (2026-08-16)
+
+**`CLAUDE.md` was wrong about autoloads.** It claims only `Game` is an
+autoload; there are eleven (`Game`, `SFX`, `FurnaceManager`,
+`ChestStorage`, `JukeboxStorage`, `NaturalMobSpawner`, `SignStorage`,
+`JukeboxAudio`, `WorldTime`, `WaterFX`, `Music`). Five of them are
+world-position-keyed tile-entity stores with no dimension component,
+which is exactly why `_clear_dimension_owned_state` exists.
+
+**One resident dimension, cleared rather than keyed.** §3.3 allows either
+clearing dimension-owned structures or keying them by dimension. Clearing
+won: with one resident dimension a keyed structure would only ever hold
+one key, and the clear is the same operation world-load already
+performed. `ChunkManager._ready` now calls the same helper the transition
+does, so the two paths cannot drift.
+
+**Tests can write to a real save slot without naming one.** Persistence
+APIs default `world_name` to `""`, which `SaveLoad.resolve_world`
+resolves to `Game.active_world` — a real slot. The transition
+transaction legitimately saves the dimension it is leaving, so the new
+tests overwrote the live `World1` `player.bin` and `entities.bin` and
+left a stray `DIM-1/`. Region files were untouched; everything was
+restored from a pre-run backup, and both new suites now redirect
+`Game.active_world` to a throwaway name. Any future batch that tests a
+saving path must do the same — passing explicit world names is not
+enough when the production function under test uses the default.
+
+**A deferred lambda that captures a Node breaks on teardown.**
+`BlockFx.warm_pool` captured the ChunkManager and its particle emitter in
+a `call_deferred` lambda. Godot raises "Lambda capture at index N was
+freed" while BINDING the captures, so the `is_instance_valid` guard
+inside the body never runs. Invisible in the game (the manager outlives
+the frame) and a wall of errors in a suite that spins managers up and
+down. Now captures `weakref`s. Note `weakref()` returns Variant, so it
+needs an explicit `: WeakRef` annotation or the project's
+warnings-as-errors setting rejects `:=`.
+
+**The mesher's worker-arity guard earned its keep.**
+`tests/test_mesher.gd::test_worker_entry_point_accepts_bound_complete_edge`
+drives `_compute_chunk_data` through the real bound Callable precisely
+because `WorkerThreadPool` resolves arity at call time. Adding the
+dimension and epoch parameters tripped it, which is the failure mode it
+was written for. It now also asserts the tags are published.
+
+**New `class_name` scripts need an editor index pass.** The three new
+classes did not resolve under `godot --headless -s gut_cmdln.gd` until
+`godot --headless --editor --quit-after N` rebuilt
+`.godot/global_script_class_cache.cfg`. `.godot/` is gitignored, so a
+fresh clone or CI needs that pass before the suite will run.
+
+### 17.3 Batch 2 (2026-08-16)
+
+**Every §4 property confirmed against source**, plus two the plan did not
+state: the portal's hardness is `-1.0f` (bedrock's unbreakable sentinel),
+and its terrain.png tile 14 is a flat blue placeholder — vanilla
+overwrites it at runtime with `et.java`'s generated 32-frame animation,
+which is Batch 7's job. Glowstone's `hk.java::a` returns `dx.aR` with no
+tool, tier or fortune term, so exactly one dust always.
+
+**Netherrack fire is one boolean, not a big tick number.** `qh.java:52`
+computes `below == netherrack` once and uses it to skip BOTH extinguish
+paths — the no-fuel check and the age-15 burnout. It deliberately does
+not gate ageing or spreading, and when the flag is set the no-fuel branch
+falls THROUGH to the spread pass rather than returning. Ported exactly;
+`tests/test_nether_blocks.gd` pins both paths with a stone control case.
+
+**The extractor had leather on the wrong tile.** `"leather": (7, 5)` is
+sprite 87, which `dx.java:72` assigns to the RAW PORKCHOP. Leather is
+`dx.java:87` `new dx(78).a(103)` → tile (7, 6). The broken `ROOT` from
+Batch 0 meant the tool had not run in a long time, so the wrong sprite
+never reached the pack. Fixed before turning extraction back on.
+
+**Batch 0's path-safety check rested on a false premise.** It asked "is
+this write target gitignored?", assuming extracted art is never tracked.
+It is: the project keeps pack art in **Git LFS** (`.gitattributes`), and
+over a thousand of those files are already in the index — the blanket
+`*.png` rule was added later and never applied retroactively. Batch 2
+added narrow allow-rules so new tiles behave like their siblings, which
+flipped the old check to a failure. `--verify` now enforces the invariant
+that does not move: writes land only in sanctioned asset directories, and
+no raw redistributable blob (client.jar, a whole atlas) is ever copied
+into the tree.
+
+**Pack fallback covers the other two packs.** `pixel_perfection` and
+`programmer_art` ship no Nether tiles; `BlockAtlas.build` already falls
+back to `alpha_vanilla` per-tile, and `tests/test_nether_rendering.gd`
+asserts every new tile resolves to a real atlas slot under the active
+pack. New PNGs need a `godot --headless --editor` import pass before
+`ResourceLoader.exists` can see them.
+
+**Deferred to Batch 7 by design.** The portal has an id, a registry
+contract, a light level, a hardness, an atlas slot and full exclusion
+from every item-facing path — but no mesh, animation, particles, sound or
+travel behaviour.
+
+### 17.4 Batch 3 (2026-08-16)
+
+**The oracle now runs the real generator.** Batch 0 left `kj.java`'s
+compile closure as a hypothesis; it holds. With six hand-written stubs
+(`cy`, `ha`, `pu`, `dw`, `nq`, and the five population decorators) the
+actual `kj.java`, `ju.java`, `dl.java` and Alpha's `fi.java` compile and
+run unmodified, driven through `kj`'s own `b(int,int)` entry point. The
+driver reaches `kj`'s private Random by reflection rather than editing
+it. The `nq` stub's ids are re-derived from vendor `nq.java` on every
+build and the emitter refuses to run if any disagrees, so the one stub
+that carries real data cannot drift.
+
+**Density, interpolation, lava sea, surface replacement and both bedrock
+bands matched bit-exactly on the first run** across 5 seeds × 8 chunks.
+The RNG consumption in the surface pass — one `nextInt(5)` per Y always,
+a second only when the first test fails — is the fragile part and it was
+right first time.
+
+**Three real defects the oracle caught**, none of which a shape-level
+test would have found:
+
+1. `ju.java`'s carve loop initialises its write index at `n13` while the
+   loop counter starts at `n13 - 1`, and decrements the index at the END
+   of the body. It therefore **clears the block one Y above the cell it
+   ellipsoid-tested**. That reads like a bug in Alpha and probably is,
+   but it is shipped behaviour and reproducing the test and write at the
+   same Y carves visibly different caves.
+2. The recursive branch call is `this.a(...)`, whose first act is
+   `new Random(this.b.nextLong())` — `this.b` being MapGenBase's
+   class-level Random, not the `random` local that shadows it inside the
+   worm loop. Threading the worm's own RNG into the recursion sends both
+   sub-tunnels somewhere else entirely.
+3. `10430.378f` is a FLOAT literal, so the sine table's index scale is
+   10430.3779296875. Using the double shifts the lookup near the ends of
+   the range.
+
+**Nether caves are bit-exact; Overworld caves deliberately are not.**
+This port carries Alpha's 65536-entry float sine TABLE (`fi.java`) and
+rounds after every float operation via `_fmul`/`_fadd`/`_fdiv`/`_fsub`,
+because the plan gates Nether terrain on full-chunk hashes. The Overworld
+port in `worldgen_caves.gd` uses double-precision `sin`/`cos` and matches
+the algorithm's shape rather than its bytes, consistent with this
+project's standing "look and feel over bit-exact" position for dimension
+0. The two are not expected to converge.
+
+**Two dead fields in `kj`'s density method.** `this.f` (the 10-octave
+field) and `this.g` (the 16-octave field) are sampled, clamped and
+rescaled into locals the source then never reads; `d6` is fixed at 0.0,
+which makes the lower-bound blend branch unreachable, exactly as §6.2
+predicted. The port keeps the sampling — it costs nothing and does not
+touch the shared Random — and says so in a comment.
+
+**The worker-safety test earned its place immediately.** The first
+implementation kept `kj`'s per-chunk Random as a static field, mirroring
+the source's `this.h`. That is correct in a single-threaded Java client
+and corrupt under `WorkerThreadPool`: two overlapping chunk generations
+interleave their surface draws. All eight worker results mismatched. The
+Random is now created per chunk and threaded through, and
+`WorldgenNether.warm()` is called from `Game._ready` alongside the
+existing Overworld warm-up so no worker hits the lazy noise build first.
+
+**A test expectation was wrong, not the code.** The lava-sea test scanned
+five chunks at seed 12345 and found none. The oracle histogram agreed
+with our output — Nether lava is genuinely sparse and plenty of chunks
+have none. The test now scans a 3×3 region at a seed the fixture shows
+lava in, and the episode is a reminder that the fixture is the authority
+on what Alpha produces, not intuition about what a Nether should contain.
+
+### 17.5 Batch 4 (2026-08-16)
+
+**`dt.java` and `lp.java` are byte-identical.** §6.5 asked for two named
+glowstone entry points "until parity proves their decompiled behaviour is
+identical". It does — the two files differ in nothing. They are called
+differently (A is a `nextInt(nextInt(10)+1)` count anchored in Y 4..123,
+B is always ten anchored anywhere in the column), and that difference is
+preserved, but one implementation now serves both.
+
+**`if (n8 != true)` is a CFR artifact, not Java.** Both glowstone classes
+count neighbours into an int and then compare it to `true`, which does not
+compile. The bytecode compares against the constant 1; the surrounding
+code and §6.5 agree the rule is "exactly one orthogonal neighbour is
+glowstone". The oracle's emitter now applies a narrow, logged repair to
+its BUILD COPY — the vendor tree is never modified — and refuses to hide
+it.
+
+**A stub silently masked the real decorators for an hour.** Batch 3 left
+no-op stubs for `kf`/`pm`/`dt`/`lp`/`aj` in `stubs/`, and the emitter
+copies vendor classes first and stubs second — so the stubs overwrote the
+real classes and population appeared to place nothing at all. Worth
+remembering when the harness grows: the stub directory is a fallback, and
+anything promoted to real vendor code has to be deleted from it.
+
+**Population write lists match the real decorators exactly** across all
+five seeds and eight source chunks: anchors, attempt counts, draw order
+and every placement predicate.
+
+**Two documented deviations.** `kf` follows its lava placement with a
+block update, which runs Alpha's fluid tick and lets the lava spread
+during generation; this port places the source block only and leaves the
+flow to the project's own fluid system after materialisation.
+`aj`'s placement predicate is `light <= 13 && isOpaqueCube(below)`, and
+during Nether population no light exists yet — no sky, no propagated
+block light — so the light term is trivially true and only the support
+check remains.
+
+**The canonicalisation costs about 5x.** A target chunk merges the write
+lists of the four sources that can reach it, and each source decorates
+into its own 2x2 window of finished terrain, so a cold target needs nine
+chunks of terrain. Bounded, mutex-guarded caches for terrain and write
+lists bring a warm 5x5 region to ~590 ms per decorated chunk against
+~125 ms for bare terrain. That is the clarity-first reference path
+behaving as the plan intends; Batch 5's native port is where it gets
+fast. The caches are proven invisible: clearing them mid-run reproduces
+identical chunks, and a seed change invalidates them.
+
+**Nothing depends on load order.** A chunk generated cold, then again
+after its whole neighbourhood exists, is byte-identical — which is the
+property Alpha cannot offer, because it decorates into a live world from
+an RNG it never reseeds.
+
+### 17.6 Batch 5 (2026-08-16)
+
+**A prerequisite refactor came first.** `JavaRandom`, `NoisePerlin` and
+the two octave grid helpers lived in an anonymous namespace inside
+`worldgen_native.cpp`, so they were file-local and unusable from a second
+generator. They moved to `src/worldgen_native_shared.h` unchanged, with
+the free functions marked `inline`; the Overworld hash fixture is what
+proves nothing shifted in the move. That extraction was done and verified
+on its own before any Nether C++ was written.
+
+**One bug, and it was a precedence bug.** `dl.java` seeds each cave
+neighbourhood with `(long)i2 * l2 + (long)i3 * l3 ^ cy2.u`. Java binds
+`^` looser than `+`, so the xor applies to the whole sum — and so does
+C++, which is why the existing Overworld line is correct with no
+parentheses at all. Writing the Nether version with an explicit
+`(b * l3 ^ seed)` group reseeded every cave in the world. Terrain hashes
+diverged on most chunks and matched on a few, which is exactly what a
+seed-level difference looks like.
+
+**The gate is not close.** Native Nether p95 measured **3.93 ms** against
+the native Overworld's **65.87 ms** on the same 24-chunk sample — a ratio
+of **0.06** against a limit of 1.25. Against the GDScript reference's
+~590 ms per decorated chunk that is roughly a **150x** speedup, which is
+in line with the shipped ports' 40-90x and unsurprising given how much of
+the cost was the 1500-attempt glowstone loops and the 17x17 cave
+neighbourhood.
+
+The full suite dropped from 374 s to 179 s as a side effect, since every
+Nether suite now generates through the native path.
+
+**Coverage moved, and that is worth knowing.** With native enabled,
+`test_nether_worldgen_oracle.gd`'s whole-chunk assertions now measure the
+NATIVE path against the Alpha fixtures, not the GDScript one. Its staged
+density and surface assertions still call `fill_base` / `apply_surface`
+directly and remain GDScript-only, and
+`test_nether_worldgen_native.gd` proves native equals GDScript
+everywhere — so both paths stay pinned to the source, just via different
+routes. A future change that removes the parity suite would silently
+leave GDScript unverified.
+
+**The caches moved into C++ too.** Terrain and per-source write lists are
+cached natively under the same mutex that guards the noise build, bounded
+at 512 entries and cleared wholesale when full. A 24x24 traversal leaves
+chunk (0, 0) byte-identical, which is the plan's no-unbounded-growth
+check.
+
+### 17.6b Batch 6 (2026-08-16)
+
+**Every §5 value confirmed against `om.java` and `oz.java`.** The fog
+colour is `ao.b(0.2f, 0.03f, 0.03f)`, the celestial angle is a literal
+`return 0.5f`, the save directory is `DIM-1`, and the brightness table is
+the SAME loop in both providers with one constant changed:
+
+    float f2 = <0.05 overworld | 0.1 nether>;
+    for (i = 0; i <= 15; i++) {
+        float f3 = 1.0f - i / 15.0f;
+        f[i] = (1.0f - f3) / (f3 * 3.0f + 1.0f) * (1.0f - f2) + f2;
+    }
+
+`(1.0f - f2)` is the plan's 0.9 for the Nether. The observable
+consequence is that an unlit Nether cell sits at exactly twice the
+brightness of an unlit Overworld one — gloomy rather than black — while
+full light stays 1.0 in both.
+
+**The lava rule is the opposite way round from the code comment.**
+`ja.java:27-29` is:
+
+    int n7 = 1;
+    if (this.bs == hb.g && !cy2.q.d) { n7 = 2; }
+
+The decay increment DEFAULTS to 1 and is RAISED to 2 for lava outside the
+Nether. `block_fluids.gd` carried a comment saying the Nether uses a
+10-tick cadence instead of 30 — that is a later-version behaviour, and
+the plan already forbade it. Cadence is untouched in both dimensions;
+only the increment moves, which takes lava's reach from 3 blocks to 7.
+
+**The compass and clock share one branch.** `ae.java:67` and `gp.java:40`
+are the same two lines against the same provider flag, and both replace
+their computed angle with `Math.random() * 3.1415927410125732 * 2.0` — a
+real `Math.random()`, not the world RNG, so two compasses in the same
+Nether disagree. The existing damped-approach renderers turn that into
+the familiar wander rather than a snap. Modelled as
+`WorldProvider.instruments_wander` rather than reusing `renders_sky`,
+because they are separate flags in the source even though both are true
+in the Nether.
+
+**Beds are denied and nothing else.** Alpha 1.2.6 has no exploding bed;
+the handler returns after a message, before it looks at the time of day,
+sets a spawn point or passes time. A structural test pins that ordering,
+since a denial placed after the spawn-point write would still "work"
+while quietly moving the player's respawn into the Nether.
+
+**Batch 1's policy surface was the right shape.** Every field this batch
+consumed — `has_sky_light`, `ambient_light_floor`, `renders_sky`,
+`fog_color`, `fixed_celestial_angle`, `lava_horizontal_decay`,
+`allows_water_placement`, `allows_sleeping` — already existed with its
+source-derived value and simply had no reader. Only `instruments_wander`
+had to be added. The ten-switch test checks all of them survive repeated
+transitions, which also catches a system mutating a shared provider
+instance rather than reading it.
+
+
+### 17.7 Batch 7 (2026-08-16)
+
+**The portal validator's along-axis vector is not the perpendicular.**
+`x.java:76-79` sets `n7`/`n8` from which neighbours are PORTAL, making
+`(n7, 0, n8)` the vector ALONG the sheet, and the final check at line 105
+is:
+
+    if (!(world.getId(x + n7, y, z + n8) == obsidian
+              && world.getId(x - n7, y, z - n8) == portal
+          || world.getId(x - n7, y, z - n8) == obsidian
+              && world.getId(x + n7, y, z + n8) == portal)) { remove }
+
+Reading `n7`/`n8` as the across-axis vector — the natural mistake, since
+a "sheet" suggests testing its faces — makes every intact portal fail,
+because the cells either side of the sheet are air. The first
+implementation here did exactly that and dissolved every portal on the
+first neighbour update. Pinned by
+`test_an_intact_portal_survives_a_neighbour_update`.
+
+**Continuous exposure travels on tick 81, not 80.** Section 7.2, every
+wiki page, and the arithmetic all say `1.0 / 0.0125 = 80`. The real
+answer is 81: `0.0125` is not exactly representable in binary, and
+Alpha accumulates it into a Java `float`. Eighty additions land just
+under 1.0, so the meter crosses on the eighty-first. Both float32 and
+double accumulation agree, so it is a property of the constant rather
+than of the precision. `PortalExposure` accumulates through
+`AlphaMath.f32` and documents `TICKS_TO_TRAVEL = 81`. The batch's
+acceptance criterion says "travels at 80 ticks"; the source-supported
+behaviour is 81 and that is what shipped.
+
+**Fire only tries to light a portal when it sits on obsidian.**
+`qh.java:168-170` — `BlockFire.onBlockAdded` is
+
+    if (world.getId(x, y - 1, z) == Block.obsidian.id
+            && Block.portal.tryToCreatePortal(world, x, y, z)) return;
+
+so the gate is part of activation, not an optimisation, and it is why a
+frame lights from its bottom row. Every route that creates a fire cell
+now goes through `BlockFire.place`, which reproduces the whole of
+`onBlockAdded` including the early return that suppresses both the fire
+write and its spread tick.
+
+**The synchronous chunk-spawn path was still Overworld-only.** Batch 1
+routed the WORKER path through `DimensionContext.provider(...)` but
+`ChunkManager._spawn_chunk_sync` called `Worldgen.generate_chunk`
+directly. A player who saved in the Nether would have been handed a ring
+of Overworld terrain at world entry — a Batch 1 gap that only became
+reachable once travel existed. Fixed here.
+
+**The portal index is a chunk-loading hint and nothing more.** Section
+7.3 permits an index; what forced one is that
+`ChunkManager.get_world_block` returns AIR for an unloaded chunk, so the
+literal 128-radius scan is both unaffordable (289 chunks) and silently
+blind without it. `PortalIndex` therefore answers only "which chunks are
+worth loading"; `NetherTeleporter.find_portal` still runs the raw
+`no.java` scan and its answer wins. Pinned by
+`test_a_lying_index_does_not_move_the_destination`, which puts the index
+and the world in direct conflict.
+
+**Search cost, measured.** On the ring a transition materializes (5×5
+chunks plus index hints) the 128-radius scan is ~170 ms; with no
+residency test at all it is ~1.7 s. It stays slow in absolute terms
+because resident columns still descend 128 cells each, and there is no
+honest way to skip them: the Nether's bedrock roof puts every chunk's
+`max_y` at 127, and narrowing the scan by the index would make
+correctness depend on the cache. Paid once per trip, behind the loading
+screen. Other measurements: portal texture build (32 frames + strip)
+21.7 ms, warmed in `Game._ready`; index hint derivation 0.20 ms for 64
+entries; and the portal revalidation now riding the block-notification
+drain costs 0.271 µs per non-portal cell.
+
+**Deliberate deviations.**
+
+- `NetherTeleporter.create_portal` runs one site-clearance pass where
+  `no.java:96-157` runs two of decreasing strictness. The only
+  observable difference is WHICH clear spot wins, and the plan's
+  canonicalisation already accepts a deterministic choice there. The
+  fallback and the 70–118 Y clamp — the parts a player can end up
+  depending on — are reproduced exactly.
+- Portal cells are rendered by a dedicated `PortalRenderer`
+  (MultiMesh + one shared material sampling a 16×512 strip of
+  `et.java`'s 32 frames) rather than as chunk-mesh geometry. The surface
+  animates at 20 Hz and the chunk atlas is static, so animating it in
+  the atlas would mean re-uploading the atlas twenty times a second for
+  a handful of cells. This also satisfies §7.1's one-material rule for
+  free.
+- Particles use one persistent emitter per cell for the nearest six
+  cells (`PortalRenderer.EFFECT_CELLS`) rather than four one-shot
+  spawns per cell per tick. x.java's rate is 480 spawns/second across a
+  single portal; a steady-state emitter produces the same population for
+  a fixed cost, and capping at six bounds both particle and audio-voice
+  counts as §7.1 requires. Vanilla's ease-out-and-return drift arc is
+  approximated by outward velocity plus a steady rise.
+- `portal.portal` / `portal.trigger` / `portal.travel` are registered
+  with their source volume and pitch parameters but resolve to silence:
+  the OGGs are not in the repo (Alpha served its sound set from Mojang's
+  resources endpoint, not the jar). Section 11 anticipates exactly this
+  — "provide silent-safe fallback if optional local Alpha audio is
+  absent" — and `SFX._optional_stream` caches the miss so an absent
+  sound costs one `ResourceLoader.exists` call per session rather than
+  one per play. Dropping the files at
+  `assets/audio/sfx/portal/{portal,trigger,travel}.ogg` enables them
+  with no code change.
+
+**Out-of-batch fix: headless boots were still writing to real saves.**
+Found while validating this batch. `ChunkManager._setup_autosave` has
+skipped the autosave timer under headless since the 2026-07-09 World1
+corruption, on the documented grounds that "headless sessions are
+READ-ONLY" — but eviction write-through (`_persist_chunk`, called when
+the streaming ring drops an edited chunk) is not on that timer. A single
+`godot --headless main.tscn --quit-after 400` rewrote
+`World1/region/r.0.-1.bin` with seed-12345 terrain. Reproduced on a clean
+HEAD, so it predates this batch. The guard is now a single
+`_disk_writes_allowed()` checked by `_persist_chunk`,
+`flush_dirty_loaded`, `save_dimension`, and the transition's
+`PlayerSave.save_player`. It is deliberately NOT on `SaveLoad`: the GUT
+suite legitimately writes and reads back throwaway worlds through that
+API, and only the live streaming paths can produce wrong-seed terrain.
+The affected region file was restored from a pre-run backup and verified
+byte-identical.
+
+**`PortalIndex.load_index` merges rather than replaces.** The headless
+guard above surfaced this: with writes skipped, a Nether round trip came
+back to an empty Overworld index, because loading the destination's file
+clobbered the in-memory bucket. Loading is not forgetting — a portal lit
+since the last save, or every hint in a session whose writes were
+skipped, would vanish on the way back. Staleness is `validate`'s job.
+World isolation now comes from an explicit `PortalIndex.reset()` at world
+entry in `ChunkManager._ready`, which is a different question and was
+being conflated with the load.
+
+### 17.8 Batch 8 (2026-08-16)
+
+**Confirmed against source, in full.** `pt.java` is short enough to
+verify line by line, and section 8.1 describes it accurately: texture
+`/mob/pigzombie.png`, `am = 0.5f` / `0.95f` with a target, `f = 5`,
+`bm = true`, `Anger = 400 + nextInt(400)`, angry-sound countdown
+`nextInt(40)`, `c_()` returning null while `Anger == 0`, the 32-block
+group alert, and no decrement of `Anger` anywhere in the class. Held item
+`new fp(dx.E, 1)` resolves through `dx.java:36` to item 27 + 256 = 283,
+the gold sword; the drop `dx.ap.aW` through `dx.java:73` to 64 + 256 =
+320, cooked porkchop, dropped `nextInt(3)` times by `hf.b(lw)`.
+
+**Its model and held-item pose come from the ZOMBIE's renderer entry.**
+`mn.java` has no `pt.class` key. The renderer lookup walks superclasses,
+so `pt` lands on `nt.class → new m(new ck(), 0.5f)` — RenderBiped with
+ModelZombie. That settles two things at once: the pigman uses the
+zombie's locked-horizontal arms, and `m.java::b` (renderEquippedItems) is
+what draws its sword. `m.java` has three branches keyed on the item type,
+and a sword takes the middle one (`dx.c[id].a()` — `kg.java` ItemSword
+returns true from `isFull3D`):
+
+    glTranslatef(0, 0.1875, 0); glScalef(0.625, -0.625, 0.625);
+    glRotatef(-100, 1,0,0); glRotatef(45, 0,1,0);
+
+`MobBase.held_item_basis_full_3d` states that pose directly in arm-local
+space rather than transcribing the GL stack, because MC's limb-local +Y
+points DOWN the limb while Godot's points up and mob forward is local -Z
+— two flips to get wrong. The resulting basis is pinned by tests on its
+determinant and on where the grip→tip diagonal ends up.
+
+**Fire immunity is what cancels the daylight burn.** `pt.k()` is an empty
+override that calls `super.k()`, so a pigman DOES inherit the zombie's
+daylight ignition unchanged and does set its burn timer. `hf.java:111`
+then forces that timer to zero on the same tick for any fireproof living
+entity. The ignite happens and is cancelled before it can do anything —
+which is why no explicit "pigmen do not burn" code exists in the source,
+and why `MobBase._env_tick` reproduces the ordering rather than
+short-circuiting earlier.
+
+**The group alert is a BOX and the distinction is observable.**
+`this.aG.b(32.0, 32.0, 32.0)` grows the pigman's own bounding box 32
+blocks on each axis. A pigman at the far corner of that box is 55 blocks
+away in a straight line and IS alerted; one 34 blocks away along a single
+axis is NOT. A radius check gets both cases wrong, so the implementation
+uses `AABB.grow` and `AABB.intersects` against the other mob's own box —
+`World.getEntities` returns anything whose box intersects, so a touching
+box counts as inside.
+
+**One in forty angered pigmen never shouts.** `c()` sets the countdown to
+`nextInt(40)`, which includes zero, and `e_()` guards with
+`if (this.b > 0 && --this.b == 0)`. A countdown that starts at zero never
+enters the branch. Section 8.1 flagged this and it is reproduced exactly;
+a test asserts zero is reachable.
+
+**Measurements.** 70 pigmen (vanilla's hostile cap) × 20 group alerts:
+0.82 ms total, 0.041 ms per alert. 70 pigmen × 20 neutral AI ticks:
+1.51 ms total, 0.0011 ms per mob-tick. Both are far below a frame budget;
+the alert scan is linear in the active-mob count and only runs on a
+player hit.
+
+**Deliberate deviations.**
+
+- Walk speeds are the source RATIO, not the source numbers. Alpha's `am`
+  is a per-tick movement scalar (0.5 neutral, 0.95 hunting); this project
+  works in m/s and its zombie — also `am = 0.5` — walks at 1.0 m/s. The
+  pigman therefore uses 1.0 and 1.9, preserving the 1.9x that is what the
+  player actually experiences.
+- The step sound is the zombie's pool. Alpha gives the pigman no step
+  sounds of its own (`lw` plays the block's), but this project already
+  gives the zombie a mob-specific step pool, and the pigman has the same
+  body on the same blocks.
+- `mob.zombiepig.zpig`, `zpighurt`, `zpigdeath` and `zpigangry` are
+  registered with their source volume and pitch — including the shout's
+  `h() * 2.0f` volume and `* 1.8f` pitch — but resolve to silence: the
+  OGGs are not in the repo, the same situation as the portal sounds, and
+  section 11 requires the silent-safe fallback. Dropping files at
+  `assets/audio/sfx/mob/zombiepig/` enables them with no code change.
+- The ModelBiped geometry is duplicated from `zombie.gd` rather than
+  extracted to a shared builder. Vanilla's `pt extends nt` would suggest
+  subclassing our `Zombie`, but its texture path, melee damage and drop
+  are consts, so a subclass could not change them without overriding the
+  model builder anyway — which is the bulk of the file. Three species now
+  carry a copy (zombie, skeleton, pigman); no further bipeds are planned,
+  so the extraction is noted rather than done.
+
+**Also added: `player.gd` joins a `player` group.** The group-aggro check
+needs to answer "is this node the player", and player.gd declares no
+`class_name` — a bare `Player` reference fails to parse at script load,
+which is why EntitySave already matches Boat and Minecart by script path.
+The check takes the script path first and the group second, and the group
+is a real membership rather than a test-only affordance.
+
+### 17.9 Batch 9 (2026-08-16)
+
+**Confirmed against source.** `am.java` is short and section 8.2
+describes it accurately: `a(4.0f, 4.0f)`, `bm = true`, the waypoint
+reroll outside [1, 60], the 2-6 tick course interval, the 100-block
+search reacquired every 20 ticks, the 64-block engage radius, the charge
+timeline (sound at 10, fire at 20, reset to -40, decrement on lost
+sight), the `> 10` texture swap, the 4-block launch offset, `h()` = 10
+sound volume, and `nextInt(20) == 0` on the spawn predicate. `hc.java`
+confirms nine tentacles from `Random(1660)` with lengths in [8, 14] and
+the `0.2 * sin(age * 0.3 + i) + 0.4` sway; `jz.java` confirms the
+squash/stretch. `az.java` confirms 1x1 size, Gaussian-0.4 aim, 0.1
+acceleration, 0.95/0.8 drag, the 25-tick shooter grace, zero direct
+damage, and the power-1 flaming explosion.
+
+**A ghast has 10 health, not 20.** `am extends ot` (EntityFlying)
+directly, never passing through `ef` (EntityMonster), so it keeps
+`hf.J = 10` rather than the 20 every other hostile gets. Two arrows kill
+one, which is the whole reason fighting one across a lava lake is viable.
+
+**Fire immunity is what suppresses the daylight burn AND the flames.**
+Same mechanism as the pigman: `hf.java:111` forces the burn timer to zero
+each tick for a fireproof living entity. Nothing ghast-specific is
+needed.
+
+**The tentacle sequence was verified independently, and the first guess
+was wrong.** `new Random(1660L).nextInt(7) + 8` produces
+`[8, 13, 9, 11, 11, 10, 12, 9, 12]`, computed from a reference
+implementation of `java.util.Random`'s LCG rather than read off this
+project's own output — so the pinned fixture states the SOURCE sequence,
+not merely current behaviour.
+
+**The course counter is post-decrement and it is observable.**
+`if (this.a-- <= 0)` tests the value BEFORE the tick's subtraction and
+decrements either way, so firing from a counter of 0 lands at -1 before
+the reroll is added. The stored value right after a course change is
+therefore [1, 5] while the INTERVAL between changes is [2, 6]. A
+pre-decrement version gets the interval right and the stored value wrong;
+both are tested, the interval by measurement rather than by field.
+
+**Measurements, and one real optimisation.** The naive transcription of
+`am.a(...)` (isCourseTraversable) rescans the ghast's full 5x5x5 cell
+neighbourhood at every one-block step, which measured **6.47 ms** for a
+50-block sweep — a frame-killer for a single mob, and the dominant cost
+by two orders of magnitude (everything else in the AI tick totalled
+0.25 ms across 200 iterations). Consecutive steps overlap by about four
+fifths, so the walk now remembers the previous cell range and tests only
+the newly covered cells. Identical result — the world does not change
+mid-walk, so a cell found clear stays clear — at **0.744 ms** for the
+same 50-block sweep and **0.238 ms** at a realistic 16-block waypoint.
+Across the suite's stress case that is 0.593 ms down to **0.069 ms** per
+ghast AI tick.
+
+**Deliberate deviations.**
+
+- `Game.difficulty` is new. Alpha reads `as.k` all over, and section 8.2
+  requires "immediately despawn/kill itself on Peaceful"; modelling that
+  as always-Normal would silently drop the behaviour. Constants plus a
+  field defaulting to Normal, no UI — Batch 10's spawn predicate needs
+  the same value.
+- `Explosion.detonate` gained a `flaming` parameter, defaulting to false
+  so TNT and creepers are untouched. It reproduces `ks.java:103-114`: for
+  each affected cell, if the cell is now air and the block below is an
+  opaque cube, one roll in three places fire. The source walks its
+  affected list in reverse, which matters only where two affected cells
+  are vertically adjacent — and that list comes out of a HashSet, so its
+  order is not reproducible in the first place.
+- The render scale is normalised by its resting value. `jz.java` scales
+  the model 4.5x at rest, on top of MC's 1/16 model units; this project's
+  model is already built in metres, so applying 4.5 directly would give a
+  4.5 m ghast inside a 4 m hitbox. Normalising keeps the SHAPE change —
+  which is the entire point of the effect — at the collision size.
+- The fireball's smoke is one persistent emitter per projectile rather
+  than a pooled one-shot per tick. `e_()` emits every tick, which is 20
+  spawns a second per fireball against FluidFx's six-emitter pool. Same
+  reasoning as the portal particles, and it makes §8.3's bounded-particle
+  requirement true by construction. The four per-tick water bubbles
+  retint that same emitter rather than adding nodes.
+- `MobBase.spawns_airborne` and `find_airborne_spawn` are new. Both
+  spawners place mobs one cell above the first opaque block, which is
+  right for anything with legs and would bury a 4x4 ghast in the ceiling
+  of most Nether caverns. Flying species get lifted into a clear pocket
+  instead, and the hook defaults to false so nothing else moves.
+- `Ghast._voxel_half_extents` is overridden rather than fixing the base,
+  which hardcodes a 0.6-wide box for every mob regardless of
+  `_get_body_width`. Correcting that globally would change spider and
+  cow collision, which is an Overworld behaviour change this batch is not
+  entitled to make. Noted as a latent inconsistency.
+- The five `mob.ghast.*` events are registered at their source volume
+  (`h()` = 10, capped at +8 dB rather than the literal 20x ratio) and
+  resolve to silence — the OGGs are not in the repo, as with the portal
+  and pigman sets. Section 11's silent-safe fallback.
+
+### 17.10 Batch 10 (2026-08-16)
+
+**Confirmed against source.** `bg.java` matches section 8.4 in every
+detail checked: the 17×17 chunk set per player, the `>` (not `>=`)
+threshold comparison, the one-in-50 per-chunk gate, one class chosen per
+candidate group, `nextInt(16) / nextInt(128) / nextInt(16)` for the
+start cell, three group passes of four attempts, the triangular
+`nextInt(6) - nextInt(6)` X/Z spread, the literally-zero
+`nextInt(1) - nextInt(1)` Y jitter, the 24-block player and world-spawn
+exclusions, and the entity's own `i()` group cap. `gy.java` gives
+hostiles a factor of 100 and passives 20. `k.java` is two lines and they
+are the whole Hell spawn table: `r = {am.class, pt.class}` and
+`s = new Class[0]`.
+
+**Neither Nether mob inherits the light gate, and the reason is
+structural.** `ef.a()` (EntityMonster) is where the sky-light and
+block-light rejections live, and every Overworld hostile reaches it via
+`super.a()`. `pt.a()` and `am.a()` both reimplement the predicate from
+`hf.a()` upward and never call `super.a()` — the pigman adds only
+`difficulty > 0`, the ghast adds `nextInt(20) == 0` and the same
+difficulty check. So a pigman spawns in a lava-lit hall exactly as
+readily as in a dark one, which is what makes the Nether feel populated
+rather than nocturnal. Modelled as
+`WorldProvider.hostile_spawns_use_light_gate` rather than an `if nether`.
+
+**`k.java` gives Hell no passive list at all** — not an empty one that
+happens to produce nothing, but `new Class[0]`. Gated on
+`WorldProvider.has_passive_spawns` inside `PassiveSpawner` itself rather
+than at its two call sites, so neither the per-frame tick nor the
+worldgen seed pass can forget.
+
+**Slimes needed their own gate.** They bypass the normal hostile pool
+entirely — no light gate, no night gate, a separate per-tick path — so
+the pool swap alone would have left them spawning in the Nether despite
+appearing on no list.
+
+**Measurements.** Nether chunk generation, native path: p50 18.9 ms,
+p95 19.8 ms (the Overworld baseline is p50 54.4 ms). On the GDScript
+reference path the same chunks take p50 1.86 s — the ~95× that justifies
+the Batch 5 port, and the reason the perf suite carries two ceilings.
+100 pigmen through one AI tick: p50 0.11 ms, p95 0.18 ms against a
+50 ms budget. 32 fireballs, one tick: p95 0.18 ms. Ghast course scan
+across 50 blocks of open air: p95 0.79 ms; into a wall two blocks out,
+40 calls in 0.12 ms. 100k brightness queries: 19.4 ms. Portal texture
+after warm: 1000 calls in 0.13 ms.
+
+**Overworld regression check.** Batch 0 baseline was
+`worldgen.generate_chunk` p50 56.51 ms / p95 66.74 ms. Now: p50 54.44 ms
+/ p95 68.74 ms. That is +3.0% on p95, inside the release gate's 10%, and
+p50 is slightly faster — both within run-to-run noise on this machine.
+The Overworld generation hash fixture has matched at every batch.
+
+**Fallback-path run.** With the debug dylib moved aside, the suite is
+1169/1221. Every failure is a per-native parity suite asserting
+`native == gdscript` with no native to compare against —
+`test_mesher_native`, `test_worldgen_native`, `test_pathfinder_native`,
+`test_voxel_collider_native`, `test_water_fx_native`. That is
+pre-existing behaviour of those suites and not a Nether regression; this
+feature's own parity suite (`test_nether_worldgen_native.gd`) self-skips
+cleanly, which is the pattern the older ones should adopt. Logged as a
+known issue rather than fixed here, since changing five unrelated suites
+is outside this feature.
+
+---
+
+## Consolidated deviation checklist
+
+Every intentional departure from Alpha 1.2.6, gathered from §17.1–17.10
+for the release gate. Nothing here is a defect; each is a decision with
+its reason.
+
+| # | Area | Deviation | Why |
+|---|---|---|---|
+| 1 | RNG | Overworld caves keep `next_long_legacy_unsigned_low`, a `nextLong` that sign-extends only the high word | OpenJDK sign-extends both. Fixing it changes every existing Overworld save's cave layout. The corrected `next_long` ships alongside and the Nether uses it. **Open decision for the user.** |
+| 2 | Portals | Exposure travels at 81 ticks, not the nominal 80 | `0.0125` is not exactly representable and Alpha accumulates it into a Java float. 81 is what the source actually produces. |
+| 3 | Portals | `create_portal` runs one site-clearance pass where `no.java` runs two | Only *which* clear spot wins differs. The fallback and the 70–118 Y clamp are exact. |
+| 4 | Portals | Rendered by a dedicated MultiMesh, not chunk geometry | The surface animates at 20 Hz and the chunk atlas is static. Also satisfies §7.1's one-material rule by construction. |
+| 5 | Portals | Particles use persistent emitters for the nearest six cells | `x.java` asks for 480 spawns/second across one portal. Bounds particle and voice counts as §7.1 requires. |
+| 6 | Ghast | Render scale normalised by its resting value | `jz.java`'s 4.5× assumes MC's 1/16 model units; this project's model is already in metres. |
+| 7 | Ghast | `course_is_clear` tests only newly covered cells per step | Identical result — the world does not change mid-walk — at 8.7× the speed. |
+| 8 | Fireball | One persistent smoke emitter per projectile | `e_()` emits every tick, 20 spawns/second, against a six-emitter shared pool. |
+| 9 | Pigman | Walk speeds are the source ratio (1.0 → 1.9 m/s), not the raw `am` scalars | This project works in m/s; its zombie, also `am = 0.5`, walks at 1.0. |
+| 10 | Pigman | Step sound reuses the zombie's pool | Alpha gives the pigman none of its own; this project already deviates that way for the zombie. |
+| 11 | Mobs | ModelBiped geometry duplicated across zombie, skeleton and pigman | Texture path, melee damage and drop are consts, so a subclass would have to override the model builder anyway. No further bipeds are planned. |
+| 12 | Mobs | `Ghast._voxel_half_extents` overridden rather than fixing the base's hardcoded 0.6 | Correcting it globally would change spider and cow collision — an Overworld behaviour change. **Latent inconsistency, logged.** |
+| 13 | Spawning | Overworld hostile cap stays at 70; the Nether uses the source's 100 | §8.4 explicitly forbids changing the Overworld figure without separate measurement. |
+| 14 | Spawning | The per-chunk loop remains this project's per-tick random-cell sample | Pre-existing Overworld behaviour; the Nether reuses it rather than forking a second controller. |
+| 15 | Audio | Nether sounds route through an OPTIONAL loader that checks existence before `load()` | The clips ARE vendored (see §17.11), so nothing is silent. The optional path stays because §11 requires a silent-safe fallback and a build without the assets should go quiet rather than error once per portal hum. |
+| 16 | Difficulty | `Game.difficulty` exists with no UI | Several source behaviours gate on `as.k`; modelling them as always-Normal would silently drop them. |
+| 17 | Explosion | `Explosion.detonate` gained a `flaming` parameter, default false | Only the fireball passes true. TNT and creepers are untouched. |
+
+### Out-of-batch fixes made during this feature
+
+Both were found while validating, both reproduce on a clean `HEAD`, and
+both are recorded in full at §17.7:
+
+- **Headless boots were writing to real saves.** The autosave timer had
+  been guarded since the 2026-07 World1 corruption, but chunk-eviction
+  write-through is not on that timer, and one `--quit-after` boot rewrote
+  a live region file with seed-12345 terrain. Now guarded by a single
+  `ChunkManager._disk_writes_allowed()`.
+- **`_spawn_chunk_sync` bypassed the dimension provider**, so a player
+  who saved in the Nether would have been handed a ring of Overworld
+  terrain at world entry.
+
+### Known issues at the release gate
+
+1. ~~**No Nether audio.**~~ Resolved — see §17.11.
+2. **Five pre-existing native-parity suites fail without the
+   extension.** They assert `native == gdscript` and have nothing to
+   compare against. `test_nether_worldgen_native.gd` shows the fix.
+3. **Overworld cave RNG.** Deviation 1 — needs a user decision about
+   existing saves before it can be corrected.
+4. **`_voxel_half_extents` hardcodes 0.6** for every non-ghast mob.
+   Deviation 12.
+5. **`godot --headless main.tscn --quit-after N` ends in a signal 11**
+   inside `WorkerThreadPool::finish()`. Reproduces on a clean HEAD;
+   unrelated to this feature.
+
+### 17.11 Nether audio (2026-08-16, post-Batch 10)
+
+**A correction first.** Batches 7, 8 and 9 each shipped their sound
+events registered but silent, and each recorded the reason as "the OGGs
+are not in the repository — Alpha served its sound set from Mojang's
+resources endpoint, not the jar." The first half is true and was
+verified. The conclusion drawn from it — that the files were therefore
+unobtainable without an outbound fetch — was never checked, and it was
+wrong. A local extraction of that same resources payload was on the
+development machine the whole time, at
+`~/Library/Application Support/minecraft/resources/sound3/`. It is
+where the zombie, skeleton, creeper and spider clips already in this
+repo came from, which a byte-match confirms:
+
+    shasum assets/audio/sfx/mob/zombie/death.ogg
+    shasum <resources>/sound3/mob/zombie/death.ogg
+    -> 6e0488ab07b9539fbaebc093f194bb6a95b2caec, both
+
+Neither `mcasset.cloud/a1.2.6` nor InventivetalentDev's mirror would
+have helped: both mirror JAR contents, and Alpha's sounds were never in
+the jar. `sound3/` is the right generation — `newsound/` carries the
+same three portal files but is a later payload, and the byte-match above
+pins which one this project standardised on.
+
+**Twenty-nine clips vendored**, vanilla filenames verbatim, following the
+rule the existing sets already follow — only what the decompiled source
+actually references:
+
+| Event | Files |
+|---|---|
+| `portal.portal` / `trigger` / `travel` | `portal/{portal,trigger,travel}.ogg` |
+| `mob.zombiepig.zpig` | `zpig1-4.ogg` |
+| `mob.zombiepig.zpigangry` | `zpigangry1-4.ogg` |
+| `mob.zombiepig.zpighurt` | `zpighurt1-2.ogg` |
+| `mob.zombiepig.zpigdeath` | `zpigdeath.ogg` |
+| `mob.ghast.moan` | `moan1-7.ogg` |
+| `mob.ghast.scream` | `scream1-5.ogg` |
+| `mob.ghast.death` / `charge` / `fireball` | `death.ogg`, `charge.ogg`, `fireball4.ogg` |
+
+Two details worth recording. `fireball4.ogg` is the real filename —
+there is no 1 through 3, and a plausible-looking rename to
+`fireball.ogg` would break the shot sound silently. And
+`affectionate scream.ogg` ships beside the ghast set but `am.java` never
+plays it, so it is deliberately not vendored — the same rule that keeps
+`infect`, `remedy`, `wood*` and `metal*` out of the zombie directory.
+
+**Alpha's SoundManager pools by numeric suffix**, resolving an event name
+to any file matching it plus a digit. The Batch 7-9 code assumed one
+file per event; it now uses pools, via a `_play_optional_pool_3d` that
+picks uniformly. Seven ghast moans is why a ghast never sounds like a
+loop.
+
+**The optional loader stays.** §11 asks for a silent-safe fallback and
+that requirement has not gone away — a build shipped without these
+assets should go quiet, not spam an engine error once per portal hum. Its
+one liability is that a broken path now fails SILENTLY, so
+`tests/test_nether_audio.gd` asserts all twenty-nine resolve to
+importable streams rather than trusting the silence.
+
+Attribution recorded in `assets/fonts/ATTRIBUTION.md` alongside the GUI
+textures, on the same personal/non-commercial study-project footing.
+
+### 17.12 Post-audit fixes (2026-08-19)
+
+A review pass over the shipped feature — reading the wiring against the
+source and against itself, at the seams between systems where the
+per-batch suites cannot look — produced sixteen verified findings, all
+now fixed. The full write-up lives in the audit artifact; this is the
+durable record of what changed and why.
+
+**The portal was meshed as a solid cube, with collision.**
+`Blocks.mesh_shape` had no PORTAL case and fell through to CUBE, and the
+native mesher's non-cube skip lists did not know id 206 — proven by
+probe: a 2×3 sheet added 80 vertices and 40 collision triangles to the
+chunk trimesh. The player physically could not enter a portal, so
+exposure never filled and travel was unreachable in-game; every Batch 7
+test had used FakeWorlds, and nothing ever meshed a chunk containing a
+portal. Fixed with `MESH_SHAPE_NONE`, PORTAL in all three native id
+lists (both cube-emission skips and the special-cells classifier), and
+PORTAL in the native opaque mirror, the fluid boundary-face rule and the
+flow-direction rule — without those three, neighbours would have culled
+their faces against the now-invisible portal, because the native mirror
+treats unknown ids as opaque. Pinned by the strongest available oracle:
+`test_portal_rendering` asserts a portal cell meshes IDENTICALLY to air,
+on both the reference and production paths. Requires the rebuilt
+`libmesher_native` (macos debug + release rebuilt; **the web wasm still
+carries the old code** and needs the emsdk rebuild before the next web
+export).
+
+**The fireball could not be hit.** It had no collider of any kind, so
+player melee and arrows — both `intersect_ray` — passed straight
+through; the deflection logic was correct, tested, and unreachable.
+It now carries a 1×1 ray-visible Area3D (`a(1.0f, 1.0f)`), the melee
+walk and the arrow walk both gained a GhastFireball branch (deflect
+along the full-3D camera look / the arrow's own flight vector; `az.a`
+discards the damage amount), and the fireball's own entity sweep
+excludes its own area. A direct hit on the PLAYER now uses the player's
+`(int, String, Vector3)` signature — the mob-style call was a runtime
+type error on every direct hit.
+
+**Explosions only ever damaged the player.** `_apply_entity_damage`
+predated mobs and was never revisited; creeper and TNT blasts never
+hurt another mob, and a deflected fireball could not hurt its ghast.
+Mobs now take the same falloff through a shared `_blast_damage` helper
+(player numbers byte-identical), with the `source` entity exempt.
+Recorded honestly: a point-blank power-1 blast is 9 damage against a
+ghast's 10 health — the last half-heart, NOT a kill. Alpha has no
+modern deflection-one-shot special case, and the playtest guide's H9
+originally overstated this.
+
+**Return portals were built floating at Y 70–118.** The site search was
+confined to the fallback band where vanilla scans the full column; an
+Overworld return (arriving at the player's unscaled Nether Y, below the
+surface) found no in-band site and conjured a sky platform. The search
+now covers Y 4–120 with every candidate competing on 3D distance (the
+per-column break also removed — it re-biased arrivals upward), and the
+fallback clamp is unchanged. Pinned by two tests: a floor at Y 40 wins
+over the band, and a 63-surface world puts the portal ON the surface
+with the ground beside the frame untouched.
+
+**Projectiles survived dimension travel.** Transient projectiles are
+deliberately non-persistable, which also meant the transition's entity
+sweep ignored them — a fireball mid-flight crossed the portal as a live
+node and detonated in the destination at its source coordinates.
+Fireball, arrow, snowball, primed TNT, fishing bobber and falling block
+all join a `transient_projectile` group in `_ready`/`setup`, and
+`_free_dimension_scene` sweeps the group globally (spawn parents vary).
+
+**The portal index is now durable and self-healing.** It was written
+only by dimension transitions — autosave and pause-quit lost it, and
+`rebuild_from_loaded` had no gameplay caller, so a portal lit and saved
+without travelling was invisible on reload (masked until now by the
+portal rendering as cubes). Autosave and the pause save both persist it
+dirty-checked, and `_index_portals_in_chunk` re-derives entries at the
+single chunk-materialization choke point — `PackedByteArray.find` is a
+native memchr, so the 99.9% of chunks with no portal pay one 32 KB scan.
+
+**Smaller fixes, each with its regression test where testable:** the
+`portal.travel` sound was ordered before `Game.is_loading` cleared and
+so could never play (reordered); index-hint chunks could be evicted by
+normal streaming during the travel transaction's awaited frames, so a
+distant known portal was occasionally missed and duplicated (hints are
+re-pinned synchronously before the search); ghast combat now steps its
+charge counter by the LOD tick scale with >=-crossing triggers, so the
+32–64 m band fires at vanilla cadence instead of quarter speed; a
+texture swap during a hurt flash updates the flash's captured originals
+instead of fighting it; lighting a portal no longer double-fires audio
+(the `portal.trigger` misuse in `BlockFire.place` removed — the event
+belongs to the exposure meter leaving zero); `PortalTravel` validates
+the player node after its awaited frames and guards its save under the
+same headless rule as every other disk path; flying mobs no longer sink
+in fluids (`ot.java`'s liquid branch is drag-only); slimes are gated by
+an explicit `has_slime_spawns` provider flag rather than the
+"species list is empty" convention; and pack-expansion spawn cells are
+re-checked against `bg.java`'s 24-block player exclusion at enqueue and
+at drain.
+
+Full suite green after the pass, with the new regression tests included.
+
+### 17.13 Playtest follow-ups (2026-08-19)
+
+**The §7.1 screen overlay had never been implemented — and the audit
+missed it too.** The plan's line "Add the screen overlay/transition
+effect" covers two things; Batch 7 shipped the transition (loading
+screen) and silently skipped the overlay, and the audit's seam-focused
+pass re-verified mechanisms rather than re-reading §7.1's presentation
+list, so it sailed through both. Now implemented as
+`scripts/ui/portal_overlay.gd` in the HUD scene, drawing the shared
+PortalTexture frames fullscreen at alpha = the exposure meter, exactly
+as Alpha's GuiIngame does. `reset_portal_exposure` was corrected with
+it: vanilla's meter rides through the dimension switch at 1.0 and the
+ordinary 0.05/tick drain produces the one-second purple fade-out on
+arrival — zeroing it on arrival (the previous behaviour) killed that
+fade and, with the overlay present, would have snapped the screen clear.
+
+**The click-to-doorway chain now has an end-to-end test.** A live
+playtest report of an invisible portal exposed that every prior test
+checked one link; `test_lighting_a_frame_produces_visible_instances`
+runs fire placement → `BlockFire.place` → `try_create` → index →
+renderer and asserts six drawn instances with the shared material and
+an opaque texture. A companion test pins that fire placed mid-air
+against a side column does NOT light the frame — `qh.java` requires
+obsidian directly below the fire cell, so that "nothing happened" is
+vanilla, not a bug. The chain is green; the field report is consistent
+with a session predating the mesher fix, where the portal rendered as a
+solid cube wearing the blank static atlas tile — invisible but
+impassable.
+
+**Obsidian had drifted to later-version numbers.** `nq.java:72` is
+`.c(10.0f).b(2000.0f)`: hardness 10 in Alpha — ≈1.9 s with a diamond
+pickaxe, 50 s bare-handed — where the shipped 50/250 encoded the
+later-version buff (a test even asserted the drifted value). Resistance
+2000, diamond-only harvest (level 3), 1:1 drop and the water-on-source
+→ obsidian / water-on-flowing → cobblestone formation were all verified
+correct against `cw.java` and `ld.java:223-254`; hardness and the
+derived bare-hand time were the only two numbers off, both now fixed
+with citations.
+
+**The portal destroyed itself the moment it was lit — in the real game
+only.** Field report from the playtest: fresh worlds, frame lights,
+nothing appears, the doorway is walkable. Root cause: this project's
+`set_world_block` notifies the WRITTEN CELL ITSELF (`_NOTIFY_OFFSETS`
+includes zero) and drains synchronously, so `try_create`'s per-cell fill
+had each portal cell re-validate while its column was one block tall —
+invalid by definition — and erase itself before its column-mates were
+written. The sheet never existed. Vanilla forecloses exactly this:
+`x.java:65-71` and `no.java:202-212` bracket their portal writes with
+`cy2.i = true` (editingBlocks), a line that was READ during Batch 7 and
+not ported. Now ported as `ChunkManager.begin/end_block_edit`, guarded
+in `enqueue_block_notification` precisely where vanilla's `cy.h()`
+checks the flag, and bracketing the fire-lit fill, arrival-frame
+construction and the fallback platform. Why nothing caught it: every
+portal test — all 26 of them, plus the end-to-end chain test written in
+response to the first report — used FakeWorld doubles, and no double
+reproduces the synchronous notify-and-revalidate cascade. Two
+regression tests now run the whole thing on a REAL ChunkManager:
+lighting survives its own creation, and breaking the frame still
+dissolves the sheet through the same drain the suppression brackets.
+
+**Arrival froze the player inside the destination portal, then bounced
+them straight back — an infinite enter/leave loop.** Second field
+report, World 2. Chain: `_spawn_chunk_sync`'s FRESH branch materialized
+the chunk node but left its first mesh+collision queued in
+`_pending_apply` (drained one per frame), so the moment `_finish`
+cleared `Game.is_loading` the player was standing on a chunk whose
+collision shape was still null. The ground-readiness guard did its job —
+froze velocity for up to 4 s — but the exposure meter arrives at 1.0
+(the vanilla purple fade-out), drains 0.5 over the 10-tick cooldown and
+refills in 40 more ticks: bounce-back at ~2.5 s, well inside the freeze.
+The player never held control for a single tick. Fix in two parts, both
+at the arrival boundary rather than in the guard: `_spawn_chunk_sync`
+now force-applies pending mesh+collision on BOTH branches (the resident
+branch already did; the comment on the function always promised "fully
+usable"), and `PortalTravel` calls the new
+`ChunkManager.refresh_collision_activity()` after placing the player —
+the per-frame activation sweep only fires on a cached-chunk CHANGE, and
+an arrival needs the ground active the same frame control returns.
+Regression: `test_spawn_chunk_now_delivers_live_collision_immediately`
+runs the real fresh-spawn path and asserts `has_live_collision` with no
+frames idled.
+
+**Lighting the frame hitched.** Two independent costs on the ignition
+frame: six unbatched emission-11 light floods (each portal cell ran its
+own synchronous BFS), and the first-portal lazy build of the particle
+emitters — CPUParticles node setup plus particle-shader compile. The
+floods now converge through one `begin_batch`/`end_batch` bracket per
+fill (the same multi-source pass explosions use), nested inside the
+existing `begin/end_block_edit` brackets in `try_create`, `build_frame`
+and `_build_platform`; the emitter pool is built dormant in
+`PortalRenderer._ready`.
+
+**The particles were flat pink squares, and far too many of them.** Two
+misreadings of vanilla. Look: `jd.java` particles are SMOKE TILES
+(random tile 0-7 of particles.png row 0) tinted purple per particle by
+`nextFloat() * 0.6 + 0.4` — the old renderer drew untextured quads in
+one flat color. Count: `x.java:133` spawns four per animateTick HIT, but
+animateTick samples 1000 random cells per tick from a ±16 TRIANGULAR
+distribution around the player — a portal cell a few blocks away is hit
+~0.1-0.25 times a tick, for a steady state of ~20-40 motes per cell. The
+old 176-per-cell constant assumed a hit every tick and rendered 1056
+quads per portal. Now: AtlasTexture smoke row (FluidFx's largesmoke
+recipe), `color_initial_ramp` dim→bright purple reproducing the f2 roll,
+random fixed anim frame per particle, negative radial acceleration
+approximating jd.java's ease-out-and-return drift, 28 per emitter at
+vanilla's 0.10-0.14 world size.
+
+**Portal audio, for the record:** all three sounds were already wired
+and ordered correctly — hum (1-in-100 per display tick per cell, 3D pool
+with 16 m falloff), trigger (the tick exposure leaves zero), travel
+(after `_finish`, because the optional-sound players gate on
+`Game.is_loading`). The freeze/loop chaos is the likely reason none of
+it registered; nothing to change until a report survives the fixes
+above.
+
+**The enter/leave loop survived the collision fix — the real cause was
+an anti-bounce inversion (2026-08-19, second field report).** The
+collision force-apply above was a real latent bug but NOT the loop's
+mechanism. The actual defect: vanilla anti-bounce lives in
+`Entity.setInPortal` — while the ten-tick post-travel cooldown runs,
+standing inside REFRESHES it and the tick proceeds as "outside" (the
+meter drains, the purple fades, and the cooldown can only expire once
+the player steps out). Our port split that guard across two components
+that each disabled the other: `PortalExposure.advance()` had a
+refresh-while-inside branch, but `player._is_in_portal()` returned
+false during cooldown — so the state machine was told the player was
+outside, the cooldown counted DOWN under their feet, the meter drained
+to 0.5 and refilled, and travel re-fired every ~2.5 s. Forever, in both
+dimensions. The refresh branch was unreachable dead code. Why the test
+lied: `test_standing_in_the_arrival_portal_never_bounces_back` drove
+the state machine directly, bypassing the lying detector — the same
+unit-vs-integration blind spot as the editingBlocks bug. Fix: the
+detector now reports raw truth and `advance()` normalizes with
+vanilla's setter semantics (`if in_portal and cooldown > 0: refresh,
+tick as outside`); the never-bounce test now pins the vanilla-true
+contract (meter DRAINS to zero while standing inside — it must never
+refill underfoot), plus a 400-tick arrival-state regression covering
+the exact state PortalTravel leaves behind. Travel begin/arrival now
+leave `[PORTAL]` DebugLog breadcrumbs so the next field report carries
+data. Note for reproduction reports: engine log rotation destroyed the
+session log for this report — rescue `user://logs/` before running any
+headless command during a bug hunt.
+
+**Third field report cracked it — the arrival was PARALYZED BY
+PENETRATION, and it took a full-game headless repro harness to see it
+(2026-08-19).** Symptom unchanged across three reports: arrive in the
+Nether, cannot move, cannot walk out. The session logs showed perfect
+arrivals (doorway-centred landing, live collision) and then total
+silence — no guard freeze, no falls, no bounce. A scratchpad harness
+that boots the REAL game headless (`main.tscn` under a SceneTree
+script), builds and lights a real portal, lets the real exposure meter
+fire the real travel, then injects real `move_forward` input,
+reproduced it on the first run: walk velocity set, gravity
+accumulating to -144 m/s, displacement 0.000000 over 240 frames.
+Physics probes narrowed it in three steps: the block data around the
+player was a perfect open doorway; the encasing StaticBody was the
+CURRENT chunk's own collision (no orphan, no stale node); and the
+capsule's FEET were at y = cell + 0.5 - 0.9. The root cause is a
+coordinate-convention mismatch: `arrival_position` returned
+`cell.y + 0.5` — a feet-origin convention — but the player body's
+origin is its capsule CENTRE (half-height 0.9), so every arrival sank
+the body 0.4 m into the frame's floor row. Deep symmetric penetration
+is unresolvable for move_and_slide: zero motion on every axis, no
+depenetration jitter, silent forever. Fix: landing y =
+`cell.y + 0.901` (floor top + half height + skin — the voxel floor
+guard's own convention), applied to `arrival_position` and the
+unfindable-frame fallback; the repro then walked 10.2 m out of the
+portal. Two of the earlier fixes were masking layers of this: with no
+live collision the ground guard froze the player (report #1's loop),
+and with the exposure inversion the meter yanked them back (report
+#2); only when both were fixed did the embed paralysis surface clean.
+Also fixed en route: portal construction never triggered a remesh
+(`set_world_block` leaves meshing to the caller) — the carved doorway
+existed only in block data while the chunk still meshed and collided
+as virgin terrain; `build_frame` and `_build_platform` now call the
+new `ChunkManager.rebuild_chunk_now` (same-frame mesh + collision, the
+`_flush_immediate_rebuild` contract) for every touched chunk.
+Regression tests pin the landing convention (`test_arrival_lands_the_
+capsule_above_the_floor_not_inside_it`) and the two stale `+0.5` pins
+were corrected — they had encoded the bug as truth, the third time a
+test faithfully guarded broken behavior. The harness lives in the
+session scratchpad (`repro/nether_move_repro.gd`); worth promoting to
+`scripts/dev/` if arrival bugs recur.
+
+**Playtest round 4 (2026-08-20): four field reports, four distinct
+causes.**
+
+*The World-4 portal vanished from inside an intact frame.* Not a bug in
+the sense the report implies — vanilla's portal block has blast
+resistance 0 (nq.java:113's `.c(-1.0f)` sets HARDNESS, and setHardness
+only raises resistance when `resistance < hardness * 5`, which -1 never
+satisfies), so a ghast fireball genuinely does erase the sheet and
+leave the obsidian standing. Relighting is the vanilla remedy — no code change
+was warranted, and none survives.
+
+CORRECTION, recorded because the first pass shipped a wrong claim: this
+investigation initially "fixed" a -1.0 it found next to the netherrack
+and glowstone entries, reporting that the blast ray's
+`intensity -= (resistance + 0.3) * coeff` was being fed a negative term
+and amplifying explosions. That -1.0 is in `hardness()`, not
+`explosion_resistance()` — the two functions sit adjacent in blocks.gd
+and the edit landed in the wrong one. `explosion_resistance(PORTAL)`
+was already 0.0 by default, so no amplification bug ever existed, and
+the edit instead broke the unbreakable-mining sentinel. Caught by an
+existing test (`portal hardness is the unbreakable sentinel`) in the
+full-suite run, reverted. `test_portal_survives_mining_but_not_
+explosions` now pins BOTH axes together — hardness -1.0, blast
+resistance 0.0, the ray term non-negative, and the frame outlasting the
+sheet — so the next reader cannot confuse them the way this pass did.
+Mining is blocked by the zero-size selection AABB (x.java's null
+collision box), not by hardness.
+
+*Ghasts "spamming snowballs".* Two separate answers. The snowball IS
+vanilla: gl.java renders the fireball as `dx.aB`'s item tile at 2x
+scale, and `dx.aB = new by(76)` is the snowball (item 332) — Alpha has
+no fire-charge sprite, so the ghast throws a scaled-up snowball. The
+spam was ours: `am.a()` gates ghast spawning behind
+`nextInt(20) == 0`, and that roll was never ported. With the Nether
+hostile pool being {pigman, ghast}, an ungated ghast took HALF of every
+hostile spawn instead of 2.5% — twenty times vanilla density, each
+firing on the correct 3 s cadence (charge -40 → 20). Ported as a
+per-species `natural_spawn_denominator()` hook, rolled on the candidate
+before any placement work, so a failed roll costs the attempt exactly
+as vanilla's does. Species that declare no gate are unaffected.
+
+*Breathing room on arrival (DEVIATION, requested).* Vanilla needs none
+because its own rarity gates do the work. `NaturalMobSpawner.grant_
+spawn_grace` suppresses the hostile pass for 12 s after a portal
+arrival and clears the pending pack queue so nothing lands the instant
+it closes; passive spawns and living mobs are untouched.
+
+*Lighting "staggering between light and dark way too much, even on the
+ghasts".* The ambient floor is the ONE term vanilla's brightness LUT
+varies by dimension — oz.java:23 uses 0.05, om.java:21 uses 0.1 — and
+`WorldProvider.ambient_light_floor` has carried the right value per
+dimension all along. Nothing consumed it: `chunk_common.gdshaderinc`
+hardcoded `float f2 = 0.05` and `EntityLighting._FLOOR` did the same,
+so the Nether rendered on the Overworld curve with every unlit cell at
+HALF the brightness vanilla gives it. Because the Nether has no sky
+channel, most of it sits at the low end of the curve where that gap is
+widest — hence the harsh staggering, and hence a ghast crossing from
+lava-light into shadow swinging twice as far as vanilla's does. The
+floor is now a shader uniform pushed from the active provider by
+day_night_driver (both the daylight path and the skyless path), with
+EntityLighting fed the same value so entities and the blocks under them
+share one curve.
+
+**Web target: deferred, not forgotten.** The web release wasm
+(`bin/libmesher_native.web.template_release.wasm32.wasm`, Aug 15) predates
+`src/mesher_native.h`'s `PORTAL = 206` (Aug 18), and the last export
+(`build/web/index.html`, Aug 15 01:30) predates the portal work entirely.
+A browser build made today would mesh portals as solid collidable cubes —
+audit finding #1, unfixed on that target only. Desktop is unaffected: the
+macOS dylibs were relinked after the header change.
+
+Deliberately NOT rebuilt yet. A fresh wasm alone changes nothing
+observable without a full re-export, native code may still move (a light
+BFS fix would touch `lighting_native.cpp`), and a web export can only be
+validated once the Nether is signed off on desktop. The web pass is one
+sequence, run in this order, AFTER desktop sign-off:
+
+    source ~/emsdk/emsdk_env.sh          # 4.0.20 pin — other versions
+                                         # break the side-module ABI
+    scons platform=web target=template_release threads=yes -j8
+    godot --headless --export-release "Web" build/web/index.html
+    python3 scripts/dev/serve_web.py 8060
+
+Then verify in-browser via a FRESH navigation, not a reload (see the web
+export notes), specifically: portal has no collision, the sheet renders,
+travel works, and the Nether's ambient floor reaches the shader — the
+four things the stale binary would silently get wrong.

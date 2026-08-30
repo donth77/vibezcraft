@@ -44,6 +44,11 @@ static var _current_tick: int = 0
 # fluid counts are under a few hundred, and an O(n) drain per tick is
 # ~µs. If this becomes a hot spot (huge cascades), swap in a binary heap.
 static var _pending: Array = []
+# Alpha keeps the same entries in a HashSet (`cy.java::D`) as well as its
+# ordered TreeSet. Equality is position + block id, so repeated neighbour
+# notifications cannot queue the same component hundreds of times before
+# its first tick fires. Vector4i is the allocation-free equivalent key.
+static var _pending_keys: Dictionary = {}
 
 # Wall-clock seconds carried across frames. Drained in SECONDS_PER_TICK
 # chunks by advance().
@@ -56,23 +61,22 @@ static var _accum_seconds: float = 0.0
 # priority for fluid ordering and that's already encoded in the fire_tick
 # ordering (same-tick entries fire in enqueue order).
 #
-# Duplicate schedules at the same (pos, block_id) are allowed — vanilla
-# checks for them to prevent queue spam but the cost is trivial for us
-# and the fluid algorithm is idempotent across multiple fire events on
-# the same cell.
+# Duplicate schedules at the same (pos, block_id) are ignored, matching
+# Alpha's `cy.java::D` HashSet. The first schedule wins even if a later
+# request supplies a shorter delay.
 static func schedule(pos: Vector3i, block_id: int, delay_ticks: int) -> void:
 	if delay_ticks < 1:
 		delay_ticks = 1
-	(
-		_pending
-		. append(
-			{
-				"pos": pos,
-				"block_id": block_id,
-				"fire_tick": _current_tick + delay_ticks,
-			}
-		)
-	)
+	_append_unique(pos, block_id, _current_tick + delay_ticks)
+
+
+static func _append_unique(pos: Vector3i, block_id: int, fire_tick: int) -> bool:
+	var key := Vector4i(pos.x, pos.y, pos.z, block_id)
+	if _pending_keys.has(key):
+		return false
+	_pending_keys[key] = true
+	_pending.append({"pos": pos, "block_id": block_id, "fire_tick": fire_tick})
+	return true
 
 
 # Remove all pending ticks for a (pos, block_id) match. Called by the
@@ -81,6 +85,9 @@ static func schedule(pos: Vector3i, block_id: int, delay_ticks: int) -> void:
 # HashSet keyed by (pos, id) which implicitly handles this; we walk the
 # array since our counts are small.
 static func cancel(pos: Vector3i, block_id: int) -> void:
+	var key := Vector4i(pos.x, pos.y, pos.z, block_id)
+	if not _pending_keys.erase(key):
+		return
 	var write: int = 0
 	for read in range(_pending.size()):
 		var entry: Dictionary = _pending[read]
@@ -136,6 +143,11 @@ static func _tick_all(manager) -> void:
 			remaining.append(entry)
 	_pending = remaining
 	for entry: Dictionary in fire_now:
+		# Vanilla removes one entry from both its TreeSet and HashSet just
+		# before invoking that callback. Keep later same-tick entries keyed
+		# until their own turn so an earlier callback cannot duplicate them.
+		var pos: Vector3i = entry.pos
+		_pending_keys.erase(Vector4i(pos.x, pos.y, pos.z, entry.block_id))
 		# Pass the scheduled block id to the callback so it can verify
 		# the cell still holds what we queued (player may have broken
 		# it mid-tick). Blocks.on_scheduled_tick switches on block id
@@ -202,6 +214,7 @@ static func take_for_chunk(cx: int, cz: int) -> Array:
 					}
 				)
 			)
+			_pending_keys.erase(Vector4i(pos.x, pos.y, pos.z, entry.block_id))
 			continue
 		if write != read:
 			_pending[write] = entry
@@ -217,16 +230,7 @@ static func restore_ticks(entries: Array) -> void:
 		var delay: int = entry.get("delay", 1) as int
 		if delay < 1:
 			delay = 1
-		(
-			_pending
-			. append(
-				{
-					"pos": entry.pos,
-					"block_id": entry.block_id,
-					"fire_tick": _current_tick + delay,
-				}
-			)
-		)
+		_append_unique(entry.pos, entry.block_id, _current_tick + delay)
 
 
 # Diagnostic — scheduler state for the debug panel / tests.
@@ -238,9 +242,21 @@ static func current_tick() -> int:
 	return _current_tick
 
 
-# Test hook. Tests need a clean scheduler between cases since the static
-# queue persists across GUT test boundaries.
-static func reset_for_tests() -> void:
+# Drop every scheduled tick and rewind the clock.
+#
+# The queue is static and world-position-keyed, so it belongs to whatever
+# dimension is resident. A dimension transition MUST clear it or a fluid
+# update scheduled at (10, 64, 10) in the Overworld fires against the
+# Nether's block at the same coordinate. ChunkManager calls this from its
+# dimension-owned state reset; tests call it between cases for the same
+# reason (the statics outlive a GUT test boundary).
+static func clear_all() -> void:
 	_pending.clear()
+	_pending_keys.clear()
 	_current_tick = 0
 	_accum_seconds = 0.0
+
+
+# Retained name for the existing test callsites.
+static func reset_for_tests() -> void:
+	clear_all()

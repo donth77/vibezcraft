@@ -227,9 +227,8 @@ func test_an_entity_a_metre_above_does_not_press() -> void:
 
 func test_repeated_contact_on_a_held_plate_does_not_grow_the_tick_queue() -> void:
 	# ap.java:65 returns early when the plate is already pressed. Without
-	# it, every frame a player stands still queues another 20-tick
-	# recheck — and TickScheduler permits duplicates, so the queue grows
-	# for as long as they stand there.
+	# it, every frame a player stands still repeats the overlap and schedule
+	# path even though TickScheduler now deduplicates the 20-tick recheck.
 	_w.living.append(_capsule_body(_cell_centre(PLATE), PLAYER_HEIGHT, PLAYER_RADIUS))
 	_w.put(PLATE, Blocks.WOODEN_PRESSURE_PLATE, 0)
 	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)

@@ -51,6 +51,9 @@ const REGION_SIZE: int = 1 << REGION_SHIFT  # 32
 # Game.active_world based on which slot the player clicks; until then
 # everything stays on World1.
 const DEFAULT_WORLD: String = "World1"
+# Sentinel for "the dimension that is currently resident". Chosen as
+# INT32_MIN so it can never collide with a real dimension id.
+const DIM_ACTIVE: int = -2147483648
 # Legacy directory from the pre-7.5 single-world layout. migrate_legacy_world
 # renames this to DEFAULT_WORLD on boot so existing players don't lose data.
 const _LEGACY_WORLD: String = "world"
@@ -79,16 +82,40 @@ static func resolve_world(world_name: String) -> String:
 	return world_name
 
 
+# Same idea as resolve_world, one axis over. Every path/cache API takes an
+# optional dimension; DIM_ACTIVE means "whichever dimension is resident",
+# so the hundreds of existing single-dimension callsites keep working
+# untouched while the Nether can address dimension -1 explicitly.
+static func resolve_dimension(dimension: int) -> int:
+	if dimension == DIM_ACTIVE:
+		return DimensionContext.active()
+	return dimension
+
+
 static func world_dir(world_name: String = "") -> String:
 	return "user://%s" % resolve_world(world_name)
 
 
-static func region_dir(world_name: String = "") -> String:
-	return "%s/region" % world_dir(world_name)
+# Directory that owns one dimension's chunks and entities.
+#
+# Dimension 0 resolves to the world root, so every Overworld save written
+# before the Nether existed keeps loading from exactly where it is — the
+# plan forbids relocating old files. Dimension -1 nests under DIM-1/,
+# mirroring vanilla's own layout.
+static func dimension_dir(world_name: String = "", dimension: int = DIM_ACTIVE) -> String:
+	return DimensionContext.provider(resolve_dimension(dimension)).dimension_dir(
+		world_dir(world_name)
+	)
 
 
-static func region_path(rx: int, rz: int, world_name: String = "") -> String:
-	return "%s/r.%d.%d.bin" % [region_dir(world_name), rx, rz]
+static func region_dir(world_name: String = "", dimension: int = DIM_ACTIVE) -> String:
+	return "%s/region" % dimension_dir(world_name, dimension)
+
+
+static func region_path(
+	rx: int, rz: int, world_name: String = "", dimension: int = DIM_ACTIVE
+) -> String:
+	return "%s/r.%d.%d.bin" % [region_dir(world_name, dimension), rx, rz]
 
 
 static func chunk_to_region(coord: Vector2i) -> Vector2i:
@@ -103,23 +130,28 @@ static func chunk_to_region(coord: Vector2i) -> Vector2i:
 # Write a single chunk's entry dict to its region file. Reads the existing
 # region (or starts empty), updates the entry for `coord`, and atomically
 # rewrites the region. Returns true on success.
-static func save_chunk(coord: Vector2i, entry: Dictionary, world_name: String = "") -> bool:
+static func save_chunk(
+	coord: Vector2i, entry: Dictionary, world_name: String = "", dimension: int = DIM_ACTIVE
+) -> bool:
 	if entry.is_empty():
 		return false
 	world_name = resolve_world(world_name)
-	_ensure_region_dir(world_name)
+	var dim: int = resolve_dimension(dimension)
+	_ensure_region_dir(world_name, dim)
 	var rcoord: Vector2i = chunk_to_region(coord)
-	var region: Dictionary = _load_region(rcoord, world_name)
+	var region: Dictionary = _load_region(rcoord, world_name, dim)
 	region[coord] = entry
-	return _flush_region(rcoord, region, world_name)
+	return _flush_region(rcoord, region, world_name, dim)
 
 
 # Read a chunk's entry from its region file. Returns an empty dict if the
 # chunk has never been saved (or the region file doesn't exist).
-static func load_chunk(coord: Vector2i, world_name: String = "") -> Dictionary:
+static func load_chunk(
+	coord: Vector2i, world_name: String = "", dimension: int = DIM_ACTIVE
+) -> Dictionary:
 	world_name = resolve_world(world_name)
 	var rcoord: Vector2i = chunk_to_region(coord)
-	var region: Dictionary = _load_region(rcoord, world_name)
+	var region: Dictionary = _load_region(rcoord, world_name, resolve_dimension(dimension))
 	return region.get(coord, {})
 
 
@@ -132,13 +164,15 @@ static func flush_all_regions(world_name: String = "") -> int:
 	for key: String in _region_cache.keys():
 		if not key.begins_with(prefix):
 			continue
+		# world|dimension|rx|rz — autosave flushes EVERY dimension of the
+		# world, not just the resident one, so a Nether region edited
+		# before stepping back through a portal still reaches disk.
 		var parts: PackedStringArray = key.split("|")
-		if parts.size() != 3:
+		if parts.size() != 4:
 			continue
-		var rx: int = int(parts[1])
-		var rz: int = int(parts[2])
-		var rcoord := Vector2i(rx, rz)
-		if _flush_region(rcoord, _region_cache[key], world_name):
+		var dim: int = int(parts[1])
+		var rcoord := Vector2i(int(parts[2]), int(parts[3]))
+		if _flush_region(rcoord, _region_cache[key], world_name, dim):
 			written += 1
 	return written
 
@@ -242,17 +276,20 @@ static func delete_world(world_name: String = "") -> bool:
 # --- Internal: region load / save ---
 
 
-static func _cache_key(rcoord: Vector2i, world_name: String) -> String:
-	return "%s|%d|%d" % [world_name, rcoord.x, rcoord.y]
+# Dimension is part of the key, not just the path: without it, chunk (0,0)
+# of the Nether would hand back the Overworld's cached region and quietly
+# overwrite it on the next flush.
+static func _cache_key(rcoord: Vector2i, world_name: String, dimension: int) -> String:
+	return "%s|%d|%d|%d" % [world_name, dimension, rcoord.x, rcoord.y]
 
 
 # Load a region's chunk dict from cache or disk. Returns an empty dict if
 # the region has no saved chunks yet.
-static func _load_region(rcoord: Vector2i, world_name: String) -> Dictionary:
-	var key: String = _cache_key(rcoord, world_name)
+static func _load_region(rcoord: Vector2i, world_name: String, dimension: int) -> Dictionary:
+	var key: String = _cache_key(rcoord, world_name, dimension)
 	if _region_cache.has(key):
 		return _region_cache[key]
-	var path: String = region_path(rcoord.x, rcoord.y, world_name)
+	var path: String = region_path(rcoord.x, rcoord.y, world_name, dimension)
 	var bytes: PackedByteArray = read_with_recovery(path)
 	var region: Dictionary = {}
 	if bytes.size() >= _HEADER_SIZE:
@@ -283,15 +320,17 @@ static func _load_region(rcoord: Vector2i, world_name: String) -> Dictionary:
 # this, a save_chunk-free path (autosave on a fresh world where no
 # eviction happened yet) would atomic_write with err=7 because the
 # directory hadn't been created via _ensure_region_dir.
-static func _flush_region(rcoord: Vector2i, region: Dictionary, world_name: String) -> bool:
+static func _flush_region(
+	rcoord: Vector2i, region: Dictionary, world_name: String, dimension: int
+) -> bool:
 	if region.is_empty():
 		return false
-	_ensure_region_dir(world_name)
-	var path: String = region_path(rcoord.x, rcoord.y, world_name)
+	_ensure_region_dir(world_name, dimension)
+	var path: String = region_path(rcoord.x, rcoord.y, world_name, dimension)
 	var body: PackedByteArray = var_to_bytes(region)
 	if not pack_and_write(path, _magic, _FORMAT_VERSION, body):
 		return false
-	_region_cache[_cache_key(rcoord, world_name)] = region
+	_region_cache[_cache_key(rcoord, world_name, dimension)] = region
 	return true
 
 
@@ -401,8 +440,8 @@ static func read_with_recovery(path: String) -> PackedByteArray:
 # --- Directory helpers ---
 
 
-static func _ensure_region_dir(world_name: String) -> void:
-	var path: String = region_dir(world_name)
+static func _ensure_region_dir(world_name: String, dimension: int = DIM_ACTIVE) -> void:
+	var path: String = region_dir(world_name, dimension)
 	if DirAccess.dir_exists_absolute(path):
 		return
 	DirAccess.make_dir_recursive_absolute(path)

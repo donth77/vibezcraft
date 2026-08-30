@@ -1,4 +1,4 @@
-[gd_scene load_steps=16 format=3]
+[gd_scene load_steps=17 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/ui/hotbar.tscn" id="1_hotbar"]
 [ext_resource type="Script" path="res://scripts/ui/armor_bar.gd" id="18_armor"]
@@ -16,6 +16,7 @@
 [ext_resource type="Script" path="res://scripts/ui/debug_item_spawner.gd" id="11_spawner"]
 [ext_resource type="Script" path="res://scripts/ui/debug_mob_spawner.gd" id="19_mob_spawner"]
 [ext_resource type="Script" path="res://scripts/ui/fire_overlay.gd" id="12_fire"]
+[ext_resource type="Script" path="res://scripts/ui/portal_overlay.gd" id="12_portal"]
 [ext_resource type="Script" path="res://scripts/ui/pumpkin_overlay.gd" id="16_pumpkin"]
 [ext_resource type="Script" path="res://scripts/ui/chat_hud.gd" id="21_chat"]
 [ext_resource type="Script" path="res://scripts/ui/sleep_overlay.gd" id="22_sleep"]
@@ -93,6 +94,15 @@ anchor_bottom = 1.0
 mouse_filter = 2
 texture = ExtResource("17_pumpkin_tex")
 script = ExtResource("16_pumpkin")
+
+[node name="PortalOverlay" type="TextureRect" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("12_portal")
 
 [node name="Hotbar" parent="." instance=ExtResource("1_hotbar")]
 

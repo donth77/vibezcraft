@@ -130,6 +130,12 @@ const _BLOCKS: Array = [
 	Blocks.WOOD_DOUBLE_SLAB,
 	Blocks.COBBLESTONE_HALF_SLAB,
 	Blocks.COBBLESTONE_DOUBLE_SLAB,
+	# Nether blocks. PORTAL is deliberately absent — it has no item form
+	# (Blocks.WORLD_ONLY_IDS) and must never appear in a spawner list;
+	# tests/test_nether_blocks.gd asserts its exclusion.
+	Blocks.NETHERRACK,
+	Blocks.SOUL_SAND,
+	Blocks.GLOWSTONE,
 ]
 # Sign item — separate from block list since the item-place handler
 # decides standing vs wall sign at right-click time.
@@ -146,6 +152,10 @@ const _ITEMS: Array = [
 	Items.BONEMEAL,
 	Items.GUNPOWDER,
 	Items.REDSTONE,
+	# Beta 1.3 redstone repeater — keep it beside dust so the two circuit
+	# items are discoverable together. It places the unpowered world state;
+	# RMB on the placed component cycles its four delay settings.
+	Items.REDSTONE_REPEATER,
 	Items.COMPASS,
 	Items.CLOCK,
 	Items.BUCKET_EMPTY,
@@ -277,6 +287,9 @@ const _ITEMS: Array = [
 	# recipe (9 → 1). Right-click does nothing for now (sticky pistons
 	# / lead crafting would consume them in modern MC; not in our scope).
 	Items.SLIMEBALL,
+	# Glowstone dust — glowstone's only drop, and the sole reagent in the
+	# nine-dust block recipe.
+	Items.GLOWSTONE_DUST,
 ]
 
 var _player: Node
@@ -430,9 +443,9 @@ func _on_cell_pressed(item_id: int) -> void:
 
 func _display_name(item_id: int) -> String:
 	# Items.display_name covers both blocks and items; fall back to
-	# Blocks.name_of for block-ids below 100 when Items doesn't match.
+	# Blocks.name_of for registered blocks when Items doesn't match.
 	var pretty: String = Items.display_name(item_id)
-	if pretty == "" and item_id < 100:
+	if pretty == "" and Blocks.is_registered(item_id):
 		pretty = Blocks.name_of(item_id).capitalize()
 	return pretty
 

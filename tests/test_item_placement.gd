@@ -4,7 +4,7 @@ extends GutTest
 #
 # `Interaction._place_block_from_held` rejects every item id outright:
 #
-#     if stack.item_id >= 100 or Items.is_tool_item(stack.item_id):
+#     if not Blocks.is_inventory_placeable(stack.item_id) or Items.is_tool_item(...):
 #         return false
 #
 # That is correct as a default — right-clicking with a pork chop must not
@@ -29,6 +29,7 @@ const _INTERACTION_PATH := "res://scripts/player/interaction.gd"
 # one is introduced and the guard below does the rest.
 const _PLACING_ITEMS: Array[String] = [
 	"REDSTONE",
+	"REDSTONE_REPEATER",
 	"RAIL",
 	"SIGN",
 	"BED",
@@ -58,7 +59,7 @@ func _is_code(line: String) -> bool:
 # Line index of the item-id rejection, or -1.
 func _guard_line(lines: PackedStringArray) -> int:
 	for i in range(lines.size()):
-		if _is_code(lines[i]) and lines[i].contains("stack.item_id >= 100"):
+		if _is_code(lines[i]) and lines[i].contains("Blocks.is_inventory_placeable(stack.item_id)"):
 			return i
 	return -1
 
@@ -75,7 +76,7 @@ func _dispatch_line(lines: PackedStringArray, item_name: String) -> int:
 func test_the_item_rejection_guard_still_exists() -> void:
 	# If this ever stops matching, the tests below are silently vacuous.
 	var lines: PackedStringArray = _source_lines()
-	assert_gt(_guard_line(lines), 0, "the `item_id >= 100` guard is still there to be beaten")
+	assert_gt(_guard_line(lines), 0, "the inventory-placeable guard is still there to be beaten")
 
 
 func test_every_block_placing_item_is_dispatched_before_the_guard() -> void:

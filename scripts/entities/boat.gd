@@ -124,6 +124,9 @@ var _damage_time: float = 0.0
 # the air→water transition and fire a splash SFX. Vanilla `dp.java`
 # uses the same edge to trigger the splash particles (line 197).
 var _was_touching_water: bool = false
+# Wake emission follows dp.java's 20 Hz entity tick even though this boat's
+# movement is integrated every physics frame.
+var _wake_tick_accumulator: float = 0.0
 # Cached Player node for the soft-push proximity check. Set in
 # _ready; nullable in case the boat outlives the player or spawns
 # before the Player node exists.
@@ -439,16 +442,18 @@ func _emit_quad(st: SurfaceTool, n: Vector3, verts: Array, uv_rect: Rect2) -> vo
 		st.add_vertex(verts[tri_idx])
 
 
-# Pack-aware boat skin loader. Falls back to the shared entity dir if
-# the active pack doesn't ship one, then to null (mesh renders untextured
-# wood-brown if no skin is found).
+# Pack-aware boat skin loader. Pixel Perfection and Programmer Art currently
+# do not ship entity boat skins, so match the rest of the pack system and
+# fall back to Alpha Vanilla instead of returning an untextured white hull.
 func _load_boat_texture() -> Texture2D:
 	var pack_path := "res://assets/textures/entities/packs/%s/boat.png" % BlockAtlas.active_pack
 	if ResourceLoader.exists(pack_path):
 		return load(pack_path) as Texture2D
-	var shared_path := "res://assets/textures/entities/boat.png"
-	if ResourceLoader.exists(shared_path):
-		return load(shared_path) as Texture2D
+	var fallback_path := (
+		"res://assets/textures/entities/packs/%s/boat.png" % BlockAtlas.DEFAULT_PACK
+	)
+	if ResourceLoader.exists(fallback_path):
+		return load(fallback_path) as Texture2D
 	return null
 
 
@@ -639,7 +644,10 @@ func _physics_process(delta: float) -> void:
 	# water from its drop-in spawn) and on any subsequent transition
 	# from above-water to in-water (e.g. driving off a 1-block drop).
 	if touches_water and not _was_touching_water:
-		SFX.play_splash(velocity)
+		SFX.play_splash(velocity, global_position)
+		FluidFx.spawn_water_entry(
+			_chunk_manager, global_position, global_position.y, HULL_LENGTH, velocity / 20.0
+		)
 	_was_touching_water = touches_water
 	if _rider != null and touches_water and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var thrust_dir: Vector3 = _read_rider_input()
@@ -682,6 +690,17 @@ func _physics_process(delta: float) -> void:
 	# penetration; this just stops the per-frame visual jitter.
 	if is_on_wall():
 		velocity = velocity.slide(get_wall_normal())
+	# dp.java emits the moving wake once per 20 Hz entity tick, after motion.
+	# The helper owns the exact 0.15-block/tick threshold, count, and hull-side
+	# position formula. Resetting the accumulator out of water prevents a
+	# deferred burst on the next entry.
+	if touches_water:
+		_wake_tick_accumulator += minf(delta, 0.5)
+		while _wake_tick_accumulator >= 0.05:
+			_wake_tick_accumulator -= 0.05
+			FluidFx.spawn_boat_wake(_chunk_manager, global_position, rotation.y, velocity / 20.0)
+	else:
+		_wake_tick_accumulator = 0.0
 	# Drive rider to seat position. Rider's own physics short-circuits
 	# while _mounted_to != null (Player._physics_process check).
 	if _rider != null:

@@ -265,9 +265,8 @@ func test_a_settled_empty_plate_stops_rechecking() -> void:
 
 func test_repeated_contact_does_not_stack_rechecks_unboundedly() -> void:
 	# ap.java:65 — once pressed, contact is a NO-OP. Without that guard
-	# every footstep of a player standing still on a plate would queue
-	# another recheck, and TickScheduler allows duplicates, so the queue
-	# would grow for as long as they stood there.
+	# every footstep of a player standing still would redo the overlap,
+	# notification, and scheduling work; scheduler dedup is a second guard.
 	_place_plate(Blocks.WOODEN_PRESSURE_PLATE)
 	_stand(true)
 	Redstone.update_plate(_w, PLATE, Blocks.WOODEN_PRESSURE_PLATE, true)

@@ -84,6 +84,16 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 	assert_eq(nat.uvs, gds.uvs, "%s: uvs byte-equal" % label)
 	assert_eq(nat.indices, gds.indices, "%s: indices byte-equal" % label)
 	assert_eq(nat.colors, gds.colors, "%s: colors byte-equal" % label)
+	assert_eq(
+		nat.get("collision_faces", PackedVector3Array()),
+		gds.collision_faces,
+		"%s: physical collision soup byte-equal" % label
+	)
+	assert_eq(
+		nat.get("plant_faces", PackedVector3Array()),
+		gds.plant_faces,
+		"%s: ray-selection soup byte-equal" % label
+	)
 	# Water + lava sub-mesh parity — native emits both fluids via
 	# emit_fluid_cell, byte-equal to GDScript's _emit_fluid_faces.
 	assert_eq(
@@ -153,6 +163,8 @@ func test_parity_every_redstone_attachment() -> void:
 		Blocks.STONE_BUTTON,
 		Blocks.STONE_PRESSURE_PLATE,
 		Blocks.WOODEN_PRESSURE_PLATE,
+		Blocks.REDSTONE_REPEATER_OFF,
+		Blocks.REDSTONE_REPEATER_ON,
 	]:
 		var chunk := Chunk.new()
 		chunk.set_block(8, 63, 8, Blocks.STONE)
@@ -227,6 +239,39 @@ func test_parity_full_worldgen_chunk() -> void:
 	var chunk := Worldgen.generate_chunk(0, 0)
 	var both := _mesh_both(chunk)
 	_assert_parity(both[0], both[1], "worldgen chunk (0,0)")
+
+
+func test_bulk_remapped_nether_fire_reaches_the_production_appendix() -> void:
+	# Player placement goes through Chunk.set_block and always sets the
+	# non-cube flag, so ordinary mesher parity fixtures could not reproduce
+	# naturally generated fire disappearing. Build through the real raw-id
+	# remap instead and compare against the identical support-only chunk.
+	var support_raw := PackedByteArray()
+	support_raw.resize(Chunk.TOTAL_BLOCKS)
+	support_raw[WorldgenNether.alpha_index(8, 63, 8)] = WorldgenNether.ALPHA_NETHERRACK
+	var fire_raw: PackedByteArray = support_raw.duplicate()
+	fire_raw[WorldgenNether.alpha_index(8, 64, 8)] = WorldgenNether.ALPHA_FIRE
+	var support := Chunk.new()
+	var fire := Chunk.new()
+	WorldgenNether.remap_to_chunk(support_raw, support)
+	WorldgenNether.remap_to_chunk(fire_raw, fire)
+	Lighting.fill_sky_light(support)
+	Lighting.fill_block_light(support)
+	Lighting.fill_sky_light(fire)
+	Lighting.fill_block_light(fire)
+	var support_mesh: Dictionary = Mesher.mesh_chunk_fast(support)
+	var fire_mesh: Dictionary = Mesher.mesh_chunk_fast(fire)
+	assert_true(fire.has_non_cube_blocks, "the remap advertises its fire cell")
+	assert_eq(
+		fire_mesh.vertices.size() - support_mesh.vertices.size(),
+		32,
+		"one floor-supported fire emits eight four-vertex flame planes"
+	)
+	assert_eq(
+		fire_mesh.plant_faces.size() - support_mesh.plant_faces.size(),
+		36,
+		"and one selection AABB (six faces, two triangles each)"
+	)
 
 
 func test_parity_offset_worldgen_chunk() -> void:
@@ -356,6 +401,25 @@ func test_parity_collision_faces_single_block() -> void:
 	var expected := _collision_faces_via_old_path(chunk)
 	assert_eq(native_faces.size(), expected.size(), "single block: collision face count")
 	assert_eq(native_faces, expected, "single block: collision faces byte-equal")
+
+
+func test_soul_sand_keeps_full_render_and_selection_but_seven_eighths_collision() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(8, 64, 8, Blocks.SOUL_SAND)
+	var both := _mesh_both(chunk)
+	_assert_parity(both[0], both[1], "soul sand split bounds")
+	var render_max_y: float = -INF
+	var collision_max_y: float = -INF
+	var selection_max_y: float = -INF
+	for vertex: Vector3 in both[1].vertices:
+		render_max_y = maxf(render_max_y, vertex.y)
+	for vertex: Vector3 in both[1].collision_faces:
+		collision_max_y = maxf(collision_max_y, vertex.y)
+	for vertex: Vector3 in both[1].plant_faces:
+		selection_max_y = maxf(selection_max_y, vertex.y)
+	assert_almost_eq(render_max_y, 65.0, 1e-6, "visual remains a full cube")
+	assert_almost_eq(collision_max_y, 64.875, 1e-6, "physics ends at seven eighths")
+	assert_almost_eq(selection_max_y, 65.0, 1e-6, "ray selection remains full-height")
 
 
 func test_parity_collision_faces_worldgen_chunk() -> void:

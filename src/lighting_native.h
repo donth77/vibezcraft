@@ -103,9 +103,9 @@ public:
 
 	// Cross-chunk relight on chunk load. Walks the 4 cardinal seam planes
 	// of `target_x, target_z` against each loaded neighbor in chunk_data;
-	// for every seam cell on EITHER side, recomputes both sky_light AND
-	// block_light using cross-chunk neighbor lookups; seeds two BFSes that
-	// drain into the loaded chunks and converge.
+	// for every seam cell on EITHER side, recomputes block_light and, when
+	// p_has_sky_light is true, sky_light using cross-chunk neighbor lookups;
+	// seeds the applicable BFSes, which drain into loaded chunks and converge.
 	//
 	// chunk_data shape: Array of Array, each inner = [
 	//   chunk_x: int, chunk_z: int,
@@ -125,7 +125,8 @@ public:
 			int p_target_z,
 			const Array &p_chunk_data,
 			const PackedByteArray &p_opacity_lut,
-			const PackedByteArray &p_emission_lut) const;
+			const PackedByteArray &p_emission_lut,
+			bool p_has_sky_light) const;
 
 protected:
 	static void _bind_methods();

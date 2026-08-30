@@ -38,6 +38,15 @@ extends RefCounted
 # Keep at 16 for vanilla parity; drop to 12 if profiling shows the ray
 # cast is the dominant cost in chained-TNT cascades.
 const _RAY_GRID: int = 16
+# Grid used for small blasts. A ghast fireball is power 1, so its crater
+# reaches under 3 blocks and the 16-grid puts ~1352 rays through roughly
+# thirty cells — wild oversampling. Measured at 4.36 ms per detonation on
+# an M2, i.e. a quarter of a 60 fps frame spent in one main-thread hitch,
+# which is what turns a ghast duel into a stutter. The 8-grid keeps ~10
+# rays per affected cell, so the crater is visually identical, and TNT
+# (power 4) and creepers (power 3) stay on the full grid untouched.
+const _RAY_GRID_SMALL: int = 8
+const _SMALL_BLAST_POWER: float = 2.0
 const _STEP: float = 0.3
 const _DROP_RATE: float = 0.3
 # Vanilla ks.java:54 — `f4 -= f3 * 0.75f` runs UNCONDITIONALLY each step,
@@ -60,37 +69,64 @@ const _PRIMED_TNT := preload("res://scripts/world/primed_tnt.gd")
 # triggered the blast (used to skip self-damage for primed TNT) and may be
 # null. Returns nothing — block writes and entity damage are applied
 # synchronously via ChunkManager.
-static func detonate(manager: Node, world_pos: Vector3, power: float, source: Node = null) -> void:
+static func detonate(
+	manager: Node, world_pos: Vector3, power: float, source: Node = null, flaming: bool = false
+) -> void:
+	var pp := PerfProbe.begin("explosion.detonate")
 	var affected: Dictionary = {}
 	# Boundary-only sample of the 16³ direction grid — cells where at least
 	# one axis is on the edge. Skipping the interior (where all axes ∈
 	# [1, 14]) cuts 4096 rays down to 1352 without changing coverage.
-	for n4 in range(_RAY_GRID):
-		for n3 in range(_RAY_GRID):
-			for n2 in range(_RAY_GRID):
+	var grid: int = _RAY_GRID if power >= _SMALL_BLAST_POWER else _RAY_GRID_SMALL
+	for n4 in range(grid):
+		for n3 in range(grid):
+			for n2 in range(grid):
 				if (
 					n4 != 0
-					and n4 != _RAY_GRID - 1
+					and n4 != grid - 1
 					and n3 != 0
-					and n3 != _RAY_GRID - 1
+					and n3 != grid - 1
 					and n2 != 0
-					and n2 != _RAY_GRID - 1
+					and n2 != grid - 1
 				):
 					continue
-				_cast_ray(manager, world_pos, power, n4, n3, n2, affected)
+				_cast_ray(manager, world_pos, power, n4, n3, n2, affected, grid)
 	_apply_entity_damage(manager, world_pos, power, source)
+	# One batch around BOTH passes. _apply_block_destruction opens its own
+	# (batches nest, only the outermost drains), but the flaming pass used
+	# to run outside it — and fire is a light source, so every fire the
+	# blast dropped fired its own block-light BFS over a ~16-cell radius,
+	# unbatched, on top of the destruction it had just deferred. Folding
+	# them into one batch means a single convergence pass for the whole
+	# detonation instead of one per fire.
+	var batched: bool = manager.has_method("begin_batch")
+	if batched:
+		manager.begin_batch()
 	_apply_block_destruction(manager, world_pos, power, affected)
+	if flaming:
+		_apply_flaming_pass(manager, affected)
+	if batched:
+		manager.end_batch()
+
+	PerfProbe.end("explosion.detonate", pp)
 
 
 static func _cast_ray(
-	manager: Node, origin: Vector3, power: float, n4: int, n3: int, n2: int, affected: Dictionary
+	manager: Node,
+	origin: Vector3,
+	power: float,
+	n4: int,
+	n3: int,
+	n2: int,
+	affected: Dictionary,
+	grid: int
 ) -> void:
 	# Map (n2, n3, n4) on the 16³ grid into a normalized direction. The
 	# `2x - 1` term recenters [0, 1] to [-1, 1]; dividing by length
 	# normalizes onto the unit sphere.
-	var dx: float = float(n4) / (_RAY_GRID - 1.0) * 2.0 - 1.0
-	var dy: float = float(n3) / (_RAY_GRID - 1.0) * 2.0 - 1.0
-	var dz: float = float(n2) / (_RAY_GRID - 1.0) * 2.0 - 1.0
+	var dx: float = float(n4) / (grid - 1.0) * 2.0 - 1.0
+	var dy: float = float(n3) / (grid - 1.0) * 2.0 - 1.0
+	var dz: float = float(n2) / (grid - 1.0) * 2.0 - 1.0
 	var dlen: float = sqrt(dx * dx + dy * dy + dz * dz)
 	if dlen <= 0.0:
 		return
@@ -151,11 +187,44 @@ static func _cast_ray(
 # walls partially block the blast — we approximate with a simple distance
 # falloff for now, since occlusion would require iterating the block grid
 # along the entity ray and the cost isn't worth it pre-mob.
+# Vanilla: damage = (1 - distance/radius)² normalized × power × 8 + 1.
+# `d12 = (1 - dist/radius) * occlusion`, then `(d12² + d12) / 2 × 8 ×
+# power + 1`. Occlusion is pinned at 1.0 (no walls test) so this reads
+# as a pure distance falloff; ray occlusion lands when the raycast
+# performance budget is reviewed. One helper so the player and mob paths
+# cannot drift.
+static func _blast_damage(dist: float, radius: float, power: float) -> int:
+	var d12: float = 1.0 - dist / radius
+	return int((d12 * d12 + d12) * 0.5 * 8.0 * power) + 1
+
+
 static func _apply_entity_damage(
 	manager: Node, origin: Vector3, power: float, source: Node
 ) -> void:
 	var radius: float = power * 2.0
 	var radius_sq: float = radius * radius
+	# Mobs first — this function predates mobs entirely (it only ever
+	# fetched the player), and the gap survived every mob phase: creeper
+	# and TNT blasts never hurt another mob, and a deflected ghast
+	# fireball could not hurt its ghast (audit finding #3). Same falloff
+	# as the player path below; `source` is skipped so a detonating
+	# entity is not damaged by its own blast bookkeeping.
+	var mobs: Dictionary = MobBase.active_mobs()
+	for mob_id: int in mobs:
+		var mob: Node = mobs[mob_id]
+		if not is_instance_valid(mob) or mob == source or not (mob is Node3D):
+			continue
+		var to_mob: Vector3 = (mob as Node3D).global_position - origin
+		var mob_dist_sq: float = to_mob.length_squared()
+		if mob_dist_sq > radius_sq:
+			continue
+		var mob_dist: float = sqrt(mob_dist_sq)
+		var mob_damage: int = _blast_damage(mob_dist, radius, power)
+		if mob_damage <= 0:
+			continue
+		var mob_dir: Vector3 = to_mob / mob_dist if mob_dist > 0.0001 else Vector3.UP
+		var mob_falloff: float = 1.0 - mob_dist / radius
+		mob.call("take_damage", mob_damage, mob_dir, mob_falloff, source)
 	var player: CharacterBody3D = (
 		manager.get_tree().root.get_node_or_null("Main/Player") as CharacterBody3D
 	)
@@ -166,13 +235,8 @@ static func _apply_entity_damage(
 	if dist_sq > radius_sq:
 		return
 	var dist: float = sqrt(dist_sq)
-	# Vanilla: damage = (1 - distance/radius)² normalized × power × 8 + 1.
-	# `d12 = (1 - dist/radius) * occlusion`, then `(d12² + d12) / 2 × 8 ×
-	# power + 1`. We pin occlusion=1.0 (no walls test) so this reads as a
-	# pure distance falloff; integration with cy.a(ao,co) for occlusion
-	# lands when raycast performance budget is reviewed.
 	var d12: float = 1.0 - dist / radius
-	var damage: int = int((d12 * d12 + d12) * 0.5 * 8.0 * power) + 1
+	var damage: int = _blast_damage(dist, radius, power)
 	if damage <= 0:
 		return
 	if player.has_method("take_damage"):
@@ -229,6 +293,30 @@ static func _apply_block_destruction(
 				_spawn_drop(manager, cell, drop)
 	# Drain the deferred sky/block-light seeds in one pass.
 	manager.end_batch()
+
+
+# Vanilla `ks.java:103-114` — the `isFlaming` half of doExplosionB, which
+# only the ghast fireball passes true for (TNT and creepers do not).
+#
+# For every cell the blast touched, AFTER destruction: if the cell is now
+# air and the block below it is an opaque cube, one roll in three places
+# fire. So a fireball leaves a scatter of flames on whatever floor it
+# exposed, not a solid sheet — and never on a ceiling or in mid-air.
+#
+# The source walks its affected list in reverse, which matters only where
+# two affected cells are vertically adjacent (setting the lower one to
+# fire makes the upper one's floor non-opaque). That list comes out of a
+# HashSet, so its order is not reproducible in the first place; iterating
+# the dictionary here is equally arbitrary and equally correct.
+static func _apply_flaming_pass(manager: Node, affected: Dictionary) -> void:
+	for cell: Vector3i in affected:
+		if manager.get_world_block(cell) != Blocks.AIR:
+			continue
+		if not Blocks.is_opaque(manager.get_world_block(cell + Vector3i(0, -1, 0))):
+			continue
+		if randi() % 3 != 0:
+			continue
+		BlockFire.place(manager, cell)
 
 
 static func _spawn_drop(manager: Node, cell: Vector3i, drop_id: int) -> void:

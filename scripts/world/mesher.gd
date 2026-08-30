@@ -321,6 +321,25 @@ static func _emit_special_cell(
 		_emit_lever_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_BED:
 		_emit_bed_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
+	elif ms == Blocks.MESH_SHAPE_REDSTONE_REPEATER:
+		_emit_repeater_geometry(
+			chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+		)
+	elif ms == Blocks.MESH_SHAPE_NONE:
+		# Portal — drawn by PortalRenderer and physically passable, but still
+		# ray-targetable through x.java's orientation-dependent 1/4-thick
+		# bounds. Emit only selection-layer soup, never render/physics faces.
+		var along_x: bool = (
+			chunk.get_block(x - 1, y, z) == Blocks.PORTAL
+			or chunk.get_block(x + 1, y, z) == Blocks.PORTAL
+		)
+		var portal_box: AABB = Blocks.portal_selection_aabb(along_x)
+		var portal_origin := Vector3(x, y, z)
+		_emit_collision_box(
+			plant_faces,
+			portal_origin + portal_box.position,
+			portal_origin + portal_box.position + portal_box.size
+		)
 
 
 # Merge locally-emitted non-cube arrays into a mesh result dict, shifting
@@ -573,7 +592,18 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 				if Blocks.needs_gdscript_mesher(id):
 					continue
 				_emit_block_faces(
-					chunk, x, y, z, id, verts, norms, uvs, colors, indices, collision_faces
+					chunk,
+					x,
+					y,
+					z,
+					id,
+					verts,
+					norms,
+					uvs,
+					colors,
+					indices,
+					collision_faces,
+					plant_faces
 				)
 
 	var result: Dictionary = {
@@ -615,9 +645,16 @@ static func _emit_block_faces(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	indices: PackedInt32Array,
-	collision_faces: PackedVector3Array
+	collision_faces: PackedVector3Array,
+	plant_faces: PackedVector3Array
 ) -> void:
 	var origin := Vector3(x, y, z)
+	var is_soul_sand: bool = id == Blocks.SOUL_SAND
+	if is_soul_sand:
+		# it.java::d supplies a 7/8-high entity box while rendering remains
+		# a full cube. The full unit selection box is a separate ray layer.
+		_emit_collision_box(collision_faces, origin, origin + Vector3(1.0, 0.875, 1.0))
+		_emit_collision_box(plant_faces, origin, origin + Vector3.ONE)
 	# Block classification is invariant across all emitted faces. Hoist it
 	# out of the six-face loop so the GDScript fallback pays one registry
 	# lookup per block, not one per visible face.
@@ -648,6 +685,18 @@ static func _emit_block_faces(
 		if id == Blocks.MOB_SPAWNER:
 			neighbor_hides_face = neighbor_id == id
 		if neighbor_hides_face:
+			# Render culling sees soul sand as opaque/full-height, but its
+			# physical box ends at 7/8. Preserve the adjacent full block's
+			# boundary in the physics soup so that 1/8 riser is never a hole.
+			if not is_soul_sand and neighbor_id == Blocks.SOUL_SAND:
+				var hidden_face_verts: Array = _FACE_VERTS[face_idx]
+				_append_collision_quad(
+					collision_faces,
+					origin + (hidden_face_verts[0] as Vector3),
+					origin + (hidden_face_verts[1] as Vector3),
+					origin + (hidden_face_verts[2] as Vector3),
+					origin + (hidden_face_verts[3] as Vector3)
+				)
 			continue
 		var face_verts: Array = _FACE_VERTS[face_idx]
 		var normal: Vector3 = _FACE_NORMALS[face_idx]
@@ -718,12 +767,19 @@ static func _emit_block_faces(
 		)
 		# Same two triangles as flat soup for trimesh collision — mirrors
 		# the index winding above so collision matches the visible face.
-		collision_faces.append(v0)
-		collision_faces.append(v2)
-		collision_faces.append(v1)
-		collision_faces.append(v0)
-		collision_faces.append(v3)
-		collision_faces.append(v2)
+		if not is_soul_sand:
+			_append_collision_quad(collision_faces, v0, v1, v2, v3)
+
+
+static func _append_collision_quad(
+	collision_faces: PackedVector3Array, v0: Vector3, v1: Vector3, v2: Vector3, v3: Vector3
+) -> void:
+	collision_faces.append(v0)
+	collision_faces.append(v2)
+	collision_faces.append(v1)
+	collision_faces.append(v0)
+	collision_faces.append(v3)
+	collision_faces.append(v2)
 
 
 # Full-cube collision soup for an externally-rendered cell (CHEST etc.).
@@ -2390,10 +2446,10 @@ static func _emit_fire_plane(
 	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
 
 
-# Vanilla bk.java:673-715 (RenderBlocks.renderTorchAtAngle), dispatched
-# by bk.b for shape == 2 (BlockTorch). Emits 4 axis-aligned side quads +
-# 1 horizontal flame quad on top, each 1.0 wide/tall but with the
-# alpha-tested torch sprite painted onto a 2/16 × 10/16 silhouette.
+# Placed torches use the narrow 2/16 × 10/16 texture strip that forms the
+# actual torch body. Mapping the complete tile onto four crossing planes
+# exposes Pixel Perfection's item-art pixels around the head four times,
+# producing a bulky gray cluster that is not part of the placed model.
 # Wall torches tilt: their side-quad bottoms shift by (ax, az) per
 # vanilla's `bk.b` dispatch (lines 84-97):
 #   meta 1 (-X support): base at x = cell.x - 0.1, y + 0.2; tilt -0.4 X
@@ -2422,20 +2478,11 @@ static func _emit_torch_quads(
 	plant_faces: PackedVector3Array
 ) -> void:
 	var rect: Rect2 = BlockAtlas.uv_rect_for(id, BlockAtlas.FACE_SIDE)
-	var top_normal := Vector3(0, 1, 0)
 	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
 	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
-	# _emit_torch_box maps only the opaque torch strip onto tight geometry;
-	# unlike crossed sprites, it must never enter the atlas discard path.
+	# _emit_torch_box maps only fully opaque pixels onto tight geometry.
 	var face_light := Color(sky_n, blk_n, 0.0, 0.0)
 	var meta: int = chunk.get_block_meta(x, y, z)
-	# Vanilla MC (both Alpha 1.2.6 bk.java:142-185 and Beta Bukkit/mc-dev
-	# RenderBlocks.renderBlockTorch) renders ALL torches as a closed
-	# 8-vert tight box — fully opaque, no alpha-test, no transparent
-	# texels in the geometry. Floor torches: upright box centered in the
-	# cell. Wall torches: same box transformed via the rotation pipeline.
-	# This is the only vanilla-faithful approach; the alpha-test wall
-	# variant we tried before doesn't exist in MC.
 	_emit_torch_box(
 		verts, norms, uvs, colors, indices, plant_faces, x, y, z, meta, rect, face_light
 	)
@@ -2549,13 +2596,7 @@ static func _emit_floor_torch_walls(
 		v1,
 		face_light
 	)
-	# Top-cap quad at y = by + 14/16 — sits at the very top of the
-	# visible flame silhouette (texture row 2 = top of opaque flame).
-	# Closes the transparent gap that the alpha-tested wall quads leave
-	# between cell-y 14/16 and cell-y 1.0. Samples the flame center
-	# (cols 7-9 / rows 6-8) so the cap reads as flame-colored. Vanilla's
-	# bk.a put a flame quad at d16=10/16 inside its tilted box; for our
-	# upright wall-quad torch the right cap height is the silhouette top.
+	# Top-cap quad at the top of the visible full-plane silhouette.
 	var fy: float = by + 14.0 / 16.0
 	var ffu0: float = u0 + (u1 - u0) * (7.0 / 16.0)
 	var ffu1: float = u0 + (u1 - u0) * (9.0 / 16.0)
@@ -2747,9 +2788,7 @@ static func _emit_wall_torch_quads(
 		v1,
 		face_light
 	)
-	# Top-cap quad at the visible flame silhouette top (texture row 2 →
-	# cell-y 14/16 of the wall quad). Offset by ax/az * 0.125 toward the
-	# lean direction so the cap stays at the leaning torch tip.
+	# Top cap follows the top of the visible full-plane silhouette.
 	var top_h: float = 14.0 / 16.0
 	var ftx: float = cx + ax * (1.0 - top_h)
 	var ftz: float = cz + az * (1.0 - top_h)
@@ -2832,41 +2871,13 @@ static func _emit_floor_torch_wall(
 	indices.append_array([base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array)
 
 
-# Vanilla `ao.a(angle)` — rotation around X axis (sin/cos lookup in fi.java
-# resolves to standard sin/cos). Mirrors:
-#   new_y = y*cos + z*sin
-#   new_z = z*cos - y*sin
-static func _torch_rotate_x(v: Vector3, angle: float) -> Vector3:
-	var c: float = cos(angle)
-	var s: float = sin(angle)
-	return Vector3(v.x, v.y * c + v.z * s, v.z * c - v.y * s)
-
-
-# Vanilla `ao.b(angle)` — rotation around Y axis.
-#   new_x = x*cos + z*sin
-#   new_z = z*cos - x*sin
-static func _torch_rotate_y(v: Vector3, angle: float) -> Vector3:
-	var c: float = cos(angle)
-	var s: float = sin(angle)
-	return Vector3(v.x * c + v.z * s, v.y, v.z * c - v.x * s)
-
-
-# Vanilla-faithful unified torch geometry — closed 8-vert box of size
-# 0.125 × 0.625 × 0.125 per ob.java + bk.java:142-185, with tight UV
-# sub-rects on every face. Handles BOTH floor torches (meta 0 / 5) AND
-# wall torches (meta 1-4) by applying the full vanilla transformation
-# pipeline:
-#   1. Z shift +1/16              (bk.java:158, bl3=false branch)
-#   2. Rotate X by -40°            (bk.java:159)
-#   3. (wall only) Y shift -3/8    (bk.java:170)
-#   4. (wall only) Rotate X +90°   (bk.java:171)
-#   5. (wall only) Rotate Y per-meta — meta 1=-90°, 2=+90°, 3=180°, 4=0°
-#   6. Translate by cell-center + (0.5, 0.125 floor / 0.5 wall, 0.5)
-#
-# Faces follow vanilla's i3=0..5 ordering and per-vert UV mapping
-# (ao2=BL, ao3=TL, ao4=TR, ao5=BR per bk.java:225-228). Normals are
-# computed from the rotated verts so they stay correct after every
-# transform.
+# Pack-safe form of Alpha's bk.java:673-715 torch geometry. Alpha maps a
+# complete 16×16 tile onto four leaning planes. We clip those planes to
+# the placed model's center strip (columns 7..9, rows 6..16), preserving
+# exactly the same visible coordinates while hiding Pixel Perfection's
+# wider item-only head artwork. In particular, wall torch tips land at
+# x/z .25 or .75 and y .825, directly beneath ob.java's particle origins
+# at x/z .23 or .77 and y .92.
 # gdlint: disable=function-arguments-number
 static func _emit_torch_box(
 	verts: PackedVector3Array,
@@ -2882,62 +2893,37 @@ static func _emit_torch_box(
 	rect: Rect2,
 	face_light: Color
 ) -> void:
-	var d15: float = 0.0625  # 1/16
-	var d16: float = 0.625  # 10/16
-	# Local-space box vertices (vanilla bk.java:151-158). ao[0..3] bottom,
-	# ao[4..7] top; ordering (-x,-z), (+x,-z), (+x,+z), (-x,+z).
-	var ao: Array[Vector3] = [
-		Vector3(-d15, 0.0, -d15),
-		Vector3(d15, 0.0, -d15),
-		Vector3(d15, 0.0, d15),
-		Vector3(-d15, 0.0, d15),
-		Vector3(-d15, d16, -d15),
-		Vector3(d15, d16, -d15),
-		Vector3(d15, d16, d15),
-		Vector3(-d15, d16, d15),
-	]
-	var is_wall: bool = meta == 1 or meta == 2 or meta == 3 or meta == 4
-	var ymeta: float = 0.0
+	var half_width: float = 0.0625
+	var bottom_center := Vector3(float(x) + 0.5, float(y), float(z) + 0.5)
+	var top_center := bottom_center + Vector3(0.0, 0.625, 0.0)
+	# These are the full-plane positions at V=1 (row 16) and V=6/16.
+	# Cropping the geometry and UV together makes this visually identical
+	# to Alpha for the center strip without exposing the pack's side pixels.
 	match meta:
 		1:
-			ymeta = -PI * 0.5
+			bottom_center = Vector3(float(x), float(y) + 0.2, float(z) + 0.5)
+			top_center = Vector3(float(x) + 0.25, float(y) + 0.825, float(z) + 0.5)
 		2:
-			ymeta = PI * 0.5
+			bottom_center = Vector3(float(x) + 1.0, float(y) + 0.2, float(z) + 0.5)
+			top_center = Vector3(float(x) + 0.75, float(y) + 0.825, float(z) + 0.5)
 		3:
-			ymeta = PI
+			bottom_center = Vector3(float(x) + 0.5, float(y) + 0.2, float(z))
+			top_center = Vector3(float(x) + 0.5, float(y) + 0.825, float(z) + 0.25)
 		4:
-			ymeta = 0.0
-	var cx_off: float = float(x) + 0.5
-	var cz_off: float = float(z) + 0.5
-	# Floor torches sit FLUSH with the ground. ob.java:135 gives the floor
-	# variant bounds of (0.4, 0.0, 0.4)..(0.6, 0.6, 0.6) — bottom at y=0 —
-	# and `Blocks.selection_aabb` already encodes that. The render used
-	# +0.125, so the pillar hovered 2/16 above its own selection box and
-	# above the block it stands on: visibly floating.
-	# Vertical placement, from vanilla's renderBlockTorch call sites:
-	# a floor torch is rendered at `d1` unchanged, a wall torch at
-	# `d1 + 0.2`. Ours used +0.125 and +0.5, which floated the floor torch
-	# above the ground and pushed the wall torch up out of its own
-	# selection box (ob.java:122-136 puts wall bounds at y 0.2..0.8).
-	var cy_off: float = float(y) + (0.2 if is_wall else 0.0)
-	for i in range(8):
-		var v: Vector3 = ao[i]
-		if is_wall:
-			# Vanilla bk.java:158-185 wall-torch pipeline. Steps 1-2 (Z+1/16
-			# + rotate-X -40°) are part of the wall transform — step 4
-			# (rotate-X +90°) rotates the leaning column horizontal so it
-			# can extend into the support wall. For floor torches there's
-			# no step 4 to undo it, so applying steps 1-2 leaves them
-			# leaning forward like a fallen cigarette. Skipping steps 1-2
-			# for floor torches gives an upright box (the visually correct
-			# look players expect from MC torches).
-			v.z += 0.0625
-			v = _torch_rotate_x(v, -0.69813174)
-			v.y -= 0.375
-			v = _torch_rotate_x(v, 1.5707964)
-			v = _torch_rotate_y(v, ymeta)
-		# Final translate to world cell.
-		ao[i] = Vector3(v.x + cx_off, v.y + cy_off, v.z + cz_off)
+			bottom_center = Vector3(float(x) + 0.5, float(y) + 0.2, float(z) + 1.0)
+			top_center = Vector3(float(x) + 0.5, float(y) + 0.825, float(z) + 0.75)
+	# ao[0..3] are the bottom square and ao[4..7] the top square;
+	# ordering is (-x,-z), (+x,-z), (+x,+z), (-x,+z).
+	var ao: Array[Vector3] = [
+		bottom_center + Vector3(-half_width, 0.0, -half_width),
+		bottom_center + Vector3(half_width, 0.0, -half_width),
+		bottom_center + Vector3(half_width, 0.0, half_width),
+		bottom_center + Vector3(-half_width, 0.0, half_width),
+		top_center + Vector3(-half_width, 0.0, -half_width),
+		top_center + Vector3(half_width, 0.0, -half_width),
+		top_center + Vector3(half_width, 0.0, half_width),
+		top_center + Vector3(-half_width, 0.0, half_width),
+	]
 	var u0: float = rect.position.x
 	var u1: float = rect.position.x + rect.size.x
 	var v0: float = rect.position.y
@@ -3559,6 +3545,253 @@ static func _bed_vertex_uv(
 		# SIDE face — U along bed length.
 		u_out = u1 if along_at_high else u0
 	return Vector2(u_out, v_out)
+
+
+# Redstone repeater — Beta 1.3 BlockRedstoneRepeater / RenderBlocks
+# render type 15. The base is a full-cell 1/8-high slab, its top tile is
+# rotated by orientation metadata, and two miniature redstone torches
+# show the output end and selected delay. Metadata bits 0-1 are direction;
+# bits 2-3 select the 2/4/6/8-game-tick delay.
+static func _emit_repeater_geometry(
+	chunk: Chunk,
+	x: int,
+	y: int,
+	z: int,
+	id: int,
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	collision_faces: PackedVector3Array
+) -> void:
+	var meta: int = chunk.get_block_meta(x, y, z)
+	var facing: int = meta & 3
+	var powered: bool = id == Blocks.REDSTONE_REPEATER_ON
+	var o := Vector3(float(x), float(y), float(z))
+	var mn: Vector3 = o
+	var mx: Vector3 = o + Vector3(1.0, 0.125, 1.0)
+	var top_rect: Rect2 = BlockAtlas.uv_rect(
+		"redstone_repeater_on" if powered else "redstone_repeater_off"
+	)
+	var side_rect: Rect2 = BlockAtlas.uv_rect("stone_slab_side")
+	# getBlockTextureFromSideAndMetadata(0): the bottom samples the
+	# corresponding redstone-torch tile. It is normally hidden by the
+	# required opaque support, but retaining it matches the source model.
+	var torch_name: String = "redstone_torch_on" if powered else "redstone_torch_off"
+	var bottom_rect: Rect2 = BlockAtlas.uv_rect(torch_name)
+	var sky_n: float = float(chunk.get_sky_light(x, y, z)) * _LIGHT_SCALE
+	var blk_n: float = float(chunk.get_block_light(x, y, z)) * _LIGHT_SCALE
+	var base_light := Color(sky_n, blk_n, 0.0, 0.0)
+	var c000 := Vector3(mn.x, mn.y, mn.z)
+	var c100 := Vector3(mx.x, mn.y, mn.z)
+	var c010 := Vector3(mn.x, mx.y, mn.z)
+	var c110 := Vector3(mx.x, mx.y, mn.z)
+	var c001 := Vector3(mn.x, mn.y, mx.z)
+	var c101 := Vector3(mx.x, mn.y, mx.z)
+	var c011 := Vector3(mn.x, mx.y, mx.z)
+	var c111 := Vector3(mx.x, mx.y, mx.z)
+	var faces: Array = [
+		[c010, c011, c111, c110, Vector3.UP],
+		[c001, c000, c100, c101, Vector3.DOWN],
+		[c100, c110, c111, c101, Vector3.RIGHT],
+		[c001, c011, c010, c000, Vector3.LEFT],
+		[c101, c111, c011, c001, Vector3.BACK],
+		[c000, c010, c110, c100, Vector3.FORWARD],
+	]
+	for face_idx in range(6):
+		var face: Array = faces[face_idx]
+		var rect: Rect2 = (
+			top_rect if face_idx == 0 else (bottom_rect if face_idx == 1 else side_rect)
+		)
+		var face_uvs: PackedVector2Array
+		if face_idx == 0:
+			face_uvs = _repeater_top_uvs(top_rect, facing)
+		else:
+			var u0: float = rect.position.x
+			var v0: float = rect.position.y
+			var u1: float = rect.position.x + rect.size.x
+			var v1: float = rect.position.y + rect.size.y
+			face_uvs = PackedVector2Array(
+				[Vector2(u0, v1), Vector2(u0, v0), Vector2(u1, v0), Vector2(u1, v1)]
+			)
+		var base: int = verts.size()
+		for vi in range(4):
+			verts.append(face[vi])
+			norms.append(face[4])
+			uvs.append(face_uvs[vi])
+			colors.append(base_light)
+		indices.append_array(
+			[base, base + 2, base + 1, base, base + 3, base + 2] as PackedInt32Array
+		)
+	# Output/front direction from the source's metadata table.
+	var output: Vector3
+	match facing:
+		0:
+			output = Vector3(0.0, 0.0, -1.0)
+		1:
+			output = Vector3(1.0, 0.0, 0.0)
+		2:
+			output = Vector3(0.0, 0.0, 1.0)
+		_:
+			output = Vector3(-1.0, 0.0, 0.0)
+	var center: Vector3 = o + Vector3(0.5, 0.0, 0.5)
+	var fixed_center: Vector3 = center + output * 0.3125
+	var delay_offset: float = Redstone.repeater_torch_offset(meta)
+	var adjustable_center: Vector3 = center - output * delay_offset
+	var torch_light := Color(sky_n, blk_n, 0.0, 1.0)
+	_emit_repeater_torch(
+		verts, norms, uvs, colors, indices, fixed_center, float(y), bottom_rect, torch_light
+	)
+	_emit_repeater_torch(
+		verts, norms, uvs, colors, indices, adjustable_center, float(y), bottom_rect, torch_light
+	)
+	# The base is both physical collision and the raycast selection shape.
+	# Vanilla's collision/selection bounds are exactly 1 x 1/8 x 1.
+	_emit_collision_box(collision_faces, mn, mx)
+
+
+# UV rotation copied from RenderBlocks.renderBlockRepeater's four
+# metadata branches. Vertex order is the top face's NW, SW, SE, NE
+# order used by `_emit_repeater_geometry`.
+static func _repeater_top_uvs(rect: Rect2, facing: int) -> PackedVector2Array:
+	var u0: float = rect.position.x
+	var v0: float = rect.position.y
+	var u1: float = rect.position.x + rect.size.x
+	var v1: float = rect.position.y + rect.size.y
+	match facing & 3:
+		1:
+			return PackedVector2Array(
+				[Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0), Vector2(u0, v0)]
+			)
+		2:
+			return PackedVector2Array(
+				[Vector2(u1, v1), Vector2(u1, v0), Vector2(u0, v0), Vector2(u0, v1)]
+			)
+		3:
+			return PackedVector2Array(
+				[Vector2(u1, v0), Vector2(u0, v0), Vector2(u0, v1), Vector2(u1, v1)]
+			)
+		_:
+			return PackedVector2Array(
+				[Vector2(u0, v0), Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0)]
+			)
+
+
+# Miniature repeater torch. RenderBlocks passes y - 3/16 to
+# renderTorchAtAngle, whose full-tile transparent side planes then leave
+# only the sprite's central torch pixels visible above the 1/8 base.
+# gdlint: disable=function-arguments-number
+static func _emit_repeater_torch(
+	verts: PackedVector3Array,
+	norms: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	indices: PackedInt32Array,
+	center: Vector3,
+	cell_y: float,
+	rect: Rect2,
+	face_light: Color
+) -> void:
+	var half_width: float = 0.0625
+	var base_y: float = cell_y - 0.1875
+	var top_y: float = base_y + 1.0
+	var x0: float = center.x - 0.5
+	var x1: float = center.x + 0.5
+	var z0: float = center.z - 0.5
+	var z1: float = center.z + 0.5
+	var u0: float = rect.position.x
+	var v0: float = rect.position.y
+	var u1: float = rect.position.x + rect.size.x
+	var v1: float = rect.position.y + rect.size.y
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(center.x - half_width, top_y, z0),
+		Vector3(center.x - half_width, base_y, z0),
+		Vector3(center.x - half_width, base_y, z1),
+		Vector3(center.x - half_width, top_y, z1),
+		Vector3.LEFT,
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(center.x + half_width, top_y, z1),
+		Vector3(center.x + half_width, base_y, z1),
+		Vector3(center.x + half_width, base_y, z0),
+		Vector3(center.x + half_width, top_y, z0),
+		Vector3.RIGHT,
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(x0, top_y, center.z + half_width),
+		Vector3(x0, base_y, center.z + half_width),
+		Vector3(x1, base_y, center.z + half_width),
+		Vector3(x1, top_y, center.z + half_width),
+		Vector3.BACK,
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	_emit_floor_torch_wall(
+		verts,
+		norms,
+		uvs,
+		colors,
+		indices,
+		Vector3(x1, top_y, center.z - half_width),
+		Vector3(x1, base_y, center.z - half_width),
+		Vector3(x0, base_y, center.z - half_width),
+		Vector3(x0, top_y, center.z - half_width),
+		Vector3.FORWARD,
+		u0,
+		v0,
+		u1,
+		v1,
+		face_light
+	)
+	# Flame/cap quad samples the exact 2x2 source pixels used by
+	# renderTorchAtAngle (columns 7-9, rows 6-8).
+	var cap_y: float = base_y + 0.625
+	var cu0: float = u0 + (u1 - u0) * (7.0 / 16.0)
+	var cu1: float = u0 + (u1 - u0) * (9.0 / 16.0)
+	var cv0: float = v0 + (v1 - v0) * (6.0 / 16.0)
+	var cv1: float = v0 + (v1 - v0) * (8.0 / 16.0)
+	var base: int = verts.size()
+	verts.append(Vector3(center.x - half_width, cap_y, center.z - half_width))
+	verts.append(Vector3(center.x - half_width, cap_y, center.z + half_width))
+	verts.append(Vector3(center.x + half_width, cap_y, center.z + half_width))
+	verts.append(Vector3(center.x + half_width, cap_y, center.z - half_width))
+	for _i in range(4):
+		norms.append(Vector3.UP)
+		colors.append(face_light)
+	uvs.append(Vector2(cu0, cv0))
+	uvs.append(Vector2(cu0, cv1))
+	uvs.append(Vector2(cu1, cv1))
+	uvs.append(Vector2(cu1, cv0))
+	indices.append_array([base, base + 1, base + 2, base, base + 2, base + 3] as PackedInt32Array)
 
 
 # Lever (pl.java render type 12). Two boxes: a cobblestone base plate

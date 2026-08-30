@@ -70,6 +70,33 @@ func test_remesh_keeps_old_collision_live_until_replacement_is_cooked() -> void:
 	assert_true(node.has_live_collision(), "replacement never leaves collision null")
 
 
+func test_redstone_visual_remesh_reuses_unchanged_collision_shapes() -> void:
+	var original := Chunk.new()
+	original.set_block(1, 10, 1, Blocks.STONE)
+	original.set_block(1, 11, 1, Blocks.REDSTONE_REPEATER_OFF)
+	original.set_block(3, 10, 1, Blocks.STONE)
+	original.set_block(3, 11, 1, Blocks.REDSTONE_WIRE)
+	var node: Node3D = _CHUNK_SCENE.instantiate()
+	node.chunk_data = original
+	add_child_autofree(node)
+	var solid_shape: Shape3D = node._collision_shape.shape
+	var selection_shape: Shape3D = node._plants_shape.shape
+	assert_not_null(solid_shape, "support + repeater collision is live")
+	assert_not_null(selection_shape, "wire selection collision is live")
+
+	var powered := Chunk.new()
+	powered.set_block(1, 10, 1, Blocks.STONE)
+	powered.set_block(1, 11, 1, Blocks.REDSTONE_REPEATER_ON)
+	powered.set_block(3, 10, 1, Blocks.STONE)
+	powered.set_block(3, 11, 1, Blocks.REDSTONE_WIRE)
+	powered.set_block_meta(3, 11, 1, 15)
+	node._apply_mesh_data(Mesher.mesh_chunk_fast(powered))
+
+	assert_false(node._collision_cook_pending, "unchanged solid soup does not queue a BVH cook")
+	assert_same(node._collision_shape.shape, solid_shape, "solid collision shape is reused")
+	assert_same(node._plants_shape.shape, selection_shape, "selection collision shape is reused")
+
+
 # --- Lighting (slice 1: storage + accessors only) ---
 
 

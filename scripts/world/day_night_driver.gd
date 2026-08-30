@@ -72,6 +72,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
+	var provider: WorldProvider = DimensionContext.active_provider()
+	if not provider.renders_sky:
+		_apply_skyless_environment(provider)
+		return
 	if _env != null and _env.environment != null:
 		var env := _env.environment
 		env.ambient_light_color = WorldTime.ambient_color()
@@ -111,3 +115,49 @@ func _process(_delta: float) -> void:
 	var sky_subtraction: float = float(WorldTime.sky_light_subtracted())
 	BlockAtlas.material().set_shader_parameter("sky_subtraction", sky_subtraction)
 	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", sky_subtraction)
+	_push_ambient_floor()
+
+
+# Dimensions with no sky (om.java's Nether) get a flat fog colour and no
+# celestial anything. Alpha renders no sky dome, no sun, no moon, no
+# stars and no clouds down there; the horizon is the fog colour all the
+# way round, which is what makes the Nether feel enclosed.
+#
+# The sun light itself is switched off rather than merely hidden: a
+# sub-horizon directional light still shades geometry in Godot, and the
+# Nether's illumination has to come entirely from the block-light channel
+# (glowstone, lava, fire, portals).
+func _apply_skyless_environment(provider: WorldProvider) -> void:
+	if _env != null and _env.environment != null:
+		var env := _env.environment
+		var fog: Color = provider.fog_color
+		env.background_mode = Environment.BG_COLOR
+		env.background_color = fog
+		env.ambient_light_color = fog
+		env.fog_light_color = fog
+		_last_sky_top = Color(-1, -1, -1, -1)
+	if _sun != null:
+		_sun.visible = false
+	# No sky channel means no daylight subtraction to push: the terrain
+	# shader's sky term is zero everywhere, so block light is the whole
+	# story. Writing 0 keeps the uniform in a defined state across a
+	# dimension switch rather than leaving the Overworld's last value.
+	BlockAtlas.material().set_shader_parameter("sky_subtraction", 0.0)
+	BlockAtlas.water_material().set_shader_parameter("sky_subtraction", 0.0)
+	_push_ambient_floor()
+
+
+# The brightness LUT's floor is the one term vanilla varies by dimension
+# (oz.java:23 = 0.05, om.java:21 = 0.1). WorldProvider has carried the
+# right value all along; nothing was pushing it to the renderer, so the
+# Nether was lit on the Overworld curve — every unlit cell at half the
+# brightness vanilla gives it, which is what made the dark/light
+# transitions read as harsh.
+func _push_ambient_floor() -> void:
+	var provider: WorldProvider = DimensionContext.provider(DimensionContext.active())
+	if provider == null:
+		return
+	var floor_value: float = provider.ambient_light_floor
+	BlockAtlas.material().set_shader_parameter("ambient_floor", floor_value)
+	BlockAtlas.water_material().set_shader_parameter("ambient_floor", floor_value)
+	EntityLighting.set_ambient_floor(floor_value)

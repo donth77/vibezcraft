@@ -161,7 +161,15 @@ static func _clip_x(cm: Node, pos: Vector3, half: Vector3, motion: float) -> flo
 	for cx in range(lo_x, hi_x + 1):
 		for cy in range(lo_y, hi_y + 1):
 			for cz in range(lo_z, hi_z + 1):
-				if not _cell_solid(cm, cx, cy, cz):
+				var block_height: float = _cell_collision_height(cm, cx, cy, cz)
+				if block_height <= 0.0:
+					continue
+				# Soul sand ends at y+7/8. A body resting on that top plane
+				# must not collide with its vertical sides during X motion.
+				if (
+					pos.y + half.y - _SKIN <= float(cy)
+					or pos.y - half.y + _SKIN >= float(cy) + block_height
+				):
 					continue
 				# Block face that blocks our motion:
 				# moving +X: face is at cx (block's -X face)
@@ -189,9 +197,10 @@ static func _clip_y(cm: Node, pos: Vector3, half: Vector3, motion: float) -> flo
 	for cy in range(lo_y, hi_y + 1):
 		for cx in range(lo_x, hi_x + 1):
 			for cz in range(lo_z, hi_z + 1):
-				if not _cell_solid(cm, cx, cy, cz):
+				var block_height: float = _cell_collision_height(cm, cx, cy, cz)
+				if block_height <= 0.0:
 					continue
-				var face: float = float(cy) if sign_motion > 0.0 else float(cy + 1)
+				var face: float = float(cy) if sign_motion > 0.0 else float(cy) + block_height
 				var allowed: float = (face - (pos.y + half.y * sign_motion)) * sign_motion
 				allowed = maxf(0.0, allowed - 0.0001)
 				if allowed * sign_motion < clipped * sign_motion:
@@ -213,7 +222,13 @@ static func _clip_z(cm: Node, pos: Vector3, half: Vector3, motion: float) -> flo
 	for cz in range(lo_z, hi_z + 1):
 		for cx in range(lo_x, hi_x + 1):
 			for cy in range(lo_y, hi_y + 1):
-				if not _cell_solid(cm, cx, cy, cz):
+				var block_height: float = _cell_collision_height(cm, cx, cy, cz)
+				if block_height <= 0.0:
+					continue
+				if (
+					pos.y + half.y - _SKIN <= float(cy)
+					or pos.y - half.y + _SKIN >= float(cy) + block_height
+				):
 					continue
 				var face: float = float(cz) if sign_motion > 0.0 else float(cz + 1)
 				var allowed: float = (face - (pos.z + half.z * sign_motion)) * sign_motion
@@ -230,10 +245,12 @@ static func _is_on_floor(cm: Node, pos: Vector3, half: Vector3) -> bool:
 	var hi_x: int = int(floor(pos.x + half.x))
 	var lo_z: int = int(floor(pos.z - half.z))
 	var hi_z: int = int(floor(pos.z + half.z))
-	var foot_y: int = int(floor(pos.y - half.y - 0.02))
+	var feet: float = pos.y - half.y
+	var foot_y: int = int(floor(feet - 0.02))
 	for cx in range(lo_x, hi_x + 1):
 		for cz in range(lo_z, hi_z + 1):
-			if _cell_solid(cm, cx, foot_y, cz):
+			var block_height: float = _cell_collision_height(cm, cx, foot_y, cz)
+			if block_height > 0.0 and absf(feet - (float(foot_y) + block_height)) <= 0.02:
 				return true
 	return false
 
@@ -242,7 +259,16 @@ static func _is_on_floor(cm: Node, pos: Vector3, half: Vector3) -> bool:
 # air, fluids, plants/saplings/flowers, torches, rails, fire, ladders
 # all pass through. Use Blocks.is_solid_collision for the lookup.
 static func _cell_solid(cm: Node, x: int, y: int, z: int) -> bool:
+	return _cell_collision_height(cm, x, y, z) > 0.0
+
+
+# Height of the simple voxel collision box in this cell. Soul sand is the
+# lone Alpha full-cube render whose collision top is not y+1 (`it.java::d`).
+# Other compound shapes retain their existing mesher-owned handling.
+static func _cell_collision_height(cm: Node, x: int, y: int, z: int) -> float:
 	if y < 0 or y >= Chunk.SIZE_Y:
-		return false
+		return 0.0
 	var id: int = cm.get_world_block(Vector3i(x, y, z))
-	return Blocks.is_solid_collision(id)
+	if not Blocks.is_solid_collision(id):
+		return 0.0
+	return 0.875 if id == Blocks.SOUL_SAND else 1.0

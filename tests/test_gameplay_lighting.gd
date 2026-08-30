@@ -59,13 +59,15 @@ func test_passive_spawn_accepts_nine_and_rejects_eight() -> void:
 	assert_false(spawner.call("_can_spawn_at", _manager, player, pos.x, pos.y, pos.z))
 
 
-func test_spider_brightness_uses_effective_light_threshold() -> void:
+func test_spider_brightness_uses_alpha_lut_threshold() -> void:
 	var spider: Node = MobRegistry.script_for("spider").new()
 	add_child_autofree(spider)
 	spider.set("_chunk_manager", _manager)
-	_manager.effective_light = 7
+	# Alpha compares the brightness LUT against 0.5: level 11 maps to
+	# 0.437 and level 12 to 0.525, so 12 is the first bright level.
+	_manager.effective_light = 11
 	assert_false(spider.call("_is_brightly_lit"))
-	_manager.effective_light = 8
+	_manager.effective_light = 12
 	assert_true(spider.call("_is_brightly_lit"))
 
 

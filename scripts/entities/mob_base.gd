@@ -75,6 +75,10 @@ const _DEATH_TILT_ANGLE: float = -PI * 0.5  # 90° fall to left (vanilla)
 # sampler emits 16 discrete LUT levels scaled by time-of-day; 32
 # buckets keeps every step distinct while bounding the variant cache.
 const _BRIGHTNESS_BUCKETS: int = 32
+# `lw.java::a(float)` samples world brightness 66% of the way up the
+# entity bounding box, not at its geometric centre. The difference is
+# visible whenever a mob straddles two vertically adjacent light cells.
+const _LIGHT_SAMPLE_HEIGHT_FACTOR: float = 0.66
 
 # Knockback magnitudes when hit. Vanilla applies `xz × 0.4, y × 0.4` to
 # the entity's velocity (scaled by attacker's knockback enchant — we
@@ -91,33 +95,39 @@ const _STUCK_ARROW_DECAY_SEC: float = 30.0
 # (water/lava-aware movement) + hf.java::B (air ticks + contact damage).
 # All passive mobs inherit; hostile mobs will too when they land.
 
-# In-fluid movement — replaces normal gravity. Vanilla water:
-# `velocity *= 0.8 / tick`, gravity = 0.02 m/tick downward; lava:
-# `velocity *= 0.5 / tick`, gravity = 0.02. Effective terminal velocity
-# is small enough that the swim-impulse below dominates and the mob
-# bobs at the surface.
+# In-fluid movement — replaces normal gravity. Vanilla stores velocity
+# in blocks/tick; this project stores blocks/second. Its post-drag
+# `motionY -= 0.02` therefore changes our velocity by -0.4 m/s once per
+# 20 Hz source tick. Fractional-frame application below preserves that
+# exact affine recurrence instead of treating 0.4 as an acceleration.
 const _WATER_DRAG_PER_TICK: float = 0.8
 const _LAVA_DRAG_PER_TICK: float = 0.5
-const _FLUID_GRAVITY: float = -0.4  # 0.02 m/tick × 20 = 0.4 m/s² down
+# `ot.java:27` — EntityFlying damps all three axes by this every tick.
+const _FLYING_DRAG_PER_TICK: float = 0.91
+const _FLUID_FALL_DELTA_PER_TICK: float = -0.4
 
 # Swim assist — vanilla `hf.java:588-592` toggles the jumping flag with
 # 80 % probability per tick while submerged, and `hf.java:518-525` then
 # adds 0.04 m/tick (= 0.8 m/s instant) upward to motionY when the
-# jumping flag is set AND the entity is in water or lava. Net effect:
-# ~+0.06 m/tick average upward drift, enough to overcome FLUID_GRAVITY
-# and float the mob to the surface.
+# jumping flag is set AND the entity is in water or lava. The impulse is
+# applied after our continuous drag step, so `_env_tick`
+# multiplies it by that fluid's source drag to preserve Alpha's actual
+# order: add 0.04, then damp by 0.8 (water) / 0.5 (lava).
 const _SWIM_IMPULSE: float = 0.8
 const _SWIM_CHANCE: float = 0.8
+# `lw.java::h_` calls `aG.b(0, -0.4, 0)`. `co.java::b` subtracts the
+# argument from the minimum and adds it to the maximum, so a negative
+# value INSETS both Y faces by 0.4. It does not translate the box down.
+const _FLUID_PROBE_Y_INSET: float = 0.4
 
 # Drowning — vanilla `hf.java:114-126`. The entity's `bk` (air) field
 # decrements 1 / tick while the EYE cell is water. When `bk <= -20`
 # (20 ticks past zero) vanilla deals 2 damage and resets to 0, so
-# damage continues at 1 Hz until the head clears water. Max air `bh`
-# is 300 ticks (15 s) in vanilla; we use 200 ticks (10 s) — the value
-# that ships in the v1.2.6 EntityHuman and most mob subclasses inherit
-# unchanged. Damage is dealt through `take_damage`, so the 1 s invuln
-# cooldown applies and the visible cadence stays at the vanilla rate.
-const _MAX_AIR_TICKS: int = 200
+# damage continues at 1 Hz until the head clears water. Base Entity
+# `lw.java:56,59` initializes both max air (`bh`) and air (`bk`) to 300
+# ticks (15 s), inherited unchanged by Alpha's animals. Damage is dealt
+# through `take_damage`, so the visible cadence remains one hit/second.
+const _MAX_AIR_TICKS: int = 300
 const _DROWN_INTERVAL_TICKS: int = 20
 const _DROWN_DAMAGE: int = 2
 
@@ -152,7 +162,7 @@ const _ENV_TICK_DT: float = 1.0 / 20.0
 const LOD_NEAR: int = 0  # <32 m — full AI 20 Hz, A* pathfinding, anim
 const LOD_MID: int = 1  # 32-64 m — AI 5 Hz, simple wander (no A*), anim
 const LOD_FAR: int = 2  # 64-96 m — AI 1 Hz, no anim updates
-const LOD_GATED: int = 3  # >96 m — process_mode DISABLED, invisible
+const LOD_GATED: int = 3  # >96 m — distance heartbeat only, invisible
 
 const _LOD_NEAR_RADIUS: float = 32.0
 const _LOD_MID_RADIUS: float = 64.0
@@ -355,16 +365,16 @@ var _stuck_seconds: float = 0.0
 # only saved base-class physics but skeletons / creepers kept running
 # expensive A* + target search every frame anyway.
 var _physics_gated: bool = false
-# Current LOD tier (LOD_NEAR..LOD_GATED). Recomputed each frame in
-# _physics_process. Subclasses use this to scale AI tick rate and
-# decide whether to run pathfinding vs simple wander.
+# Current LOD tier (LOD_NEAR..LOD_GATED). Recomputed each active physics
+# frame; GATED mobs are revisited by NaturalMobSpawner's shared 4 Hz wake
+# sweep. Subclasses use this to scale AI tick rate and decide whether to
+# run pathfinding vs simple wander.
 var _lod_tier: int = LOD_NEAR
-# Bounds total population — vanilla despawns mobs > 128 m from any
-# player after a 30 s grace. Without this, passive mobs accumulate
+# Bounds total population. Without this, passive mobs accumulate
 # forever (24+ per km of exploration). When the mob enters GATED,
 # arm a SceneTreeTimer; if the timer fires before the mob is
-# re-ungated, queue_free. process_mode = ALWAYS on the timer so it
-# fires even though the mob itself is DISABLED.
+# re-ungated, queue_free. GATED mobs disable their own processing entirely;
+# NaturalMobSpawner's shared wake sweep notices the player returning.
 var _despawn_timer: SceneTreeTimer = null
 # Frame skip counter for move_and_slide throttling — see
 # _physics_process. Resets every time move_and_slide actually fires.
@@ -373,9 +383,8 @@ var _move_frame_skip: int = 0
 # is_on_floor() since we no longer use move_and_slide.
 var _voxel_on_floor: bool = false
 # True when the last collision step zeroed a non-zero horizontal
-# velocity component (i.e., the mob hit a wall). Subclasses can read
-# this to drive vanilla "isCollidedHorizontally" behaviors — currently
-# only the spider's Beta wall-climb mechanic.
+# velocity component (i.e., the mob hit a wall). Retained for subclasses
+# that need vanilla isCollidedHorizontally behavior.
 var _was_collided_horizontally: bool = false
 
 var _air_ticks: int = _MAX_AIR_TICKS
@@ -410,6 +419,33 @@ var _last_attacker: Node = null
 # loops to avoid the extra Array allocation.
 static func active_mobs() -> Dictionary:
 	return _active_mobs
+
+
+# Shared wake pass for fully-disabled GATED mobs. NaturalMobSpawner calls
+# this at 4 Hz, replacing one `_physics_process` callback per mob per frame
+# with a single bounded scan of the active-mob registry. Horizontal distance
+# matches `_update_distance_lod`; waking within 250 ms is imperceptible at
+# 96+ blocks while restoring the gate's intended zero per-mob tick cost.
+static func wake_gated_mobs(player: Node3D) -> int:
+	if player == null or not is_instance_valid(player):
+		return 0
+	var woken: int = 0
+	var player_pos: Vector3 = player.global_position
+	for instance_id: Variant in _active_mobs:
+		var value: Variant = _active_mobs[instance_id]
+		if not is_instance_valid(value) or not value is MobBase:
+			continue
+		var mob: MobBase = value as MobBase
+		if not mob._physics_gated:
+			continue
+		var dx: float = mob.global_position.x - player_pos.x
+		var dz: float = mob.global_position.z - player_pos.z
+		var distance_sq: float = dx * dx + dz * dz
+		if distance_sq > _LOD_FAR_RADIUS_SQ:
+			continue
+		mob._leave_distance_gate(distance_sq)
+		woken += 1
+	return woken
 
 
 # Returns a cached StandardMaterial3D for the given texture path.
@@ -534,11 +570,112 @@ func _takes_fall_damage() -> bool:
 	return true
 
 
+# Vanilla `ot.java` (EntityFlying). Override to false for a mob that
+# supplies its own vertical motion — gravity and the grounded-friction
+# branch are both skipped, and `c(float)` (fall damage) is a no-op on the
+# flying base, which `_takes_fall_damage` covers separately.
+func _uses_gravity() -> bool:
+	return true
+
+
+# `hf.i()` — how many of this species one candidate group may produce.
+# Four by default; `am.i()` returns 1, which is why ghasts are always
+# alone. Read by NaturalMobSpawner.
+func spawn_group_size() -> int:
+	return 4
+
+
+# True when this species belongs in open air rather than standing on a
+# floor. The debug spawner and the spawner cage both place mobs one cell
+# above the first opaque block they find, which is right for everything
+# with legs and wrong for a 4x4 ghast — it would be born half inside the
+# ceiling. Flying mobs override this and get lifted instead.
+func spawns_airborne() -> bool:
+	return false
+
+
+# The first position at or above `floor_cell` with a clear pocket big
+# enough for a `size`-cube body, or null within `max_lift` cells.
+#
+# Returned as FEET coordinates (this project's CharacterBody3D
+# convention), cell-centred horizontally, so a caller can assign it to
+# global_position directly.
+static func find_airborne_spawn(
+	chunk_manager: Node, floor_cell: Vector3i, size: float, max_lift: int = 24
+) -> Variant:
+	if chunk_manager == null:
+		return null
+	var span: int = int(ceil(size))
+	var half: int = span / 2
+	for lift: int in range(max_lift):
+		var feet_y: int = floor_cell.y + lift
+		if feet_y + span > Chunk.SIZE_Y:
+			return null
+		if _pocket_is_clear(chunk_manager, floor_cell, feet_y, span, half):
+			return Vector3(float(floor_cell.x) + 0.5, float(feet_y), float(floor_cell.z) + 0.5)
+	return null
+
+
+static func _pocket_is_clear(
+	chunk_manager: Node, floor_cell: Vector3i, feet_y: int, span: int, half: int
+) -> bool:
+	for dx: int in range(-half, span - half):
+		for dz: int in range(-half, span - half):
+			for dy: int in range(span):
+				var cell := Vector3i(floor_cell.x + dx, feet_y + dy, floor_cell.z + dz)
+				if chunk_manager.get_world_block(cell) != Blocks.AIR:
+					return false
+	return true
+
+
 func _cached_player() -> Node3D:
 	if _cached_player_node != null and is_instance_valid(_cached_player_node):
 		return _cached_player_node
 	_cached_player_node = (get_tree().root.get_node_or_null("Main/Player") as Node3D)
 	return _cached_player_node
+
+
+# Vanilla `EntityLiving.canEntityBeSeen`: trace from this mob's eye to the
+# target's eye and reject the first solid block. Player.global_position is
+# the centre of its 1.8 m capsule, so +0.7 reaches the first-person eye;
+# MobBase targets expose their source-faithful eye height directly.
+func has_line_of_sight(target: Node3D) -> bool:
+	if target == null:
+		return false
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return true
+	var from: Vector3 = global_position + Vector3(0.0, _get_eye_height(), 0.0)
+	var target_eye_height: float = 0.7
+	if target is MobBase:
+		target_eye_height = float(target.call("_get_eye_height"))
+	var to: Vector3 = target.global_position + Vector3(0.0, target_eye_height, 0.0)
+	var segment: Vector3 = to - from
+	var length: float = segment.length()
+	if length < 0.001:
+		return true
+	# Quarter-block samples cannot skip a one-cell obstacle on any axis.
+	# Endpoints are excluded so neither entity's occupied cell blocks itself.
+	var samples: int = maxi(1, int(ceil(length * 4.0)))
+	for i: int in range(1, samples):
+		var point: Vector3 = from.lerp(to, float(i) / float(samples))
+		var cell := Vector3i(int(floor(point.x)), int(floor(point.y)), int(floor(point.z)))
+		if Blocks.is_solid_collision(_chunk_manager.get_world_block(cell)):
+			return false
+	return true
+
+
+# Shared hostile-melee bridge. Player.take_damage uses a source string while
+# MobBase.take_damage receives knockback strength and the attacking entity.
+# EntityMonster may retaliate against another mob after friendly fire, so its
+# direct target cannot safely be assumed to be the player.
+func _deal_melee_damage(target: Node3D, amount: int) -> void:
+	if target == null or not target.has_method("take_damage"):
+		return
+	var direction: Vector3 = target.global_position - global_position
+	if target is MobBase:
+		target.call("take_damage", amount, direction, 1.0, self)
+	else:
+		target.call("take_damage", amount, "mob", direction)
 
 
 # Returns a horizontal world target 3-6 m away, or Vector3.ZERO if
@@ -598,7 +735,7 @@ func roll_wander_gate(denom_at_near: int) -> bool:
 #
 # MUST be called once per AI tick (20 Hz). If called from `_process`
 # (variable framerate) it would over-fire on high-fps hosts. The AI
-# tick is also gated on `_dying` + the 48 m physics radius — both
+# tick is also gated on `_dying` + the 96 m physics radius — both
 # desirable: dying mobs don't speak, and far-mobs (inaudible past
 # the 16 m audio max distance anyway) skip the random call entirely.
 #
@@ -699,63 +836,76 @@ static func _cached_box(size: Vector3) -> BoxShape3D:
 	return box
 
 
+# Updates the performance LOD and returns true while this mob should skip
+# expensive simulation. Crossing beyond FAR disables this node completely;
+# NaturalMobSpawner's shared 4 Hz registry sweep calls `_leave_distance_gate`
+# when the player returns within range.
+func _update_distance_lod() -> bool:
+	var player: Node3D = _cached_player()
+	if player != null:
+		var dx: float = global_position.x - player.global_position.x
+		var dz: float = global_position.z - player.global_position.z
+		var distance_sq: float = dx * dx + dz * dz
+		if distance_sq > _LOD_FAR_RADIUS_SQ:
+			_enter_distance_gate()
+			return true
+		_leave_distance_gate(distance_sq)
+	return false
+
+
+func _enter_distance_gate() -> void:
+	velocity = Vector3.ZERO
+	_physics_gated = true
+	_lod_tier = LOD_GATED
+	visible = false
+	if _despawn_timer == null:
+		_despawn_timer = get_tree().create_timer(_DESPAWN_GATED_SECONDS, true, false, true)
+		_despawn_timer.timeout.connect(_on_gated_despawn_check)
+	# Set this last so the current callback can unwind and close its probe.
+	# The shared wake sweep invokes `_leave_distance_gate` directly even
+	# while this node is disabled.
+	process_mode = Node.PROCESS_MODE_DISABLED
+
+
+func _leave_distance_gate(distance_sq: float) -> void:
+	var was_gated: bool = _physics_gated
+	# Cancel the old callback before a later gate cycle reuses the field.
+	# Merely dropping the reference lets the old timer delete a newly-gated
+	# mob when its original 30-second deadline arrives.
+	if _despawn_timer != null:
+		var despawn_callback := Callable(self, "_on_gated_despawn_check")
+		if _despawn_timer.timeout.is_connected(despawn_callback):
+			_despawn_timer.timeout.disconnect(despawn_callback)
+		_despawn_timer = null
+	if distance_sq > _LOD_MID_RADIUS_SQ:
+		_lod_tier = LOD_FAR
+	elif distance_sq > _LOD_NEAR_RADIUS_SQ:
+		_lod_tier = LOD_MID
+	else:
+		_lod_tier = LOD_NEAR
+	_physics_gated = false
+	if was_gated:
+		visible = true
+		process_mode = Node.PROCESS_MODE_INHERIT
+
+
 # Subclasses override to add per-mob AI in _process. The base only handles
 # physics + cooldowns; AI lives one level up so changing the AI of a
 # specific mob doesn't accidentally break gravity / damage / death.
 func _physics_process(delta: float) -> void:
+	var pp := PerfProbe.begin("mob.physics")
 	# Dying — freeze position + skip all physics. The tilt rotation
 	# applied in _process is the only thing that should move while the
 	# mob is falling over.
 	if _dying:
 		velocity = Vector3.ZERO
+		PerfProbe.end("mob.physics", pp)
 		return
-	# Distance gate — mobs far from any player skip physics + AI to
-	# keep frame cost flat regardless of total mob count. Vanilla
-	# despawns at 128 m; we use a softer 48 m cull so the mob stays
-	# alive (preserves spawned populations, world feels consistent on
-	# return) but doesn't burn cycles. move_and_slide alone is the
-	# dominant per-mob cost; skipping it for distant mobs trades AI
-	# liveness for steady FPS in mob-spawner-heavy worlds.
-	var p: Node3D = _cached_player()
-	if p != null:
-		var dx: float = global_position.x - p.global_position.x
-		var dz: float = global_position.z - p.global_position.z
-		var d_sq: float = dx * dx + dz * dz
-		# Tier classification — squared-distance compares avoid sqrt.
-		if d_sq > _LOD_FAR_RADIUS_SQ:
-			# GATED: hard-disable the node entirely. No physics, no
-			# render, no script processing. Re-enabled when player
-			# re-approaches. Arm a 30 s despawn timer if not already
-			# armed — fires queue_free on a still-gated mob to bound
-			# the total population (vanilla despawns at 128 m + delay).
-			velocity = Vector3.ZERO
-			_physics_gated = true
-			_lod_tier = LOD_GATED
-			if process_mode != Node.PROCESS_MODE_DISABLED:
-				process_mode = Node.PROCESS_MODE_DISABLED
-				visible = false
-			if _despawn_timer == null:
-				# process_mode=ALWAYS so the timer fires even though our
-				# own node is DISABLED.
-				_despawn_timer = (get_tree().create_timer(
-					_DESPAWN_GATED_SECONDS, true, false, true
-				))
-				_despawn_timer.timeout.connect(_on_gated_despawn_check)
-			return
-		# Cancel any pending despawn — we're back in range.
-		if _despawn_timer != null:
-			_despawn_timer = null
-		if d_sq > _LOD_MID_RADIUS_SQ:
-			_lod_tier = LOD_FAR
-		elif d_sq > _LOD_NEAR_RADIUS_SQ:
-			_lod_tier = LOD_MID
-		else:
-			_lod_tier = LOD_NEAR
-	if _physics_gated:
-		# Re-enable when back in range.
-		process_mode = Node.PROCESS_MODE_INHERIT
-		visible = true
-	_physics_gated = false
+	# Distance gate — the helper returns true while expensive work is
+	# suspended and disables this node. A shared 4 Hz sweep detects re-entry.
+	if _update_distance_lod():
+		PerfProbe.end("mob.physics", pp)
+		return
 	# Chunk-load gate. populate_chunk_at_gen spawns mobs the moment the
 	# chunk's block data lands, but the trimesh collider is built async
 	# on a worker. During that 1-30 frame window, is_on_floor() returns
@@ -774,6 +924,7 @@ func _physics_process(delta: float) -> void:
 		)
 		if not _chunk_manager.is_chunk_loaded(mob_chunk):
 			velocity = Vector3.ZERO
+			PerfProbe.end("mob.physics", pp)
 			return
 	var pre_move_y: float = global_position.y
 	var pre_move_vel_y: float = velocity.y
@@ -783,27 +934,24 @@ func _physics_process(delta: float) -> void:
 	# refreshed inside the while-loop below at the same 50 ms cadence.
 	_env_sample_accum += delta
 	if _env_sample_accum >= _ENV_TICK_DT or not _env_sampled_once:
+		var first_environment_sample: bool = not _env_sampled_once
+		var was_in_water: bool = _in_water
 		_env_sample_accum = 0.0
 		_env_sampled_once = true
 		_in_water = _check_in_water()
 		_in_lava = _check_in_lava()
 		_in_fire_cached = _check_in_fire()
-		# Shared entity-contact hook (redstone-plan.md §7.3): mobs count
-		# as walking entities for redstone ore (vanilla an.java b(…, lw2)
-		# fires for ANY entity). Rides the 20 Hz env cadence — vanilla's
-		# own per-tick rate — and only while grounded and actually moving,
-		# so idle mobs cost one boolean here and nothing else.
-		if (
-			_chunk_manager != null
-			and _voxel_on_floor
-			and Vector2(velocity.x, velocity.z).length_squared() > 0.04
-		):
-			var walk_cell := Vector3i(
-				int(floor(global_position.x)),
-				int(floor(global_position.y - 0.5)),
-				int(floor(global_position.z))
+		# lw.java:155-185. First-update water is silent; every later dry→wet
+		# edge emits width-scaled bubble and splash loops at the AABB floor.
+		if _in_water and not was_in_water and not first_environment_sample:
+			SFX.play_splash(velocity, global_position + Vector3(0.0, _get_body_height() * 0.5, 0.0))
+			FluidFx.spawn_water_entry(
+				_chunk_manager,
+				global_position,
+				global_position.y,
+				_get_body_width(),
+				velocity / 20.0
 			)
-			Blocks.on_entity_walking(_chunk_manager, walk_cell, self)
 	var in_fire: bool = _in_fire_cached
 	# Gravity / drag — fluid cells replace normal gravity entirely.
 	# Vanilla water: velocity *= 0.8/tick, gravity -0.02/tick.
@@ -812,11 +960,31 @@ func _physics_process(delta: float) -> void:
 	if _in_water:
 		var k: float = pow(_WATER_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
-		velocity.y += _FLUID_GRAVITY * delta
+		# ot.java's liquid branch is drag-only — a flying mob does not
+		# sink. Every grounded mob keeps the gravity term.
+		if _uses_gravity():
+			velocity.y += _alpha_fluid_fall_delta(_WATER_DRAG_PER_TICK, k)
 	elif _in_lava:
 		var k: float = pow(_LAVA_DRAG_PER_TICK, 20.0 * delta)
 		velocity *= k
-		velocity.y += _FLUID_GRAVITY * delta
+		if _uses_gravity():
+			velocity.y += _alpha_fluid_fall_delta(_LAVA_DRAG_PER_TICK, k)
+	elif not _uses_gravity():
+		# `ot.java` (EntityFlying) overrides moveEntityWithHeading to drop
+		# the gravity term entirely and damp all three axes EQUALLY —
+		# `ot.java:27` `float f4 = 0.91f` then `:45-48` `this.az *= f4;
+		# this.aA *= f4; this.aB *= f4;`, run every tick via
+		# `hf.java:527`. aH (onGround) stays false while flying, so f4
+		# never drops to the 0.546 ground value.
+		#
+		# This branch used to be a bare `pass` on the theory that "a
+		# flying mob damps itself". Nothing did: the ghast's AI only ever
+		# ADDS impulse, so velocity had no terminal value at all and was
+		# bounded only by waypoint reversals. Simulated over 60 s of the
+		# vanilla waypoint loop that is ~15.6 m/s mean against vanilla's
+		# ~4.5, which is why ghasts rocketed around and slammed into
+		# cavern walls.
+		velocity *= pow(_FLYING_DRAG_PER_TICK, 20.0 * delta)
 	elif not _voxel_on_floor:
 		# Gravity. VoxelCollider sets _voxel_on_floor based on whether
 		# a solid cell sits directly below the AABB feet — replaces
@@ -834,9 +1002,14 @@ func _physics_process(delta: float) -> void:
 		# couldn't cover the 1-block horizontal gap.
 		if velocity.y < 0.0:
 			velocity.y = 0.0
-		var f: float = pow(_GROUND_FRICTION, delta)
-		velocity.x *= f
-		velocity.z *= f
+			var f: float = pow(_GROUND_FRICTION, delta)
+			velocity.x *= f
+			velocity.z *= f
+	# The callback belongs to Entity.move, not the sparse environment sample.
+	# Run it after gravity/friction prepared this step's velocity and before
+	# VoxelCollider consumes it, so soul sand continuously slows real motion.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	# Custom voxel-AABB collision (VoxelCollider) instead of
 	# move_and_slide. Per-mob cost drops from ~2-3 ms to ~0.05 ms
 	# because we read chunk block data directly (1-30 cell checks)
@@ -885,7 +1058,7 @@ func _physics_process(delta: float) -> void:
 	_was_voxel_on_floor = _voxel_on_floor
 	# Horizontal collision = a non-zero pre-clip x/z component was zeroed
 	# by the wall scan. Threshold matches the collider's own 1e-4 motion
-	# epsilon. Used by spider for the Beta wall-climb mechanic.
+	# epsilon.
 	_was_collided_horizontally = (
 		(absf(pre_clip_vx) > 0.0001 and absf(velocity.x) <= 0.0001)
 		or (absf(pre_clip_vz) > 0.0001 and absf(velocity.z) <= 0.0001)
@@ -956,6 +1129,8 @@ func _physics_process(delta: float) -> void:
 	while _env_tick_accum >= _ENV_TICK_DT:
 		_env_tick_accum -= _ENV_TICK_DT
 		_env_tick(in_fire)
+
+	PerfProbe.end("mob.physics", pp)
 
 
 func _process(delta: float) -> void:
@@ -1083,18 +1258,20 @@ func _env_tick(in_fire: bool) -> void:
 	if _dying:
 		return
 	# Swim assist — vanilla hf.java:588-592 + 518-525. 80 % chance to
-	# push up by SWIM_IMPULSE when in either water or lava. The drag
-	# applied in _physics_process counters most of this each frame so
-	# the net rise rate stays at ~0.06 m/tick (= 1.2 m/s ceiling drift).
+	# push up by 0.04 blocks/tick when in either water or lava. Alpha adds
+	# that impulse BEFORE the liquid branch damps velocity. Our environment
+	# tick runs after movement, so store the equivalent post-drag impulse.
 	if _in_water or _in_lava:
 		if randf() < _SWIM_CHANCE:
-			velocity.y += _SWIM_IMPULSE
+			var source_drag: float = _WATER_DRAG_PER_TICK if _in_water else _LAVA_DRAG_PER_TICK
+			velocity.y += _SWIM_IMPULSE * source_drag
 	# Drowning — vanilla hf.java:114-126. Check the EYE cell (top of BB)
 	# specifically rather than the body center, so a tall mob with feet
 	# submerged + head above water keeps breathing.
 	if _check_head_in_water():
 		_air_ticks -= 1
 		if _air_ticks <= -_DROWN_INTERVAL_TICKS:
+			FluidFx.spawn_drowning_bubbles(_chunk_manager, global_position, velocity / 20.0)
 			take_damage(_DROWN_DAMAGE, Vector3.ZERO)
 			_air_ticks = 0
 	else:
@@ -1111,6 +1288,17 @@ func _env_tick(in_fire: bool) -> void:
 	if _in_water and _on_fire_ticks > 0:
 		_on_fire_ticks = 0
 		_fire_dmg_accum_ticks = 0
+	# hf.java:111 — a fireproof LIVING entity has its burn timer forced to
+	# zero every tick, after whatever set it. That ordering is why a
+	# zombie pigman never burns in daylight despite inheriting the
+	# zombie's ignition unchanged: the ignite lands and is cancelled on
+	# the same tick, so no damage and no flames.
+	if _is_fire_immune():
+		_on_fire_ticks = 0
+		_fire_dmg_accum_ticks = 0
+		if _fire_pivot != null:
+			_fire_pivot.visible = false
+		return
 	# Contact damage — lava deals 4 HP per 20 ticks while standing in
 	# lava. Otherwise the on-fire timer (set by lava OR fire-block
 	# contact) deals 1 HP per 20 ticks until it counts down to 0.
@@ -1139,39 +1327,98 @@ func _env_tick(in_fire: bool) -> void:
 # (..., y=64+eye_height, ...) for its head. The chunk-manager call is
 # guarded against the singleton not being mounted (headless tests).
 func _check_in_water() -> bool:
-	if _chunk_manager == null:
-		return false
-	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z)),
+	return body_touches_fluid(
+		_chunk_manager, global_position, _get_body_width(), _get_body_height(), true
 	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.WATER_FLOWING or b == Blocks.WATER_STILL
 
 
 func _check_in_lava() -> bool:
-	if _chunk_manager == null:
+	return body_touches_fluid(
+		_chunk_manager, global_position, _get_body_width(), _get_body_height(), false
+	)
+
+
+# Alpha cy.java::a(AABB, Material, Entity), reached by lw.java::h_ / L.
+# Scan the same integer cell range as cy.java: floor(min) through
+# floor(max + 1), exclusive, after insetting both Y faces by 0.4.
+# cy.java also compares its integer upper scan bound with BlockFluid's
+# metadata-dependent surface before accepting the material.
+# `feet_position` follows this project's mob convention: the node origin is
+# at the feet while the collision capsule is offset upward by half-height.
+static func body_touches_fluid(
+	manager, feet_position: Vector3, body_width: float, body_height: float, water: bool
+) -> bool:
+	if manager == null or not manager.has_method("get_world_block"):
+		return false
+	var half_width: float = body_width * 0.5
+	var min_pos := Vector3(
+		feet_position.x - half_width,
+		feet_position.y + _FLUID_PROBE_Y_INSET,
+		feet_position.z - half_width
+	)
+	var max_pos := Vector3(
+		feet_position.x + half_width,
+		feet_position.y + body_height - _FLUID_PROBE_Y_INSET,
+		feet_position.z + half_width
+	)
+	var min_cell := Vector3i(floori(min_pos.x), floori(min_pos.y), floori(min_pos.z))
+	var max_exclusive := Vector3i(
+		floori(max_pos.x + 1.0), floori(max_pos.y + 1.0), floori(max_pos.z + 1.0)
+	)
+	for x: int in range(min_cell.x, max_exclusive.x):
+		for y: int in range(min_cell.y, max_exclusive.y):
+			for z: int in range(min_cell.z, max_exclusive.z):
+				var cell := Vector3i(x, y, z)
+				var id: int = int(manager.call("get_world_block", cell))
+				if (water and not Blocks.is_water(id)) or (not water and not Blocks.is_lava(id)):
+					continue
+				var meta: int = 0
+				if manager.has_method("get_world_block_meta"):
+					meta = int(manager.call("get_world_block_meta", cell))
+				var level: int = 0 if meta >= 8 else (meta & 7)
+				# ld.java::b(meta): surface = y + 1 - (level + 1) / 9.
+				var surface_y: float = float(y + 1) - float(level + 1) / 9.0
+				if float(max_exclusive.y) >= surface_y:
+					return true
+	return false
+
+
+# Alpha `lw.java::a(Material)` tests the exact eye point against the
+# metadata-dependent liquid surface. A block-ID-only test incorrectly
+# drowns an animal whose eye occupies the dry portion of a shallow-flow
+# voxel. Note the source's extra `- 1/9` in `ld.b(meta) - 1/9`: the eye
+# surface is `cellY + 1 - level/9`, not the rendered surface formula used
+# by the body overlap query.
+static func point_is_submerged_in_fluid(manager, point: Vector3, water: bool) -> bool:
+	if manager == null or not manager.has_method("get_world_block"):
 		return false
 	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z)),
+		int(floor(point.x)),
+		int(floor(point.y)),
+		int(floor(point.z)),
 	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.LAVA_FLOWING or b == Blocks.LAVA_STILL
+	var id: int = int(manager.call("get_world_block", cell))
+	if (water and not Blocks.is_water(id)) or (not water and not Blocks.is_lava(id)):
+		return false
+	var meta: int = 0
+	if manager.has_method("get_world_block_meta"):
+		meta = int(manager.call("get_world_block_meta", cell))
+	var level: int = 0 if meta >= 8 else (meta & 7)
+	var surface_y: float = float(cell.y + 1) - float(level) / 9.0
+	return point.y < surface_y
 
 
 func _check_head_in_water() -> bool:
-	if _chunk_manager == null:
-		return false
-	var cell: Vector3i = Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_eye_height())),
-		int(floor(global_position.z)),
-	)
-	var b: int = _chunk_manager.get_world_block(cell)
-	return b == Blocks.WATER_FLOWING or b == Blocks.WATER_STILL
+	var eye_position := global_position + Vector3(0.0, _get_eye_height(), 0.0)
+	return point_is_submerged_in_fluid(_chunk_manager, eye_position, true)
+
+
+# Convert Alpha's once-per-tick affine liquid rule to an arbitrary render
+# delta. If one full tick elapsed, `drag_factor == drag_per_tick` and this
+# returns exactly -0.4 m/s. Splitting that tick across multiple frames
+# composes to the same result, avoiding frame-rate-dependent sinking.
+static func _alpha_fluid_fall_delta(drag_per_tick: float, drag_factor: float) -> float:
+	return _FLUID_FALL_DELTA_PER_TICK * (1.0 - drag_factor) / (1.0 - drag_per_tick)
 
 
 func _check_in_fire() -> bool:
@@ -1201,6 +1448,113 @@ func _get_eye_height() -> float:
 	return 0.35
 
 
+# Vanilla `lw.bm` (fireProof). Override to true for species that ignore
+# fire entirely — in Alpha 1.2.6 that is the zombie pigman and the ghast.
+#
+# The flag does three separate things in the source, and all three are
+# reproduced in _env_tick:
+#   * lw.java:216 `K()` — lava contact deals no damage and does not set
+#     the burn timer;
+#   * lw.java:433 `a(int)` — fire-block contact deals no damage;
+#   * hf.java:111 — for a LIVING entity the burn timer is forced to 0
+#     every tick, so a fireproof mob never renders flames at all.
+#
+# That last one is why a zombie pigman does not burn in daylight even
+# though `pt` inherits `nt.k()`'s daylight ignition unchanged: the
+# ignition happens and is cancelled on the same tick.
+func _is_fire_immune() -> bool:
+	return false
+
+
+# Attach an extruded item sprite to a mob's arm pivot — the shared
+# mechanic behind the skeleton's bow and the zombie pigman's gold sword.
+#
+# Vanilla's equivalent is `m.java::b(EntityLiving, float)` (RenderBiped
+# .renderEquippedItems), which calls `this.a.d.b(0.0625f)` to apply the
+# RIGHT ARM's transform before drawing. Parenting to the arm pivot is the
+# scene-graph way of saying the same thing: the item inherits the arm's
+# pose for free, including the walk swing and any attack animation.
+#
+# `item_basis` must have its scale BAKED INTO the column lengths — Godot 4
+# `node.basis = ...` wipes a separately-assigned `node.scale`, and this
+# was a real bug in the skeleton's bow. See held_item_basis_full_3d.
+#
+# Returns the MeshInstance3D, or null when the item has no icon (headless
+# tests, or an id with no sprite).
+func attach_held_item(
+	arm_pivot: Node3D, item_id: int, item_basis: Basis, hand_offset: Vector3
+) -> MeshInstance3D:
+	if arm_pivot == null:
+		return null
+	var tex: Texture2D = ItemIcons.icon_for(item_id)
+	if tex == null:
+		return null
+	var mesh: ArrayMesh = SpriteExtruder.build(tex)
+	if mesh == null:
+		return null
+	var node := MeshInstance3D.new()
+	node.mesh = mesh
+	arm_pivot.add_child(node)
+	node.basis = item_basis
+	node.position = hand_offset
+	node.material_override = held_item_material(tex)
+	return node
+
+
+# Material for an extruded held item. Alpha-scissor rather than the mob's
+# shared unshaded material: item sprites have transparent corners, and
+# they are a different albedo from the body texture.
+static func held_item_material(tex: Texture2D) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	mat.alpha_scissor_threshold = 0.5
+	return mat
+
+
+# The pose `m.java` uses for a FULL-3D item — swords and tools, the
+# branch guarded by `dx.c[id].a()` (Item.isFull3D, which `kg.java`
+# ItemSword returns true from):
+#
+#     glTranslatef(0, 0.1875, 0); glScalef(f, -f, f);
+#     glRotatef(-100, 1,0,0); glRotatef(45, 0,1,0);   // f = 0.625
+#
+# Those are not the complete item rotations. `m.java:44` then calls
+# `ku.a(ItemStack)`, whose sprite branch adds:
+#
+#     glScalef(1.5, 1.5, 1.5);
+#     glRotatef(50, 0,1,0); glRotatef(335, 0,0,1);
+#
+# OpenGL post-multiplies, so a sprite vertex sees the -25° Z rotation,
+# then the 50° Y rotation, before RenderBiped's 45° Y / -100° X
+# rotations. The previous implementation omitted `ku` entirely and
+# hand-authored the blade along arm-local -Y. ModelZombie then raises the
+# arm horizontally, mapping -Y to mob-forward: the sword tip consequently
+# pointed straight at the player.
+#
+# Reproduce the complete rotation stack here. SpriteExtruder's texture is
+# not mirrored on X like `ku`'s unit quad, so the final 180° Y rotation
+# supplies that X flip while also swapping the equivalent front/back faces
+# to keep this Basis right-handed (and therefore safe with back-face
+# culling). Vanilla's held-item Y reflection and our model-space Y flip
+# cancel one another. Uniform 1.5 / 0.625 sizing is deliberately represented
+# by the caller's pixel scale; neither changes the angle.
+static func held_item_basis_full_3d(pixel_scale: float) -> Basis:
+	var mesh_to_vanilla_quad := Basis(Vector3.UP, PI)
+	var item_renderer := (
+		Basis(Vector3.UP, deg_to_rad(50.0)) * Basis(Vector3(0.0, 0.0, 1.0), deg_to_rad(-25.0))
+	)
+	var render_biped := (
+		Basis(Vector3.RIGHT, deg_to_rad(-100.0)) * Basis(Vector3.UP, deg_to_rad(45.0))
+	)
+	var combined: Basis = render_biped * item_renderer * mesh_to_vanilla_quad
+	# Bake the scale into the column lengths — assigning `node.scale`
+	# separately would be silently discarded by the basis write.
+	return Basis(combined.x * pixel_scale, combined.y * pixel_scale, combined.z * pixel_scale)
+
+
 # Public damage entry — called by player (melee), arrows (projectile),
 # Explosion (TNT blast), and lava. Returns true if the hit landed (false
 # during invulnerability window).
@@ -1217,7 +1571,7 @@ func take_damage(
 		return false
 	# Latch attacker for kill-source attribution. Vanilla `hf.aq` tracks
 	# this for drop tables (creeper-by-skeleton drops a music disc) and
-	# AI revenge targeting (which we don't use yet).
+	# hostile retaliation targeting.
 	if attacker != null:
 		_last_attacker = attacker
 	# Vanilla EntityLiving.damageEntity (hf.java:281-294) — gates the
@@ -1448,28 +1802,30 @@ func _clear_hurt_flash() -> void:
 
 
 # Vanilla `EntityRenderer.setBrightness` — entity colors are texture ×
-# world.getBrightnessForRender(cell). Mirror that by sampling the cell
-# at the mob's body center every frame and, when the quantized level
-# changes, swapping every mesh onto the cached brightness VARIANT of
-# its material (see _brightness_variant). Materials are never mutated:
+# world.getBrightnessForRender(cell). Mirror that by sampling the source
+# cell 66% up the mob's bounding box every frame and, when the quantized
+# level changes, swapping every mesh onto the cached brightness VARIANT
+# of its material (see _brightness_variant). Materials are never mutated:
 # most are shared across the whole species, and writing per-mob state
 # into a shared instance made every herd member flip to the last
 # ticker's light level.
+#
+# A renderer may deliberately replace the sampled colour. Alpha's ghast
+# renderer (`jz.java`) calls glColor4f(1,1,1,1) after RenderManager has
+# applied the normal brightness, so `_renders_fullbright()` feeds the
+# same material path a final brightness of one for that species.
 #
 # Skipped during hurt flash — the red flash material temporarily owns
 # every mesh's material_override, and swapping it would visibly kill
 # the flash. Resumes on the next frame after _clear_hurt_flash.
 func _tick_world_brightness() -> void:
-	if _chunk_manager == null:
-		return
 	if _hurt_flash_remaining > 0.0:
 		return
-	var cell := Vector3i(
-		int(floor(global_position.x)),
-		int(floor(global_position.y + _get_body_height() * 0.5)),
-		int(floor(global_position.z))
-	)
-	var lit: float = EntityLighting.sample_brightness(_chunk_manager, cell)
+	var lit: float = 1.0
+	if not _renders_fullbright():
+		if _chunk_manager == null:
+			return
+		lit = EntityLighting.sample_brightness(_chunk_manager, _lighting_sample_cell())
 	var bucket: int = clampi(
 		int(round(lit * float(_BRIGHTNESS_BUCKETS - 1))), 0, _BRIGHTNESS_BUCKETS - 1
 	)
@@ -1496,6 +1852,25 @@ func _tick_world_brightness() -> void:
 			# caching variants keyed by short-lived materials would pin
 			# them in the static dict forever as mobs despawn.
 			_tint_private_material(base, lit_q)
+
+
+# Exact `lw.java::a(float)` sample point. Godot mob origins sit at the
+# feet, equivalent to Alpha's `posY - yOffset` term.
+func _lighting_sample_cell() -> Vector3i:
+	return Vector3i(
+		int(floor(global_position.x)),
+		int(floor(global_position.y + _get_body_height() * _LIGHT_SAMPLE_HEIGHT_FACTOR)),
+		int(floor(global_position.z))
+	)
+
+
+# Runtime visual-state changes (charge textures, equipment, skins) can
+# replace a material without changing the mob's light bucket. Force the
+# policy through the new material immediately so the cache cannot leave
+# it at the wrong brightness until the mob crosses a light boundary.
+func _refresh_world_brightness() -> void:
+	_last_lit_bucket = -1
+	_tick_world_brightness()
 
 
 # One brightness-tinted duplicate per (base material, bucket), shared
@@ -1540,6 +1915,12 @@ func current_world_brightness() -> float:
 	if _last_lit_bucket < 0:
 		return 1.0
 	return float(_last_lit_bucket) / float(_BRIGHTNESS_BUCKETS - 1)
+
+
+# Renderer-level colour override. Most species retain the sampled world
+# brightness; ghast.gd mirrors Alpha `jz.java` by returning true.
+func _renders_fullbright() -> bool:
+	return false
 
 
 # Species override hook — return true when the subclass animates its
