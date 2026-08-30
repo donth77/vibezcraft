@@ -236,9 +236,14 @@ func _propagate_removal(w: FakeWorld, origin: Vector3i, step: Vector3i) -> void:
 # --- Block properties ---
 
 
-func test_the_portal_block_has_no_collision_drop_or_selection() -> void:
+func test_the_portal_block_has_no_collision_or_drop_but_can_be_ray_traced() -> void:
 	assert_false(Blocks.is_solid_collision(Blocks.PORTAL), "walk straight through")
-	assert_eq(Blocks.selection_aabb(Blocks.PORTAL).size, Vector3.ZERO, "not targetable")
+	assert_eq(Blocks.collision_aabb(Blocks.PORTAL).size, Vector3.ZERO, "no entity collision")
+	assert_eq(
+		Blocks.selection_aabb(Blocks.PORTAL).size,
+		Vector3(0.25, 1.0, 1.0),
+		"x.java fallback ray bounds are a quarter-block slab"
+	)
 	assert_eq(Blocks.drops(Blocks.PORTAL), Blocks.AIR, "no drop")
 	assert_false(Blocks.has_item_form(Blocks.PORTAL), "no item form")
 	assert_eq(Blocks.light_emission(Blocks.PORTAL), 11, "emits 11")
@@ -628,8 +633,11 @@ func test_portal_survives_mining_but_not_explosions() -> void:
 	# The blast ray subtracts `(resistance + 0.3) * coeff`; a negative
 	# term would make a blast STRONGER for crossing a cell.
 	assert_gte(Blocks.explosion_resistance(Blocks.PORTAL) + 0.3, 0.0, "ray term stays positive")
-	# Mining is blocked by selectability, not hardness: x.java returns a
-	# null collision box, so the cell can never be targeted.
+	# Entity collision and ray tracing are distinct. x.java returns null for
+	# the former but sets thin bounds for the latter; hardness is what blocks
+	# mining once the ray has targeted the sheet.
 	assert_eq(
-		Blocks.selection_aabb(Blocks.PORTAL).size, Vector3.ZERO, "untargetable, so unmineable"
+		Blocks.selection_aabb(Blocks.PORTAL).size,
+		Vector3(0.25, 1.0, 1.0),
+		"targetable, while hardness still makes it unmineable"
 	)

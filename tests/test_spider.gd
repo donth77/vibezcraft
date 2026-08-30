@@ -9,6 +9,17 @@ extends GutTest
 var _parent: Node = null
 
 
+class LightWorld:
+	extends Node
+
+	var level: int = 0
+	var sampled_cell: Vector3i = Vector3i.ZERO
+
+	func get_world_effective_light(pos: Vector3i) -> int:
+		sampled_cell = pos
+		return level
+
+
 func before_each() -> void:
 	_parent = Node.new()
 	add_child_autofree(_parent)
@@ -42,16 +53,50 @@ func test_bb_dims_match_vanilla() -> void:
 	var spider: Node = _instantiate_offscreen()
 	assert_eq(spider.call("_get_body_height"), 0.9, "BB height should be vanilla 0.9 m")
 	assert_eq(spider.call("_get_body_width"), 1.4, "BB width should be vanilla 1.4 m")
-	# Vanilla eye height = 0.9 × 0.75 − 0.5 = 0.175 — used for drowning.
-	assert_almost_eq(spider.call("_get_eye_height"), 0.175, 0.001)
+	# EntityLiving.v() = height × 0.85. be.j() = 0.175 is the riding
+	# offset and must not be reused for LOS.
+	assert_almost_eq(spider.call("_get_eye_height"), 0.765, 0.001)
 
 
-# HP — vanilla EntitySpider override sets aT = 16 (lower than the
-# default 20 used by zombie). Bones drop only after the spider is
-# killed, so the HP value gates the kill loop.
-func test_max_health_is_16() -> void:
+# HP — be.java has no override after ef.<init> sets J = 20.
+func test_max_health_is_20() -> void:
 	var spider: Node = _instantiate_offscreen()
-	assert_eq(spider.get("max_health"), 16)
+	assert_eq(spider.get("max_health"), 20)
+
+
+func test_alpha_combat_constants_and_speed_ratio() -> void:
+	assert_eq(Spider._AI_MELEE_RANGE, 2.5, "ef.a attacks below 2.5 blocks")
+	assert_eq(Spider._AI_MELEE_DAMAGE, 2, "spider inherits ef.f = 2")
+	assert_eq(Spider._AI_MELEE_COOLDOWN_SEC, 1.0, "P = 20 ticks")
+	assert_eq(Spider._AI_WALK_SPEED, Zombie._AI_WALK_SPEED * 1.6, "be.am 0.8 / nt.am 0.5")
+
+
+func test_brightness_cutoff_uses_alpha_lut_and_body_sample_height() -> void:
+	var spider: Node3D = _instantiate_offscreen() as Node3D
+	var world := LightWorld.new()
+	_parent.add_child(world)
+	spider.global_position = Vector3(0.5, 10.3, 0.5)
+	spider.set("_chunk_manager", world)
+	world.level = 11
+	assert_false(spider.call("_is_brightly_lit"), "LUT brightness 0.437 remains hostile")
+	assert_eq(world.sampled_cell, Vector3i(0, 10, 0), "lw.a samples 66% up the AABB")
+	world.level = 12
+	assert_true(spider.call("_is_brightly_lit"), "LUT brightness 0.525 is daytime-bright")
+
+
+func test_alpha_spider_has_no_beta_wall_climb_hook() -> void:
+	var src: String = FileAccess.get_file_as_string("res://scripts/entities/spider.gd")
+	assert_eq(src.find("_CLIMB_SPEED"), -1, "be.java predates wall climbing")
+
+
+func test_damage_assigns_the_actual_attacker_without_a_revenge_timer() -> void:
+	var spider: Node = _instantiate_offscreen()
+	var attacker := Node3D.new()
+	_parent.add_child(attacker)
+	assert_true(spider.call("take_damage", 1, Vector3.ZERO, 0.0, attacker))
+	assert_eq(spider.get("_ai_player_cache"), attacker, "ef assigns fc.g directly")
+	var src: String = FileAccess.get_file_as_string("res://scripts/entities/spider.gd")
+	assert_eq(src.find("_AI_REVENGE_DURATION_SEC"), -1, "Alpha has no timed revenge exemption")
 
 
 # Spider extends MobBase — needed for take_damage / die() / drop

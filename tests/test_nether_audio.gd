@@ -22,6 +22,7 @@ extends GutTest
 const _PORTAL := "res://assets/audio/sfx/portal/"
 const _PIGMAN := "res://assets/audio/sfx/mob/zombiepig/"
 const _GHAST := "res://assets/audio/sfx/mob/ghast/"
+const _SFX_SCRIPT := preload("res://scripts/audio/sfx.gd")
 
 
 func _assert_all_load(paths: Array, label: String) -> void:
@@ -42,6 +43,58 @@ func test_the_three_portal_events_resolve() -> void:
 	_assert_all_load(
 		[_PORTAL + "portal.ogg", _PORTAL + "trigger.ogg", _PORTAL + "travel.ogg"], "portal"
 	)
+
+
+# --- Blocks ---
+
+
+func test_nether_block_sound_materials_match_the_alpha_registrations() -> void:
+	var sfx := _SFX_SCRIPT.new()
+	# nq.java:110 `.a(h)`, h = stone.
+	assert_eq(sfx._material_for(Blocks.NETHERRACK), "stone", "netherrack mines as stone")
+	# nq.java:111 `.a(l)`, l = w("sand"): d() is sand but a() is gravel.
+	assert_eq(sfx._material_for(Blocks.SOUL_SAND), "sand", "soul sand mining hit")
+	assert_eq(sfx._break_material_for(Blocks.SOUL_SAND), "gravel", "soul sand destruction")
+	# nq.java:112 `.a(j)`, j = y("stone"): ordinary sound stone,
+	# destruction override random.glass.
+	assert_eq(sfx._material_for(Blocks.GLOWSTONE), "stone", "glowstone mining hit")
+	assert_true(sfx._uses_glass_break_sound(Blocks.GLOWSTONE), "glowstone shatters")
+	assert_eq(sfx._material_for(Blocks.PORTAL), "", "unbreakable portal has no player break route")
+	sfx.free()
+
+
+func test_nether_block_break_helpers_dispatch_a_real_sound_family() -> void:
+	var sfx := _RecordingSfx.new()
+	sfx.play_break(Blocks.NETHERRACK)
+	assert_eq(sfx.random_material, "stone", "netherrack dispatches stone")
+	sfx.reset_recording()
+	sfx.play_break(Blocks.SOUL_SAND)
+	assert_eq(sfx.random_material, "gravel", "soul sand dispatches gravel on destruction")
+	sfx.reset_recording()
+	sfx.play_break(Blocks.GLOWSTONE)
+	assert_true(
+		sfx.direct_path.begins_with("res://assets/audio/sfx/random/glass"),
+		"glowstone dispatches a glass shatter"
+	)
+	sfx.reset_recording()
+	sfx.play_break(Blocks.PORTAL)
+	assert_eq(sfx.random_material, "", "portal does not dispatch a material")
+	assert_eq(sfx.direct_path, "", "portal does not dispatch a direct clip")
+	sfx.free()
+
+
+func test_nether_mining_hits_use_the_non_destruction_materials() -> void:
+	var expected: Dictionary = {
+		Blocks.NETHERRACK: "stone",
+		Blocks.SOUL_SAND: "sand",
+		Blocks.GLOWSTONE: "stone",
+	}
+	var sfx := _RecordingSfx.new()
+	for id: Variant in expected:
+		sfx.reset_recording()
+		sfx.play_mining(int(id))
+		assert_eq(sfx.random_material, expected[id], "mining block %d" % int(id))
+	sfx.free()
 
 
 # --- Zombie pigman ---
@@ -163,3 +216,20 @@ func test_the_new_audio_shares_its_source_with_the_existing_set() -> void:
 	assert_eq(
 		load(zombie).get_class(), load(ghast).get_class(), "both import as the same stream type"
 	)
+
+
+class _RecordingSfx:
+	extends "res://scripts/audio/sfx.gd"
+
+	var random_material: String = ""
+	var direct_path: String = ""
+
+	func reset_recording() -> void:
+		random_material = ""
+		direct_path = ""
+
+	func _play_random(material: String, _base_pitch: float) -> void:
+		random_material = material
+
+	func _play_one(path: String, _volume_db: float, _pitch: float) -> void:
+		direct_path = path

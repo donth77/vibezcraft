@@ -255,6 +255,9 @@ const _ITEM_TEXTURE_NAMES: Dictionary = {
 	# pack by the Nether pass; _load_item_sprite falls back to
 	# assets/textures/items/ for packs that don't ship it.
 	Items.GLOWSTONE_DUST: "glowstone_dust",
+	# Beta 1.3 ItemReed registration `.setIconCoord(6, 5)` — the
+	# dedicated repeater item sprite, distinct from either world-state ID.
+	Items.REDSTONE_REPEATER: "redstone_repeater",
 	# Buckets — placeholder colors picked up by the fallback-color path
 	# below. Leave them OUT of this table so the icon renderer uses the
 	# solid-color fallback; real sprites can be dropped in later.

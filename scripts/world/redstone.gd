@@ -1,3 +1,4 @@
+# gdlint: disable=max-file-lines
 class_name Redstone
 ## Alpha 1.2.6 redstone power model.
 ##
@@ -72,6 +73,15 @@ const TORCH_BURNOUT_LIMIT: int = 8
 # d() both return 20 ticks (one second).
 const BUTTON_PULSE_TICKS: int = 20
 const PLATE_RECHECK_TICKS: int = 20
+
+# Beta 1.3 BlockRedstoneRepeater.field_22023_b is {1,2,3,4} redstone
+# ticks; update scheduling multiplies each by 2 game ticks. One game tick
+# is 50 ms, giving the familiar 0.1/0.2/0.3/0.4 second settings.
+const REPEATER_DELAYS: Array[int] = [2, 4, 6, 8]
+# RenderBlocks / randomDisplayTick offset of the movable delay torch from
+# center, ordered by the same metadata index. The first setting places it
+# 1/16 slightly toward the output; later clicks walk it toward the rear.
+const REPEATER_TORCH_OFFSETS: Array[float] = [-0.0625, 0.0625, 0.1875, 0.3125]
 
 # ap.java's inset detection box: (x+0.125, y, z+0.125) to
 # (x+0.875, y+0.25, z+0.875). Standing at the very corner of the cell
@@ -180,6 +190,10 @@ static func is_power_source(id: int) -> bool:
 			return true
 		Blocks.STONE_BUTTON, Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
 			return true
+	# Beta 1.3's repeater deliberately returns false from
+	# canProvidePower(). Its directional output still participates in the
+	# world power queries below, but wire does not visually auto-connect;
+	# Mojang added input-side auto-connection in Beta 1.7.
 	return false
 
 
@@ -290,6 +304,8 @@ static func provides_weak_power(manager, pos: Vector3i, slot: int) -> bool:
 		Blocks.STONE_PRESSURE_PLATE, Blocks.WOODEN_PRESSURE_PLATE:
 			# ap.java:127 — a pressed plate powers every direction.
 			return manager.get_world_block_meta(pos) > 0
+		Blocks.REDSTONE_REPEATER_ON:
+			return slot == repeater_output_slot(manager.get_world_block_meta(pos))
 	return false
 
 
@@ -367,6 +383,10 @@ static func provides_strong_power(manager, pos: Vector3i, slot: int) -> bool:
 			# same, which is how a wire drives a door through the block
 			# it runs across.
 			return _wire_powers_slot(manager, pos, slot)
+		Blocks.REDSTONE_REPEATER_ON:
+			# BlockRedstoneRepeater delegates indirect/strong output to the
+			# same one-direction predicate as weak output.
+			return slot == repeater_output_slot(manager.get_world_block_meta(pos))
 	return false
 
 
@@ -439,6 +459,8 @@ static func on_neighbor_changed(manager, pos: Vector3i, source_id: int = Blocks.
 			_check_plate_support(manager, pos, id)
 		Blocks.LEVER:
 			_check_mounted_support(manager, pos, id)
+		Blocks.REDSTONE_REPEATER_OFF, Blocks.REDSTONE_REPEATER_ON:
+			_update_repeater(manager, pos, id)
 		Blocks.WOODEN_DOOR, Blocks.IRON_DOOR:
 			_update_door(manager, pos, id)
 		Blocks.TNT:
@@ -995,3 +1017,104 @@ static func _check_plate_support(manager, pos: Vector3i, block_id: int) -> void:
 	manager.set_world_block_state(pos, Blocks.AIR, 0)
 	if manager.has_method("spawn_block_drop"):
 		manager.call("spawn_block_drop", pos, Blocks.drops(block_id))
+
+
+# --- Redstone repeater (Beta 1.3 BlockRedstoneRepeater) ----------------
+
+
+# The slot the POWERED repeater occupies relative to the cell at its
+# output. This is also the slot used to query the rear input cell — the
+# apparent symmetry follows World.isBlockIndirectlyProvidingPowerTo's slot
+# convention (see the class-level SLOT_* comment).
+static func repeater_output_slot(meta: int) -> int:
+	match meta & 3:
+		0:
+			return SLOT_SOUTH  # output points north (-Z)
+		1:
+			return SLOT_WEST  # output points east (+X)
+		2:
+			return SLOT_NORTH  # output points south (+Z)
+		_:
+			return SLOT_EAST  # output points west (-X)
+
+
+# World-space direction from the repeater cell toward its output/front.
+static func repeater_output_offset(meta: int) -> Vector3i:
+	return -SLOT_OFFSETS[repeater_output_slot(meta)]
+
+
+# World-space direction from the repeater cell toward its rear/input.
+static func repeater_input_offset(meta: int) -> Vector3i:
+	return SLOT_OFFSETS[repeater_output_slot(meta)]
+
+
+static func repeater_delay_ticks(meta: int) -> int:
+	return REPEATER_DELAYS[(meta & 0xC) >> 2]
+
+
+static func repeater_torch_offset(meta: int) -> float:
+	return REPEATER_TORCH_OFFSETS[(meta & 0xC) >> 2]
+
+
+# Beta 1.3 only samples the cell directly behind the repeater. Side power
+# is intentionally ignored, unlike a normal redstone consumer.
+static func repeater_input_powered(manager, pos: Vector3i, meta: int = -1) -> bool:
+	var state: int = manager.get_world_block_meta(pos) if meta < 0 else meta
+	var rear_slot: int = repeater_output_slot(state)
+	return indirect_power_from(manager, pos + SLOT_OFFSETS[rear_slot], rear_slot)
+
+
+# Right-click cycles delay index 0→1→2→3→0 while preserving orientation.
+# BlockRedstoneRepeater.blockActivated performs only this metadata write;
+# it neither changes power immediately nor restarts an already-pending tick.
+static func cycle_repeater_delay(manager, pos: Vector3i) -> int:
+	var id: int = manager.get_world_block(pos)
+	if id != Blocks.REDSTONE_REPEATER_OFF and id != Blocks.REDSTONE_REPEATER_ON:
+		return -1
+	var meta: int = manager.get_world_block_meta(pos)
+	var next_delay: int = ((((meta & 0xC) >> 2) + 1) & 3) << 2
+	var next_meta: int = (meta & 3) | next_delay
+	manager.set_world_block_state(pos, id, next_meta)
+	return repeater_delay_ticks(next_meta)
+
+
+# Placement has one historical fast path: if the rear is already powered,
+# Beta schedules the unpowered block after ONE game tick rather than waiting
+# for the selected 2-tick default delay.
+static func on_repeater_placed(manager, pos: Vector3i) -> void:
+	if manager.get_world_block(pos) != Blocks.REDSTONE_REPEATER_OFF:
+		return
+	if repeater_input_powered(manager, pos):
+		TickScheduler.schedule(pos, Blocks.REDSTONE_REPEATER_OFF, 1)
+
+
+# Scheduled transition. The unpowered branch always turns on once its tick
+# arrives, even if a short input pulse ended in the meantime; in that case it
+# queues the powered state to turn back off after the same delay. This is the
+# Beta 1.3 minimum-pulse behavior, not an edge-trigger shortcut.
+static func repeater_tick(manager, pos: Vector3i, block_id: int) -> void:
+	var meta: int = manager.get_world_block_meta(pos)
+	var input_powered: bool = repeater_input_powered(manager, pos, meta)
+	if block_id == Blocks.REDSTONE_REPEATER_ON:
+		if not input_powered:
+			manager.set_world_block_state(pos, Blocks.REDSTONE_REPEATER_OFF, meta)
+		return
+	manager.set_world_block_state(pos, Blocks.REDSTONE_REPEATER_ON, meta)
+	if not input_powered:
+		TickScheduler.schedule(pos, Blocks.REDSTONE_REPEATER_ON, repeater_delay_ticks(meta))
+
+
+# Neighbour update: validate the opaque support first, then schedule only
+# when the current output disagrees with the rear input. TickScheduler's
+# stale-ID guard naturally discards duplicate entries after the first state
+# transition, matching vanilla's de-duplicated block-update set.
+static func _update_repeater(manager, pos: Vector3i, block_id: int) -> void:
+	if not is_normal_cube(manager, pos + Vector3i(0, -1, 0)):
+		manager.set_world_block_state(pos, Blocks.AIR, 0)
+		if manager.has_method("spawn_block_drop"):
+			manager.call("spawn_block_drop", pos, Blocks.drops(block_id))
+		return
+	var meta: int = manager.get_world_block_meta(pos)
+	var lit: bool = block_id == Blocks.REDSTONE_REPEATER_ON
+	if lit != repeater_input_powered(manager, pos, meta):
+		TickScheduler.schedule(pos, block_id, repeater_delay_ticks(meta))

@@ -85,6 +85,8 @@ func test_health_and_melee_match_the_source() -> void:
 	# up from EntityMonster's default of 2.
 	assert_eq(mob.get("max_health"), 20, "20 health from the hostile base")
 	assert_eq(ZombiePigman._AI_MELEE_DAMAGE, 5, "pt.java sets attack damage to 5")
+	assert_eq(ZombiePigman._AI_MELEE_RANGE, 2.5, "inherited ef melee reach")
+	assert_eq(ZombiePigman._AI_MELEE_COOLDOWN_SEC, 1.0, "P = 20 ticks")
 
 
 func test_drops_zero_to_two_cooked_porkchops() -> void:
@@ -369,6 +371,17 @@ func test_a_loaded_pigman_does_not_reacquire_beyond_sixteen_metres() -> void:
 	var player: Node3D = _fake_player_at(Vector3(40, 0, 0))
 	restored.set("_ai_player_cache", player)
 	assert_null(restored.call("_find_target"), "ef.c_() searches 16 m, not the whole world")
+
+
+func test_an_existing_pigman_target_has_no_forty_block_leash() -> void:
+	var mob: Node3D = _pigman_at(Vector3.ZERO) as Node3D
+	mob.set("anger", 500)
+	var player: Node3D = _fake_player_at(Vector3(6, 0, 0))
+	mob.set("_ai_player_cache", player)
+	mob.set("_ai_target", player)
+	player.global_position = Vector3(80, 0, 0)
+	mob.call("_ai_tick")
+	assert_eq(mob.get("_ai_target"), player, "fc retains a living target regardless of distance")
 
 
 # --- Held item ---

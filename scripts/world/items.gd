@@ -350,6 +350,13 @@ const SLIMEBALL: int = 204
 # of nine (en.java:32). Alpha has no four-dust recipe and no other use.
 const GLOWSTONE_DUST: int = 205
 
+# Redstone repeater [BETA 1.3 exception] — vanilla item 356
+# (`Item.field_22018_aZ`) places the unpowered repeater block. The two
+# world-state block IDs live at 207/208; this dedicated item stays separate
+# so powered repeaters never leak into inventories or save data as items.
+# Vanilla stack size is the default 64.
+const REDSTONE_REPEATER: int = 209
+
 # --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
 #
 # The authoritative list of every item id this build defines, and the
@@ -472,6 +479,7 @@ const REGISTERED_IDS: Array[int] = [
 	SNOWBALL,
 	SLIMEBALL,
 	GLOWSTONE_DUST,
+	REDSTONE_REPEATER,
 ]
 
 # Armor-slot kinds — align with the 4 armor slots in Inventory (slots
@@ -980,6 +988,8 @@ static func id_from_name(item_name: String) -> int:
 			return SLIMEBALL
 		"glowstone_dust":
 			return GLOWSTONE_DUST
+		"redstone_repeater":
+			return REDSTONE_REPEATER
 		"netherrack":
 			return Blocks.NETHERRACK
 		"soul_sand":
@@ -1351,6 +1361,8 @@ static func display_name(item_id: int) -> String:
 			return "Music Disc - Still Water"
 		GLOWSTONE_DUST:
 			return "Glowstone Dust"
+		REDSTONE_REPEATER:
+			return "Redstone Repeater"
 	return ""
 
 

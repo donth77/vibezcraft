@@ -84,6 +84,16 @@ func _assert_parity(gds: Dictionary, nat: Dictionary, label: String) -> void:
 	assert_eq(nat.uvs, gds.uvs, "%s: uvs byte-equal" % label)
 	assert_eq(nat.indices, gds.indices, "%s: indices byte-equal" % label)
 	assert_eq(nat.colors, gds.colors, "%s: colors byte-equal" % label)
+	assert_eq(
+		nat.get("collision_faces", PackedVector3Array()),
+		gds.collision_faces,
+		"%s: physical collision soup byte-equal" % label
+	)
+	assert_eq(
+		nat.get("plant_faces", PackedVector3Array()),
+		gds.plant_faces,
+		"%s: ray-selection soup byte-equal" % label
+	)
 	# Water + lava sub-mesh parity — native emits both fluids via
 	# emit_fluid_cell, byte-equal to GDScript's _emit_fluid_faces.
 	assert_eq(
@@ -153,6 +163,8 @@ func test_parity_every_redstone_attachment() -> void:
 		Blocks.STONE_BUTTON,
 		Blocks.STONE_PRESSURE_PLATE,
 		Blocks.WOODEN_PRESSURE_PLATE,
+		Blocks.REDSTONE_REPEATER_OFF,
+		Blocks.REDSTONE_REPEATER_ON,
 	]:
 		var chunk := Chunk.new()
 		chunk.set_block(8, 63, 8, Blocks.STONE)
@@ -389,6 +401,25 @@ func test_parity_collision_faces_single_block() -> void:
 	var expected := _collision_faces_via_old_path(chunk)
 	assert_eq(native_faces.size(), expected.size(), "single block: collision face count")
 	assert_eq(native_faces, expected, "single block: collision faces byte-equal")
+
+
+func test_soul_sand_keeps_full_render_and_selection_but_seven_eighths_collision() -> void:
+	var chunk := Chunk.new()
+	chunk.set_block(8, 64, 8, Blocks.SOUL_SAND)
+	var both := _mesh_both(chunk)
+	_assert_parity(both[0], both[1], "soul sand split bounds")
+	var render_max_y: float = -INF
+	var collision_max_y: float = -INF
+	var selection_max_y: float = -INF
+	for vertex: Vector3 in both[1].vertices:
+		render_max_y = maxf(render_max_y, vertex.y)
+	for vertex: Vector3 in both[1].collision_faces:
+		collision_max_y = maxf(collision_max_y, vertex.y)
+	for vertex: Vector3 in both[1].plant_faces:
+		selection_max_y = maxf(selection_max_y, vertex.y)
+	assert_almost_eq(render_max_y, 65.0, 1e-6, "visual remains a full cube")
+	assert_almost_eq(collision_max_y, 64.875, 1e-6, "physics ends at seven eighths")
+	assert_almost_eq(selection_max_y, 65.0, 1e-6, "ray selection remains full-height")
 
 
 func test_parity_collision_faces_worldgen_chunk() -> void:

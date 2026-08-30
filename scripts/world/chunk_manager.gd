@@ -40,10 +40,9 @@ const _NOTIFY_OFFSETS: Array[Vector3i] = [
 # well above any hand-built Alpha circuit (there are no repeaters or
 # pistons to build a large clock out of).
 const _NOTIFY_BUDGET_PER_DRAIN: int = 4096
-# Key under which an entity's last contact cell is cached, so
-# `report_entity_contact` fires only on arrival. Node metadata rather
-# than a member on each entity script: four unrelated entity types need
-# it and none of them share a base class.
+# Key under which an entity's last contact cell is cached. Arrival-only
+# callbacks use it; continuous collision callbacks deliberately bypass it.
+# Node metadata avoids duplicating the cache across unrelated entity scripts.
 const _CONTACT_CELL_META: StringName = &"_block_contact_cell"
 const _AUTOSAVE_INTERVAL_SEC: float = 300.0
 # World-entry drain-boost window (see _entry_boost_until_msec).
@@ -214,8 +213,8 @@ var _pending_immediate_rebuild: Dictionary = {}
 # sweep until the player actually crosses a chunk boundary.
 var _last_collision_center: Vector2i = Vector2i(2147483647, 2147483647)
 var _applies_this_frame: int = 0  # reset each _process; see try_consume_apply_budget
-# Ambient scanner timer — drives AmbientFx.tick at 10 Hz. Vanilla's
-# cy.java randomDisplayTick runs per-frame; we sample less often.
+# Ambient scanner timer — drives AmbientFx.tick at Alpha's 20 Hz client
+# tick cadence on desktop. Mobile web uses the reduced cadence below.
 var _ambient_scan_accum: float = 0.0
 # Mobile web: 5 Hz ambient + tick load-shedding while chunks stream in.
 # Cached once in _ready — the platform can't change mid-session.
@@ -414,7 +413,6 @@ func _process(_delta: float) -> void:
 		var t_wire := PerfProbe.begin("redstone.update")
 		Redstone.drain_wire_work(self, Redstone.WIRE_STEPS_PER_DRAIN, Redstone.WIRE_USEC_PER_DRAIN)
 		PerfProbe.end("redstone.update", t_wire)
-	_sweep_player_block_contact()
 	var t_set := PerfProbe.begin("chunk_mgr.tick.update_chunk_set")
 	_update_chunk_set()
 	_drain_retiring_chunks()
@@ -445,9 +443,9 @@ func _process(_delta: float) -> void:
 	if shed_this_frame:
 		_shed_tick_frames -= 1
 	_ambient_scan_accum += _delta
-	# 5 Hz on mobile web (measured 3.5 ms/scan on a low-end phone proxy
-	# even at the reduced 250-cell budget); 10 Hz everywhere else.
-	var ambient_interval: float = 0.2 if _is_mobile_web else 0.1
+	# Alpha calls its 1000-cell display scan from the 20 Hz client tick.
+	# Mobile web keeps the measured 5 Hz / 250-cell load-shed exception.
+	var ambient_interval: float = 0.2 if _is_mobile_web else 0.05
 	if not shed_this_frame and _ambient_scan_accum >= ambient_interval:
 		_ambient_scan_accum = 0.0
 		var t_ambient := PerfProbe.begin("chunk_mgr.tick.ambient")
@@ -2884,46 +2882,35 @@ func entity_world_aabb(node: Node3D) -> AABB:
 	return EntityBounds.world_aabb(node)
 
 
-# The player's own contact sweep. `player.gd` already fires the hook on
-# its footstep cadence, but that only covers WALKING onto a cell —
-# falling, jumping or riding onto a plate and then standing still fires
-# no footstep, and the plate would never wake. Keyed on the occupied
-# cell so a stationary player costs one Vector3i compare per frame, and
-# so lit redstone ore still reverts underfoot exactly as vanilla.
-func _sweep_player_block_contact() -> void:
-	if _player == null or not is_instance_valid(_player):
-		return
-	report_entity_contact(_player)
-
-
-# Contact hook for entities that are not the player and not mobs —
-# dropped items, arrows, minecarts and boats all call this from their
-# own step. Fires only when the entity's bounds move into a new cell,
-# because that is the event a plate actually needs: arrival wakes it,
-# and its own 20-tick recheck notices the departure.
-func report_entity_contact(node: Node3D) -> void:
+# Contact hook shared by players, mobs, dropped items, projectiles and
+# vehicles. Vanilla `lw.java:379-391` invokes collision callbacks for every
+# overlapped block after every move. Continuous callbacks (currently soul
+# sand drag) therefore run before the enter-cell dedupe; edge-triggered
+# callbacks (plates and redstone ore) retain the cheap arrival-only path.
+func report_entity_contact(node: Node3D) -> int:
 	var box: AABB = EntityBounds.world_aabb(node)
+	var soul_contacts: int = Blocks.apply_entity_collision_callbacks(self, box, node)
 	var cell: Vector3i = EntityBounds.contact_cell(box)
 	if node.get_meta(_CONTACT_CELL_META, Vector3i(0, -9999, 0)) == cell:
-		return
+		return soul_contacts
 	node.set_meta(_CONTACT_CELL_META, cell)
-	notify_entity_block_contact(node)
+	notify_entity_block_contact(node, box)
+	return soul_contacts
 
 
-# Fire the shared block-contact hook for every cell this entity's bounds
-# touch — vanilla `Entity.moveEntity` does the same sweep before running
-# `Block.onEntityCollidedWithBlock`. Callers throttle to cell CHANGES,
-# which is all a plate needs: arrival wakes it, and its own 20-tick
-# recheck handles the release.
-func notify_entity_block_contact(node: Node3D) -> void:
-	var box: AABB = EntityBounds.world_aabb(node)
+# Fire arrival-only block hooks for every touched cell. Soul sand is omitted
+# here because report_entity_contact already ran its continuous callback for
+# this same AABB; including it would multiply velocity twice on entry frames.
+func notify_entity_block_contact(node: Node3D, box: AABB) -> void:
 	var lo := Vector3i(floori(box.position.x), floori(box.position.y), floori(box.position.z))
 	var end: Vector3 = box.position + box.size
 	var hi := Vector3i(floori(end.x), floori(end.y), floori(end.z))
 	for y in range(lo.y, hi.y + 1):
 		for z in range(lo.z, hi.z + 1):
 			for x in range(lo.x, hi.x + 1):
-				Blocks.on_entity_walking(self, Vector3i(x, y, z), node)
+				var pos := Vector3i(x, y, z)
+				if get_world_block(pos) != Blocks.SOUL_SAND:
+					Blocks.on_entity_walking(self, pos, node)
 
 
 # Vanilla plays `random.click` at volume 0.3 for every redstone

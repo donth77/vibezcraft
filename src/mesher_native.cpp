@@ -51,6 +51,17 @@ static const int FACE_NEIGHBOR[6][3] = {
 // face_idx → face_kind: 0=top, 1=bottom, 2=side. Must mirror Mesher._FACE_KIND.
 static const int FACE_KIND[6] = { 0, 1, 2, 2, 2, 2 };
 
+static inline void append_collision_quad(PackedVector3Array &faces,
+		const Vector3 &v0, const Vector3 &v1,
+		const Vector3 &v2, const Vector3 &v3) {
+	faces.append(v0);
+	faces.append(v2);
+	faces.append(v1);
+	faces.append(v0);
+	faces.append(v3);
+	faces.append(v2);
+}
+
 // WATER_SURFACE_DROP removed after Flow #4 — top heights are now per-
 // corner and derived from water_corner_height() using the adjacent cells'
 // metadata. The uniform 8/9 drop is a special case (cell surrounded by
@@ -364,6 +375,8 @@ static Vector2 fluid_flow_vector(const uint8_t *blocks_ptr, const uint8_t *meta_
 					&& nid != MesherNative::STONE_PRESSURE_PLATE
 					&& nid != MesherNative::WOODEN_PRESSURE_PLATE
 					&& nid != MesherNative::PORTAL
+					&& nid != MesherNative::REDSTONE_REPEATER_OFF
+					&& nid != MesherNative::REDSTONE_REPEATER_ON
 					&& !n_is_water && !n_is_lava);
 			if (n_opaque) {
 				continue;
@@ -544,6 +557,9 @@ Dictionary MesherNative::mesh_chunk_data(
 	// (which walked the mesh to extract this same data). Byte-equivalent
 	// to the old path — enforced by test_parity_collision_faces.
 	PackedVector3Array collision_faces;
+	// Selection-only soup. Soul sand is a full-cube ray target even though
+	// its entity collision ends at 7/8 height.
+	PackedVector3Array plant_faces;
 	// Water sub-mesh — translucent, attaches a different ShaderMaterial on
 	// the Godot side. Emitted only when the chunk contains water cells;
 	// consumer (chunk_node) checks `water_vertices.is_empty()` before
@@ -575,6 +591,7 @@ Dictionary MesherNative::mesh_chunk_data(
 		result["uvs"] = uvs;
 		result["indices"] = indices;
 		result["collision_faces"] = collision_faces;
+		result["plant_faces"] = plant_faces;
 		result["water_vertices"] = water_verts;
 		result["water_normals"] = water_norms;
 		result["water_uvs"] = water_uvs;
@@ -636,8 +653,15 @@ Dictionary MesherNative::mesh_chunk_data(
 				}
 				// Non-cube blocks are meshed by GDScript's
 				// _append_non_cube_geometry — skip cube face emission.
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
 					continue;
+				}
+				const bool is_soul_sand = id == SOUL_SAND;
+				if (is_soul_sand) {
+					const Vector3 origin((float)x, (float)y, (float)z);
+					emit_collision_box(collision_faces, origin,
+							origin + Vector3(1.0f, 0.875f, 1.0f));
+					emit_collision_box(plant_faces, origin, origin + Vector3(1.0f, 1.0f, 1.0f));
 				}
 
 				for (int face = 0; face < 6; face++) {
@@ -668,7 +692,7 @@ Dictionary MesherNative::mesh_chunk_data(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL && neighbor_id != REDSTONE_REPEATER_OFF && neighbor_id != REDSTONE_REPEATER_ON
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -681,6 +705,17 @@ Dictionary MesherNative::mesh_chunk_data(
 						neighbor_hides_face = (neighbor_id == id);
 					}
 					if (neighbor_hides_face) {
+						if (!is_soul_sand && neighbor_id == SOUL_SAND) {
+							const Vector3 v0(x + FACE_VERTS[face][0][0], y + FACE_VERTS[face][0][1],
+									z + FACE_VERTS[face][0][2]);
+							const Vector3 v1(x + FACE_VERTS[face][1][0], y + FACE_VERTS[face][1][1],
+									z + FACE_VERTS[face][1][2]);
+							const Vector3 v2(x + FACE_VERTS[face][2][0], y + FACE_VERTS[face][2][1],
+									z + FACE_VERTS[face][2][2]);
+							const Vector3 v3(x + FACE_VERTS[face][3][0], y + FACE_VERTS[face][3][1],
+									z + FACE_VERTS[face][3][2]);
+							append_collision_quad(collision_faces, v0, v1, v2, v3);
+						}
 						continue;
 					}
 
@@ -738,13 +773,11 @@ Dictionary MesherNative::mesh_chunk_data(
 					indices.append(base);
 					indices.append(base + 3);
 					indices.append(base + 2);
-					// Same two triangles as a flat soup for trimesh collision.
-					collision_faces.append(v0);
-					collision_faces.append(v2);
-					collision_faces.append(v1);
-					collision_faces.append(v0);
-					collision_faces.append(v3);
-					collision_faces.append(v2);
+					// Soul sand owns a separate 7/8-height box above; its full-cube
+					// render faces must never leak into entity collision.
+					if (!is_soul_sand) {
+						append_collision_quad(collision_faces, v0, v1, v2, v3);
+					}
 				}
 			}
 		}
@@ -756,6 +789,7 @@ Dictionary MesherNative::mesh_chunk_data(
 	result["uvs"] = uvs;
 	result["indices"] = indices;
 	result["collision_faces"] = collision_faces;
+	result["plant_faces"] = plant_faces;
 	result["water_vertices"] = water_verts;
 	result["water_normals"] = water_norms;
 	result["water_uvs"] = water_uvs;
@@ -808,6 +842,7 @@ Dictionary MesherNative::mesh_lit_core(
 	PackedColorArray colors;
 	PackedInt32Array indices;
 	PackedVector3Array collision_faces;
+	PackedVector3Array plant_faces;
 	// Water sub-mesh — translucent material. Now carries per-vertex COLOR
 	// sampled from the open neighbor cell (sky_light/15 in R, block_light/15
 	// in G), so the water shader can dim it at night / in caves the same
@@ -841,6 +876,7 @@ Dictionary MesherNative::mesh_lit_core(
 		result["colors"] = colors;
 		result["indices"] = indices;
 		result["collision_faces"] = collision_faces;
+		result["plant_faces"] = plant_faces;
 		result["water_vertices"] = water_verts;
 		result["water_normals"] = water_norms;
 		result["water_uvs"] = water_uvs;
@@ -914,8 +950,15 @@ Dictionary MesherNative::mesh_lit_core(
 							&lava_colors, sky_ptr, block_light_ptr, light_scale);
 					continue;
 				}
-				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
+				if (id == SAPLING || id == FIRE || id == TORCH || id == CHEST || id == FENCE || id == WOOD_STAIRS || id == COBBLESTONE_STAIRS || id == WOODEN_DOOR || id == IRON_DOOR || id == LADDER || id == FLOWER_RED || id == FLOWER_YELLOW || id == MUSHROOM_BROWN || id == MUSHROOM_RED || id == SUGAR_CANE || id == SNOW_LAYER || id == CROPS || id == TALL_GRASS || id == HALF_SLAB || id == WOOD_HALF_SLAB || id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING || id == SIGN_WALL || id == FENCE_GATE || id == RAIL || id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
 					continue;
+				}
+				const bool is_soul_sand = id == SOUL_SAND;
+				if (is_soul_sand) {
+					const Vector3 origin((float)x, (float)y, (float)z);
+					emit_collision_box(collision_faces, origin,
+							origin + Vector3(1.0f, 0.875f, 1.0f));
+					emit_collision_box(plant_faces, origin, origin + Vector3(1.0f, 1.0f, 1.0f));
 				}
 				const float block_alpha_test = cube_needs_alpha_test(id) ? 1.0f : 0.0f;
 				for (int face = 0; face < 6; face++) {
@@ -947,7 +990,7 @@ Dictionary MesherNative::mesh_lit_core(
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
 									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
-									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL
+									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL && neighbor_id != REDSTONE_REPEATER_OFF && neighbor_id != REDSTONE_REPEATER_ON
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =
 							neighbor_opaque || (neighbor_id == id);
@@ -960,6 +1003,17 @@ Dictionary MesherNative::mesh_lit_core(
 						neighbor_hides_face = (neighbor_id == id);
 					}
 					if (neighbor_hides_face) {
+						if (!is_soul_sand && neighbor_id == SOUL_SAND) {
+							const Vector3 v0(x + FACE_VERTS[face][0][0], y + FACE_VERTS[face][0][1],
+									z + FACE_VERTS[face][0][2]);
+							const Vector3 v1(x + FACE_VERTS[face][1][0], y + FACE_VERTS[face][1][1],
+									z + FACE_VERTS[face][1][2]);
+							const Vector3 v2(x + FACE_VERTS[face][2][0], y + FACE_VERTS[face][2][1],
+									z + FACE_VERTS[face][2][2]);
+							const Vector3 v3(x + FACE_VERTS[face][3][0], y + FACE_VERTS[face][3][1],
+									z + FACE_VERTS[face][3][2]);
+							append_collision_quad(collision_faces, v0, v1, v2, v3);
+						}
 						continue;
 					}
 
@@ -1027,12 +1081,9 @@ Dictionary MesherNative::mesh_lit_core(
 					indices.append(base);
 					indices.append(base + 3);
 					indices.append(base + 2);
-					collision_faces.append(v0);
-					collision_faces.append(v2);
-					collision_faces.append(v1);
-					collision_faces.append(v0);
-					collision_faces.append(v3);
-					collision_faces.append(v2);
+					if (!is_soul_sand) {
+						append_collision_quad(collision_faces, v0, v1, v2, v3);
+					}
 				}
 			}
 		}
@@ -1045,6 +1096,7 @@ Dictionary MesherNative::mesh_lit_core(
 	result["colors"] = colors;
 	result["indices"] = indices;
 	result["collision_faces"] = collision_faces;
+	result["plant_faces"] = plant_faces;
 	result["water_vertices"] = water_verts;
 	result["water_normals"] = water_norms;
 	result["water_uvs"] = water_uvs;
@@ -1433,7 +1485,7 @@ void MesherNative::append_noncube_pass(Dictionary &result,
 							|| id == HALF_SLAB || id == WOOD_HALF_SLAB
 							|| id == COBBLESTONE_HALF_SLAB || id == SIGN_STANDING
 							|| id == SIGN_WALL || id == FENCE_GATE || id == RAIL
-							|| id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL) {
+							|| id == BED_FOOT || id == BED_HEAD || id == REDSTONE_WIRE || id == REDSTONE_TORCH || id == REDSTONE_TORCH_OFF || id == LEVER || id == STONE_BUTTON || id == STONE_PRESSURE_PLATE || id == WOODEN_PRESSURE_PLATE || id == PORTAL || id == REDSTONE_REPEATER_OFF || id == REDSTONE_REPEATER_ON) {
 						// Player-built shapes stay GDScript — returned in scan
 						// order for Mesher._append_special_cells.
 						special_cells.append(idx);
@@ -1468,9 +1520,14 @@ void MesherNative::append_noncube_pass(Dictionary &result,
 		ri.append_array(nc_indices);
 		result["indices"] = ri;
 	}
-	// The GDScript reference dict always carries plant_faces (possibly
-	// empty) — match its shape. special_cells always present on lit2/lit3.
-	result["plant_faces"] = nc_plant_faces;
+	// Preserve selection soup already emitted by the cube pass (soul sand),
+	// then append native cross/snow selection boxes in reference scan order.
+	PackedVector3Array result_plant_faces;
+	if (result.has("plant_faces")) {
+		result_plant_faces = result["plant_faces"];
+	}
+	result_plant_faces.append_array(nc_plant_faces);
+	result["plant_faces"] = result_plant_faces;
 	result["special_cells"] = special_cells;
 }
 

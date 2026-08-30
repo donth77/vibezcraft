@@ -29,19 +29,19 @@ const _ENTRIES: Dictionary = {
 	# wool ONCE on first damage (Alpha first-hit shed mechanic) OR via
 	# right-click with Beta SHEARS item (no damage variant).
 	"sheep": "res://scripts/entities/sheep.gd",
-	# M3 — vanilla lk.java (EntityZombie). First hostile mob. 20 HP,
-	# 3-damage melee, daylight burn, drops 0-2 feather (Alpha 1.2.6
+	# M3 — vanilla nt.java (EntityZombie). First hostile mob. 20 HP,
+	# 5-damage melee, daylight burn, drops 0-2 feather (Alpha 1.2.6
 	# vanilla; Beta 1.8 swapped to rotten flesh). HostileAI = target +
 	# chase + melee, reuses Pathfinder.find_path from the passives.
 	"zombie": "res://scripts/entities/zombie.gd",
-	# M4 — vanilla nq.java (EntitySkeleton). Second hostile, RANGED.
-	# 20 HP, kites at bow range [4, 10] m, charges 1.5 s then fires an
-	# Arrow at the player's torso. Drops 0-2 bone + 0-2 arrow.
+	# M4 — vanilla dh.java (EntitySkeleton). Second hostile, RANGED.
+	# 20 HP, closes inside 10 m, fires immediately when attackTime is
+	# zero, then waits 30 ticks. Drops 0-2 arrows only.
 	# Daylight burn (same as zombie).
 	"skeleton": "res://scripts/entities/skeleton.gd",
 	# M5 — vanilla be.java (EntitySpider). Light-gated hostile (neutral
 	# in bright light, targets nearest player ≤ 16 m when brightness
-	# < 0.5). 16 HP, 2-damage melee, drops 0-2 string. No daylight burn.
+	# < 0.5). 20 HP, 2-damage melee, drops 0-2 string. No daylight burn.
 	# Pounces toward the player at 2-6 m range instead of Beta's wall
 	# climb (Alpha be.java has no climbable-block flag).
 	"spider": "res://scripts/entities/spider.gd",

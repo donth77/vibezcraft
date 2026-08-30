@@ -237,7 +237,7 @@ const _ZOMBIE_STEP_SOUNDS: Array = [
 	"res://assets/audio/sfx/mob/zombie/step4.ogg",
 	"res://assets/audio/sfx/mob/zombie/step5.ogg",
 ]
-# Skeleton audio — Alpha 1.2.6 sound3/mob/skeleton/. nq.java::d()
+# Skeleton audio — Alpha 1.2.6 sound3/mob/skeleton/. dh.java::d()
 # returns "mob.skeleton" (idle/say), f_() returns "mob.skeletonhurt",
 # f() returns "mob.skeletondeath". Files fetched from minecraft.wiki
 # (Category:Skeleton_sounds) — same sound pool used since Alpha. Note
@@ -513,14 +513,25 @@ func stop_all_sfx() -> void:
 
 
 func play_break(block_id: int) -> void:
-	# Glass has a dedicated shatter set, not the stone dig variants — vanilla
-	# BlockGlass overrides StepSound.soundOnDestroyed to "random.glass*".
-	# Ice uses the same glass shatter set in vanilla (BlockIce.stepSound =
-	# soundGlassFootstep, which is the glass break/footstep set).
-	if block_id == Blocks.GLASS or block_id == Blocks.ICE:
+	# nq.java's `y` StepSound overrides the final-destruction event with
+	# `random.glass`. Glowstone is registered with that same `j` sound at
+	# nq.java:112, alongside glass and ice, even though its mining/step
+	# sound remains stone.
+	if _uses_glass_break_sound(block_id):
 		var path: String = _GLASS_BREAK_SOUNDS[randi() % _GLASS_BREAK_SOUNDS.size()]
 		_play_one(path, 0.0, 1.0 + randf_range(-PITCH_JITTER, PITCH_JITTER))
 		return
+	var mat := _break_material_for(block_id)
+	if mat == "":
+		return
+	_play_random(mat, 1.0)
+
+
+# Repeated mining-hit sound. Vanilla jg.java:71 calls StepSound.d(),
+# while the completed break calls StepSound.a() in iv.java:28. Most
+# blocks return the same event for both; soul sand and glass-like blocks
+# deliberately do not, so this must remain separate from play_break.
+func play_mining(block_id: int) -> void:
 	var mat := _material_for(block_id)
 	if mat == "":
 		return
@@ -1260,6 +1271,20 @@ func _play_random(material: String, base_pitch: float) -> void:
 	player.play()
 
 
+# Final-destruction sound material. `w.java::a()` makes the sand StepSound
+# use `step.gravel` only for destruction; `d()` remains `step.sand` for
+# mining hits, footsteps and placement. Soul sand is nq.java:111 `.a(l)`,
+# where `l` is precisely that `w("sand", ...)` instance.
+func _break_material_for(block_id: int) -> String:
+	if block_id == Blocks.SOUL_SAND:
+		return "gravel"
+	return _material_for(block_id)
+
+
+func _uses_glass_break_sound(block_id: int) -> bool:
+	return block_id == Blocks.GLASS or block_id == Blocks.ICE or block_id == Blocks.GLOWSTONE
+
+
 # gdlint: disable=max-returns
 func _material_for(block_id: int) -> String:
 	match block_id:
@@ -1271,13 +1296,22 @@ func _material_for(block_id: int) -> String:
 			return "stone"
 		Blocks.DIAMOND_ORE, Blocks.FURNACE, Blocks.LIT_FURNACE, Blocks.GLASS:
 			return "stone"
+		Blocks.NETHERRACK:
+			# nq.java:110 `.a(h)`; h is the stone StepSound.
+			return "stone"
+		Blocks.GLOWSTONE:
+			# nq.java:112 `.a(j)`; j steps/mines as stone but overrides
+			# only the completed break with random.glass (handled above).
+			return "stone"
 		Blocks.DIRT, Blocks.GRASS, Blocks.LEAVES, Blocks.SAPLING:
 			return "grass"
 		Blocks.FLOWER_RED, Blocks.FLOWER_YELLOW, Blocks.MUSHROOM_BROWN, Blocks.MUSHROOM_RED:
 			return "grass"
 		Blocks.SUGAR_CANE:
 			return "grass"
-		Blocks.SAND:
+		Blocks.SAND, Blocks.SOUL_SAND:
+			# nq.java:111 assigns l = w("sand"). Its ordinary sound is
+			# sand; final destruction alone is redirected to gravel.
 			return "sand"
 		Blocks.LOG, Blocks.PLANKS, Blocks.CRAFTING_TABLE, Blocks.TORCH:
 			return "wood"
@@ -1365,6 +1399,10 @@ func _material_for(block_id: int) -> String:
 		Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF:
 			# nq.java:98-99 — `new bo(75/76, …).a(e)`, `e` = "wood"
 			# (nq.java:9). Same as the plain torch above.
+			return "wood"
+		Blocks.REDSTONE_REPEATER_OFF, Blocks.REDSTONE_REPEATER_ON:
+			# The Beta 1.3 constructors also call `.a(e)`, so both repeater
+			# states share the wood pool.
 			return "wood"
 		Blocks.LEVER:
 			# nq.java:92 — `new pl(69, 96).c(0.5f).a(e)` → wood.

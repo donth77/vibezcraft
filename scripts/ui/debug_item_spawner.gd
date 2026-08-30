@@ -286,6 +286,9 @@ const _ITEMS: Array = [
 	# Glowstone dust — glowstone's only drop, and the sole reagent in the
 	# nine-dust block recipe.
 	Items.GLOWSTONE_DUST,
+	# Beta 1.3 redstone repeater — places the unpowered world state; RMB
+	# on the placed component cycles its four delay settings.
+	Items.REDSTONE_REPEATER,
 ]
 
 var _player: Node

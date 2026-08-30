@@ -18,6 +18,9 @@ extends RefCounted
 
 const _PARTICLES_ATLAS_PATH: String = "res://assets/textures/particles/particles.png"
 const _POOL_SIZE: int = 6
+const _ALPHA_TORCH_PARTICLE: GDScript = preload("res://scripts/world/alpha_torch_particle.gd")
+const _TORCH_WALL_RISE: float = 0.22
+const _TORCH_WALL_OFFSET: float = 0.27
 
 # Cached material — built once on first call. All fizz instances share
 # the same StandardMaterial3D since the atlas + settings are identical.
@@ -37,10 +40,6 @@ static var _lava_spark_material: StandardMaterial3D = null
 # draw passes (Godot 4 quirk, same issue lava_spark hit), so we render
 # a flat-color quad sized to match vanilla's 0.01 m sprite footprint.
 static var _splash_material: StandardMaterial3D = null
-# Torch-flame material cache — small yellow-orange billboard, vanilla
-# `EntityFlameFX` (db.java's flame entry). Lifetime ~1 s, slight upward
-# drift, no gravity.
-static var _torch_flame_material: StandardMaterial3D = null
 # Bubble (EntityBubbleFX) — particles.png tile 32 = (0, 16, 8, 8). Drifts
 # upward at 0.002/tick gravity, dies on leaving water.
 static var _bubble_material: StandardMaterial3D = null
@@ -633,94 +632,33 @@ static func spawn_fire_smoke(parent: Node, pos: Vector3i) -> void:
 	spawn_smoke(parent, Vector3(pos) + Vector3(0.5, 0.5, 0.5))
 
 
-# Vanilla EntityFlameFX (ko.java:23) samples particles.png tile 48 — an
-# 8×8 sprite at pixel (0, 24, 8, 8) on the 128×128 atlas, NOT a solid
-# block. The sprite has a soft yellow-orange flame shape with translucent
-# edges. Solid-yellow billboards read as "yellow boxes" — wrong look.
-static func get_torch_flame_material() -> StandardMaterial3D:
-	if _torch_flame_material != null:
-		return _torch_flame_material
-	var sheet: Texture2D = load(_PARTICLES_ATLAS_PATH) as Texture2D
-	var mat := StandardMaterial3D.new()
-	mat.albedo_texture = sheet
-	# Crop UVs to the 8×8 flame tile at (0, 24) on the 128×128 sheet.
-	# uv_scale = 8/128 = 0.0625; uv_offset.y = 24/128 = 0.1875.
-	mat.uv1_scale = Vector3(8.0 / 128.0, 8.0 / 128.0, 1.0)
-	mat.uv1_offset = Vector3(0.0, 24.0 / 128.0, 0.0)
-	mat.texture_filter = StandardMaterial3D.TEXTURE_FILTER_NEAREST
-	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
-	mat.billboard_mode = StandardMaterial3D.BILLBOARD_ENABLED
-	_torch_flame_material = mat
-	return mat
-
-
-# Torch tip particle — vanilla `bk.b` (BlockTorch.randomDisplayTick)
-# spawns ONE smoke + ONE flame at the torch tip per random-tick roll.
-# We emit just the flame for now: the smoke half wants vanilla's
-# `EntitySmokeFX` (pi.java, ~0.1 m, single 8×8 tile) but our existing
-# pool is wired for `largesmoke` (4× larger) which reads as a small
-# cloud over a torch. Adding a dedicated small-smoke pool is a follow-up.
-#
-# Sizing: vanilla `ko.java` (EntityFlameFX) renders sprite tile 48 at
-# parent default `g ≈ 0.1 × (rand·0.5 + 0.5)` → 0.05-0.15 m visible quad.
-# We render at 0.10 m flat — the tile is solid yellow (no alpha gradient)
-# so we don't need vanilla's parabolic shrink to read the same.
-#
-# Position: floor torches centered; wall torches (meta 1-4) lean toward
-# the supporting wall by 0.27 cells (vanilla bk.b `d4 = 0.27`).
-static func spawn_torch_particles(parent: Node, cell_pos: Vector3i, meta: int) -> void:
-	# Floor: particle at (cx+0.5, cy+0.7, cz+0.5) — just below box top.
-	# Wall: the rotation pipeline places the flame tip at cy+0.95 and
-	# ~0.064 blocks away from the wall in the lean direction. Offsets
-	# derived from tracing the vanilla bk.java rotation pipeline
-	# (Z+1/16, rotX-40°, Y-3/8, rotX+90°, rotY per-meta) through
-	# the top-face center vertex.
-	var tip := Vector3(cell_pos) + Vector3(0.5, 0.85, 0.5)
+# Exact position from ob.java:140-162 (BlockTorch.randomDisplayTick).
+# Keeping this pure makes the five metadata cases straightforward to test.
+static func torch_particle_origin(cell_pos: Vector3i, meta: int) -> Vector3:
+	var origin := Vector3(cell_pos) + Vector3(0.5, 0.7, 0.5)
 	match meta:
 		1:
-			tip.y += 0.18
+			origin += Vector3(-_TORCH_WALL_OFFSET, _TORCH_WALL_RISE, 0.0)
 		2:
-			tip.y += 0.18
+			origin += Vector3(_TORCH_WALL_OFFSET, _TORCH_WALL_RISE, 0.0)
 		3:
-			tip.y += 0.18
+			origin += Vector3(0.0, _TORCH_WALL_RISE, -_TORCH_WALL_OFFSET)
 		4:
-			tip.y += 0.18
-	# --- Flame particle (vanilla ko.java / EntityFlameFX) ---
-	# Spawns at exact tip position with zero velocity. Vanilla's ±0.05
-	# position jitter in the constructor is dead code (modifies locals
-	# after super() already set position). Quad size: vanilla base
-	# pp.g ∈ [1.0, 2.0], rendered at 0.1*g per half → full [0.2, 0.4].
-	var flame := _acquire(parent, 1, Vector3.ZERO)
-	var fproc := ParticleProcessMaterial.new()
-	fproc.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_POINT
-	fproc.direction = Vector3.ZERO
-	fproc.spread = 0.0
-	fproc.initial_velocity_min = 0.0
-	fproc.initial_velocity_max = 0.0
-	fproc.gravity = Vector3.ZERO
-	fproc.scale_min = 0.8
-	fproc.scale_max = 1.0
-	fproc.particle_flag_align_y = false
-	fproc.sub_emitter_mode = ParticleProcessMaterial.SUB_EMITTER_DISABLED
-	# Vanilla parabolic shrink: g = a * (1 - f8² * 0.5)
-	var sc := Curve.new()
-	for i in range(7):
-		var f8: float = float(i) / 6.0
-		sc.add_point(Vector2(f8, 1.0 - f8 * f8 * 0.5))
-	var sct := CurveTexture.new()
-	sct.curve = sc
-	fproc.scale_curve = sct
-	var fdraw := QuadMesh.new()
-	fdraw.size = Vector2(0.28, 0.28)
-	fdraw.material = get_torch_flame_material()
-	flame.draw_pass_1 = fdraw
-	flame.lifetime = 1.0
-	flame.one_shot = false
-	flame.position = tip
-	flame.visible = true
-	flame.emitting = true
-	flame.process_material = fproc
-	flame.restart()
-	_schedule_return(parent, flame)
-	# TODO: torch smoke particles — removed for now, needs proper tuning.
+			origin += Vector3(0.0, _TORCH_WALL_RISE, _TORCH_WALL_OFFSET)
+	return origin
+
+
+# ob.java emits one ordinary smoke particle followed by one flame at the
+# same point. Dedicated Sprite3D particles avoid mutating the shared fluid
+# GPUParticles pool and reproduce Alpha's tick-stepped size/frame changes.
+static func spawn_torch_particles(parent: Node, cell_pos: Vector3i, meta: int) -> void:
+	if parent == null or not is_instance_valid(parent):
+		return
+	var origin: Vector3 = torch_particle_origin(cell_pos, meta)
+	var brightness: float = EntityLighting.sample_brightness(parent, cell_pos)
+	var smoke: Sprite3D = _ALPHA_TORCH_PARTICLE.new() as Sprite3D
+	var flame: Sprite3D = _ALPHA_TORCH_PARTICLE.new() as Sprite3D
+	parent.add_child(smoke)
+	parent.add_child(flame)
+	smoke.call("configure", 1, origin, brightness)
+	flame.call("configure", 0, origin, brightness)

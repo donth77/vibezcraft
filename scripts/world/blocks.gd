@@ -529,6 +529,18 @@ const GLOWSTONE := 99
 # kind is a registry query now — see is_registered / has_item_form.
 const PORTAL := 206
 
+# Redstone repeater [BETA 1.3 exception] — vanilla BlockRedstoneRepeater
+# uses two block IDs so lighting can change with the powered state while
+# metadata remains available for orientation + delay:
+#   bits 0-1 = facing/output (0=north, 1=east, 2=south, 3=west)
+#   bits 2-3 = delay index (1-4 redstone ticks = 2/4/6/8 game ticks)
+# Both world IDs drop the dedicated Items.REDSTONE_REPEATER item and are
+# deliberately world-only: players place the item, never either transient
+# state ID directly. IDs append above PORTAL so every persisted assignment
+# remains stable.
+const REDSTONE_REPEATER_OFF := 207
+const REDSTONE_REPEATER_ON := 208
+
 # Redstone wire — vanilla lu.java via nq.av (id 55, tex 84/85 with the
 # powered variants at +16). Hardness 0, no collision box, needs a normal
 # solid cube directly below. Metadata is the POWER LEVEL 0-15 and uses
@@ -628,6 +640,10 @@ const MESH_SHAPE_PRESSURE_PLATE: int = 18
 # mechanic). Routing it through the special-cell path with no branch is
 # what guarantees the chunk mesh contributes zero geometry for it.
 const MESH_SHAPE_NONE: int = 19
+# Beta 1.3 repeater — 1/8-high stone base with an oriented top tile and
+# two small redstone torches. Metadata controls facing + adjustable-torch
+# position; the block ID selects lit versus unlit art.
+const MESH_SHAPE_REDSTONE_REPEATER: int = 20
 
 # --- Content registry (docs/nether-alpha-1.2.6-implementation-plan.md §3.1) ---
 #
@@ -750,6 +766,8 @@ const REGISTERED_IDS: Array[int] = [
 	SOUL_SAND,
 	GLOWSTONE,
 	PORTAL,
+	REDSTONE_REPEATER_OFF,
+	REDSTONE_REPEATER_ON,
 ]
 
 # Blocks that exist only as world cells — never as an inventory stack, a
@@ -759,7 +777,7 @@ const REGISTERED_IDS: Array[int] = [
 # Alpha's `x.java` gives the portal no item form, no drop and no
 # pick-block, so it must never reach a presentation path even though it
 # is a perfectly ordinary byte inside `Chunk.blocks`.
-const WORLD_ONLY_IDS: Array[int] = [PORTAL]
+const WORLD_ONLY_IDS: Array[int] = [PORTAL, REDSTONE_REPEATER_OFF, REDSTONE_REPEATER_ON]
 
 # Lazy-init lookup table for light_opacity (built on first access).
 # Direct PackedByteArray index is significantly faster than a multi-arm
@@ -830,6 +848,10 @@ static func on_scheduled_tick(manager, pos: Vector3i, block_id: int) -> void:
 	elif block_id == REDSTONE_TORCH or block_id == REDSTONE_TORCH_OFF:
 		# The 2-tick inverter delay (bo.java d() == 2).
 		Redstone.torch_tick(manager, pos, block_id)
+	elif block_id == REDSTONE_REPEATER_OFF or block_id == REDSTONE_REPEATER_ON:
+		# Beta 1.3 BlockRedstoneRepeater: metadata selects a 2/4/6/8
+		# game-tick delay, while the scheduled block ID selects the state.
+		Redstone.repeater_tick(manager, pos, block_id)
 	elif block_id == GLOWING_REDSTONE_ORE:
 		# an.java updateTick — lit redstone ore decays back to the unlit
 		# id. The stale-ID guard above already dropped this tick if the
@@ -1160,11 +1182,40 @@ static func on_entity_walking(manager, pos: Vector3i, entity: Node = null) -> vo
 static func apply_soul_sand_drag(entity: Node) -> bool:
 	if entity == null or not is_instance_valid(entity):
 		return false
-	if not ("velocity" in entity):
+	# CharacterBody3D exposes `velocity`; the two Node3D-based vanilla
+	# entities (dropped items and arrows) keep the same motion vector in
+	# `_velocity`. Vanilla's callback mutates Entity.motionX/Z for both, so
+	# route either storage convention through the same multiplier.
+	var property_name: StringName
+	if "velocity" in entity:
+		property_name = &"velocity"
+	elif "_velocity" in entity:
+		property_name = &"_velocity"
+	else:
 		return false
-	var v: Vector3 = entity.get("velocity")
-	entity.set("velocity", Vector3(v.x * SOUL_SAND_DRAG, v.y, v.z * SOUL_SAND_DRAG))
+	var v: Vector3 = entity.get(property_name)
+	entity.set(property_name, Vector3(v.x * SOUL_SAND_DRAG, v.y, v.z * SOUL_SAND_DRAG))
 	return true
+
+
+# Run block/entity collision callbacks for every cell touched by an entity
+# AABB. `lw.java:379-391` performs this sweep on EVERY move call; it is not
+# an enter-cell event. Soul sand relies on that distinction because its
+# horizontal 0.4 multiplier must be reapplied continuously while contact
+# persists. Returns the number of soul-sand cells touched for focused tests.
+static func apply_entity_collision_callbacks(manager, box: AABB, entity: Node) -> int:
+	var lo := Vector3i(floori(box.position.x), floori(box.position.y), floori(box.position.z))
+	var end: Vector3 = box.position + box.size
+	var hi := Vector3i(floori(end.x), floori(end.y), floori(end.z))
+	var soul_contacts: int = 0
+	for y in range(lo.y, hi.y + 1):
+		for z in range(lo.z, hi.z + 1):
+			for x in range(lo.x, hi.x + 1):
+				if manager.get_world_block(Vector3i(x, y, z)) != SOUL_SAND:
+					continue
+				if apply_soul_sand_drag(entity):
+					soul_contacts += 1
+	return soul_contacts
 
 
 # One contact event on a redstone ore cell. Returns the number of
@@ -1228,6 +1279,8 @@ static func is_solid_collision(id: int) -> bool:
 		or id == HALF_SLAB
 		or id == WOOD_HALF_SLAB
 		or id == COBBLESTONE_HALF_SLAB
+		or id == REDSTONE_REPEATER_OFF
+		or id == REDSTONE_REPEATER_ON
 		or id == WOOD_STAIRS
 		or id == COBBLESTONE_STAIRS
 		or id == WOODEN_DOOR
@@ -1337,6 +1390,11 @@ static func is_opaque(id: int) -> bool:
 		# never conduct: Redstone.is_normal_cube keys off is_opaque, and
 		# a conducting wire would relay its own power.
 		and id != REDSTONE_WIRE
+		# Repeaters are 1/8-high circuit components. They neither fill nor
+		# conduct through their cell; only their directional power rule in
+		# Redstone may energize the front neighbour.
+		and id != REDSTONE_REPEATER_OFF
+		and id != REDSTONE_REPEATER_ON
 		# Lever is a small cobble base + handle occupying a fraction of
 		# its cell (pl.java a() returns false for isOpaqueCube). It also
 		# must never conduct redstone — Redstone.is_normal_cube keys off
@@ -1437,6 +1495,8 @@ static func is_replaceable(id: int) -> bool:
 		or id == STONE_BUTTON
 		or id == STONE_PRESSURE_PLATE
 		or id == WOODEN_PRESSURE_PLATE
+		or id == REDSTONE_REPEATER_OFF
+		or id == REDSTONE_REPEATER_ON
 	)
 
 
@@ -1518,6 +1578,8 @@ static func _build_light_opacity_lut() -> void:
 	_light_opacity_lut[STONE_BUTTON] = 0
 	_light_opacity_lut[STONE_PRESSURE_PLATE] = 0
 	_light_opacity_lut[WOODEN_PRESSURE_PLATE] = 0
+	_light_opacity_lut[REDSTONE_REPEATER_OFF] = 0
+	_light_opacity_lut[REDSTONE_REPEATER_ON] = 0
 	# Bed: 9/16 tall, light passes through the open top. Vanilla
 	# bd.java doesn't override isOpaqueCube either.
 	_light_opacity_lut[BED_FOOT] = 0
@@ -1588,6 +1650,9 @@ static func light_emission(id: int) -> int:
 			return 9  # int(15 * 0.625), nq.aO glowing redstone ore
 		REDSTONE_TORCH:
 			return 7  # int(15 * 0.5), nq.aQ lit redstone torch
+		REDSTONE_REPEATER_ON:
+			# Beta 1.3 registration `.a(0.625f)` on the powered block.
+			return 9
 		GLOWSTONE:
 			return 15  # nq.java:112 .a(1.0f)
 		PORTAL:
@@ -1641,6 +1706,30 @@ static func light_allows_placement(id: int, effective_light: int) -> bool:
 	return true
 
 
+# Entity-collision AABB for simple block shapes. Chunk mesh emitters own
+# compound/stateful shapes (stairs, fences, open gates), but cube-shaped
+# blocks use this contract to keep physical bounds separate from cursor
+# selection. Vanilla soul sand is the important exception: it renders and
+# selects as a full cube while `it.java::d` returns a 7/8-high collision box.
+static func collision_aabb(id: int, meta: int = 0) -> AABB:
+	if id == PORTAL:
+		return AABB(Vector3.ZERO, Vector3.ZERO)  # x.java:12-13
+	if id == SOUL_SAND:
+		return AABB(Vector3.ZERO, Vector3(1.0, 0.875, 1.0))  # it.java:10-12
+	if not is_solid_collision(id):
+		return AABB(Vector3.ZERO, Vector3.ZERO)
+	return selection_aabb(id, meta)
+
+
+# Portal ray/selection bounds from `x.java:16-25`. A sheet whose portal
+# neighbours run along X is full-width in X and 1/4 thick in Z; the fallback
+# (including an isolated cell) is 1/4 thick in X and full-width in Z.
+static func portal_selection_aabb(along_x: bool) -> AABB:
+	if along_x:
+		return AABB(Vector3(0.0, 0.0, 0.375), Vector3(1.0, 1.0, 0.25))
+	return AABB(Vector3(0.375, 0.0, 0.0), Vector3(0.25, 1.0, 1.0))
+
+
 # Cursor-selection AABB in cell-local coords (origin at the cell's
 # (x,y,z), unit cube spans [(0,0,0), (1,1,1)]). Mirrors vanilla MC's
 # Block.maxX/Y/Z fields set by the constructor — see BlockSapling()
@@ -1667,17 +1756,13 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# — full-width slab, 2/16 tall.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
 	if id == SOUL_SAND:
-		# it.java::d — `f2 = 0.125f`, box (x, y, z)..(x+1, y+1-f2, z+1).
-		# A full-width cell whose top sits at 0.875, which is why a
-		# player walking across soul sand is visibly sunk into it. This
-		# must be a real collision height, not a speed fudge on a
-		# full-height cube: it changes eye/foot height and step-up.
-		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.875, 1.0))
+		# The base Block bounds remain a full cube. `it.java` overrides only
+		# the entity-collision box (`d`), not selection/ray bounds.
+		return AABB(Vector3.ZERO, Vector3.ONE)
 	if id == PORTAL:
-		# x.java returns a null collision box AND is not selectable —
-		# a portal cell cannot be targeted or mined. Zero-size AABB keeps
-		# the raycast from ever registering a hit.
-		return AABB(Vector3.ZERO, Vector3.ZERO)
+		# Orientation needs neighbour state and is resolved by the mesher and
+		# Interaction. This is x.java's isolated-cell/Z-axis fallback.
+		return portal_selection_aabb(false)
 	if id == STONE_BUTTON:
 		# iy.java:113-125 — 6/16 tall, 6/16 wide, 2/16 deep unpressed and
 		# 1/16 when pressed, hugging the wall it is mounted on.
@@ -1700,6 +1785,11 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 		# lu.java ctor: setBlockBounds(0, 0, 0, 1, 0.0625, 1) — a film
 		# one pixel thick across the whole cell.
 		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0625, 1.0))
+	if id == REDSTONE_REPEATER_OFF or id == REDSTONE_REPEATER_ON:
+		# BlockRedstoneRepeater ctor: setBlockBounds(0, 0, 0, 1, 0.125, 1).
+		# The two rendered torches extend above this, but vanilla selection
+		# and physical collision both remain the 1/8-high base.
+		return AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.125, 1.0))
 	if id == LEVER:
 		# pl.java:118-129 — f2 = 0.1875 for the four wall mounts, 0.25
 		# for the floor variants (meta 5 and 6 share one box).
@@ -1922,6 +2012,8 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_BUTTON
 	if id == STONE_PRESSURE_PLATE or id == WOODEN_PRESSURE_PLATE:
 		return MESH_SHAPE_PRESSURE_PLATE
+	if id == REDSTONE_REPEATER_OFF or id == REDSTONE_REPEATER_ON:
+		return MESH_SHAPE_REDSTONE_REPEATER
 	if id == PORTAL:
 		# Falling through to CUBE here gave the portal solid geometry AND
 		# chunk collision — the player could never step into one, which
@@ -1964,15 +2056,12 @@ static func is_wool(id: int) -> bool:
 	return id >= WOOL_WHITE and id <= WOOL_BLACK
 
 
-# Vanilla `Block.getExplosionResistance` — how much a block resists the
-# blast wave from TNT / creepers. The explosion ray loses
-# `(resistance + 0.3) × 0.225` intensity per 0.3-block step, so a 4.0-power
-# TNT blast (initial ~3 intensity per ray) breaks ~3 blocks of stone deep
-# but ~0 blocks of cobblestone (cobble's resistance 30 is a vanilla
-# anomaly — the recipe is faster to mine but tougher to explode). Bedrock
-# and obsidian use absurd values so they're effectively immune to TNT.
-# Numbers come from Bukkit/mc-dev (Beta-faithful; Alpha used the same
-# values for the few blocks it had).
+# Vanilla `Block.getExplosionResistance` (`nq.java:329-330`) returns the
+# internal resistance field divided by five. `c(hardness)` raises that field
+# to hardness*5, while an explicit `b(value)` replaces it with value*3
+# (`nq.java:164-186`). Consequently a block with only `.c(0.4)` reports 0.4,
+# and obsidian's `.b(2000)` reports 1200 — the registration argument itself
+# is not the public blast resistance.
 # Direct LUT lookup for the explosion ray-cast hot path. Lazy-builds the
 # table on first call by walking every block id through the slower match
 # below. PackedFloat32Array index = block_id; returns 0.0 for unknown ids
@@ -1996,13 +2085,27 @@ static func explosion_resistance(id: int) -> float:
 		return 4.0
 	match id:
 		BEDROCK:
-			return 6000000.0
+			return 3600000.0  # nq.z: .b(6000000) -> 6000000*3/5
 		OBSIDIAN:
-			return 2000.0
+			return 1200.0  # nq.ap: .b(2000) -> 2000*3/5
+		NETHERRACK:
+			return 0.4  # nq.bb: .c(0.4), no explicit resistance override
+		SOUL_SAND:
+			return 0.5  # nq.bc: .c(0.5)
+		GLOWSTONE:
+			return 0.3  # nq.bd: .c(0.3)
+		PORTAL:
+			return 0.0  # nq.be: .c(-1) does not raise the zero default
+		GRAVEL:
+			return 0.6  # nq.F: .c(0.6)
 		COBBLESTONE, COBBLESTONE_STAIRS, MOSSY_COBBLESTONE:
 			return 30.0
-		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL:
-			return 500.0
+		WATER_FLOWING, WATER_STILL:
+			return 100.0  # nq.A/B: .c(100)
+		LAVA_FLOWING:
+			return 0.0  # nq.C: .c(0)
+		LAVA_STILL:
+			return 100.0  # nq.D: .c(100)
 		IRON_DOOR:
 			return 25.0
 		STONE, BRICK, FURNACE, LIT_FURNACE, IRON_ORE, COAL_ORE, GOLD_ORE, DIAMOND_ORE:
@@ -2107,6 +2210,9 @@ static func hardness(id: int) -> float:
 			return 0.5
 		REDSTONE_WIRE, REDSTONE_TORCH, REDSTONE_TORCH_OFF:
 			# lu.java / bo.java both `c(0.0f)` — instant break, any tool.
+			return 0.0
+		REDSTONE_REPEATER_OFF, REDSTONE_REPEATER_ON:
+			# Beta 1.3 registers both repeater states with hardness 0.
 			return 0.0
 		STONE_BUTTON, STONE_PRESSURE_PLATE, WOODEN_PRESSURE_PLATE:
 			# iy.java / ap.java both `c(0.5f)`.
@@ -2343,37 +2449,12 @@ static func drop_with_tool(id: int, tool_id: int) -> int:
 	return drops(id)
 
 
-# Bare-hand break time in seconds (Alpha hardness × 1.5 baseline).
-# A return of -1.0 means unbreakable (bedrock).
+# Compatibility helper for callers that specifically ask for an empty hand.
+# Keep it delegated to the authoritative tool/material calculation: rock
+# blocks such as netherrack use vanilla's wrong-tool `hardness * 5` branch,
+# not the soft-block `hardness * 1.5` baseline.
 static func break_time_bare_hand(id: int) -> float:
-	match id:
-		BEDROCK:
-			return -1.0
-		LEAVES:
-			return 0.3
-		DIRT, SAND:
-			return 0.75
-		GRASS, FARMLAND, GRAVEL:
-			return 0.9
-		NETHERRACK:
-			return 0.6
-		SOUL_SAND:
-			return 0.75
-		GLOWSTONE:
-			return 0.45
-		LOG:
-			return 3.0
-		PLANKS:
-			return 3.0
-		STONE, COBBLESTONE, BRICK:
-			return 7.5  # painfully slow without a pickaxe — Alpha-faithful
-		FURNACE, LIT_FURNACE:
-			return 17.5  # 3.5 hardness × 5 (no-tool penalty)
-		COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, GLOWING_REDSTONE_ORE:
-			return 15.0  # ores are tougher than stone — wood-pick takes ~2.5s
-		OBSIDIAN:
-			return 50.0  # 10 hardness × 5 (no-tool penalty) — Alpha's 10, not the later 50
-	return 1.5
+	return break_time(id, AIR)
 
 
 # Alpha-faithful drop table. Returns the item ID dropped when the block is
@@ -2450,6 +2531,10 @@ static func drops(id: int) -> int:
 			# lu.java::a(int, Random) returns dx.aA — breaking wire hands
 			# back the dust that placed it.
 			return Items.REDSTONE
+		REDSTONE_REPEATER_OFF, REDSTONE_REPEATER_ON:
+			# BlockRedstoneRepeater.idDropped always returns the dedicated
+			# repeater item, irrespective of the powered state.
+			return Items.REDSTONE_REPEATER
 		REDSTONE_ORE, GLOWING_REDSTONE_ORE:
 			# an.java::a(int, Random) returns dx.aA (redstone dust) for
 			# BOTH ore ids — a lit ore mined mid-glow still pays out.
@@ -2718,6 +2803,10 @@ static func name_of(id: int) -> String:
 			return "redstone_torch"
 		REDSTONE_TORCH_OFF:
 			return "redstone_torch_off"
+		REDSTONE_REPEATER_OFF:
+			return "redstone_repeater"
+		REDSTONE_REPEATER_ON:
+			return "redstone_repeater_powered"
 		STONE_BUTTON:
 			return "stone_button"
 		STONE_PRESSURE_PLATE:
@@ -2818,6 +2907,14 @@ static func get_face_texture(id: int, face: String) -> String:
 		# Default tile; the mesher picks cross vs line and the powered
 		# variant from neighbour connectivity + meta (lu.java:16).
 		return "redstone_dust_cross"
+	if id == REDSTONE_REPEATER_OFF:
+		if face == "top":
+			return "redstone_repeater_off"
+		return "stone_slab_side"
+	if id == REDSTONE_REPEATER_ON:
+		if face == "top":
+			return "redstone_repeater_on"
+		return "stone_slab_side"
 	if id == LEVER:
 		# The handle tile. The mesher pulls the cobblestone tile
 		# separately for the base box (pl.java renders the base with

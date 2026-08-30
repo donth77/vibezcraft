@@ -63,15 +63,14 @@ const _AI_TICK_DT: float = 1.0 / 20.0
 
 # `ef.c_()` — EntityMonster looks for the closest player within 16 m.
 const _AI_DETECT_RADIUS: float = 16.0
-const _AI_ABANDON_RADIUS: float = 40.0
 const _AI_REPATH_TICKS: int = 20
 
 # `pt` sets `this.f = 5` in its constructor, overriding EntityMonster's
 # default of 2. Five is a lot — a pigman two-shots an unarmoured player
 # down to half health.
-const _AI_MELEE_RANGE: float = 1.8
+const _AI_MELEE_RANGE: float = 2.5
 const _AI_MELEE_DAMAGE: int = 5
-const _AI_MELEE_COOLDOWN_SEC: float = 0.5
+const _AI_MELEE_COOLDOWN_SEC: float = 1.0
 
 # `e_()` line 1: `this.am = this.g != null ? 0.95f : 0.5f`. The zombie's
 # `am` is 0.5 and walks at 1.0 m/s here, so the angry figure scales to
@@ -311,7 +310,14 @@ func take_damage(
 	if attacker != null and _is_player(attacker):
 		_alert_group(attacker as Node3D)
 		become_angry_at(attacker as Node3D)
-	return super.take_damage(amount, knockback_dir, knockback_strength, attacker)
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
+	# ef.a still assigns a non-player attacker to fc.g. It does not spread
+	# permanent anger, but the struck pigman fights that entity while it lives.
+	if landed and attacker is Node3D and attacker != self:
+		_ai_target = attacker as Node3D
+		_ai_path.clear()
+		_ai_repath_counter = _AI_REPATH_TICKS
+	return landed
 
 
 func _alert_group(attacker: Node3D) -> void:
@@ -421,15 +427,9 @@ func _ai_tick() -> void:
 		return
 	_ai_target = player
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
-	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		# Vanilla drops the target reference but NOT the anger — the
-		# pigman goes back to wandering and re-acquires the moment a
-		# player is in range again.
-		_ai_player_cache = null
-		_ai_target = null
-		_wander_tick()
-		return
-	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
+	# Pigmen still inherit EntityCreature's sight gate around the attack hook.
+	# A retained target may be pursued through cover but never struck through it.
+	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE and has_line_of_sight(player):
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -449,6 +449,10 @@ func _ai_tick() -> void:
 # A calm pigman returns null here no matter what is standing next to it,
 # which is the whole of its neutrality.
 func _find_target() -> Node3D:
+	# `fc.g` is retained while its living target remains valid, independent of
+	# both distance and sight. This also covers the target assigned by a hit.
+	if _ai_target != null and is_instance_valid(_ai_target):
+		return _ai_target
 	if not is_angry():
 		return null
 	var player: Node3D = _find_player()
@@ -459,11 +463,12 @@ func _find_target() -> Node3D:
 	# same 16 m EntityMonster uses.
 	if (
 		global_position.distance_squared_to(player.global_position)
-		> (_AI_DETECT_RADIUS * _AI_DETECT_RADIUS)
+		>= (_AI_DETECT_RADIUS * _AI_DETECT_RADIUS)
 	):
-		# Already chasing someone? Keep them until the abandon radius.
-		if _ai_target != null and is_instance_valid(_ai_target):
-			return _ai_target
+		return null
+	# pt.c_ delegates new acquisition to ef.c_(), whose nearest-player result
+	# is accepted only when EntityLiving.canEntityBeSeen succeeds.
+	if not has_line_of_sight(player):
 		return null
 	return player
 
@@ -569,9 +574,7 @@ func _pick_wander_target() -> bool:
 
 
 func _attack_player(player: Node3D) -> void:
-	if not player.has_method("take_damage"):
-		return
-	player.call("take_damage", _AI_MELEE_DAMAGE, "mob", player.global_position - global_position)
+	_deal_melee_damage(player, _AI_MELEE_DAMAGE)
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
 	_swing_remaining_sec = _SWING_DURATION_SEC
 

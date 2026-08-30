@@ -115,6 +115,10 @@ static func get_material(block_id: int) -> StandardMaterial3D:
 	var tile_tex := ImageTexture.create_from_image(tile_img)
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = StandardMaterial3D.SHADING_MODE_UNSHADED
+	# CPUParticles3D.color arrives at the draw material as vertex COLOR.
+	# Consume it as albedo so the per-emitter voxel-light sample applied in
+	# _apply_voxel_light actually modulates the textured crumbs.
+	mat.vertex_color_use_as_albedo = true
 	mat.transparency = StandardMaterial3D.TRANSPARENCY_ALPHA
 	mat.albedo_texture = tile_tex
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
@@ -386,6 +390,18 @@ static func spawn_reddust(parent: Node, world_pos: Vector3i, face_normal: Vector
 	# normal axis; sit 1/16 + a hair outside the face plane.
 	particles.emission_box_extents = Vector3(0.35, 0.35, 0.35) - face_abs * 0.35
 	particles.position = Vector3(world_pos) + Vector3(0.5, 0.5, 0.5) + face_normal * 0.57
+	particles.visible = true
+	particles.restart()
+	_schedule_return_reddust(parent, particles)
+
+
+# Reddust at an exact world-space point, with a small volume of source-
+# faithful jitter. Used by powered Beta repeaters, whose display tick is
+# centered over one of two miniature torches rather than on a block face.
+static func spawn_reddust_at(parent: Node, world_position: Vector3) -> void:
+	var particles: CPUParticles3D = _acquire_reddust(parent)
+	particles.emission_box_extents = Vector3(0.1, 0.1, 0.1)
+	particles.position = world_position
 	particles.visible = true
 	particles.restart()
 	_schedule_return_reddust(parent, particles)

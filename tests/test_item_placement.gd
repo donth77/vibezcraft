@@ -29,6 +29,7 @@ const _INTERACTION_PATH := "res://scripts/player/interaction.gd"
 # one is introduced and the guard below does the rest.
 const _PLACING_ITEMS: Array[String] = [
 	"REDSTONE",
+	"REDSTONE_REPEATER",
 	"RAIL",
 	"SIGN",
 	"BED",

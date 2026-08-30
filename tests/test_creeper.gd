@@ -9,6 +9,19 @@ extends GutTest
 var _parent: Node = null
 
 
+class DetonationProbe:
+	extends Creeper
+
+	var drop_calls: int = 0
+	var death_sfx_calls: int = 0
+
+	func _spawn_drops() -> void:
+		drop_calls += 1
+
+	func _play_death_sfx() -> void:
+		death_sfx_calls += 1
+
+
 func before_each() -> void:
 	_parent = Node.new()
 	add_child_autofree(_parent)
@@ -112,6 +125,17 @@ func test_vanilla_fuse_constants() -> void:
 	assert_true(
 		src.find("_FUSE_ABORT_RANGE: float = 7.0") != -1, "sustain band should reach vanilla 7.0 m"
 	)
+
+
+func test_self_detonation_bypasses_death_loot_and_uses_feet_origin() -> void:
+	var creeper := DetonationProbe.new()
+	_parent.add_child(creeper)
+	creeper.global_position = Vector3(3.5, 64.05, -7.5)
+	assert_eq(creeper.call("_explosion_origin"), creeper.global_position, "lw.ax is AABB-base Y")
+	creeper.call("_detonate")
+	assert_eq(creeper.drop_calls, 0, "dq calls setDead directly instead of onDeath")
+	assert_eq(creeper.death_sfx_calls, 0, "the explosion sound is the detonation cue")
+	assert_true(creeper.is_queued_for_deletion(), "self-detonation removes the creeper immediately")
 
 
 # Persistence round-trip — fuse_ticks + fuse_dir must survive a save.

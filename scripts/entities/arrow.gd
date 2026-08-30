@@ -49,6 +49,11 @@ var _stuck: bool = false
 var _spawn_time: float = 0.0
 var _is_critical: bool = false
 var _shooter: Node = null
+# Alpha skeleton arrows use lv.java's fixed four damage and 0.03/tick
+# gravity. Player-fired arrows keep the clone's charge-scaled damage and
+# existing trajectory unless setup supplies these per-projectile overrides.
+var _fixed_damage: int = 0
+var _gravity_per_tick: float = GRAVITY_PER_TICK
 # Pre-computed list of CollisionObject3D RIDs under _shooter, captured
 # at first physics tick. Without this cache, every per-frame raycast
 # called `_collect_collision_rids` which walked the shooter's entire
@@ -68,10 +73,18 @@ var _last_light_brightness: float = -1.0
 # Caller (interaction.gd._fire_bow) sets initial velocity from
 # (camera_forward × charge × MAX_SPEED) and passes the shooter so we
 # can exclude them from the entity-hit sweep.
-func setup(shooter: Node, vel: Vector3, is_critical: bool) -> void:
+func setup(
+	shooter: Node,
+	vel: Vector3,
+	is_critical: bool,
+	fixed_damage: int = 0,
+	gravity_per_tick: float = GRAVITY_PER_TICK
+) -> void:
 	_shooter = shooter
 	_velocity = vel
 	_is_critical = is_critical
+	_fixed_damage = fixed_damage
+	_gravity_per_tick = gravity_per_tick
 	_spawn_time = Time.get_ticks_msec() / 1000.0
 
 
@@ -202,7 +215,7 @@ func _physics_process(delta: float) -> void:
 	# Per-tick constants → per-second: drag^(ticks/sec*delta) is
 	# Godot's correct continuous form, and gravity becomes (per-tick *
 	# ticks/sec²) m/s².
-	var gravity_accel: float = GRAVITY_PER_TICK * TICKS_PER_SEC * TICKS_PER_SEC
+	var gravity_accel: float = _gravity_per_tick * TICKS_PER_SEC * TICKS_PER_SEC
 	var drag_factor: float = pow(AIR_DRAG_PER_TICK, delta * TICKS_PER_SEC)
 	_velocity *= drag_factor
 	_velocity.y -= gravity_accel * delta
@@ -373,11 +386,7 @@ func _collect_collision_rids_recursive(node: Node, out: Array) -> void:
 # Arrow → player hit. Player.take_damage(amount: int, source: String)
 # uses the "arrow" source tag for projectile damage.
 func _hit_player(player: Node, _hit_pos: Vector3) -> void:
-	var speed_per_tick: float = _velocity.length() / TICKS_PER_SEC
-	var raw: float = speed_per_tick * BASE_DAMAGE
-	var dmg: int = maxi(1, int(ceil(raw)))
-	if _is_critical:
-		dmg += randi() % (dmg / 2 + 2)
+	var dmg: int = _impact_damage()
 	# Use a string source tag, matching player.gd's take_damage
 	# signature. Other call sites (zombie melee, fall) pass tags like
 	# "mob" / "fall"; "arrow" mirrors vanilla EntityArrow.attackEntityFrom.
@@ -397,11 +406,7 @@ func _hit_mob(mob: Node, hit_pos: Vector3) -> void:
 	# get blocks/tick before scaling. Without this, a full-charge 60
 	# m/s arrow dealt 60 × 2 = 120 damage — instakilled every mob.
 	# Full-charge in vanilla units: 3 blocks/tick × 2.0 base = 6 dmg.
-	var speed_per_tick: float = _velocity.length() / TICKS_PER_SEC
-	var raw: float = speed_per_tick * BASE_DAMAGE
-	var dmg: int = maxi(1, int(ceil(raw)))
-	if _is_critical:
-		dmg += randi() % (dmg / 2 + 2)
+	var dmg: int = _impact_damage()
 	# Knockback scales with arrow speed so a fully-drawn shot punches
 	# harder than a half-charge tap. Reference: a 60 m/s full-charge
 	# arrow → 2× multiplier; a slow 15 m/s low-charge release → 0.5×.
@@ -420,6 +425,17 @@ func _hit_mob(mob: Node, hit_pos: Vector3) -> void:
 		mob.call("add_stuck_arrow", hit_pos, _velocity.normalized())
 	SFX.play_arrow_hit()
 	queue_free()
+
+
+func _impact_damage() -> int:
+	if _fixed_damage > 0:
+		return _fixed_damage
+	var speed_per_tick: float = _velocity.length() / TICKS_PER_SEC
+	var raw: float = speed_per_tick * BASE_DAMAGE
+	var damage: int = maxi(1, int(ceil(raw)))
+	if _is_critical:
+		damage += randi() % (damage / 2 + 2)
+	return damage
 
 
 func _stick_at(p: Vector3) -> void:

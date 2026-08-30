@@ -233,7 +233,9 @@ func _try_attack_mob() -> bool:
 		if stack != null and not stack.is_empty():
 			held_id = stack.item_id
 	var damage: int = Items.melee_damage(held_id)
-	var landed: bool = bool(mob.call("take_damage", damage, attacker_xz))
+	# Pass the attacking entity so Alpha hostiles can assign their actual
+	# revenge target (`ef.a(attacker, damage)`) and kill credit remains exact.
+	var landed: bool = bool(mob.call("take_damage", damage, attacker_xz, 1.0, _player_node()))
 	_trigger_player_use_swing()
 	# Hurt cue only when the hit actually landed — vanilla plays the hit
 	# sound inside the `if (attackEntityFrom(...))` success branch, so
@@ -279,6 +281,15 @@ func _block_visual_aabb(world_pos: Vector3i, id: int, meta: int) -> AABB:
 		var n: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, -1)) == Blocks.FENCE
 		var s: bool = _chunk_manager.get_world_block(world_pos + Vector3i(0, 0, 1)) == Blocks.FENCE
 		return Blocks.fence_selection_aabb(w, e, n, s)
+	if id == Blocks.PORTAL:
+		# x.java:16-25 mutates the block bounds from adjacent portal cells
+		# immediately before ray tracing. Portal sheets carry no axis metadata,
+		# so derive the same orientation from their live neighbours here.
+		var along_x: bool = (
+			_chunk_manager.get_world_block(world_pos + Vector3i(-1, 0, 0)) == Blocks.PORTAL
+			or _chunk_manager.get_world_block(world_pos + Vector3i(1, 0, 0)) == Blocks.PORTAL
+		)
+		return Blocks.portal_selection_aabb(along_x)
 	# Wall sign mounted against a fence: the mesher renders the panel
 	# offset 0.375 m INTO the fence cell so it touches the post, but
 	# selection_aabb returns the default cell-face position. Detect
@@ -774,12 +785,15 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 			_reset_mining()
 			return
 	_mining_progress += delta
-	# Loop the dig sound every ~300ms while mining
+	# Loop the StepSound.d() mining-hit event every ~300ms. Keep this
+	# distinct from the final StepSound.a() destruction event: glowstone
+	# mines as stone then shatters, while soul sand mines as sand then
+	# finishes with gravel.
 	var now: int = Time.get_ticks_msec()
 	if now - _last_dig_sound_ms >= DIG_SOUND_INTERVAL_MS:
 		_last_dig_sound_ms = now
 		var id: int = _chunk_manager.get_world_block(target)
-		SFX.play_break(id)
+		SFX.play_mining(id)
 	# Vanilla bz.java:114-143 — sprinkle one EntityDiggingFX per tick at
 	# the face being hit. We spawn at MINING_PARTICLE_INTERVAL_MS cadence
 	# (every ~3 vanilla ticks) so the trickle is visible without flooding.
@@ -1393,6 +1407,13 @@ func _try_place() -> void:
 		_toggle_lever(hit.block_pos)
 		_last_place_ms = now
 		return
+	if hit_id == Blocks.REDSTONE_REPEATER_OFF or hit_id == Blocks.REDSTONE_REPEATER_ON:
+		# BlockRedstoneRepeater.blockActivated cycles only metadata bits
+		# 2-3 (1, 2, 3, 4 redstone ticks); orientation and powered state
+		# stay intact. The Beta 1.3 handler is silent.
+		Redstone.cycle_repeater_delay(_chunk_manager, hit.block_pos)
+		_last_place_ms = now
+		return
 	if hit_id == Blocks.STONE_BUTTON:
 		# Press is a no-op while already down (iy.java:139), so an
 		# already-pressed button falls through to normal placement.
@@ -1992,6 +2013,12 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	# unreachable, so right-clicking with redstone did nothing at all.
 	if stack.item_id == Items.REDSTONE:
 		return _try_place_redstone_dust(hit)
+	# Beta 1.3's ItemReed-backed repeater item places the unpowered
+	# world block. Both powered and unpowered state IDs are deliberately
+	# world-only, so this dedicated item route must run before the generic
+	# inventory-placeable guard below.
+	if stack.item_id == Items.REDSTONE_REPEATER:
+		return _try_place_redstone_repeater(hit)
 	# Slab combine — vanilla qj.java::e(). Placing a half-slab onto a
 	# cell that already holds the SAME half-slab variant (from the top
 	# face) upgrades the cell to the matching double-slab and consumes
@@ -2603,6 +2630,43 @@ func _try_place_redstone_dust(hit: Dictionary) -> bool:
 	_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_WIRE, 0)
 	Redstone.update_wire(_chunk_manager, place)
 	SFX.play_place(Blocks.REDSTONE_WIRE)
+	var inv: Inventory = _player_inventory()
+	if inv != null:
+		inv.consume_one_selected()
+	return true
+
+
+# Item.field_22018_aZ / BlockRedstoneRepeater placement (Beta 1.3).
+# The item's inventory ID is separate from both world-state block IDs.
+func _try_place_redstone_repeater(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	var hit_id: int = _chunk_manager.get_world_block(hit.block_pos)
+	var place: Vector3i
+	if Blocks.is_replaceable(hit_id):
+		place = hit.block_pos
+	else:
+		place = hit.block_pos + hit.normal_i
+	var target_id: int = _chunk_manager.get_world_block(place)
+	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# BlockRedstoneRepeater.canPlaceBlockAt/canBlockStay requires a full
+	# opaque cube directly below the 1/8-high base.
+	if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
+		return false
+	if _block_overlaps_player(place):
+		return false
+	if target_id != Blocks.AIR:
+		var displaced: int = Blocks.drops(target_id)
+		if displaced != Blocks.AIR:
+			_spawn_dropped_item(place, displaced)
+	# The source adds two quadrants to the player's BlockDirectional
+	# facing. That makes the repeater's output/front point away from the
+	# player while retaining delay index 0 in metadata bits 2-3.
+	var repeater_meta: int = (_player_yaw_facing() + 2) & 3
+	_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_REPEATER_OFF, repeater_meta)
+	Redstone.on_repeater_placed(_chunk_manager, place)
+	SFX.play_place(Blocks.REDSTONE_REPEATER_OFF)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()

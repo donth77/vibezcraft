@@ -508,11 +508,9 @@ func test_a_floor_torch_sits_on_the_ground_not_above_it() -> void:
 
 
 func test_a_torch_never_renders_outside_its_own_selection_box() -> void:
-	# The general form of the floating bug: geometry that disagrees with
-	# the box the game says the block occupies. Vanilla renders a floor
-	# torch at `d1` and a wall torch at `d1 + 0.2`; ours used +0.125 and
-	# +0.5, so the floor torch hovered and the wall torch climbed out of
-	# the top of its box.
+	# The placed model uses only the narrow body strip. Keeping that tight
+	# geometry inside the selection box prevents Pixel Perfection's wider
+	# item-art pixels from becoming extra geometry around the torch head.
 	for id: int in [Blocks.TORCH, Blocks.REDSTONE_TORCH, Blocks.REDSTONE_TORCH_OFF]:
 		for mount: int in [
 			Redstone.MOUNT_FLOOR,

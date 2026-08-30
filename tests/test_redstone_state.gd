@@ -339,7 +339,7 @@ func _capsule_at(feet: Vector3) -> Node3D:
 	return body
 
 
-func test_the_managers_own_sweep_presses_a_plate_under_the_player() -> void:
+func test_the_managers_shared_contact_route_presses_a_plate_under_the_player() -> void:
 	# The last untested seam, and the same shape as every bug this
 	# feature has had: the geometry is covered in test_entity_bounds.gd
 	# and the plate logic in test_redstone_inputs.gd, but nothing checked
@@ -351,9 +351,9 @@ func test_the_managers_own_sweep_presses_a_plate_under_the_player() -> void:
 	assert_eq(_cm.get_world_block_meta(plate), 0, "starts released")
 
 	_cm._player = _capsule_at(Vector3(plate) + Vector3(0.5, 0.0, 0.5))
-	_cm._sweep_player_block_contact()
+	_cm.report_entity_contact(_cm._player)
 	_drain_everything()
-	assert_eq(_cm.get_world_block_meta(plate), 1, "the sweep pressed it")
+	assert_eq(_cm.get_world_block_meta(plate), 1, "the shared contact route pressed it")
 
 
 func test_a_dropped_entity_presses_a_wooden_plate_but_not_a_stone_one() -> void:
@@ -386,11 +386,11 @@ func test_contact_only_fires_when_the_entity_changes_cell() -> void:
 	_cm.set_world_block(plate, Blocks.WOODEN_PRESSURE_PLATE, 0)
 	_drain_everything()
 	_cm._player = _capsule_at(Vector3(plate) + Vector3(0.5, 0.0, 0.5))
-	_cm._sweep_player_block_contact()
+	_cm.report_entity_contact(_cm._player)
 	_drain_everything()
 	var settled: int = TickScheduler.pending_count()
 	for _i in range(30):
-		_cm._sweep_player_block_contact()
+		_cm.report_entity_contact(_cm._player)
 	assert_eq(TickScheduler.pending_count(), settled, "30 stationary frames queue nothing new")
 
 

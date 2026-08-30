@@ -111,6 +111,33 @@ func test_no_nether_block_needs_a_tool_tier() -> void:
 		assert_eq(Blocks.required_harvest_level(id), 0, "block %d has no tier gate" % id)
 
 
+func test_bare_hand_timing_uses_the_authoritative_material_branch() -> void:
+	# Netherrack is rock material. Alpha's player-relative hardness takes
+	# the wrong-tool branch with an empty hand: 0.4 hardness * 5 = 2.0 s.
+	assert_almost_eq(Blocks.break_time_bare_hand(Blocks.NETHERRACK), 2.0, 1e-6)
+	for id: int in [Blocks.NETHERRACK, Blocks.SOUL_SAND, Blocks.GLOWSTONE, Blocks.PORTAL]:
+		assert_almost_eq(
+			Blocks.break_time_bare_hand(id),
+			Blocks.break_time(id, Blocks.AIR),
+			1e-6,
+			"bare-hand helper delegates for block %d" % id
+		)
+
+
+func test_nether_blast_resistance_matches_alpha_registration_math() -> void:
+	# nq.c(hardness) stores hardness*5 and the public getter divides by 5.
+	# nq.b(value) stores value*3, so explicit values expose value*3/5.
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.NETHERRACK), 0.4, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.SOUL_SAND), 0.5, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.GLOWSTONE), 0.3, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.PORTAL), 0.0, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.OBSIDIAN), 1200.0, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.BEDROCK), 3600000.0, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.LAVA_FLOWING), 0.0, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.LAVA_STILL), 100.0, 1e-6)
+	assert_almost_eq(Blocks.explosion_resistance(Blocks.GRAVEL), 0.6, 1e-6)
+
+
 # --- Drops ---
 
 
@@ -243,11 +270,16 @@ func test_soul_sand_collision_top_is_seven_eighths() -> void:
 	# it.java::d uses f2 = 0.125f and returns a box ending at y+1-f2.
 	# This has to be a real collision height: it changes eye/foot height
 	# and step-up, which a speed modifier on a full cube cannot.
-	var box: AABB = Blocks.selection_aabb(Blocks.SOUL_SAND)
+	var box: AABB = Blocks.collision_aabb(Blocks.SOUL_SAND)
 	assert_eq(box.position, Vector3.ZERO, "full-width cell")
 	assert_eq(box.size.x, 1.0, "full width in X")
 	assert_eq(box.size.z, 1.0, "full width in Z")
 	assert_almost_eq(box.size.y, 0.875, 1e-6, "top face sits at 0.875")
+	assert_eq(
+		Blocks.selection_aabb(Blocks.SOUL_SAND),
+		AABB(Vector3.ZERO, Vector3.ONE),
+		"base block bounds remain full-height for ray selection"
+	)
 
 
 func test_soul_sand_scales_horizontal_motion_by_four_tenths() -> void:
@@ -289,6 +321,31 @@ func test_the_walk_hook_routes_soul_sand_to_the_drag() -> void:
 	Blocks.on_entity_walking(world, Vector3i(0, 63, 0), entity)
 	assert_almost_eq(entity.velocity.x, 4.0, 1e-6, "walking on soul sand slows X")
 	assert_almost_eq(entity.velocity.z, 4.0, 1e-6, "and Z")
+
+
+func test_soul_sand_collision_callback_reapplies_without_changing_cells() -> void:
+	# lw.java invokes block/entity collision callbacks after every move, not
+	# only when the lowest occupied cell changes.
+	var world := _FakeWorld.new()
+	autofree(world)
+	world.blocks[Vector3i.ZERO] = Blocks.SOUL_SAND
+	var entity := CharacterBody3D.new()
+	add_child_autofree(entity)
+	entity.velocity = Vector3(10.0, 3.0, 10.0)
+	var box := AABB(Vector3(0.1, 0.1, 0.1), Vector3(0.8, 0.8, 0.8))
+	assert_eq(Blocks.apply_entity_collision_callbacks(world, box, entity), 1)
+	assert_almost_eq(entity.velocity.x, 4.0, 1e-6, "first move applies 0.4")
+	assert_eq(Blocks.apply_entity_collision_callbacks(world, box, entity), 1)
+	assert_almost_eq(entity.velocity.x, 1.6, 1e-6, "same-cell next move applies it again")
+	assert_almost_eq(entity.velocity.y, 3.0, 1e-6, "vertical motion remains untouched")
+
+
+func test_soul_sand_drag_reaches_node3d_entities_with_private_motion() -> void:
+	var entity := _PrivateVelocityEntity.new()
+	add_child_autofree(entity)
+	entity._velocity = Vector3(5.0, -2.0, -5.0)
+	assert_true(Blocks.apply_soul_sand_drag(entity), "dropped-item/arrow storage is supported")
+	assert_eq(entity._velocity, Vector3(2.0, -2.0, -2.0))
 
 
 func test_walking_on_ordinary_ground_does_not_slow_anything() -> void:
@@ -338,12 +395,14 @@ func test_the_portal_is_absent_from_the_inventory_icon_bake() -> void:
 		assert_true(iconified.has(id), "block %d gets an iso bake" % id)
 
 
-func test_the_portal_has_no_collision_or_selection_box() -> void:
-	# x.java returns a null collision box; standing IN a portal is how
-	# travel works at all.
+func test_the_portal_is_passable_but_has_thin_ray_bounds() -> void:
+	# x.java returns null from the entity-collision method, then sets a
+	# 1/4-thick orientation-dependent bound for rendering/ray tracing.
 	assert_false(Blocks.is_solid_collision(Blocks.PORTAL), "walk straight through")
+	assert_eq(Blocks.collision_aabb(Blocks.PORTAL).size, Vector3.ZERO, "no entity collision")
 	var box: AABB = Blocks.selection_aabb(Blocks.PORTAL)
-	assert_eq(box.size, Vector3.ZERO, "not targetable by the raycast")
+	assert_eq(box.position, Vector3(0.375, 0.0, 0.0), "isolated-cell fallback is X-thin")
+	assert_eq(box.size, Vector3(0.25, 1.0, 1.0), "ray target is a quarter-block slab")
 
 
 func test_the_portal_still_round_trips_as_a_stored_byte() -> void:
@@ -498,6 +557,12 @@ class _FakeWorld:
 
 	func get_world_effective_light(_pos: Vector3i) -> int:
 		return 15
+
+
+class _PrivateVelocityEntity:
+	extends Node3D
+
+	var _velocity: Vector3 = Vector3.ZERO
 
 
 class _FakeBreakPlayer:

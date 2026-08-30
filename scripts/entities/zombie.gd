@@ -1,7 +1,7 @@
 class_name Zombie
 extends "res://scripts/entities/mob_base.gd"
 
-# Vanilla Alpha 1.2.6 EntityZombie (`lk.java`). First hostile mob in
+# Vanilla Alpha 1.2.6 EntityZombie (`nt.java`). First hostile mob in
 # the clone. Targets the nearest player within 16 m, pathfinds toward
 # them with the existing Pathfinder voxel A*, and melee-attacks once
 # adjacent. Burns in direct sunlight (vanilla EntityZombie.B()
@@ -67,26 +67,23 @@ const _BB_WIDTH: float = 0.6
 # AI cadence — 20 Hz tick rate matches vanilla integer-tick math.
 const _AI_TICK_DT: float = 1.0 / 20.0
 
-# Target acquisition window. Vanilla `nb.java` (EntityMob) targets the
+# Target acquisition window. Vanilla `ef.java` (EntityMob) targets the
 # nearest player within 16 m via getClosestPlayerToEntity().
 const _AI_DETECT_RADIUS: float = 16.0
-# Vanilla path-give-up distance. If the player walks further than this
-# during a chase, the zombie drops the path and re-rolls a target.
-const _AI_ABANDON_RADIUS: float = 40.0
 # How often to rebuild the path to a moving target. Re-pathing every
 # tick is wasteful and produces jittery movement; every 1 s gives the
 # zombie time to commit to the current path before re-aiming. Vanilla
 # `ay.java::a(ao2)` rebuilds via `f` field every ~32 ticks.
 const _AI_REPATH_TICKS: int = 20
 
-# Melee. Vanilla `lk.java::e(ao2)` deals 3 HP on Normal difficulty.
-const _AI_MELEE_RANGE: float = 1.8  # vanilla square-distance check ≤ 2.0² m
-const _AI_MELEE_DAMAGE: int = 3
-const _AI_MELEE_COOLDOWN_SEC: float = 0.5
+# Melee. ef.a(target, distance) attacks below 2.5 blocks and writes the
+# shared attack timer P=20; nt.<init> raises attack strength from 2 to 5.
+const _AI_MELEE_RANGE: float = 2.5
+const _AI_MELEE_DAMAGE: int = 5
+const _AI_MELEE_COOLDOWN_SEC: float = 1.0
 
-# Walk speed. Vanilla `lk.java::A = 0.23F` per tick on horizontal = 4.6
-# blocks/sec; our nq passive walks at 0.7. Zombies chase a bit faster
-# to feel threatening.
+# Walk-speed baseline. Alpha nt.am = 0.5; other hostile speeds are
+# compared with that source value when translated into clone units.
 const _AI_WALK_SPEED: float = 1.0
 const _AI_JUMP_VELOCITY: float = 6.0
 const _AI_STEP_BOOST_SPEED: float = 2.5
@@ -191,7 +188,7 @@ func _get_body_width() -> float:
 
 func _ready() -> void:
 	max_health = 20  # vanilla `qy.java::aT = 20` (EntityLiving default)
-	# Vanilla Alpha 1.2.6 lk.java::g_() returns FEATHER. 0-2 per kill
+	# Vanilla Alpha 1.2.6 nt.java::g_() returns FEATHER. 0-2 per kill
 	# (same range as pig pork, cow leather).
 	drop_item_id = Items.FEATHER
 	drop_count_min = 0
@@ -199,6 +196,23 @@ func _ready() -> void:
 	_build_collision_shape()
 	_build_model()
 	super._ready()
+
+
+# `ef.a(attacker, damage)` assigns a successfully damaging entity directly
+# to EntityCreature.g. This bypasses the ordinary 16-block/visibility search:
+# striking a zombie is itself enough for that zombie to know its attacker.
+func take_damage(
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
+	if landed and attacker is Node3D and attacker != self:
+		_ai_player_cache = attacker as Node3D
+		_ai_path.clear()
+		_ai_repath_counter = _AI_REPATH_TICKS
+	return landed
 
 
 # Modern MC zombies have a 2.5% chance to drop one iron ingot per kill
@@ -335,7 +349,7 @@ func _physics_process(delta: float) -> void:
 		_ai_tick_accum -= effective_dt
 		_ai_tick()
 	# Melee cooldown ticks independently of the AI Hz so the cooldown
-	# expires precisely 0.5 s after the last hit landed.
+	# expires precisely 1.0 s after the last hit landed.
 	if _ai_melee_cooldown_sec > 0.0:
 		_ai_melee_cooldown_sec = maxf(0.0, _ai_melee_cooldown_sec - delta)
 	# Daylight burn poll — once per second is enough; the env tick in
@@ -376,17 +390,12 @@ func _ai_tick() -> void:
 		_wander_tick()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
-	# Drop the chase when the player gets too far. _AI_ABANDON_RADIUS is
-	# bigger than _AI_DETECT_RADIUS so we don't oscillate between chase
-	# and idle at the boundary.
-	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		_ai_player_cache = null
-		_wander_tick()
-		return
+	# Alpha EntityCreature retains a living acquired target at any range;
+	# target lifetime is bounded by the separate entity-despawn rules.
 	# In-melee? Vanilla EntityMob.l(EntityLiving target) attacks when
 	# `distSqr < e²` where e is the attack-range setting (~2.0² for
 	# zombies). Skip pathing this tick if we're already adjacent.
-	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE:
+	if dist_sq < _AI_MELEE_RANGE * _AI_MELEE_RANGE and has_line_of_sight(player):
 		_face_target(player)
 		_velocity_brake()
 		if _ai_melee_cooldown_sec <= 0.0:
@@ -416,8 +425,18 @@ func _find_player() -> Node3D:
 	var main: Node = get_tree().root.get_node_or_null("Main")
 	if main == null:
 		return null
-	_ai_player_cache = main.find_child("Player", true, false) as Node3D
-	return _ai_player_cache
+	var candidate: Node3D = main.find_child("Player", true, false) as Node3D
+	if candidate == null:
+		return null
+	if (
+		global_position.distance_squared_to(candidate.global_position)
+		>= _AI_DETECT_RADIUS * _AI_DETECT_RADIUS
+	):
+		return null
+	if not has_line_of_sight(candidate):
+		return null
+	_ai_player_cache = candidate
+	return candidate
 
 
 func _repath_toward(player: Node3D) -> void:
@@ -463,8 +482,6 @@ func _tick_walk_path() -> void:
 
 
 func _attack_player(player: Node3D) -> void:
-	if not player.has_method("take_damage"):
-		return
 	# Vanilla EntityMob.l calls EntityHuman.a(this, attackDamage) which
 	# routes to EntityHuman.attackEntityFrom. We mirror via
 	# Player.take_damage(amount, source). Source tag is the literal
@@ -474,7 +491,7 @@ func _attack_player(player: Node3D) -> void:
 	# script load. Player.gd's DAMAGE_MOB const is `"mob"`.
 	# Pass the attacker→player direction so take_damage can knock the
 	# player back (vanilla mob melee shoves + pops the target).
-	player.call("take_damage", _AI_MELEE_DAMAGE, "mob", player.global_position - global_position)
+	_deal_melee_damage(player, _AI_MELEE_DAMAGE)
 	_ai_melee_cooldown_sec = _AI_MELEE_COOLDOWN_SEC
 	# Beta `EntityLiving.swingItem()` — flip the swing flag so the
 	# overhead-chomp animation plays. Vanilla restarts the swing even

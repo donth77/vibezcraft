@@ -6,18 +6,17 @@ extends RefCounted
 # `ld.java:188-199` (ParticleLava at 1/100 on air-above lava) and
 # `qh.java:186-238` (fire.fire sound at 1/24 + largesmoke on flammable
 # neighbors). Factored out of ChunkManager to keep that file under the
-# 1000-line linter cap; `tick` is called at 10 Hz by the manager.
+# 1000-line linter cap; `tick` is called at Alpha's 20 Hz cadence on
+# desktop and at a reduced 5 Hz cadence on mobile web.
 #
-# Vanilla runs 1000 random-cell rolls per frame in a 16-block cube
+# Vanilla runs 1000 random-cell rolls per 20 Hz client tick in a 16-block cube
 # centered on the player (nextInt(16) - nextInt(16) yields a triangular
-# distribution ±15, mode 0). At 60 FPS that's ~60k rolls/sec across
-# ~32k cells. We hit the same density at 10 Hz by rolling 1000
-# cells/scan = 10k/sec, enough to fire sparks within a second or two
-# when a small lava pour sits next to the player.
+# distribution ±15, mode 0), for 20k rolls/sec. Desktop runs that same
+# cadence; mobile web retains an explicit reduced budget below.
 
 const _CELLS_PER_SCAN: int = 1000
 # Mobile-web budget. The 1000-cell interpreted loop measured 12.5 ms per
-# 10 Hz scan on a mid-tier phone proxy (~12% of wall clock), usually
+# scan on a mid-tier phone proxy, usually
 # hunting for zero lava/fire/torch cells. 250 keeps every effect — sparks
 # just take a few seconds to ramp near a lava pour instead of ~1 s, which
 # a phone screen hides. Desktop keeps vanilla density.
@@ -46,7 +45,7 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 	# replaces the per-iteration chunks.has + dict get (which the single-
 	# slot cache only avoided ~25% of the time due to the triangular
 	# distribution spreading cells across the 4 player-corner chunks).
-	# Net: ~1500-2000 dict lookups → 9 dict lookups per tick.
+	# Net: ~1500-2000 dict lookups → 9 dict lookups per scan.
 	var nine_chunks: Array = []
 	nine_chunks.resize(9)
 	for dcz in range(-1, 2):
@@ -57,7 +56,7 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 				c = (chunks[cc] as Node3D).chunk
 			nine_chunks[(dcz + 1) * 3 + (dcx + 1)] = c
 	# Static context — check OS directly rather than Game.is_mobile_web().
-	# Two has_feature lookups per 10 Hz scan is noise.
+	# Two has_feature lookups per scan is noise.
 	var mobile_web: bool = OS.has_feature("web_android") or OS.has_feature("web_ios")
 	var cells: int = _CELLS_PER_SCAN_MOBILE_WEB if mobile_web else _CELLS_PER_SCAN
 	for _i in range(cells):
@@ -85,6 +84,8 @@ static func tick(manager: Node, chunks: Dictionary, player_pos: Vector3) -> void
 			_fire(manager, wx, wy, wz)
 		elif id == Blocks.TORCH:
 			_torch(manager, wx, wy, wz)
+		elif id == Blocks.REDSTONE_REPEATER_ON:
+			_repeater(manager, wx, wy, wz)
 
 
 # Lava-cell ambient: only fires when the cell directly above is AIR
@@ -96,11 +97,8 @@ static func _lava(manager: Node, wx: int, wy: int, wz: int) -> void:
 	var above: int = manager.call("get_world_block", Vector3i(wx, wy + 1, wz)) as int
 	if above != Blocks.AIR:
 		return
-	# Vanilla ld.java:197 rolls 1/100 at 60 FPS = 60k rolls/sec; we run
-	# at 10 Hz × 1000 rolls = 10k rolls/sec, so 1/100 here gives 6× LESS
-	# spark density than vanilla. 1/16 lands close to vanilla's effective
-	# per-second rate without becoming the prior "fountain."
-	if randi() % 16 != 0:
+	# ld.java:197: one lava particle on one in every 100 selected lava cells.
+	if randi() % 100 != 0:
 		return
 	# Vanilla ld.java:197 spawns the "lava" particle silently — no SFX.
 	FluidFx.spawn_lava_spark(manager, Vector3i(wx, wy, wz))
@@ -115,7 +113,7 @@ static func _lava(manager: Node, wx: int, wy: int, wz: int) -> void:
 # several seconds. Skip when the cell is one or two ticks from
 # extinguishing AND there are no flammable neighbors keeping it alive.
 static func _fire(manager: Node, wx: int, wy: int, wz: int) -> void:
-	if randi() % 4 == 0:
+	if randi() % 24 == 0:
 		if not _fire_about_to_die(manager, wx, wy, wz):
 			SFX.play_fire_crackle()
 	# Smoke disabled — never got the particles to render right (squished
@@ -147,13 +145,24 @@ static func _fire_about_to_die(manager: Node, wx: int, wy: int, wz: int) -> bool
 
 
 # Torch-cell ambient: flame + smoke at the torch tip, meta-aware so wall
-# torches' particles end up on the leaning side. Mirrors `bk.b`
-# (BlockTorch.randomDisplayTick) which spawns one smoke + one flame per
-# roll. Vanilla rolls 1/anything-low here since torches are common; we
-# gate at 1-in-3 so a 10 Hz × 1000-cell scan with a few torches in range
-# produces roughly the vanilla density without flooding the pool.
+# torches' particles end up on the leaning side. ob.java:140-162 emits one
+# smoke + one flame every time World's display-tick scan selects the cell;
+# there is no additional per-torch probability gate.
 static func _torch(manager: Node, wx: int, wy: int, wz: int) -> void:
-	if randi() % 3 != 0:
-		return
 	var meta: int = manager.call("get_world_block_meta", Vector3i(wx, wy, wz)) as int
 	FluidFx.spawn_torch_particles(manager, Vector3i(wx, wy, wz), meta)
+
+
+# Powered Beta 1.3 repeater display tick. BlockRedstoneRepeater chooses
+# either the fixed output torch or the movable delay torch with equal
+# probability, then jitters one fullbright reddust mote around its tip.
+static func _repeater(manager: Node, wx: int, wy: int, wz: int) -> void:
+	var pos := Vector3i(wx, wy, wz)
+	var meta: int = manager.call("get_world_block_meta", pos) as int
+	var output: Vector3 = Vector3(Redstone.repeater_output_offset(meta))
+	var local_offset: Vector3
+	if randi() % 2 == 0:
+		local_offset = output * 0.3125
+	else:
+		local_offset = -output * Redstone.repeater_torch_offset(meta)
+	BlockFx.spawn_reddust_at(manager, Vector3(pos) + Vector3(0.5, 0.4, 0.5) + local_offset)

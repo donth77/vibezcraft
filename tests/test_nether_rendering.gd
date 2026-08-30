@@ -180,13 +180,17 @@ func test_a_nether_stack_survives_the_inventory() -> void:
 # --- Portal exclusion ---
 
 
-func test_the_portal_is_excluded_from_every_item_facing_path() -> void:
+func test_the_portal_is_excluded_from_item_paths_but_keeps_its_ray_bounds() -> void:
 	assert_false(Blocks.has_item_form(Blocks.PORTAL), "no item form")
 	assert_false(Items.is_registered(Blocks.PORTAL), "not an item")
 	assert_eq(Items.display_name(Blocks.PORTAL), "", "no item display name")
 	assert_eq(Blocks.drops(Blocks.PORTAL), Blocks.AIR, "no drop")
 	assert_false(Blocks.is_solid_collision(Blocks.PORTAL), "no collision")
-	assert_eq(Blocks.selection_aabb(Blocks.PORTAL).size, Vector3.ZERO, "no selection box")
+	assert_eq(
+		Blocks.selection_aabb(Blocks.PORTAL).size,
+		Vector3(0.25, 1.0, 1.0),
+		"x.java ray bounds remain independent of every item-facing path"
+	)
 
 
 func test_the_portal_cannot_be_placed_from_a_stack() -> void:

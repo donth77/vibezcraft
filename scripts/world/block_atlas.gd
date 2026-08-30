@@ -217,6 +217,11 @@ const _LAYOUT := {
 	"soul_sand": 111,
 	"glowstone": 112,
 	"portal": 113,
+	# Beta 1.3 repeater top faces — terrain.png indices 131/147. The
+	# mesher rotates these per metadata; sides reuse stone_slab_side and
+	# the two raised torches reuse the existing redstone-torch tiles.
+	"redstone_repeater_off": 114,
+	"redstone_repeater_on": 115,
 }
 
 # Foliage tint variants.

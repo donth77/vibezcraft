@@ -77,6 +77,14 @@ func test_redstone_block_list_matches_defined_ids() -> void:
 	assert_true(ids.has(Blocks.GLOWING_REDSTONE_ORE), "glowing ore is tracked")
 
 
+func test_repeater_uses_its_item_in_the_spawner_not_world_state_ids() -> void:
+	var items: Array = _spawner_items()
+	var blocks: Array = _spawner_blocks()
+	assert_true(items.has(Items.REDSTONE_REPEATER), "dedicated repeater item is spawnable")
+	assert_false(blocks.has(Blocks.REDSTONE_REPEATER_OFF), "unpowered state stays world-only")
+	assert_false(blocks.has(Blocks.REDSTONE_REPEATER_ON), "powered state stays world-only")
+
+
 func test_every_redstone_block_is_spawnable() -> void:
 	var spawnable: Array = _spawner_blocks()
 	for id: int in _redstone_ids():

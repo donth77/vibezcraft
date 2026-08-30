@@ -311,7 +311,15 @@ func test_reserved_nether_ids_landed_in_the_right_registry() -> void:
 		assert_false(Blocks.is_registered(id), "reserved item id %d is NOT a block" % id)
 
 
-func test_ids_207_to_255_are_free_for_future_content() -> void:
-	for id: int in range(207, 256):
+func test_repeater_ids_landed_in_the_right_registry() -> void:
+	for id: int in [Blocks.REDSTONE_REPEATER_OFF, Blocks.REDSTONE_REPEATER_ON]:
+		assert_true(Blocks.is_registered(id), "repeater state id %d is a block" % id)
+		assert_false(Items.is_registered(id), "repeater state id %d is not an item" % id)
+	assert_true(Items.is_registered(Items.REDSTONE_REPEATER), "repeater inventory id is an item")
+	assert_false(Blocks.is_registered(Items.REDSTONE_REPEATER), "repeater item is not a block")
+
+
+func test_ids_210_to_255_are_free_for_future_content() -> void:
+	for id: int in range(210, 256):
 		assert_false(Blocks.is_registered(id), "id %d is free" % id)
 		assert_false(Items.is_registered(id), "id %d is free" % id)

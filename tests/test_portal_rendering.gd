@@ -189,13 +189,11 @@ func _meshed_chunk(with_portal: bool) -> Dictionary:
 	return Mesher.mesh_chunk(chunk)
 
 
-func test_a_portal_cell_meshes_exactly_like_air() -> void:
-	# THE oracle for audit finding #1. The portal's visual belongs to
-	# PortalRenderer and its collision is the absence of one, so for the
-	# chunk mesher a portal cell must be indistinguishable from air —
-	# same faces, same collision soup, same everything. Before the fix a
-	# 2x3 sheet added 80 vertices and 40 collision triangles, and the
-	# player could not physically enter a portal.
+func test_a_portal_adds_only_thin_selection_soup_to_the_chunk() -> void:
+	# PortalRenderer owns visible geometry and x.java returns null entity
+	# collision, so render + physical streams remain byte-identical to AIR.
+	# Ray bounds are separate: x.java:16-25 makes the sheet targetable via a
+	# 1/4-thick orientation-dependent AABB on the selection layer.
 	var without: Dictionary = _meshed_chunk(false)
 	var with_portal: Dictionary = _meshed_chunk(true)
 	assert_eq(with_portal.vertices, without.vertices, "identical vertices — no cube was emitted")
@@ -206,6 +204,14 @@ func test_a_portal_cell_meshes_exactly_like_air() -> void:
 		"identical collision soup — the player can walk in"
 	)
 	assert_eq(with_portal.uvs, without.uvs, "identical UVs")
+	assert_gt(
+		with_portal.plant_faces.size(), without.plant_faces.size(), "portal adds selection soup"
+	)
+	for vertex: Vector3 in with_portal.plant_faces:
+		assert_true(
+			vertex.z == 7.375 or vertex.z == 7.625,
+			"X-axis sheet stays within the source's quarter-block Z thickness"
+		)
 	# And the same oracle through the PRODUCTION path — native cube pass
 	# plus the GDScript appendix. When the extension is absent this
 	# degrades to the reference path above, which is fine: the point is
@@ -217,6 +223,11 @@ func test_a_portal_cell_meshes_exactly_like_air() -> void:
 		fast_with.collision_faces,
 		fast_without.collision_faces,
 		"production path: identical collision"
+	)
+	assert_gt(
+		fast_with.plant_faces.size(),
+		fast_without.plant_faces.size(),
+		"production path: thin ray-selection soup is present"
 	)
 
 

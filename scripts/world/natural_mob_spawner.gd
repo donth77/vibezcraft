@@ -1,23 +1,21 @@
 extends Node
 
-# Natural mob spawning — vanilla's per-chunk hostile-mob spawn pass
-# (`SpawnerAnimals.findChunksForSpawning` in Beta+, kept conceptually
-# the same from Alpha). Vanilla picks per-chunk candidates within a
-# 17×17 chunk window around each player, rolls a per-attempt sample,
-# and spawns when light + floor + clearance + cap checks pass.
+# Natural mob spawning — Alpha 1.2.6's per-chunk hostile-mob pass
+# (`bg.java`). Alpha picks candidate groups in a 17×17 chunk window around
+# each player, then applies light, floor, clearance, distance, and cap checks.
 #
-# Our Stage-1 cut keeps the spirit but trades the per-chunk loop for a
-# simpler per-tick random-cell sample around the player. Good enough
-# to validate the hostile-mob fight loop; the per-chunk loop is a Beta-
-# parity polish item.
+# This project still trades the eligible-chunk scan for four player-centred
+# group origins per second. Once an origin is selected, however, the nearby
+# candidate walk is the source's direct three-outer by four-inner loop.
 #
-# Rules (Alpha-faithful):
-#   * Only zombies for now (mob types Stage 1).
+# Rules:
+#   * The active dimension supplies the hostile species list.
 #   * Effective combined light ≤ 7 at the candidate cell (Alpha's
 #     time-adjusted `World.getBlockLightValue`).
 #   * Target cell + cell-above are AIR; cell-below is opaque (real floor).
-#   * Range 24..128 m XZ from the player (vanilla SPAWN_DISTANCE band).
-#   * Hostile cap = 70 total active mobs (vanilla constant).
+#   * Every final candidate, rather than merely its origin, is at least
+#     24 m from the player.
+#   * The active dimension provider supplies the hostile cap.
 # There is intentionally no coarse global night gate: Alpha applies the
 # per-cell combined-light rule, allowing dark caves to spawn hostiles by day
 # while rejecting bright surface cells.
@@ -40,9 +38,10 @@ const _SLIME_ATTEMPTS_PER_TICK: int = 2
 # player's Y minus a wide negative range to reach down into caves.
 const _SLIME_Y_MIN: int = 0
 
-# Vanilla spawn-radius band. Mobs spawn 24..128 m XZ from the player.
-# Spawn band. With LOD tiering in mob_base (NEAR < 32m, MID < 64m,
-# FAR < 96m, GATED beyond), we can spawn out to 80m and the distant
+# Current candidate-origin band. Alpha's hard minimum is 24 m; this
+# implementation samples only out to 80 m instead of scanning every eligible
+# chunk in the full 17×17 window. With LOD tiering in mob_base (NEAR < 32m,
+# MID < 64m, FAR < 96m, GATED beyond), we can spawn out to 80m and the distant
 # mobs will still tick at reduced cadence (5 Hz mid, 1 Hz far). Mobs
 # scatter across the visible band like vanilla but cost a fraction
 # of the CPU. Inner 24m still protected.
@@ -53,14 +52,6 @@ const _SPAWN_MAX_RADIUS: float = 80.0
 # band of the player which covers caves + surface for now.
 const _SPAWN_Y_BAND: int = 12
 
-# Vanilla per-player hostile cap (gameDifficulty * 70 in Alpha). The
-# mob_base.gd 48 m physics gate + the subclass _physics_gated flag
-# (skeleton / creeper / zombie / spider all check it) skip AI + path-
-# finding for mobs out of range, so only ~10-15 of these 70 actually
-# run full physics at any given moment. The remaining 55+ cost just a
-# distance check per frame each (~100 ns).
-const _HOSTILE_CAP: int = 70
-
 # Tick interval — 1 Hz. Earlier 2 Hz × 8 attempts × 4-mob pack
 # expansion landed up to 32 mob instantiations in one tick, each
 # costing 5-10 ms in _ready (mesh + collider + fire billboards).
@@ -69,34 +60,26 @@ const _HOSTILE_CAP: int = 70
 # keeps per-tick cost bounded.
 const _SPAWN_INTERVAL_SEC: float = 1.0
 
-# Per-tick attempts. Hard cap of 4 — even with pack expansion (up to
-# 4 mobs per seed), the per-tick spawn count is bounded so one bad
-# tick can't stall the main thread.
+# Per-tick candidate-group origins. Alpha evaluates eligible chunks rather
+# than sampling a player-centred ring, but once an origin is chosen each
+# group follows bg.java's exact 3×4 nearby-attempt structure below.
 const _ATTEMPTS_PER_TICK: int = 4
 # Hard ceiling on mobs instantiated in a single tick. With shared
 # mesh + material caching (MobCube._mesh_cache + MobBase._shared_materials)
 # per-spawn _ready() is ~1-2 ms instead of 5-10 ms, so 4/tick keeps
 # under a 16 ms frame budget and gets the cap fill rate close to
-# vanilla. Pack expansion still drains 1/tick from the queue for
-# graceful smoothing.
+# vanilla while still allowing one complete Alpha-sized group per pass.
 const _MAX_SPAWNS_PER_TICK: int = 4
 
-# Pack-spawn — vanilla `SpawnerCreature.spawnEntities` runs a 4-loop
-# after the seed cell passes, attempting 4 MORE same-species spawns
-# jittered by `nextInt(6) - nextInt(6)` (±5 X/Z) with ZERO Y delta.
-# Each additional attempt independently checks cell validity, so the
-# actual pack count is geometry-dependent — open caves get the full
-# 4, tight corridors trim to 1-2. Vanilla's jitter loop produces "up
-# to 4 mobs per pack" total (1 seed + 3 successful pack attempts).
-const _PACK_INNER_ATTEMPTS: int = 3
+# Alpha bg.java's candidate-group loop has three outer passes. Each pass
+# resets to the same origin and performs four cumulative random-walk steps.
+# There is NO guaranteed seed spawn and NO separate solo/pack roll: all
+# twelve cells independently pass or fail placement + species predicates,
+# and the shared success count stops at `hf.i()` (four for spiders and the
+# other Overworld hostiles, one for ghasts).
+const _PACK_OUTER_ATTEMPTS: int = 3
+const _PACK_INNER_ATTEMPTS: int = 4
 const _PACK_JITTER_XZ: int = 6  # vanilla nextInt(6) - nextInt(6) = ±5
-# Solo-spawn roll — 25% of successful seed cells skip the pack loop
-# entirely so the player encounters a lone mob from time to time.
-# Mirrors the Beta-era feel where the pack-loop's Y=0 jitter + tight
-# cave geometry made single hostiles common in practice (most extras
-# failed validity). The explicit roll keeps the variability stable
-# regardless of how cleanly our chunk geometry resembles vanilla.
-const _SOLO_SPAWN_CHANCE: float = 0.25  # vanilla — 75% of seeds expand into packs
 
 # `hf.i()` returns 4. Species override it — `am.i()` returns 1.
 const _DEFAULT_GROUP_SIZE: int = 4
@@ -104,10 +87,9 @@ const _DEFAULT_GROUP_SIZE: int = 4
 # Cached lookups so the per-tick path avoids find_child + Script load.
 var _player_cache: Node3D = null
 var _chunk_manager_cache: Node = null
-# Hostile species pool, cached after first lookup. Per attempt we pick
-# uniformly from this list. Vanilla SpawnerAnimals weights by mob's
-# `getCanSpawnHere` per attempt rather than a flat pool, but uniform
-# is close enough until skeleton-vs-zombie biome rules ship.
+# Hostile species pool, cached after first lookup. Alpha chooses uniformly
+# from the active provider's class array, then applies that entity's own spawn
+# predicate to each candidate; the group loop below follows that ordering.
 # dimension:int -> Array[Script]. Keyed by dimension because a portal
 # trip changes the answer; a single slot would have carried Overworld
 # mobs into the Nether.
@@ -121,11 +103,6 @@ var _spawn_accum: float = 0.0
 # work per tick so a lucky pack expansion can't pile 32 mob _ready()
 # calls into one frame.
 var _spawns_this_tick: int = 0
-# Pack-spawn queue. Each entry is [mob_script, cell]. Drained 1 per
-# tick (alongside the seed roll) so a pack of 4 takes 4 ticks to
-# fully materialize instead of all-at-once. Maintains vanilla
-# clustered-pack visuals without the per-frame stutter.
-var _pack_queue: Array = []
 # Seconds of hostile-spawn suppression remaining. See grant_spawn_grace.
 var _spawn_grace_remaining: float = 0.0
 
@@ -145,9 +122,6 @@ func _ready() -> void:
 # passive spawns and already-living mobs are untouched.
 func grant_spawn_grace(seconds: float) -> void:
 	_spawn_grace_remaining = maxf(_spawn_grace_remaining, seconds)
-	# Anything already queued from before the trip would land the instant
-	# the window closes, which defeats the point.
-	_pack_queue.clear()
 
 
 func _process(delta: float) -> void:
@@ -223,32 +197,18 @@ func _run_spawn_pass() -> void:
 	if pool.is_empty():
 		return
 	_spawns_this_tick = 0
-	# Drain the pack queue first — these are pre-validated cells
-	# from previous seed spawns. Counts against the per-tick spawn
-	# budget so the queue + new seeds together can't exceed it.
-	while not _pack_queue.is_empty() and _spawns_this_tick < _MAX_SPAWNS_PER_TICK:
-		var entry: Array = _pack_queue.pop_front()
-		var queued_cell: Vector3i = entry[1] as Vector3i
-		if not _outside_player_exclusion(player, queued_cell):
-			continue
-		if _is_valid_spawn_cell_for(manager, entry[0] as Script, queued_cell):
-			_spawn_mob_at(manager, entry[0] as Script, queued_cell)
-	# Then new seed rolls if budget remains.
+	# One species is chosen per candidate group, exactly as bg.java chooses
+	# classArray[n6] before entering its 3×4 placement-attempt loop.
 	for _i in range(_ATTEMPTS_PER_TICK):
 		if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
 			break
 		# `int n6 = cy2.l.nextInt(classArray.length)` — ONE class is
 		# chosen per candidate group, not per attempt within it.
 		var mob_script: Script = pool[randi() % pool.size()] as Script
-		# Vanilla rolls the species gate on the CANDIDATE, and a failed
-		# roll costs the attempt — that is what makes ghasts rare rather
-		# than merely slower to place.
-		if not _passes_species_spawn_roll(mob_script):
-			continue
-		_try_spawn_one(manager, player, mob_script)
+		_try_spawn_group(manager, player, mob_script)
 
 
-func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
+func _try_spawn_group(manager: Node, player: Node3D, mob_script: Script) -> int:
 	# Pick a random XZ offset in the spawn band. Uniform polar
 	# distribution (radius² uniform → linear radius distribution favors
 	# the outer band) is closer to vanilla's per-chunk-uniform pick.
@@ -272,60 +232,115 @@ func _try_spawn_one(manager: Node, player: Node3D, mob_script: Script) -> void:
 	var origin: Vector3i = Vector3i(
 		int(floor(player.global_position.x)), 0, int(floor(player.global_position.z))
 	)
-	var seed_cell: Vector3i = Vector3i(origin.x + dx, sy, origin.z + dz)
-	if not _is_valid_spawn_cell_for(manager, mob_script, seed_cell):
-		return
-	# Seed mob — always spawns at the validated seed cell.
-	_spawn_mob_at(manager, mob_script, seed_cell)
-	# `if (n10 >= hf2.i()) continue block6;` — the group-size cap is the
-	# ENTITY's, and a ghast's is 1. `am.i()` returns 1 where the
-	# EntityLiving default is 4, which is why ghasts are always alone.
-	if _group_size_for(mob_script) <= 1:
-		return
-	# Solo-roll: 25% of seeds skip the pack expansion, so the player
-	# encounters lone hostiles from time to time instead of always-packs.
-	if randf() < _SOLO_SPAWN_CHANCE:
-		return
-	# Vanilla pack loop — `SpawnerCreature.spawnEntities` line ~135.
-	# Up to _PACK_INNER_ATTEMPTS extra spawns at triangular-jittered
-	# cells. We ENQUEUE these for subsequent ticks instead of spawning
-	# inline; the queue drains 1/tick along with seed rolls so per-
-	# frame cost stays bounded. Pre-validate so dead cells don't sit
-	# in the queue (validity re-checked on drain in case terrain
-	# changed in the meantime).
-	var pack_cell: Vector3i = seed_cell
-	for _i in range(_PACK_INNER_ATTEMPTS):
-		pack_cell += Vector3i(
-			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ),
-			0,
-			(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ)
-		)
-		if not _outside_player_exclusion(player, pack_cell):
-			continue
-		if _is_valid_spawn_cell_for(manager, mob_script, pack_cell):
-			_pack_queue.append([mob_script, pack_cell])
-	# Bound the queue so a runaway frame can't pile up hundreds of
-	# pending mobs that all spawn over the next 100 seconds.
-	if _pack_queue.size() > 32:
-		_pack_queue.resize(32)
+	var group_origin := Vector3i(origin.x + dx, sy, origin.z + dz)
+	return _spawn_group_from_origin(manager, player, mob_script, group_origin)
+
+
+# Alpha bg.java lines 44-80. The origin only gates whether the group is
+# attempted; it is never itself a guaranteed spawn. Candidate Y stays fixed
+# because `nextInt(1) - nextInt(1)` is always zero.
+func _spawn_group_from_origin(
+	manager: Node,
+	player: Node3D,
+	mob_script: Script,
+	origin: Vector3i,
+	candidate_jitters: Array[Vector3i] = []
+) -> int:
+	var chunk_coord := Vector2i(origin.x >> 4, origin.z >> 4)
+	if manager.get_chunk_at_coord(chunk_coord) == null:
+		return 0
+	if manager.get_world_block(origin) != Blocks.AIR:
+		return 0
+	var spawned: int = 0
+	var group_cap: int = _group_size_for(mob_script)
+	var jitter_index: int = 0
+	for _outer in range(_PACK_OUTER_ATTEMPTS):
+		# Alpha resets n11/n12/n13 to the group origin for every outer pass.
+		var candidate: Vector3i = origin
+		for _inner in range(_PACK_INNER_ATTEMPTS):
+			var jitter: Vector3i
+			if jitter_index < candidate_jitters.size():
+				jitter = candidate_jitters[jitter_index]
+			else:
+				jitter = Vector3i(
+					(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ),
+					0,
+					(randi() % _PACK_JITTER_XZ) - (randi() % _PACK_JITTER_XZ)
+				)
+			jitter_index += 1
+			candidate += jitter
+			if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
+				return spawned
+			if not _outside_player_exclusion(player, candidate):
+				continue
+			if not _is_valid_spawn_cell_for(manager, mob_script, candidate):
+				continue
+			# The entity's spawn predicate runs per candidate in Alpha. This is
+			# observable for ghasts (`am.a()` rolls one-in-twenty each time).
+			if not _passes_species_spawn_roll(mob_script):
+				continue
+			if not _spawn_mob_at(manager, mob_script, candidate):
+				continue
+			spawned += 1
+			if spawned >= group_cap:
+				return spawned
+	return spawned
 
 
 # Instantiate the mob script + parent it under the chunk manager.
 # Position-Y nudged 0.05 above the cell floor to avoid z-fighting.
-func _spawn_mob_at(manager: Node, mob_script: Script, cell: Vector3i) -> void:
+func _spawn_mob_at(manager: Node, mob_script: Script, cell: Vector3i) -> bool:
 	# Hard per-tick budget — silently drop the spawn if we've already
 	# instantiated _MAX_SPAWNS_PER_TICK mobs this tick. The cap still
 	# fills (next tick will spawn more), just spread across multiple
 	# frames so no single frame absorbs the full 10-20 ms of mob
 	# construction work.
 	if _spawns_this_tick >= _MAX_SPAWNS_PER_TICK:
-		return
+		return false
+	# Alpha constructs the candidate and then `hf.a()` rejects it when
+	# another entity already intersects its AABB. The random walk can roll
+	# (0, 0) repeatedly, so omitting this check allowed an entire group to
+	# be born in one cell and look like coordinated pack aggression.
+	if not _spawn_entity_space_is_clear(manager, mob_script, cell):
+		return false
 	var mob = mob_script.new() as CharacterBody3D
 	if mob == null:
-		return
+		return false
 	manager.add_child(mob)
 	mob.global_position = Vector3(cell) + Vector3(0.5, 0.05, 0.5)
 	_spawns_this_tick += 1
+	return true
+
+
+# Entity-overlap half of `hf.a()`. Block/liquid clearance is handled by
+# `_is_valid_spawn_cell_for`; this scan mirrors World.getEntitiesWithinAABB
+# for the bounded MobBase population without involving PhysicsServer3D.
+func _spawn_entity_space_is_clear(manager: Node, mob_script: Script, cell: Vector3i) -> bool:
+	var descriptor: Dictionary = _species_descriptor(mob_script)
+	var width: float = float(descriptor.get("width", 0.6))
+	var height: float = float(descriptor.get("height", 1.8))
+	var feet := Vector3(cell) + Vector3(0.5, 0.05, 0.5)
+	var candidate_box := AABB(
+		feet - Vector3(width * 0.5, 0.0, width * 0.5), Vector3(width, height, width)
+	)
+	for value: Variant in _MOB_BASE.active_mobs().values():
+		if not is_instance_valid(value) or not value is Node3D:
+			continue
+		var other := value as Node3D
+		# Active mobs in the inactive dimension can share coordinates but
+		# do not inhabit this world's entity list.
+		if not manager.is_ancestor_of(other):
+			continue
+		var other_width: float = float(other.call("_get_body_width"))
+		var other_height: float = float(other.call("_get_body_height"))
+		var other_feet: Vector3 = other.global_position
+		var other_box := AABB(
+			other_feet - Vector3(other_width * 0.5, 0.0, other_width * 0.5),
+			Vector3(other_width, other_height, other_width)
+		)
+		if candidate_box.intersects(other_box):
+			return false
+	return true
 
 
 # Per-species spawn validity. `bg.java` constructs the entity and calls
@@ -379,14 +394,23 @@ func _species_descriptor(mob_script: Script) -> Dictionary:
 	if _species_cache.has(mob_script):
 		return _species_cache[mob_script]
 	var descriptor: Dictionary = {
-		"airborne": false, "size": 1.0, "group_size": _DEFAULT_GROUP_SIZE, "spawn_denominator": 1
+		"airborne": false,
+		"size": 1.0,
+		"width": 0.6,
+		"height": 1.8,
+		"group_size": _DEFAULT_GROUP_SIZE,
+		"spawn_denominator": 1,
 	}
 	var probe: Object = mob_script.new()
 	if probe != null:
 		if probe.has_method("spawns_airborne"):
 			descriptor["airborne"] = bool(probe.call("spawns_airborne"))
 		if probe.has_method("_get_body_height"):
-			descriptor["size"] = float(probe.call("_get_body_height"))
+			var body_height: float = float(probe.call("_get_body_height"))
+			descriptor["size"] = body_height
+			descriptor["height"] = body_height
+		if probe.has_method("_get_body_width"):
+			descriptor["width"] = float(probe.call("_get_body_width"))
 		if probe.has_method("spawn_group_size"):
 			descriptor["group_size"] = int(probe.call("spawn_group_size"))
 		if probe.has_method("natural_spawn_denominator"):
@@ -400,10 +424,9 @@ func _species_descriptor(mob_script: Script) -> Dictionary:
 
 
 # `bg.java` rejects any spawn attempt within 24 blocks of a player. The
-# seed ring already starts at 24, but pack jitter is ±5 per hop with up
-# to three hops, so an expansion cell could land inside the ring (audit
-# finding #16). Checked at enqueue AND at drain — the player moves
-# between the two.
+# origin ring already starts at 24, but cumulative pack jitter can move an
+# attempted cell inside it. Alpha applies the player exclusion to every
+# candidate, so we do the same rather than trusting the origin distance.
 func _outside_player_exclusion(player: Node3D, cell: Vector3i) -> bool:
 	if player == null or not is_instance_valid(player):
 		return true

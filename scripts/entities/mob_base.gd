@@ -158,7 +158,7 @@ const _ENV_TICK_DT: float = 1.0 / 20.0
 const LOD_NEAR: int = 0  # <32 m — full AI 20 Hz, A* pathfinding, anim
 const LOD_MID: int = 1  # 32-64 m — AI 5 Hz, simple wander (no A*), anim
 const LOD_FAR: int = 2  # 64-96 m — AI 1 Hz, no anim updates
-const LOD_GATED: int = 3  # >96 m — process_mode DISABLED, invisible
+const LOD_GATED: int = 3  # >96 m — distance heartbeat only, invisible
 
 const _LOD_NEAR_RADIUS: float = 32.0
 const _LOD_MID_RADIUS: float = 64.0
@@ -365,12 +365,11 @@ var _physics_gated: bool = false
 # _physics_process. Subclasses use this to scale AI tick rate and
 # decide whether to run pathfinding vs simple wander.
 var _lod_tier: int = LOD_NEAR
-# Bounds total population — vanilla despawns mobs > 128 m from any
-# player after a 30 s grace. Without this, passive mobs accumulate
+# Bounds total population. Without this, passive mobs accumulate
 # forever (24+ per km of exploration). When the mob enters GATED,
 # arm a SceneTreeTimer; if the timer fires before the mob is
-# re-ungated, queue_free. process_mode = ALWAYS on the timer so it
-# fires even though the mob itself is DISABLED.
+# re-ungated, queue_free. The mob keeps its extremely cheap distance
+# heartbeat while gated so it can notice the player returning.
 var _despawn_timer: SceneTreeTimer = null
 # Frame skip counter for move_and_slide throttling — see
 # _physics_process. Resets every time move_and_slide actually fires.
@@ -379,9 +378,8 @@ var _move_frame_skip: int = 0
 # is_on_floor() since we no longer use move_and_slide.
 var _voxel_on_floor: bool = false
 # True when the last collision step zeroed a non-zero horizontal
-# velocity component (i.e., the mob hit a wall). Subclasses can read
-# this to drive vanilla "isCollidedHorizontally" behaviors — currently
-# only the spider's Beta wall-climb mechanic.
+# velocity component (i.e., the mob hit a wall). Retained for subclasses
+# that need vanilla isCollidedHorizontally behavior.
 var _was_collided_horizontally: bool = false
 
 var _air_ticks: int = _MAX_AIR_TICKS
@@ -605,6 +603,49 @@ func _cached_player() -> Node3D:
 	return _cached_player_node
 
 
+# Vanilla `EntityLiving.canEntityBeSeen`: trace from this mob's eye to the
+# target's eye and reject the first solid block. Player.global_position is
+# the centre of its 1.8 m capsule, so +0.7 reaches the first-person eye;
+# MobBase targets expose their source-faithful eye height directly.
+func has_line_of_sight(target: Node3D) -> bool:
+	if target == null:
+		return false
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return true
+	var from: Vector3 = global_position + Vector3(0.0, _get_eye_height(), 0.0)
+	var target_eye_height: float = 0.7
+	if target is MobBase:
+		target_eye_height = float(target.call("_get_eye_height"))
+	var to: Vector3 = target.global_position + Vector3(0.0, target_eye_height, 0.0)
+	var segment: Vector3 = to - from
+	var length: float = segment.length()
+	if length < 0.001:
+		return true
+	# Quarter-block samples cannot skip a one-cell obstacle on any axis.
+	# Endpoints are excluded so neither entity's occupied cell blocks itself.
+	var samples: int = maxi(1, int(ceil(length * 4.0)))
+	for i: int in range(1, samples):
+		var point: Vector3 = from.lerp(to, float(i) / float(samples))
+		var cell := Vector3i(int(floor(point.x)), int(floor(point.y)), int(floor(point.z)))
+		if Blocks.is_solid_collision(_chunk_manager.get_world_block(cell)):
+			return false
+	return true
+
+
+# Shared hostile-melee bridge. Player.take_damage uses a source string while
+# MobBase.take_damage receives knockback strength and the attacking entity.
+# EntityMonster may retaliate against another mob after friendly fire, so its
+# direct target cannot safely be assumed to be the player.
+func _deal_melee_damage(target: Node3D, amount: int) -> void:
+	if target == null or not target.has_method("take_damage"):
+		return
+	var direction: Vector3 = target.global_position - global_position
+	if target is MobBase:
+		target.call("take_damage", amount, direction, 1.0, self)
+	else:
+		target.call("take_damage", amount, "mob", direction)
+
+
 # Returns a horizontal world target 3-6 m away, or Vector3.ZERO if
 # the cooldown hasn't expired yet. Shared `EntityCreature.find
 # RandomTargetBlock` wander helper for hostile mobs (zombie, skeleton,
@@ -662,7 +703,7 @@ func roll_wander_gate(denom_at_near: int) -> bool:
 #
 # MUST be called once per AI tick (20 Hz). If called from `_process`
 # (variable framerate) it would over-fire on high-fps hosts. The AI
-# tick is also gated on `_dying` + the 48 m physics radius — both
+# tick is also gated on `_dying` + the 96 m physics radius — both
 # desirable: dying mobs don't speak, and far-mobs (inaudible past
 # the 16 m audio max distance anyway) skip the random call entirely.
 #
@@ -763,6 +804,44 @@ static func _cached_box(size: Vector3) -> BoxShape3D:
 	return box
 
 
+# Updates the performance LOD and returns true while this mob should skip
+# expensive simulation. It intentionally remains callable every physics
+# frame: disabling the node here also disabled the only code capable of
+# noticing that the player had returned.
+func _update_distance_lod() -> bool:
+	var player: Node3D = _cached_player()
+	if player != null:
+		var dx: float = global_position.x - player.global_position.x
+		var dz: float = global_position.z - player.global_position.z
+		var distance_sq: float = dx * dx + dz * dz
+		if distance_sq > _LOD_FAR_RADIUS_SQ:
+			velocity = Vector3.ZERO
+			_physics_gated = true
+			_lod_tier = LOD_GATED
+			visible = false
+			if _despawn_timer == null:
+				_despawn_timer = get_tree().create_timer(_DESPAWN_GATED_SECONDS, true, false, true)
+				_despawn_timer.timeout.connect(_on_gated_despawn_check)
+			return true
+		# Back in range: cancel the old callback. Merely dropping the
+		# reference lets that timer delete a mob during a later gate cycle.
+		if _despawn_timer != null:
+			var despawn_callback := Callable(self, "_on_gated_despawn_check")
+			if _despawn_timer.timeout.is_connected(despawn_callback):
+				_despawn_timer.timeout.disconnect(despawn_callback)
+			_despawn_timer = null
+		if distance_sq > _LOD_MID_RADIUS_SQ:
+			_lod_tier = LOD_FAR
+		elif distance_sq > _LOD_NEAR_RADIUS_SQ:
+			_lod_tier = LOD_MID
+		else:
+			_lod_tier = LOD_NEAR
+	if _physics_gated:
+		visible = true
+	_physics_gated = false
+	return false
+
+
 # Subclasses override to add per-mob AI in _process. The base only handles
 # physics + cooldowns; AI lives one level up so changing the AI of a
 # specific mob doesn't accidentally break gravity / damage / death.
@@ -775,54 +854,11 @@ func _physics_process(delta: float) -> void:
 		velocity = Vector3.ZERO
 		PerfProbe.end("mob.physics", pp)
 		return
-	# Distance gate — mobs far from any player skip physics + AI to
-	# keep frame cost flat regardless of total mob count. Vanilla
-	# despawns at 128 m; we use a softer 48 m cull so the mob stays
-	# alive (preserves spawned populations, world feels consistent on
-	# return) but doesn't burn cycles. move_and_slide alone is the
-	# dominant per-mob cost; skipping it for distant mobs trades AI
-	# liveness for steady FPS in mob-spawner-heavy worlds.
-	var p: Node3D = _cached_player()
-	if p != null:
-		var dx: float = global_position.x - p.global_position.x
-		var dz: float = global_position.z - p.global_position.z
-		var d_sq: float = dx * dx + dz * dz
-		# Tier classification — squared-distance compares avoid sqrt.
-		if d_sq > _LOD_FAR_RADIUS_SQ:
-			# GATED: hard-disable the node entirely. No physics, no
-			# render, no script processing. Re-enabled when player
-			# re-approaches. Arm a 30 s despawn timer if not already
-			# armed — fires queue_free on a still-gated mob to bound
-			# the total population (vanilla despawns at 128 m + delay).
-			velocity = Vector3.ZERO
-			_physics_gated = true
-			_lod_tier = LOD_GATED
-			if process_mode != Node.PROCESS_MODE_DISABLED:
-				process_mode = Node.PROCESS_MODE_DISABLED
-				visible = false
-			if _despawn_timer == null:
-				# process_mode=ALWAYS so the timer fires even though our
-				# own node is DISABLED.
-				_despawn_timer = (get_tree().create_timer(
-					_DESPAWN_GATED_SECONDS, true, false, true
-				))
-				_despawn_timer.timeout.connect(_on_gated_despawn_check)
-			PerfProbe.end("mob.physics", pp)
-			return
-		# Cancel any pending despawn — we're back in range.
-		if _despawn_timer != null:
-			_despawn_timer = null
-		if d_sq > _LOD_MID_RADIUS_SQ:
-			_lod_tier = LOD_FAR
-		elif d_sq > _LOD_NEAR_RADIUS_SQ:
-			_lod_tier = LOD_MID
-		else:
-			_lod_tier = LOD_NEAR
-	if _physics_gated:
-		# Re-enable when back in range.
-		process_mode = Node.PROCESS_MODE_INHERIT
-		visible = true
-	_physics_gated = false
+	# Distance gate — the helper returns true while expensive work is
+	# suspended, but keeps enough processing alive to detect re-entry.
+	if _update_distance_lod():
+		PerfProbe.end("mob.physics", pp)
+		return
 	# Chunk-load gate. populate_chunk_at_gen spawns mobs the moment the
 	# chunk's block data lands, but the trimesh collider is built async
 	# on a worker. During that 1-30 frame window, is_on_floor() returns
@@ -856,22 +892,6 @@ func _physics_process(delta: float) -> void:
 		_in_water = _check_in_water()
 		_in_lava = _check_in_lava()
 		_in_fire_cached = _check_in_fire()
-		# Shared entity-contact hook (redstone-plan.md §7.3): mobs count
-		# as walking entities for redstone ore (vanilla an.java b(…, lw2)
-		# fires for ANY entity). Rides the 20 Hz env cadence — vanilla's
-		# own per-tick rate — and only while grounded and actually moving,
-		# so idle mobs cost one boolean here and nothing else.
-		if (
-			_chunk_manager != null
-			and _voxel_on_floor
-			and Vector2(velocity.x, velocity.z).length_squared() > 0.04
-		):
-			var walk_cell := Vector3i(
-				int(floor(global_position.x)),
-				int(floor(global_position.y - 0.5)),
-				int(floor(global_position.z))
-			)
-			Blocks.on_entity_walking(_chunk_manager, walk_cell, self)
 	var in_fire: bool = _in_fire_cached
 	# Gravity / drag — fluid cells replace normal gravity entirely.
 	# Vanilla water: velocity *= 0.8/tick, gravity -0.02/tick.
@@ -922,9 +942,14 @@ func _physics_process(delta: float) -> void:
 		# couldn't cover the 1-block horizontal gap.
 		if velocity.y < 0.0:
 			velocity.y = 0.0
-		var f: float = pow(_GROUND_FRICTION, delta)
-		velocity.x *= f
-		velocity.z *= f
+			var f: float = pow(_GROUND_FRICTION, delta)
+			velocity.x *= f
+			velocity.z *= f
+	# The callback belongs to Entity.move, not the sparse environment sample.
+	# Run it after gravity/friction prepared this step's velocity and before
+	# VoxelCollider consumes it, so soul sand continuously slows real motion.
+	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
+		_chunk_manager.report_entity_contact(self)
 	# Custom voxel-AABB collision (VoxelCollider) instead of
 	# move_and_slide. Per-mob cost drops from ~2-3 ms to ~0.05 ms
 	# because we read chunk block data directly (1-30 cell checks)
@@ -973,7 +998,7 @@ func _physics_process(delta: float) -> void:
 	_was_voxel_on_floor = _voxel_on_floor
 	# Horizontal collision = a non-zero pre-clip x/z component was zeroed
 	# by the wall scan. Threshold matches the collider's own 1e-4 motion
-	# epsilon. Used by spider for the Beta wall-climb mechanic.
+	# epsilon.
 	_was_collided_horizontally = (
 		(absf(pre_clip_vx) > 0.0001 and absf(velocity.x) <= 0.0001)
 		or (absf(pre_clip_vz) > 0.0001 and absf(velocity.z) <= 0.0001)
@@ -1425,7 +1450,7 @@ func take_damage(
 		return false
 	# Latch attacker for kill-source attribution. Vanilla `hf.aq` tracks
 	# this for drop tables (creeper-by-skeleton drops a music disc) and
-	# AI revenge targeting (which we don't use yet).
+	# hostile retaliation targeting.
 	if attacker != null:
 		_last_attacker = attacker
 	# Vanilla EntityLiving.damageEntity (hf.java:281-294) — gates the

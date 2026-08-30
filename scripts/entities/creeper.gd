@@ -86,7 +86,6 @@ const _AI_TICK_DT: float = 1.0 / 20.0
 # Vanilla `ef.c_()` targets the nearest player within 16 m (with
 # line-of-sight check). Same constant as zombie/skeleton.
 const _AI_DETECT_RADIUS: float = 16.0
-const _AI_ABANDON_RADIUS: float = 40.0
 const _AI_REPATH_TICKS: int = 20
 
 # --- Fuse mechanics (vanilla `dq.a(lw, float)`) ---
@@ -103,9 +102,9 @@ const _FUSE_MAX_TICKS: int = 30
 # power 4.0; creeper is slightly weaker).
 const _EXPLOSION_POWER: float = 3.0
 
-# Walk speed + pathfinding params — same as zombie. Creepers chase at
-# a steady pace (vanilla `dq` has no special speed override).
-const _AI_WALK_SPEED: float = 1.0
+# dq has no speed override, so it inherits hf.am = 0.7 versus the
+# zombie's nt.am = 0.5: a 1.4x ratio in clone units.
+const _AI_WALK_SPEED: float = 1.4
 const _AI_JUMP_VELOCITY: float = 6.0
 const _AI_STEP_BOOST_SPEED: float = 2.5
 const _AI_MAX_YAW_STEP: float = PI / 4.0
@@ -211,6 +210,22 @@ func _ready() -> void:
 	_build_collision_shape()
 	_build_model()
 	super._ready()
+
+
+# Shared Alpha EntityMonster retaliation: damage identifies the attacker even
+# when the normal 16-block, line-of-sight acquisition could not find it.
+func take_damage(
+	amount: int,
+	knockback_dir: Vector3 = Vector3.ZERO,
+	knockback_strength: float = 1.0,
+	attacker: Node = null
+) -> bool:
+	var landed: bool = super.take_damage(amount, knockback_dir, knockback_strength, attacker)
+	if landed and attacker is Node3D and attacker != self:
+		_ai_player_cache = attacker as Node3D
+		_ai_path.clear()
+		_ai_repath_counter = _AI_REPATH_TICKS
+	return landed
 
 
 # Vanilla `dq.b(lw)`: standard drops (gunpowder via super), PLUS one
@@ -410,10 +425,13 @@ func _ai_tick() -> void:
 		_wander_tick()
 		return
 	var dist_sq: float = global_position.distance_squared_to(player.global_position)
-	if dist_sq > _AI_ABANDON_RADIUS * _AI_ABANDON_RADIUS:
-		_ai_player_cache = null
+	# fc.b_() retains a living acquired target regardless of distance.
+	# EntityCreature only invokes the attack hook while the target remains
+	# visible. Retain the target behind cover, but decay the fuse and pursue
+	# instead of hissing through a wall.
+	if not has_line_of_sight(player):
 		_tick_fuse_decay()
-		_wander_tick()
+		_pursue_player(player)
 		return
 	# Vanilla `dq.a(lw, float)`: ignite at < 3 m (NEW) or sustain at
 	# < 7 m (ONGOING). Two-band check so a hissing creeper doesn't
@@ -427,14 +445,11 @@ func _ai_tick() -> void:
 	# Out of range — count fuse back down toward 0 (vanilla `b_()`
 	# else-branch decrement) so the next ignite starts fresh.
 	_tick_fuse_decay()
-	# Continue chase: re-aim periodically, walk the path.
-	if dist_sq < _FUSE_IGNITE_RANGE * _FUSE_IGNITE_RANGE:
-		# Already in melee range — face the player and stop. Shouldn't
-		# happen since the band check above caught it, but defensive.
-		_face_target(player)
-		_velocity_brake()
-		return
-	# FAILED searches back off to the half interval (see _ai_path_failed).
+	_pursue_player(player)
+
+
+func _pursue_player(player: Node3D) -> void:
+	# FAILED searches back off to half the interval (see _ai_path_failed).
 	var repath_due: bool = _ai_repath_counter >= _AI_REPATH_TICKS
 	if _ai_path.is_empty():
 		repath_due = not _ai_path_failed or _ai_repath_counter >= _AI_REPATH_TICKS / 2
@@ -483,24 +498,20 @@ func _detonate() -> void:
 	if _exploded:
 		return
 	_exploded = true
-	# Death SFX BEFORE explosion so the creeper-death sound layers
-	# audibly with random.explode rather than getting drowned out.
-	_play_death_sfx()
-	# Spawn drops at the creeper's CURRENT position before the blast
-	# blows the cell to AIR — vanilla drops drop here regardless of
-	# whether the creeper kills itself or a player kills it.
-	_spawn_drops()
+	# dq calls World.createExplosion then setDead directly. That bypasses
+	# EntityLiving's normal death/loot path: self-detonation yields neither
+	# gunpowder nor a separate creeper-death sound.
 	if _chunk_manager != null:
-		# Vanilla `as.a(this, this.aw, this.ax, this.ay, 3.0f)` — vanilla
-		# `ax` is the entity's CENTER Y (not feet). Detonating at feet
-		# eats more terrain below than above, producing a lopsided
-		# crater. Lift to body center so the blast wraps the creeper
-		# symmetrically.
-		var center: Vector3 = global_position + Vector3(0.0, _BB_HEIGHT * 0.5, 0.0)
-		Explosion.detonate(_chunk_manager, center, _EXPLOSION_POWER, self)
+		Explosion.detonate(_chunk_manager, _explosion_origin(), _EXPLOSION_POWER, self)
 	# Skip the normal death-tilt animation — a creeper that just
 	# detonated should disappear with the blast, not fall sideways.
 	queue_free()
+
+
+# Alpha lw.ax tracks the AABB base/feet Y; the clone's mob origin uses
+# the same convention, so no body-center lift belongs here.
+func _explosion_origin() -> Vector3:
+	return global_position
 
 
 # --- Helpers reused from zombie's chase pattern ---
@@ -512,8 +523,18 @@ func _find_player() -> Node3D:
 	var main: Node = get_tree().root.get_node_or_null("Main")
 	if main == null:
 		return null
-	_ai_player_cache = main.find_child("Player", true, false) as Node3D
-	return _ai_player_cache
+	var candidate: Node3D = main.find_child("Player", true, false) as Node3D
+	if candidate == null:
+		return null
+	if (
+		global_position.distance_squared_to(candidate.global_position)
+		>= _AI_DETECT_RADIUS * _AI_DETECT_RADIUS
+	):
+		return null
+	if not has_line_of_sight(candidate):
+		return null
+	_ai_player_cache = candidate
+	return candidate
 
 
 func _repath_toward(player: Node3D) -> void:

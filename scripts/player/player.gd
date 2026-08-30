@@ -1716,12 +1716,19 @@ func _play_footstep() -> void:
 	if block_id == Blocks.AIR:
 		return
 	SFX.play_step(block_id)
-	# Shared entity-contact hook (redstone-plan.md §7.3) — vanilla
-	# Entity.move fires Block.b(world, …, entity) for the cell underfoot.
-	# Footstep cadence ≈ vanilla's per-move-tick rate while walking, and
-	# standing still fires nothing, so lit redstone ore reverts under a
-	# stationary player exactly like vanilla.
-	Blocks.on_entity_walking(chunk_manager, block_pos, self)
+
+
+# Invoke the world's entity/block contact sweep after this frame's movement
+# velocity has been prepared. In particular, soul sand must scale the actual
+# velocity passed to move_and_slide; the old footstep-only callback ran after
+# movement and its result was overwritten by the next frame's input speed.
+func _report_block_contact() -> void:
+	var cm: Node = _chunk_manager_ref
+	if cm == null or not is_instance_valid(cm):
+		cm = get_tree().root.get_node_or_null("Main/ChunkManager")
+		_chunk_manager_ref = cm
+	if cm != null and cm.has_method("report_entity_contact"):
+		cm.report_entity_contact(self)
 
 
 func _cancel_bow_if_charging() -> void:
@@ -2250,6 +2257,7 @@ func _physics_process(delta: float) -> void:
 
 	if creative_mode and _is_flying:
 		_update_flight_physics()
+		_report_block_contact()
 		move_and_slide()
 		# Airborne — no footstep cadence, no fall tracking while flying.
 		# (fall tracking is disarmed because _is_flying disables gravity and
@@ -2297,6 +2305,7 @@ func _physics_process(delta: float) -> void:
 					FluidFx.spawn_water_splash(cm, splash_pos, velocity, 8)
 		_was_in_water = true
 		_update_water_physics(delta)
+		_report_block_contact()
 		var attempted_vx: float = velocity.x
 		var attempted_vz: float = velocity.z
 		_move_and_slide_with_voxel_floor_guard()
@@ -2368,6 +2377,7 @@ func _physics_process(delta: float) -> void:
 		var climbing: bool = _move_pressed("move_forward") or _move_pressed("jump")
 		if climbing:
 			velocity.y = LADDER_CLIMB_SPEED
+	_report_block_contact()
 	var was_grounded: bool = is_on_floor()
 	var pre_slide_vel: Vector3 = velocity
 	_move_and_slide_with_voxel_floor_guard()
