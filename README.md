@@ -22,32 +22,28 @@ Gameplay and scene-graph logic is GDScript. Six performance-critical paths—chu
 
 ## Features
 
-- **Infinite procedural world** — 2D Perlin heightmap, stratified terrain layers, oak trees, caves, ore veins (coal/iron/gold/diamond)
-- **The Nether** — working obsidian portals, dimension travel, lava seas, netherrack, soul sand, glowstone, ghasts, and zombie pigmen
-- **Redstone circuits** — dust, torches, levers, buttons, pressure plates, doors, TNT, rails, and four-delay repeaters with directional full-strength output
-- **100+ block types and states** — stone family, ores, wood, glass, sand, gravel, torches, fences, stairs, doors, chests, furnaces, flowing fluids, fire, beds, jukeboxes, slabs, plants, snow, TNT, redstone, Nether blocks, rails, signs, wool (16 colors), and metal blocks
-- **80+ items** — full tool tiers (pickaxe/axe/shovel/sword/hoe × wood/stone/iron/diamond/gold), armor sets (leather/iron/gold/diamond), bow + arrows, buckets, flint & steel, shears, fishing rod, food, raw materials, redstone repeaters, glowstone dust, 8 music discs, and the minecart family
-- **11 mob species** — pigs, cows, chickens, sheep, zombies, skeletons, spiders, creepers, slimes, zombie pigmen, and ghasts
-- **Crafting & smelting** — recipe registry (shaped + shapeless) from `data/recipes.json`, 2×2 inventory grid + 3×3 crafting table. Furnace with fuel/input/output slots, burn-time tracking
-- **Day/night cycle** — 20-minute day, sky color gradient, sun direction, dynamic lighting
-- **Light propagation** — sky light + block light with BFS flood fill, per-face brightness LUT in shader
-- **Water & lava physics** — finite flow propagation, swim mechanics, bucket placement/pickup
-- **Combat** — melee + ranged (bow + arrows with charge mechanic + critical hits), knockback, armor damage reduction, fall damage, drowning, fire/lava, health regen, death screen with respawn
-- **Dungeons** — cobble/mossy cobble rooms with mob spawner cages + chest loot
-- **Beds** — Sleep mechanic, multi-cell place/break, set spawn point
-- **Jukeboxes + 8 music discs** — Ambient music auto-pauses during disc playback
-- **Farming + fishing** — wheat crops, hoe tilling, tall grass seed drops; cast/reel fishing with raw + cooked fish
-- **Minecart family** — rails (straight + curve), standard + chest + furnace minecarts
-- **Chest, furnace, jukebox storage** — per-block inventories with dedicated UI screens
-- **World save/load** — purpose-built binary format under `user://World{N}/` (chunks, player position + inventory, entities, world metadata) with crash-safe `.new`/`.old` recovery; multi-world select screen
-- **Creative mode** — toggleable from Pause → Options or via the hotkey; flight, no fall damage, instant block break
-- **Rebindable controls** — every gameplay action mappable from Main Menu → Settings → Controls or in-game Pause → Options → Controls; persists to `user://settings.cfg`
-- **In-game item + mob spawners** — grid of every block + item with quantity selector (F4) + grid of every mob species (F6); available in Creative or Debug mode
-- **Audio** — footstep cadence, block break/place SFX, per-mob idle/hurt/death/step sounds, ambient sounds, music player ([Suno playlist](https://suno.com/playlist/8ac3096a-6040-47d8-af33-cfadb9b4438c))
-- **Player model** — first-person and third-person with arm/leg animation, held-item rendering
-- **Threaded chunk loading** — `WorkerThreadPool` for worldgen + meshing, streaming around player
-- **Native C++ fast paths (6 GDExtensions)** — chunk mesher, worldgen base terrain, lighting BFS, water FX, pathfinder A*, voxel-AABB collider — all with GDScript fallback
-
+- **Infinite procedural world**
+- **The Nether**
+- **Redstone circuits** 
+- **100+ block types and states** 
+- **80+ items** 
+- **11 mob species**
+- **Crafting & smelting**
+- **Day/night cycle** 
+- **Water & lava physics**
+- **Combat**
+- **Dungeons**
+- **Beds**
+- **Jukeboxes + 8 music discs** 
+- **Farming + fishing**
+- **Minecarts**
+- **Chest, furnace, jukebox storage**
+- **World save/load** 
+- **Creative mode**
+- **Rebindable controls**
+- **In-game item + mob spawners**
+- **Audio** 
+- **1st and 3rd person** 
 
 
 ## Build
