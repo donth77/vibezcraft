@@ -99,6 +99,21 @@ const _CANE_MAX_HEIGHT: int = 3
 # Cap on _apply_mesh_data calls per frame. Each apply = up to 3 ArrayMesh
 # VBOs + trimesh; stacking them on one frame caused 120→70 fps spikes.
 @export var apply_budget_per_frame: int = 1
+# Wall-clock budget for the initial-load ring, in microseconds.
+#
+# `_spawn_initial_chunks` used to await a rendered frame between EVERY
+# chunk, which is a throughput cap denominated in frames — and each of its
+# chunks is a full synchronous generate + light + mesh on the main thread,
+# so the frames it is waiting for are the slow ones it is creating. A field
+# report on the GDScript fallback measured 1-5 fps through the load and
+# therefore 1-5 chunks a second: minutes to fill a render distance.
+#
+# Spending a time budget before yielding decouples the two. On a machine
+# where a chunk costs more than the budget this is exactly the old
+# behaviour (one chunk, then yield); where chunks are cheap it stops
+# paying a whole frame of latency for each one. The yield itself stays,
+# because the loading screen has to get frames to draw its progress bar.
+@export var initial_spawn_budget_usec: int = 30000
 # Chebyshev radius of the live-physics ring around the player. Saves
 # ~1-2 MB × outer chunks of trimesh + BVH at FAR.
 @export var collision_radius: int = 1
@@ -387,8 +402,14 @@ func _spawn_initial_chunks() -> void:
 	# Offsets are relative; add _initial_load_center so the ring centers
 	# on the saved player chunk (or (0,0) for fresh worlds).
 	var order: Array = ChunkView.spiral_offsets(render_distance)
+	# Yield on a time budget rather than once per chunk — see
+	# initial_spawn_budget_usec. The progress bar still gets frames; it
+	# just stops costing one per chunk on hardware that could do six.
+	var deadline: int = Time.get_ticks_usec() + initial_spawn_budget_usec
 	for c: Vector2i in order:
-		await get_tree().process_frame
+		if Time.get_ticks_usec() >= deadline:
+			await get_tree().process_frame
+			deadline = Time.get_ticks_usec() + initial_spawn_budget_usec
 		_spawn_chunk_sync(c + _initial_load_center)
 		loaded += 1
 		initial_chunks_ready.emit(loaded, total)
@@ -864,6 +885,14 @@ func _compute_chunk_data(
 
 # Main thread: pick at most one completed chunk per frame and finish it
 # (ArrayMesh build + collision + add to scene). Caps per-frame upload cost.
+#
+# Deliberately still one per frame, and not time-budgeted: the ChunkNode it
+# creates parks its mesh in `_pending_apply`, which drains at
+# apply_budget_per_frame (1). Materializing faster than that would only
+# move the backlog forward into a queue of live-but-meshless ChunkNodes
+# sitting in `_chunks` with no collision — visible chunk throughput would
+# not change, and `collision_radius` entities could find a loaded coord
+# with a null shape.
 func _materialize_one_ready_chunk() -> void:
 	_result_mutex.lock()
 	var coord: Vector2i = Vector2i.ZERO

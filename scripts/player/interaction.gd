@@ -2649,18 +2649,25 @@ func _farm_drops(broken_id: int, pos: Vector3i) -> Array:
 # Vanilla ey.java (ItemRedstone): dust becomes REDSTONE_WIRE on top of a
 # normal solid cube. Mirrors _try_place_rail's shape — resolve the target
 # cell from the hit face, verify support, commit, seed propagation.
+#
+# The target cell must be EXACTLY air. ey.java is unusually blunt about it:
+#
+#     if (cy2.a(n2, n3, n4) != 0) { return false; }
+#
+# — no replaceable check at all, unlike ItemBlock. Routing this through
+# Blocks.is_replaceable instead let dust land on a cell that already held
+# dust, because wire is in that list (blocks.gd:1504) to let FLUIDS wash it
+# away, not to invite building into it. Aiming at the exposed face of any
+# solid block abutting a live wire then burned a redstone from the stack,
+# dropped a duplicate on the floor, and — the part that actually hurt —
+# rewrote the cell with meta 0, wiping the wire's power level.
 func _try_place_redstone_dust(hit: Dictionary) -> bool:
 	var place: Vector3i = hit.block_pos + hit.normal_i
-	var target_id: int = _chunk_manager.get_world_block(place)
-	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+	if _chunk_manager.get_world_block(place) != Blocks.AIR:
 		return false
 	# lu.java:a — wire needs a full opaque cube directly beneath it.
 	if not Redstone.is_normal_cube(_chunk_manager, place + Vector3i(0, -1, 0)):
 		return false
-	if target_id != Blocks.AIR:
-		var displaced: int = Blocks.drops(target_id)
-		if displaced != Blocks.AIR:
-			_spawn_dropped_item(place, displaced)
 	_chunk_manager.set_world_block_state(place, Blocks.REDSTONE_WIRE, 0)
 	Redstone.update_wire(_chunk_manager, place)
 	SFX.play_place(Blocks.REDSTONE_WIRE)
@@ -2683,6 +2690,13 @@ func _try_place_redstone_repeater(hit: Dictionary) -> bool:
 		place = hit.block_pos + hit.normal_i
 	var target_id: int = _chunk_manager.get_world_block(place)
 	if target_id != Blocks.AIR and not Blocks.is_replaceable(target_id):
+		return false
+	# Same trap the dust placement fell into: both repeater states sit in
+	# Blocks.is_replaceable so fluids can wash them out, which let a
+	# repeater be "placed" onto a cell that already held one — burning the
+	# item and resetting the delay and facing the player had just set.
+	# Nothing legitimate places a repeater into a repeater.
+	if target_id == Blocks.REDSTONE_REPEATER_OFF or target_id == Blocks.REDSTONE_REPEATER_ON:
 		return false
 	# BlockRedstoneRepeater.canPlaceBlockAt/canBlockStay requires a full
 	# opaque cube directly below the 1/8-high base.
@@ -3331,6 +3345,8 @@ func _set_player_mining(active: bool) -> void:
 
 func _player_inventory() -> Inventory:
 	var player: Node = get_parent()
+	if player == null:
+		return null
 	if player.has_method("get") and "inventory" in player:
 		return player.get("inventory") as Inventory
 	return null

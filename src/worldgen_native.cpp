@@ -1205,6 +1205,103 @@ Dictionary WorldgenNative::settle_generated_gravity(
 	return result;
 }
 
+// Flood fill from every cell that is definitely load-bearing — the y=0
+// bedrock plane, and any solid cell on a chunk boundary column, which might
+// connect onward through a neighbour we cannot see — then report which
+// strippable cells the fill never reached.
+//
+// Mirrors Worldgen._floating_terrain_indices_reference exactly, including
+// the seed order and the 6-neighbour expansion order, so the two can be
+// compared index-for-index.
+PackedInt32Array WorldgenNative::strip_floating_terrain(
+		const PackedByteArray &p_blocks,
+		const PackedByteArray &p_support_lut,
+		const PackedByteArray &p_strip_lut) const {
+	PackedInt32Array out;
+	constexpr int TOTAL = SIZE_X * SIZE_Y * SIZE_Z;
+	if (p_blocks.size() < TOTAL || p_support_lut.size() < 256 || p_strip_lut.size() < 256) {
+		return out;
+	}
+	const uint8_t *blocks = p_blocks.ptr();
+	const uint8_t *support = p_support_lut.ptr();
+	const uint8_t *strip = p_strip_lut.ptr();
+
+	constexpr int STRIDE_X = 1;
+	constexpr int STRIDE_Z = SIZE_X;
+	constexpr int STRIDE_Y = SIZE_X * SIZE_Z;
+
+	std::vector<uint8_t> supported(TOTAL, 0);
+	std::vector<int> queue;
+	queue.reserve(TOTAL);
+
+	auto seed_cell = [&](int idx) {
+		if (supported[idx] == 0 && support[blocks[idx]] != 0) {
+			supported[idx] = 1;
+			queue.push_back(idx);
+		}
+	};
+
+	// Seed: the y=0 bedrock plane is always solid ground.
+	for (int z = 0; z < SIZE_Z; z++) {
+		for (int x = 0; x < SIZE_X; x++) {
+			seed_cell(z * STRIDE_Z + x);
+		}
+	}
+	// Seed: solid cells on any chunk-boundary column. They may be held up
+	// by terrain in the neighbouring chunk, which this pass cannot see, so
+	// they are treated as supported rather than stripped.
+	for (int y = 1; y < SIZE_Y; y++) {
+		const int y_off = y * STRIDE_Y;
+		for (int w = 0; w < SIZE_Z; w++) {
+			seed_cell(y_off + w * STRIDE_Z);
+			seed_cell(y_off + w * STRIDE_Z + (SIZE_X - 1));
+		}
+		for (int w = 1; w < SIZE_X - 1; w++) {
+			seed_cell(y_off + w);
+			seed_cell(y_off + (SIZE_Z - 1) * STRIDE_Z + w);
+		}
+	}
+
+	// BFS through the 6 orthogonal neighbours.
+	size_t head = 0;
+	while (head < queue.size()) {
+		const int idx = queue[head++];
+		const int y = idx / STRIDE_Y;
+		const int rem = idx - y * STRIDE_Y;
+		const int z = rem / STRIDE_Z;
+		const int x = rem - z * STRIDE_Z;
+		if (x > 0) {
+			seed_cell(idx - STRIDE_X);
+		}
+		if (x < SIZE_X - 1) {
+			seed_cell(idx + STRIDE_X);
+		}
+		if (z > 0) {
+			seed_cell(idx - STRIDE_Z);
+		}
+		if (z < SIZE_Z - 1) {
+			seed_cell(idx + STRIDE_Z);
+		}
+		if (y > 0) {
+			seed_cell(idx - STRIDE_Y);
+		}
+		if (y < SIZE_Y - 1) {
+			seed_cell(idx + STRIDE_Y);
+		}
+	}
+
+	for (int idx = 0; idx < TOTAL; idx++) {
+		if (supported[idx] != 0) {
+			continue;
+		}
+		if (strip[blocks[idx]] == 0) {
+			continue;
+		}
+		out.push_back(idx);
+	}
+	return out;
+}
+
 void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("build_base_terrain", "chunk_x", "chunk_z", "heightmap"),
@@ -1224,6 +1321,9 @@ void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("settle_generated_gravity", "blocks", "meta"),
 			&WorldgenNative::settle_generated_gravity);
+	ClassDB::bind_method(
+			D_METHOD("strip_floating_terrain", "blocks", "support_lut", "strip_lut"),
+			&WorldgenNative::strip_floating_terrain);
 	// Static class method exposed as instance-callable so GDScript can
 	// invoke `_native_worldgen.set_world_seed(N)` symmetrically with the
 	// other native APIs. The static keyword in the header keeps the

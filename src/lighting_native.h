@@ -3,6 +3,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 
 namespace godot {
 
@@ -97,6 +98,31 @@ public:
 			int p_world_x,
 			int p_world_y,
 			int p_world_z,
+			const Array &p_chunk_data,
+			const PackedByteArray &p_opacity_lut,
+			const PackedByteArray &p_emission_lut) const;
+
+	// Multi-source counterpart. One shared queue and one convergence pass
+	// over the union of every source's 31-cube, instead of a complete
+	// overlapping BFS per edited cell.
+	//
+	// This is the shape every bulk edit actually wants — an explosion
+	// changes dozens of cells at once — and it was the only lighting entry
+	// point with no native path at all, so a detonation ran the whole
+	// convergence in GDScript on the main thread. A field report measured
+	// 495-926 ms there, second only to the explosion that triggered it.
+	//
+	// `world_positions` is flat x, y, z triples — a strided PackedInt32Array
+	// rather than a PackedVector3Array because these are exact integer cell
+	// coordinates and Vector3 stores real_t, which is a 32-bit float in a
+	// standard build. That round-trip stops being lossless past 2^24, and
+	// there is no reason to put a precision ceiling on a coordinate that
+	// arrives as an int. Same convention scatter_ores already uses for its
+	// config array.
+	//
+	// Same chunk_data shape and return as the single-source overload.
+	Dictionary update_block_light_around_world_many(
+			const PackedInt32Array &p_world_positions,
 			const Array &p_chunk_data,
 			const PackedByteArray &p_opacity_lut,
 			const PackedByteArray &p_emission_lut) const;

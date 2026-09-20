@@ -50,6 +50,38 @@ const _CONTACT_LAVA: int = 2
 const _CONTACT_WATER: int = 4
 const _AABB_EPSILON: float = 0.0001
 
+# Distance LOD. Items are the one entity class that routinely exists in
+# the dozens — one creeper in a sand pile drops scores at once — and until
+# now every single one ran the whole per-frame pipeline no matter where it
+# was: billboard or spin, a brightness sample and material write, an
+# entity-contact report, the 20 Hz hazard tick, a magnet check, the
+# push-out-of-solid scan, and a PhysicsDirectSpaceState3D.intersect_ray.
+# MobBase has had a four-tier gate for exactly this reason; items never
+# got one.
+#
+# Inside NEAR nothing changes. Past it the item is a handful of pixels, so
+# the visual work goes and the magnet cannot possibly apply (the player
+# would have to be within MAGNET_RADIUS, which is 1.8 m). Past DORMANT an
+# item that has already come to rest stops ticking entirely bar its
+# despawn clock.
+const _LOD_NEAR_RADIUS: float = 24.0
+const _LOD_DORMANT_RADIUS: float = 64.0
+const _LOD_NEAR_RADIUS_SQ: float = _LOD_NEAR_RADIUS * _LOD_NEAR_RADIUS
+const _LOD_DORMANT_RADIUS_SQ: float = _LOD_DORMANT_RADIUS * _LOD_DORMANT_RADIUS
+# Measuring the distance is itself per-item work, and an item 60 m out does
+# not become 20 m out inside one frame unless the player teleports — and a
+# portal hop frees every transient entity anyway.
+const _LOD_REFRESH_SEC: float = 0.25
+
+# A settled item re-derives the same answer every frame: gravity nudges it
+# down a hair, the floor probe snaps it back, velocity returns to zero.
+# That is one ray query per item per frame to stay exactly still. While at
+# rest the probe drops to this period — the only thing it can discover is
+# the floor being mined out from under it, and a fifth of a second of
+# latency on that is invisible.
+const _REST_PROBE_SEC: float = 0.2
+const _REST_SPEED_EPSILON: float = 0.01
+
 var item_id: int = 0
 var _spawn_time: float = 0.0
 var _hover_phase: float = 0.0
@@ -72,6 +104,15 @@ var _ray_query: PhysicsRayQueryParameters3D  # reused per-frame to avoid allocs
 # first write. Vanilla af.java samples every render frame; we skip
 # negligible deltas to avoid GPU uniform churn on a stack of items.
 var _last_brightness: float = -1.0
+# LOD bookkeeping — see the _LOD_* constants. `_near` and `_dormant` are
+# recomputed on the refresh cadence rather than per frame.
+var _near: bool = true
+var _dormant: bool = false
+var _lod_accum: float = 0.0
+# True once the item has landed and stopped. Gates the floor-probe
+# throttle and, past _LOD_DORMANT_RADIUS, the whole tick.
+var _at_rest: bool = false
+var _rest_probe_accum: float = 0.0
 
 
 func setup(
@@ -117,6 +158,30 @@ func setup(
 func _process(delta: float) -> void:
 	if _picked_up:
 		return
+	if _player == null:
+		_player = _find_player()
+	_lod_accum += delta
+	if _lod_accum >= _LOD_REFRESH_SEC:
+		_lod_accum = 0.0
+		_refresh_lod()
+	# The despawn clock is a wall-clock comparison and runs at every tier —
+	# an item must not outlive its five minutes just because nobody was
+	# nearby to tick it.
+	var elapsed: float = Time.get_ticks_msec() / 1000.0 - _spawn_time
+	if elapsed > LIFETIME_SEC:
+		queue_free()
+		return
+	# Dormant: past the far ring AND already settled. No player within magnet
+	# range, no legible spin, no brightness delta worth a material write, and
+	# no fall left to finish. Gating only once it is AT REST is deliberate:
+	# freezing an item mid-arc would leave it hanging in the air for whoever
+	# walks back out to it.
+	#
+	# The hazard tick stops too, so an item resting in lava sixty-odd metres
+	# away waits to burn until someone comes near. Same trade MobBase makes
+	# at LOD_FAR, and it resolves itself the moment anyone can see it.
+	if _dormant and _at_rest:
+		return
 	# Alpha 1.2.6 af.java (RenderItem) has two branches:
 	#   • Full-cube block (line 38-56): 3D cube, continuous Y-spin
 	#     (glRotatef(f5, 0, 1, 0), f5 = age / 20 * 180/π).
@@ -126,11 +191,18 @@ func _process(delta: float) -> void:
 	# We preserve the extrusion for visual depth but keep the billboard +
 	# no-spin behavior so a diagonal tool sprite stays readable from every
 	# angle instead of flashing through a thin edge-on view each rotation.
+	# The BILLBOARD is not gated by distance. It is two subtractions and an
+	# atan2, and a sprite item that stops facing the camera drifts edge-on
+	# as the player walks around it — an extruded sprite seen edge-on is a
+	# sliver, which is the opposite of what a report saying "often times I
+	# don't see items" needs. The light sample and its material write are
+	# the parts actually worth gating, along with the cube spin, which is
+	# not legible at range either way.
 	if _is_sprite_item:
 		_billboard_to_camera()
-		_update_world_brightness()
-	else:
+	elif _near:
 		rotate_y(delta * SPIN_SPEED)
+	if _near:
 		_update_world_brightness()
 
 	# Vanilla Entity.moveEntity fires Block.onEntityCollidedWithBlock for
@@ -139,12 +211,6 @@ func _process(delta: float) -> void:
 	# without it an unpressed plate has nothing to wake it.
 	if _chunk_manager != null and _chunk_manager.has_method("report_entity_contact"):
 		_chunk_manager.report_entity_contact(self)
-	if _player == null:
-		_player = _find_player()
-	var elapsed: float = Time.get_ticks_msec() / 1000.0 - _spawn_time
-	if elapsed > LIFETIME_SEC:
-		queue_free()
-		return
 	# EntityItem runs at the source's fixed 20 Hz. Hazard damage precedes
 	# pickup/movement, so an item already burning cannot be rescued on the
 	# same tick that exhausts its five health points.
@@ -155,7 +221,10 @@ func _process(delta: float) -> void:
 	# inventory can't take this item — otherwise the item orbits the
 	# player at PICKUP_RADIUS forever (magnet pulls in, pickup fails,
 	# repeat) and looks like it's tied to them by an invisible string.
-	if _player != null and elapsed >= _pickup_delay and _player_can_accept():
+	# `_near` short-circuits this: MAGNET_RADIUS is 1.8 m, so an item past
+	# the 24 m near ring cannot possibly be in range and the vector maths
+	# is pure waste.
+	if _near and _player != null and elapsed >= _pickup_delay and _player_can_accept():
 		var target: Vector3 = _player.global_position + Vector3(0, 0.4, 0)
 		var to_target: Vector3 = target - global_position
 		var dist: float = to_target.length()
@@ -169,6 +238,7 @@ func _process(delta: float) -> void:
 			else:
 				global_position += step
 			_velocity = Vector3.ZERO
+			_at_rest = false
 			return
 
 	# Alpha 1.2.6 eo.java:47 — pushOutOfBlocks runs BEFORE move every tick,
@@ -189,11 +259,25 @@ func _process(delta: float) -> void:
 	# means the sin phase advances continuously through the fall and the
 	# transition to rest is smooth (the item's arc naturally dominates
 	# the small bob while in motion).
-	if _mesh != null:
+	if _near and _mesh != null:
 		_hover_phase += delta * HOVER_FREQUENCY * TAU
 		# +amp bias keeps the bob non-negative so the sprite never dips
 		# below its resting Y and clips through the floor.
 		_mesh.position.y = sin(_hover_phase) * HOVER_AMPLITUDE + HOVER_AMPLITUDE
+
+
+# Recompute the two distance flags. Squared distance so no sqrt, and
+# horizontal-and-vertical because a shaft full of drops under the player
+# is exactly the case that hurts. With no player yet (first frames after a
+# world load) the item stays fully active rather than silently freezing.
+func _refresh_lod() -> void:
+	if _player == null:
+		_near = true
+		_dormant = false
+		return
+	var distance_sq: float = global_position.distance_squared_to(_player.global_position)
+	_near = distance_sq <= _LOD_NEAR_RADIUS_SQ
+	_dormant = distance_sq > _LOD_DORMANT_RADIUS_SQ
 
 
 # Advance Alpha's Entity fire bookkeeping at 20 Hz. Returns true once the
@@ -292,11 +376,20 @@ func _apply_physics(delta: float) -> void:
 	# Gravity on Y, exponential drag on horizontal so thrown items glide
 	# briefly before settling. No horizontal collision — items rarely travel
 	# more than a block from their spawn before friction stops them.
+	# Rest throttle — see _REST_PROBE_SEC. A settled item spends one ray
+	# query per frame proving it is still settled; the only thing that
+	# probe can ever discover is the floor being mined out from under it.
+	if _at_rest:
+		_rest_probe_accum += delta
+		if _rest_probe_accum < _REST_PROBE_SEC:
+			return
+		_rest_probe_accum = 0.0
 	_velocity.y = maxf(_velocity.y + GRAVITY * delta, TERMINAL_VELOCITY)
 	var drag_factor: float = clampf(1.0 - HORIZONTAL_DRAG * delta, 0.0, 1.0)
 	_velocity.x *= drag_factor
 	_velocity.z *= drag_factor
 	var new_pos: Vector3 = global_position + _velocity * delta
+	var landed: bool = false
 	if _velocity.y <= 0.0:
 		var half: float = MESH_SIZE * 0.5
 		# Cooked collision wins wherever it exists: the chunk trimesh follows
@@ -312,6 +405,15 @@ func _apply_physics(delta: float) -> void:
 		if floor_top > -INF:
 			new_pos.y = floor_top + half
 			_velocity.y = 0.0
+			landed = true
+	# Settled means on a floor with the horizontal throw damped out. Losing
+	# the floor clears it immediately, so a mined-out support resumes the
+	# fall at full per-frame rate on the very next tick.
+	_at_rest = (
+		landed
+		and absf(_velocity.x) < _REST_SPEED_EPSILON
+		and absf(_velocity.z) < _REST_SPEED_EPSILON
+	)
 	global_position = new_pos
 
 
@@ -545,6 +647,9 @@ func _push_out_of_solid_block() -> void:
 	# _apply_physics' horizontal drag and 0.98/tick-equivalent Y damping
 	# then decay it at roughly vanilla's rate.
 	var speed: float = randf_range(2.0, 6.0)
+	# Being shoved out of a block is motion, so the rest throttle has to
+	# let go or the impulse would sit unintegrated for a fifth of a second.
+	_at_rest = false
 	match axis:
 		0:
 			_velocity.x = -speed

@@ -116,6 +116,31 @@ public:
 	Dictionary settle_generated_gravity(
 			const PackedByteArray &p_blocks, const PackedByteArray &p_meta) const;
 
+	// Native port of Worldgen._floating_terrain_indices_reference — the
+	// flood fill that finds terrain cells the trilerp left hanging in
+	// mid-air with nothing connecting them to bedrock or to a chunk edge.
+	//
+	// Worth porting because it is one of only two worldgen passes the
+	// natives did not cover, and it is not cheap: a 32,768-cell BFS plus a
+	// 32,768-cell sweep per chunk, measured at 63-92 ms in a field report.
+	// Every player paid that, extension loaded or not.
+	//
+	// Stays ignorant of block ids the same way the lighting natives do —
+	// two 256-entry LUTs decide the semantics:
+	//   support_lut[id] — 1 if the cell can carry structure (anything that
+	//                     is not air or a fluid). Seeds and BFS both use it.
+	//   strip_lut[id]   — 1 if an unsupported cell of this id is a noise
+	//                     artifact that should be removed.
+	//
+	// Returns the flat Y-major indices to strip, ascending. The caller
+	// applies them, because writing a cell has bookkeeping side effects
+	// (meta reset, lighting revision, water-cell flag) that belong with
+	// Chunk, and the stripped set is tiny compared to the search.
+	PackedInt32Array strip_floating_terrain(
+			const PackedByteArray &p_blocks,
+			const PackedByteArray &p_support_lut,
+			const PackedByteArray &p_strip_lut) const;
+
 protected:
 	static void _bind_methods();
 

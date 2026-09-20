@@ -188,6 +188,12 @@ static var _noise: FastNoiseLite
 # GDScript. Parity with the GDScript fill is guaranteed by
 # tests/test_worldgen_native.gd.
 static var _native_worldgen: RefCounted
+# Lazily-built LUTs for the floating-terrain flood fill — see
+# _build_floating_luts. Static so the 512 bytes are built once per session
+# rather than per chunk on a worker thread.
+static var _floating_luts_built: bool = false
+static var _floating_support_lut_cache: PackedByteArray = PackedByteArray()
+static var _floating_strip_lut_cache: PackedByteArray = PackedByteArray()
 
 # Global seed driving every deterministic worldgen hash. Mutable static
 # so the main-menu "World seed" setting can rewrite it before Game._ready
@@ -252,6 +258,13 @@ static func enable_native() -> bool:
 	# the class registry the same way ClassDB.instantiate above does).
 	if _native_worldgen != null:
 		_call_native_set_seed(WORLD_SEED)
+	# Build the flood-fill LUTs here, on the main thread, while nothing is
+	# generating. Only the native path reads them, and that path only opens
+	# once _native_worldgen is non-null — so doing it now is what keeps the
+	# lazy accessors below from ever racing two WorkerThreadPool chunk jobs
+	# through a half-built static. Same contract Game._ready follows for
+	# BlockAtlas and the selection-AABB table.
+	_build_floating_luts()
 	return _native_worldgen != null
 
 
@@ -786,7 +799,86 @@ static func _smooth_surface_spikes_3d(chunk: Chunk) -> void:
 # surface walk are already in C++. Port if it shows up in profiles.
 static func _strip_floating_terrain(chunk: Chunk) -> void:
 	var probe_token := PerfProbe.begin("worldgen.strip_floating")
-	var blocks: PackedByteArray = chunk.blocks
+	var indices: PackedInt32Array = _floating_terrain_indices(chunk.blocks)
+	const STRIDE_Z_APPLY: int = Chunk.SIZE_X
+	const STRIDE_Y_APPLY: int = Chunk.SIZE_X * Chunk.SIZE_Z
+	# Applied here rather than inside the search so the native port only has
+	# to agree on WHICH cells are floating. Writing one goes through
+	# set_block_unchecked for its bookkeeping — meta reset, lighting
+	# revision, the has_water_cells flag — and the set is tiny next to the
+	# 32,768-cell search that found it.
+	for idx: int in indices:
+		var y: int = idx / STRIDE_Y_APPLY
+		var rem: int = idx - y * STRIDE_Y_APPLY
+		var z: int = rem / STRIDE_Z_APPLY
+		var x: int = rem - z * STRIDE_Z_APPLY
+		var fill: int = Blocks.WATER_STILL if y < SEA_LEVEL else Blocks.AIR
+		chunk.set_block_unchecked(x, y, z, fill)
+	PerfProbe.end("worldgen.strip_floating", probe_token)
+
+
+# 256-entry LUTs that give the flood fill its semantics without the native
+# side needing to know a single block id — same contract the lighting
+# natives use for opacity/emission. Built once; the id sets are constant.
+#
+# The accessors below are lazy only as a safety net for direct callers
+# (tests, tools). Production warms them in enable_native(), because
+# _floating_terrain_indices runs inside a WorkerThreadPool job and a lazy
+# first build there would be two threads racing one static.
+static func _floating_support_lut() -> PackedByteArray:
+	if not _floating_luts_built:
+		_build_floating_luts()
+	return _floating_support_lut_cache
+
+
+static func _floating_strip_lut() -> PackedByteArray:
+	if not _floating_luts_built:
+		_build_floating_luts()
+	return _floating_strip_lut_cache
+
+
+static func _build_floating_luts() -> void:
+	_floating_support_lut_cache = PackedByteArray()
+	_floating_support_lut_cache.resize(256)
+	_floating_strip_lut_cache = PackedByteArray()
+	_floating_strip_lut_cache.resize(256)
+	# Anything that is not air or a fluid can carry structure.
+	for i: int in range(256):
+		var carries: bool = (
+			i != Blocks.AIR
+			and i != Blocks.WATER_STILL
+			and i != Blocks.WATER_FLOWING
+			and i != Blocks.LAVA_STILL
+			and i != Blocks.LAVA_FLOWING
+		)
+		_floating_support_lut_cache[i] = 1 if carries else 0
+	# Only plain terrain is a noise artifact worth removing. An unsupported
+	# ore vein or a tree left standing is a different bug; this pass is
+	# deliberately narrow.
+	for id: int in [Blocks.STONE, Blocks.DIRT, Blocks.GRASS, Blocks.SAND, Blocks.GRAVEL]:
+		_floating_strip_lut_cache[id] = 1
+	_floating_luts_built = true
+
+
+# Dispatch: C++ when the extension is loaded, GDScript reference otherwise.
+# The two must return identical index lists — tests/test_worldgen_native.gd
+# pins that.
+static func _floating_terrain_indices(blocks: PackedByteArray) -> PackedInt32Array:
+	if _native_worldgen != null and _native_worldgen.has_method("strip_floating_terrain"):
+		return _native_worldgen.call(
+			"strip_floating_terrain", blocks, _floating_support_lut(), _floating_strip_lut()
+		)
+	return _floating_terrain_indices_reference(blocks)
+
+
+# GDScript reference for the flood fill. Seeds from the y=0 bedrock plane
+# and from every solid cell on a chunk-boundary column (those may be held
+# up through a neighbour this pass cannot see), floods through the 6
+# orthogonal neighbours, then reports every strippable cell the flood never
+# reached — trilerp output occasionally grazes above zero density in mid-air
+# and leaves islands vanilla terrain does not have.
+static func _floating_terrain_indices_reference(blocks: PackedByteArray) -> PackedInt32Array:
+	var out: PackedInt32Array = PackedInt32Array()
 	var supported: PackedByteArray = PackedByteArray()
 	supported.resize(Chunk.TOTAL_BLOCKS)
 	var queue: PackedInt32Array = PackedInt32Array()
@@ -970,7 +1062,7 @@ static func _strip_floating_terrain(chunk: Chunk) -> void:
 				queue[tail] = nidy1
 				tail += 1
 
-	# Strip unvisited terrain blocks (project IDs, not vanilla MC IDs).
+	# Report unvisited terrain blocks (project IDs, not vanilla MC IDs).
 	var stone: int = Blocks.STONE
 	var grass: int = Blocks.GRASS
 	var dirt: int = Blocks.DIRT
@@ -982,13 +1074,8 @@ static func _strip_floating_terrain(chunk: Chunk) -> void:
 		var b2: int = blocks[idx2]
 		if b2 != stone and b2 != dirt and b2 != grass and b2 != sand and b2 != gravel:
 			continue
-		var y2: int = idx2 / STRIDE_Y
-		var rem2: int = idx2 - y2 * STRIDE_Y
-		var z2: int = rem2 / STRIDE_Z
-		var x2: int = rem2 - z2 * STRIDE_Z
-		var fill: int = Blocks.WATER_STILL if y2 < SEA_LEVEL else Blocks.AIR
-		chunk.set_block_unchecked(x2, y2, z2, fill)
-	PerfProbe.end("worldgen.strip_floating", probe_token)
+		out.append(idx2)
+	return out
 
 
 # Cold-biome post-pass — vanilla puts these in BiomeDecorator + the

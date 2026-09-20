@@ -87,6 +87,11 @@ const MAX_HORIZ_PER_AXIS: float = 8.0
 # radius of (0.98/2 + 0.2) ≈ 0.69 m.
 const CART_COLLISION_RADIUS: float = 0.69
 
+# Curve rails bend around a cell corner on a quarter circle. Radius 0.5
+# puts the arc through the midpoint of each of the two cell edges the
+# curve connects, so it meets the neighbouring straight rails flush.
+const CURVE_RADIUS: float = 0.5
+
 # Vanilla minecart health — 6 HP (qd.java sets `this.b` damage threshold
 # to 40 with 10×-per-hit multiplier same as the boat).
 const MAX_HEALTH: int = 6
@@ -148,6 +153,12 @@ var _collision_tick_accum: float = 0.0
 # cart appears already aligned and the smoothing only fires on later
 # yaw changes (curve transitions, etc.).
 var _yaw_initialized: bool = false
+# Slope tilt of the hull, radians, positive = nose up. Derived fresh from
+# the rail under the cart every frame, so it is deliberately NOT persisted
+# — a loaded cart re-acquires it on its first physics tick. Lives here
+# rather than straight on _visual_root.rotation.x because the damage rock
+# writes that same property and the two have to sum.
+var _slope_pitch: float = 0.0
 
 
 func setup(spawn_pos: Vector3, yaw: float, owner: Node3D, cart_variant: int = 0) -> void:
@@ -453,7 +464,7 @@ func _apply_furnace_thrust(delta: float) -> void:
 		var nz: float = _push_z / mag
 		var rail_info: Dictionary = _find_rail_under_cart()
 		if not rail_info.is_empty():
-			var axis: Vector3 = _rail_axis_for(rail_info.meta)
+			var axis: Vector3 = _rail_axis_for(rail_info.meta, rail_info.cell)
 			# Project push onto the rail axis (signed). Negative dot
 			# means the player is on the "positive" side of the cart;
 			# we want the cart to move AWAY (negative axis direction),
@@ -589,7 +600,7 @@ func _physics_process(delta: float) -> void:
 		var thrust_dir: Vector3 = _read_rider_input()
 		if thrust_dir.length_squared() > 0.001:
 			if on_rail:
-				var rail_axis: Vector3 = _rail_axis_for(rail_info.meta)
+				var rail_axis: Vector3 = _rail_axis_for(rail_info.meta, rail_info.cell)
 				var along: float = thrust_dir.dot(rail_axis)
 				velocity += rail_axis * along * RIDER_THRUST * delta
 			else:
@@ -602,7 +613,7 @@ func _physics_process(delta: float) -> void:
 	# rails — sliding it around is fine).
 	if _rider == null:
 		var rail_axis_for_push: Vector3 = (
-			_rail_axis_for(rail_info.meta) if on_rail else Vector3.ZERO
+			_rail_axis_for(rail_info.meta, rail_info.cell) if on_rail else Vector3.ZERO
 		)
 		_apply_soft_push(delta, rail_axis_for_push)
 	# Furnace cart self-propulsion. Vanilla qd.java::e_() type==2:
@@ -641,14 +652,29 @@ func _physics_process(delta: float) -> void:
 	# (e.g. just-placed cart with player facing the "wrong" way along
 	# the rail).
 	var target_yaw: float = rotation.y
+	var target_pitch: float = 0.0
 	if on_rail:
-		var axis: Vector3 = _rail_axis_for(rail_info.meta)
+		var axis: Vector3 = _rail_axis_for(rail_info.meta, rail_info.cell)
 		if absf(axis.x) > 0.001 or absf(axis.z) > 0.001:
 			var yaw_a: float = atan2(-axis.x, -axis.z)
 			var yaw_b: float = atan2(axis.x, axis.z)
 			var diff_a: float = absf(_shortest_angle(yaw_a - rotation.y))
 			var diff_b: float = absf(_shortest_angle(yaw_b - rotation.y))
-			target_yaw = yaw_a if diff_a <= diff_b else yaw_b
+			# yaw_a points the hull along +axis, yaw_b along -axis.
+			var faces_along_axis: bool = diff_a <= diff_b
+			target_yaw = yaw_a if faces_along_axis else yaw_b
+			# Slope pitch. _rail_axis_for already bakes the rail's rise
+			# into Y for the ascending metas — meta 2 returns
+			# (2,1,0).normalized() — but nothing ever read that Y, so a
+			# cart climbed a ramp dead level. That is the "doesn't turn at
+			# angles in model" half of the report; vanilla's
+			# RenderMinecart pitches the hull along the rail it is on.
+			#
+			# A positive rotation.x tilts local -Z (forward) upward, so
+			# the nose rises when the cart faces uphill. Facing the other
+			# way down the same rail flips the sign.
+			var rise: float = axis.y if faces_along_axis else -axis.y
+			target_pitch = asin(clampf(rise, -1.0, 1.0))
 	elif _rider != null:
 		target_yaw = _rider.rotation.y
 	var diff: float = target_yaw - rotation.y
@@ -663,12 +689,16 @@ func _physics_process(delta: float) -> void:
 	# on chest/furnace carts whose front face is distinct).
 	if not _yaw_initialized:
 		rotation.y = target_yaw
+		_slope_pitch = target_pitch
 		_yaw_initialized = true
 	else:
 		var yaw_rate: float = 10.0 if on_rail else 5.0
 		var max_step: float = yaw_rate * delta
 		diff = clampf(diff, -max_step, max_step)
 		rotation.y += diff
+		# Pitch tracks at the same rate, so a cart cresting a ramp levels
+		# out over the same handful of frames the yaw takes to settle.
+		_slope_pitch += clampf(target_pitch - _slope_pitch, -max_step, max_step)
 	# Move. On rails, we translate position directly along the rail
 	# axis instead of using move_and_slide — physics collision response
 	# was shoving the cart off the rail when the player walked into it
@@ -741,11 +771,10 @@ func _find_rail_under_cart() -> Dictionary:
 
 # Return the unit direction vector the rail's axis points along.
 # For straight rails: pure X or Z. For ascending rails: diagonal in
-# the climbing plane. For curves (meta 6-9): pick the axis closer to
-# the cart's current velocity (crude — Stage 2a snap-through instead
-# of smooth arc interpolation; Stage 2b can add curve interpolation).
+# the climbing plane. For curves (meta 6-9): the tangent of the
+# quarter-circle arc at the cart's current position in the cell.
 # gdlint: disable=max-returns
-func _rail_axis_for(meta: int) -> Vector3:
+func _rail_axis_for(meta: int, cell: Vector3i) -> Vector3:
 	match meta:
 		0:
 			return Vector3(0, 0, 1)
@@ -764,12 +793,19 @@ func _rail_axis_for(meta: int) -> Vector3:
 			# Ascending south: from (0,-1,-1) to (0,0,+1) is (0, +1, +2).
 			return Vector3(0, 1, 2).normalized()
 		6, 7, 8, 9:
-			# Curves — pick the dominant axis of current velocity.
-			# Stage 2a crude curve handling: continue along the
-			# perpendicular axis without smooth interpolation.
-			if absf(velocity.x) > absf(velocity.z):
-				return Vector3(1, 0, 0)
-			return Vector3(0, 0, 1)
+			# Curves. _apply_curve_physics constrains the cart to a
+			# quarter-circle arc and projects its velocity onto the arc
+			# TANGENT, so the tangent is the direction the cart is
+			# actually travelling — the hull has to point along it.
+			#
+			# This used to return whichever cardinal axis had the larger
+			# velocity component, which is wrong three ways: the hull sat
+			# up to 45° off the track through the whole corner, it snapped
+			# a full 90° the instant |vx| and |vz| swapped dominance
+			# mid-curve, and a stationary cart (both components 0) fell
+			# through to pure north-south on every curve regardless of
+			# which way the track actually bent.
+			return _curve_tangent(cell, meta)
 	return Vector3(0, 0, 1)
 
 
@@ -895,61 +931,65 @@ func _apply_end_of_track_brake(
 			velocity.z = 0.0
 
 
-# Snap cart to a quarter-circle arc inside a curve-rail cell. Each
-# curve meta wraps around one of the cell's four corners (see
-# RAIL_ENDPOINTS). The arc has radius 0.5 and is centered at the
-# wrap corner; cart's position projects onto the nearest arc point,
-# and velocity is constrained to the tangent at that point.
-func _apply_curve_physics(cell: Vector3i, meta: int) -> void:
-	# Wrap-corner per meta, in cell-local 2D coords (x, z) ∈ [0, 1]².
-	var corner_x: float = 0.0
-	var corner_z: float = 0.0
+# Wrap-corner per curve meta, in cell-local 2D coords (x, z) ∈ [0, 1]².
+# Each curve meta bends around one of the cell's four corners — see
+# RAIL_ENDPOINTS for which pair of endpoints that is.
+func _curve_corner(meta: int) -> Vector2:
 	match meta:
 		6:  # NE curve: S + E endpoints → wraps SE corner
-			corner_x = 1.0
-			corner_z = 1.0
+			return Vector2(1.0, 1.0)
 		7:  # NW curve: S + W endpoints → wraps SW corner
-			corner_x = 0.0
-			corner_z = 1.0
+			return Vector2(0.0, 1.0)
 		8:  # SW curve: N + W endpoints → wraps NW corner
-			corner_x = 0.0
-			corner_z = 0.0
-		_:  # 9 SE curve: N + E endpoints → wraps NE corner
-			corner_x = 1.0
-			corner_z = 0.0
-	var local_x: float = global_position.x - float(cell.x)
-	var local_z: float = global_position.z - float(cell.z)
-	var dx: float = local_x - corner_x
-	var dz: float = local_z - corner_z
-	# Cart's angle from corner. Distance might be 0 if cart is exactly
-	# at the corner — clamp to a tiny minimum to avoid NaN from atan2.
-	var dist: float = sqrt(dx * dx + dz * dz)
-	if dist < 0.001:
-		# Cart sitting at the corner — nudge along the arc midline.
-		dx = -corner_x + 0.5 - corner_x
-		dz = -corner_z + 0.5 - corner_z
-	# Snap radius to 0.5 (arc radius).
-	var inv: float = 0.5 / maxf(dist, 0.001)
-	var snap_dx: float = dx * inv
-	var snap_dz: float = dz * inv
-	global_position.x = float(cell.x) + corner_x + snap_dx
-	global_position.z = float(cell.z) + corner_z + snap_dz
+			return Vector2(0.0, 0.0)
+	return Vector2(1.0, 0.0)  # 9 SE curve: N + E endpoints → wraps NE corner
+
+
+# Unit vector from the wrap corner toward the cart, in cell-local XZ.
+# Undefined when the cart sits exactly on the corner; there we point at
+# the arc's midline instead, which is what the old code's comment said
+# it did — though the expression under it read `0.5 - 2 * corner` and
+# then divided by the un-recomputed near-zero distance, which would have
+# flung the cart hundreds of blocks had anything ever landed within a
+# millimetre of the corner.
+func _curve_radius_dir(cell: Vector3i, meta: int) -> Vector2:
+	var corner: Vector2 = _curve_corner(meta)
+	var d := Vector2(
+		global_position.x - float(cell.x) - corner.x, global_position.z - float(cell.z) - corner.y
+	)
+	if d.length() < 0.001:
+		d = Vector2(0.5, 0.5) - corner
+	return d.normalized()
+
+
+# Unit tangent of the arc at the cart's current position — perpendicular
+# to the radius vector. Both travel directions along the arc are valid,
+# so callers treat this as a LINE, not a half-line: physics projects
+# velocity onto it, and the model picks whichever of the two facings is
+# closer to its current yaw.
+func _curve_tangent(cell: Vector3i, meta: int) -> Vector3:
+	var radius: Vector2 = _curve_radius_dir(cell, meta)
+	return Vector3(-radius.y, 0.0, radius.x)
+
+
+# Snap cart to a quarter-circle arc inside a curve-rail cell. The arc has
+# radius CURVE_RADIUS and is centred at the wrap corner; the cart's
+# position projects onto the nearest arc point, and velocity is
+# constrained to the tangent there.
+func _apply_curve_physics(cell: Vector3i, meta: int) -> void:
+	var corner: Vector2 = _curve_corner(meta)
+	var radius: Vector2 = _curve_radius_dir(cell, meta)
+	global_position.x = float(cell.x) + corner.x + radius.x * CURVE_RADIUS
+	global_position.z = float(cell.z) + corner.y + radius.y * CURVE_RADIUS
 	global_position.y = float(cell.y) + 1.0 / 16.0
 	velocity.y = 0.0
-	# Tangent direction at the snapped point — perpendicular to the
-	# radius vector (snap_dx, snap_dz). For a CCW arc, tangent is
-	# (-snap_dz, snap_dx); for CW, (snap_dz, -snap_dx). Either way,
-	# project velocity onto the tangent line (both directions are
-	# valid since the cart can travel along the arc either way).
-	var tx: float = -snap_dz
-	var tz: float = snap_dx
-	var tlen: float = sqrt(tx * tx + tz * tz)
-	if tlen > 0.001:
-		tx /= tlen
-		tz /= tlen
-	var along: float = velocity.x * tx + velocity.z * tz
-	velocity.x = tx * along
-	velocity.z = tz * along
+	# Snapping only changed the radius LENGTH, so the tangent direction is
+	# the same before and after — recomputing here just keeps the two
+	# readers of the arc geometry sharing one definition.
+	var tangent: Vector3 = _curve_tangent(cell, meta)
+	var along: float = velocity.x * tangent.x + velocity.z * tangent.z
+	velocity.x = tangent.x * along
+	velocity.z = tangent.z * along
 
 
 func _shortest_angle(a: float) -> float:
@@ -1049,10 +1089,13 @@ func _update_damage_rock(delta: float) -> void:
 		_damage_time = maxf(0.0, _damage_time - delta * 20.0)
 	if absf(_damage_rock) > 0.001:
 		_damage_rock *= pow(0.85, delta * 20.0)
-		_visual_root.rotation.x = _damage_rock * 0.4
-	elif _visual_root.rotation.x != 0.0:
+	else:
 		_damage_rock = 0.0
-		_visual_root.rotation.x = 0.0
+	# The slope tilt and the damage rock share rotation.x, so they sum
+	# here rather than letting whichever wrote last win — a cart taking a
+	# hit halfway up a ramp used to snap level for the length of the rock,
+	# then snap back.
+	_visual_root.rotation.x = _slope_pitch + _damage_rock * 0.4
 
 
 # --- Persistence (EntitySave TYPE_MINECART) ---

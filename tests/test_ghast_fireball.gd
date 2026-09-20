@@ -432,7 +432,7 @@ func test_the_collision_size_is_one_block() -> void:
 # --- Being hit (audit findings #2 / #3 / #9) ---
 
 
-func test_the_fireball_carries_a_one_block_hit_area() -> void:
+func test_the_fireball_carries_a_cursor_sized_hit_area() -> void:
 	# Without a collider it was invisible to every intersect_ray in the
 	# game — melee and arrows could never touch it, so deflection was
 	# unreachable despite the logic being correct.
@@ -452,9 +452,20 @@ func test_the_fireball_carries_a_one_block_hit_area() -> void:
 	if shape != null:
 		assert_eq(
 			(shape.shape as BoxShape3D).size,
-			Vector3.ONE * GhastFireball.COLLISION_SIZE,
-			"a(1.0f, 1.0f) — one block"
+			Vector3.ONE * GhastFireball.CURSOR_HIT_SIZE,
+			"kb.java:87-89 expands by k_() before the cursor ray — 3x3x3"
 		)
+
+
+# az.java:168 returns 1.0 where lw.java:811's default is 0.1. The cursor
+# box is the collision box grown by that border on every side, so the
+# player aims at nine times the cross-section a bare 1x1x1 would give.
+func test_the_cursor_border_follows_the_fireball_override() -> void:
+	assert_eq(GhastFireball.CURSOR_BORDER_SIZE, 1.0, "az.java:168 k_() == 1.0f")
+	assert_eq(GhastFireball.CURSOR_HIT_SIZE, 3.0, "1 + 2x1 — a 3-block cursor target")
+	var bare: float = GhastFireball.COLLISION_SIZE * GhastFireball.COLLISION_SIZE
+	var expanded: float = GhastFireball.CURSOR_HIT_SIZE * GhastFireball.CURSOR_HIT_SIZE
+	assert_almost_eq(expanded / bare, 9.0, 0.0001, "9x the cross-section to aim at")
 
 
 func test_a_raycast_can_actually_hit_it() -> void:

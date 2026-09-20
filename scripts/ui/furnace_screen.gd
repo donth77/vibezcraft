@@ -590,7 +590,7 @@ func _handle_left_click(slot_id: int) -> void:
 		slot.count = _cursor.count
 		_cursor.item_id = tmp_id
 		_cursor.count = tmp_n
-	_refresh()
+	_commit()
 
 
 # Right-click: place 1 from cursor, or pick up half a stack from a slot.
@@ -623,7 +623,7 @@ func _handle_right_click(slot_id: int) -> void:
 			if _cursor.count <= 0:
 				_cursor.item_id = Blocks.AIR
 				_cursor.count = 0
-	_refresh()
+	_commit()
 
 
 # Vanilla output-slot takes: cursor must be empty OR same item id with room.
@@ -644,4 +644,19 @@ func _take_output(output: ItemStack) -> void:
 		if output.count <= 0:
 			output.item_id = Blocks.AIR
 			output.count = 0
+	_commit()
+
+
+# Every slot handler on this screen writes `inventory.slots[...]` in place.
+# Repainting our own panels is not enough: the hotbar, the first-person
+# held item, the armour bar and the pumpkin overlay all redraw off
+# `Inventory.changed` and nothing else. Without the emit, moving ore out of
+# a hotbar slot into the furnace left the hotbar drawing a stack that was
+# no longer there — a ghost icon that survived closing the screen, because
+# `close()` only emits incidentally (via add_item) when the cursor is
+# holding something. Every sibling screen already does this:
+# chest_screen.gd:429, crafting_table_screen.gd:430, inventory_screen.gd:528.
+func _commit() -> void:
+	if inventory != null:
+		inventory.changed.emit()
 	_refresh()

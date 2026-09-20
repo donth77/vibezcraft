@@ -476,9 +476,19 @@ const _STEP_SOUNDS: Dictionary = {
 # silent. AudioStreamPlayer3D handles falloff; the non-positional
 # pool above is only for player-frame sounds (UI clicks, player hurt,
 # block break at cursor, etc.) that should always be full volume.
-const POOL_SIZE_3D: int = 4
+# Six, not four: explosions now share this pool with every mob sound, and
+# a chain detonation round-robining through four slots would cut off the
+# mob audio playing under it (and vice versa). The 2D pool it moved off
+# was six deep for the same reason.
+const POOL_SIZE_3D: int = 6
 const MOB_SOUND_MAX_DISTANCE: float = 16.0  # vanilla mob audio range
 const MOB_SOUND_UNIT_SIZE: float = 4.0  # closer = louder; tuned for clarity
+# Explosions are the one sound vanilla gives a wider radius: qg.java's
+# `f7 *= f5` with ks.java's volume 4.0 puts the falloff edge at 16 × 4.
+# unit_size scales with it so the rolloff curve keeps the same shape the
+# mob pool has — unity out to a quarter of the range, then down.
+const EXPLODE_SOUND_MAX_DISTANCE: float = 64.0
+const EXPLODE_SOUND_UNIT_SIZE: float = 16.0
 
 var _players: Array = []
 var _next_player: int = 0
@@ -888,10 +898,21 @@ func play_fuse(loud: bool = true, base_pitch: float = 1.0) -> void:
 
 # TNT/creeper detonation — vanilla picks 1 of 4 explode variants. Pitch
 # envelope `(1 + (rand-rand) × 0.2) × 0.7` per ks.java::b() drops the
-# clip an octave-ish so the bassy boom reads correctly. `pos` is the
-# detonation world coord (unused today; positional 3D audio lands when
-# the SFX system sprouts an AudioStreamPlayer3D pool).
-func play_explode(_pos: Vector3 = Vector3.ZERO) -> void:
+# clip an octave-ish so the bassy boom reads correctly.
+#
+# The `4.0` vanilla passes as its volume argument is NOT a gain. qg.java:156-166:
+#
+#     float f7 = 16.0f;
+#     if (f5 > 1.0f) { f7 *= f5; }          // audible radius → 64 blocks
+#     a.newSource(..., 2, f7);
+#     if (f5 > 1.0f) { f5 = 1.0f; }         // gain CLAMPED to unity
+#     a.setVolume(string2, f5 * this.f.b);
+#
+# So an explosion is exactly as loud at the source as any other sound —
+# it just carries four times as far and attenuates the whole way. Reading
+# the 4.0 as "+6 dB on a non-positional player" made a creeper sixty
+# blocks away twice as loud as a block break underfoot.
+func play_explode(pos: Vector3 = Vector3.ZERO) -> void:
 	if not Game.sfx_enabled or Game.is_loading:
 		return
 	var path: String = _EXPLODE_SOUNDS[randi() % _EXPLODE_SOUNDS.size()]
@@ -901,13 +922,15 @@ func play_explode(_pos: Vector3 = Vector3.ZERO) -> void:
 		_stream_cache[path] = stream
 	if stream == null:
 		return
-	var player: AudioStreamPlayer = _players[_next_player]
-	_next_player = (_next_player + 1) % POOL_SIZE
+	var player: AudioStreamPlayer3D = _players_3d[_next_player_3d]
+	_next_player_3d = (_next_player_3d + 1) % POOL_SIZE_3D
+	player.global_position = pos
 	player.stream = stream
-	# Vanilla volume 4.0 — louder than every other random.* sound (which
-	# is exactly the drama you want from TNT). Cap at +6 dB so the player's
-	# speakers don't clip on a chain detonation.
-	player.volume_db = 6.0
+	# Pool default is the 16 m mob range; widen to vanilla's 16 × 4 for
+	# this one play. Every other 3D checkout sets its own range back.
+	player.max_distance = EXPLODE_SOUND_MAX_DISTANCE
+	player.unit_size = EXPLODE_SOUND_UNIT_SIZE
+	player.volume_db = 0.0
 	# `(1 + (rand-rand) × 0.2) × 0.7` averages ~0.7 with ±0.14 jitter.
 	player.pitch_scale = (1.0 + (randf() - randf()) * 0.2) * 0.7
 	player.play()
@@ -1209,6 +1232,8 @@ func _play_optional_3d(path: String, pos: Vector3, volume_db: float, pitch: floa
 	_next_player_3d = (_next_player_3d + 1) % POOL_SIZE_3D
 	player.global_position = pos
 	player.stream = stream
+	player.max_distance = MOB_SOUND_MAX_DISTANCE
+	player.unit_size = MOB_SOUND_UNIT_SIZE
 	player.volume_db = volume_db
 	player.pitch_scale = pitch
 	player.play()
@@ -1265,6 +1290,8 @@ func _play_mob_sound_3d(
 	_next_player_3d = (_next_player_3d + 1) % POOL_SIZE_3D
 	player.global_position = pos
 	player.stream = stream
+	player.max_distance = MOB_SOUND_MAX_DISTANCE
+	player.unit_size = MOB_SOUND_UNIT_SIZE
 	player.volume_db = volume_db
 	player.pitch_scale = base_pitch + randf_range(-0.1, 0.1)
 	player.play()

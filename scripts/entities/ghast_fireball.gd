@@ -28,6 +28,21 @@ extends Node3D
 # `a(1.0f, 1.0f)` — a one-block collision size.
 const COLLISION_SIZE: float = 1.0
 
+# `az.java:168` overrides `k_()` (getCollisionBorderSize) to return 1.0,
+# where every ordinary entity inherits `lw.java:811`'s 0.1. That border is
+# not physics — it exists purely for the cursor, which grows each entity's
+# box by it before the ray test (`kb.java:87-89`):
+#
+#     float f4 = lw2.k_();
+#     co co2 = lw2.aG.b(f4, f4, f4);
+#     nx nx2 = co2.a(ao2, ao4);
+#
+# So vanilla asks the player to hit a 3×3×3 target, not a 1×1×1 one — nine
+# times the cross-section. Batting a fireball back is meant to be possible
+# on a fast-moving target with a thin centre-screen ray.
+const CURSOR_BORDER_SIZE: float = 1.0
+const CURSOR_HIT_SIZE: float = COLLISION_SIZE + 2.0 * CURSOR_BORDER_SIZE
+
 # The constructor's aim spread and speed. Each axis of the aim vector
 # gets `nextGaussian() * 0.4` added BEFORE normalisation, so the spread
 # is proportional to how far off-axis it lands, not a fixed cone.
@@ -71,7 +86,7 @@ var ticks_in_air: int = 0
 
 var _velocity: Vector3 = Vector3.ZERO
 var _chunk_manager: Node = null
-# The 1x1 ray-visible collider — see _build_hit_area.
+# The ray-visible cursor collider — see _build_hit_area.
 var _hit_area: Area3D = null
 var _sprite: Sprite3D = null
 var _smoke: CPUParticles3D = null
@@ -128,19 +143,24 @@ func _ready() -> void:
 	_build_hit_area()
 
 
-# `a(1.0f, 1.0f)` — a one-block collision size. Without a collider the
-# fireball was invisible to every intersect_ray in the game: player
-# melee and arrows could never touch it, so the deflection mechanic —
-# correct and tested at the logic level — had no physical route in
-# (audit finding #2). Monitoring stays off; the area exists purely to be
+# Without a collider the fireball was invisible to every intersect_ray in
+# the game: player melee and arrows could never touch it, so the deflection
+# mechanic — correct and tested at the logic level — had no physical route
+# in (audit finding #2). Monitoring stays off; the area exists purely to be
 # ray-visible, exactly like the mobs' head-hit areas.
+#
+# Sized to CURSOR_HIT_SIZE, not COLLISION_SIZE. This area is only ever
+# consulted by the cursor ray, which is exactly the place vanilla applies
+# the `k_()` border expansion — so the border belongs baked into the shape
+# rather than bolted onto every caller. Physics collision (the impact that
+# detonates the thing) runs off the entity's own movement sweep, not here.
 func _build_hit_area() -> void:
 	_hit_area = Area3D.new()
 	_hit_area.monitoring = false
 	_hit_area.monitorable = true
 	var shape := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3.ONE * COLLISION_SIZE
+	box.size = Vector3.ONE * CURSOR_HIT_SIZE
 	shape.shape = box
 	_hit_area.add_child(shape)
 	add_child(_hit_area)

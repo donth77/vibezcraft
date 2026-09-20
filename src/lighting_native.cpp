@@ -6,6 +6,7 @@
 #include <godot_cpp/variant/vector2i.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -497,8 +498,30 @@ Dictionary LightingNative::update_block_light_around_world(
 		const Array &p_chunk_data,
 		const PackedByteArray &p_opacity_lut,
 		const PackedByteArray &p_emission_lut) const {
+	// The single-source case is the one-element multi-source case. Kept as
+	// its own bound method because every existing caller passes a bare
+	// world coord and there is no reason to make them box it.
+	PackedInt32Array one;
+	one.push_back(p_world_x);
+	one.push_back(p_world_y);
+	one.push_back(p_world_z);
+	return update_block_light_around_world_many(
+			one, p_chunk_data, p_opacity_lut, p_emission_lut);
+}
+
+Dictionary LightingNative::update_block_light_around_world_many(
+		const PackedInt32Array &p_world_positions,
+		const Array &p_chunk_data,
+		const PackedByteArray &p_opacity_lut,
+		const PackedByteArray &p_emission_lut) const {
 	Dictionary result;
 	if (p_opacity_lut.size() < 256 || p_emission_lut.size() < 256) {
+		return result;
+	}
+	// Flat x, y, z triples. A ragged tail would silently shift every
+	// following source, so refuse the whole call rather than guess.
+	const int source_count = p_world_positions.size() / 3;
+	if (source_count == 0 || p_world_positions.size() % 3 != 0) {
 		return result;
 	}
 	const uint8_t *op = p_opacity_lut.ptr();
@@ -526,12 +549,28 @@ Dictionary LightingNative::update_block_light_around_world(
 		slabs[chunk_key(slab.chunk_x, slab.chunk_z)] = slab;
 	}
 
-	const int x_lo = p_world_x - 15;
-	const int x_hi = p_world_x + 15;
-	const int y_lo = std::max(0, p_world_y - 15);
-	const int y_hi = std::min(SIZE_Y - 1, p_world_y + 15);
-	const int z_lo = p_world_z - 15;
-	const int z_hi = p_world_z + 15;
+	// Union of every source's 31-cube. This is only a runaway clamp: the
+	// BFS expands from cells whose light actually changed, so widening the
+	// box permits more reach without forcing any extra visits. Mirrors the
+	// GDScript reference's bounds exactly so parity holds.
+	int x_lo = INT32_MAX;
+	int x_hi = INT32_MIN;
+	int y_lo = INT32_MAX;
+	int y_hi = INT32_MIN;
+	int z_lo = INT32_MAX;
+	int z_hi = INT32_MIN;
+	const int32_t *src = p_world_positions.ptr();
+	for (int i = 0; i < source_count; i++) {
+		const int px = src[i * 3];
+		const int py = src[i * 3 + 1];
+		const int pz = src[i * 3 + 2];
+		x_lo = std::min(x_lo, px - 15);
+		x_hi = std::max(x_hi, px + 15);
+		y_lo = std::min(y_lo, std::max(0, py - 15));
+		y_hi = std::max(y_hi, std::min(SIZE_Y - 1, py + 15));
+		z_lo = std::min(z_lo, pz - 15);
+		z_hi = std::max(z_hi, pz + 15);
+	}
 
 	auto get_block = [&](int wx, int wy, int wz) -> int {
 		if (wy < 0 || wy >= SIZE_Y) {
@@ -632,16 +671,26 @@ Dictionary LightingNative::update_block_light_around_world(
 		wz = int(bz);
 	};
 
-	queue.push_back(pack_pos(p_world_x, p_world_y, p_world_z));
 	static constexpr int N_DX[6] = { 1, -1, 0, 0, 0, 0 };
 	static constexpr int N_DY[6] = { 0, 0, 1, -1, 0, 0 };
 	static constexpr int N_DZ[6] = { 0, 0, 0, 0, 1, -1 };
-	for (int n = 0; n < 6; n++) {
-		int nx = p_world_x + N_DX[n];
-		int ny = p_world_y + N_DY[n];
-		int nz = p_world_z + N_DZ[n];
-		if (nx >= x_lo && nx <= x_hi && ny >= y_lo && ny <= y_hi && nz >= z_lo && nz <= z_hi) {
-			queue.push_back(pack_pos(nx, ny, nz));
+	// Every source and its six neighbours go in before the drain starts, so
+	// overlapping sources converge once rather than fighting each other
+	// across repeated passes.
+	queue.reserve(size_t(source_count) * 7);
+	for (int i = 0; i < source_count; i++) {
+		const int sx = src[i * 3];
+		const int sy = src[i * 3 + 1];
+		const int sz = src[i * 3 + 2];
+		queue.push_back(pack_pos(sx, sy, sz));
+		for (int n = 0; n < 6; n++) {
+			int nx = sx + N_DX[n];
+			int ny = sy + N_DY[n];
+			int nz = sz + N_DZ[n];
+			if (nx >= x_lo && nx <= x_hi && ny >= y_lo && ny <= y_hi
+					&& nz >= z_lo && nz <= z_hi) {
+				queue.push_back(pack_pos(nx, ny, nz));
+			}
 		}
 	}
 
@@ -1061,6 +1110,10 @@ void LightingNative::_bind_methods() {
 			D_METHOD("update_block_light_around_world",
 					"world_x", "world_y", "world_z", "chunk_data", "opacity_lut", "emission_lut"),
 			&LightingNative::update_block_light_around_world);
+	ClassDB::bind_method(
+			D_METHOD("update_block_light_around_world_many",
+					"world_positions", "chunk_data", "opacity_lut", "emission_lut"),
+			&LightingNative::update_block_light_around_world_many);
 	ClassDB::bind_method(
 			D_METHOD("relight_chunk_borders",
 					"target_x", "target_z", "chunk_data", "opacity_lut", "emission_lut",

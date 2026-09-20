@@ -718,6 +718,14 @@ static func update_block_light_around_world_many(world_positions: Array[Vector3i
 	if world_positions.is_empty():
 		return
 	var probe_token := PerfProbe.begin("lighting.update_block_world_batch")
+	# Native fast path. This entry point is the one bulk edits actually use
+	# — an explosion flushes every cell it destroyed through here at once —
+	# and it was the only lighting routine with no C++ behind it, so a
+	# detonation ran its whole convergence in GDScript on the main thread.
+	if _native_lighting != null and manager.has_method("get_chunk_at_coord"):
+		_update_block_light_around_world_many_native(world_positions, manager)
+		PerfProbe.end("lighting.update_block_world_batch", probe_token)
+		return
 	var x_lo: int = world_positions[0].x - _LIGHT_DECAY_RADIUS
 	var x_hi: int = world_positions[0].x + _LIGHT_DECAY_RADIUS
 	var y_lo: int = maxi(0, world_positions[0].y - _LIGHT_DECAY_RADIUS)
@@ -743,6 +751,58 @@ static func update_block_light_around_world_many(world_positions: Array[Vector3i
 		queue, queued, manager, false, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi
 	)
 	PerfProbe.end("lighting.update_block_world_batch", probe_token)
+
+
+# Native fast-path for the multi-source batch. Marshals every chunk the
+# union of the sources' 31-cubes can touch, hands the whole source list to
+# one C++ BFS, and writes back only the chunks that actually changed.
+#
+# The chunk span is computed from the union rather than per-source because
+# the BFS is a single pass across one slab set — the C++ side cannot fetch
+# a chunk we did not hand it, and a missing chunk reads as "unloaded", which
+# its `in_loaded` gate treats as a hard stop.
+static func _update_block_light_around_world_many_native(
+	world_positions: Array[Vector3i], manager
+) -> void:
+	var min_x: int = world_positions[0].x
+	var max_x: int = world_positions[0].x
+	var min_z: int = world_positions[0].z
+	var max_z: int = world_positions[0].z
+	# Flat x, y, z triples rather than a PackedVector3Array: these are exact
+	# cell coordinates, and Vector3 stores real_t — a 32-bit float in a
+	# standard build, which stops round-tripping ints losslessly past 2^24.
+	# Same strided-int convention WorldgenNative.scatter_ores uses.
+	var packed := PackedInt32Array()
+	packed.resize(world_positions.size() * 3)
+	for i: int in range(world_positions.size()):
+		var p: Vector3i = world_positions[i]
+		packed[i * 3] = p.x
+		packed[i * 3 + 1] = p.y
+		packed[i * 3 + 2] = p.z
+		min_x = mini(min_x, p.x)
+		max_x = maxi(max_x, p.x)
+		min_z = mini(min_z, p.z)
+		max_z = maxi(max_z, p.z)
+	var min_cx: int = int(floor(float(min_x - _LIGHT_DECAY_RADIUS) / float(Chunk.SIZE_X)))
+	var max_cx: int = int(floor(float(max_x + _LIGHT_DECAY_RADIUS) / float(Chunk.SIZE_X)))
+	var min_cz: int = int(floor(float(min_z - _LIGHT_DECAY_RADIUS) / float(Chunk.SIZE_Z)))
+	var max_cz: int = int(floor(float(max_z + _LIGHT_DECAY_RADIUS) / float(Chunk.SIZE_Z)))
+	var chunk_data: Array = []
+	for cx in range(min_cx, max_cx + 1):
+		for cz in range(min_cz, max_cz + 1):
+			var chunk: Chunk = manager.get_chunk_at_coord(Vector2i(cx, cz))
+			if chunk == null:
+				continue
+			chunk_data.append([cx, cz, chunk.blocks, chunk.block_light])
+	var result: Dictionary = _native_lighting.update_block_light_around_world_many(
+		packed, chunk_data, _opacity_lut_for_native(), _emission_lut_for_native()
+	)
+	for k: Vector2i in result:
+		var c: Chunk = manager.get_chunk_at_coord(k)
+		if c == null:
+			continue
+		c.block_light = result[k]
+		manager.notify_chunk_lighting_updated(k)
 
 
 # Native fast-path for update_block_light_around_world. Same chunk-data
