@@ -140,6 +140,45 @@ func test_a_parked_cart_faces_a_different_way_on_each_curve() -> void:
 			assert_lt(parallel, 0.999, "curve %d and %d get different headings" % [i, j])
 
 
+# Integration cover for the unit tests above: drive a cart through a whole
+# curve cell and check the hull actually points where it is travelling.
+#
+# The rate limiter that smooths yaw between straight rails must not apply
+# here. An arc tangent varies continuously and meets its neighbouring
+# straights head-on, so there is no step to smooth — and at the 8 m/s cap
+# the arc turns at v/r = 16 rad/s against a 10 rad/s limit, which measured
+# as 35 degrees of sustained lag before this was fixed. What is left is one
+# frame of it: the yaw is derived before the tick's move is applied, so at
+# top speed it trails by 8/60/0.5 = 15.3 degrees and no more.
+func test_the_hull_points_along_a_curve_at_full_speed() -> void:
+	var world := VoxelWorldNode.new()
+	add_child_autofree(world)
+	var cell := Vector3i(0, _FLOOR_Y, 0)
+	world.put(cell, Blocks.RAIL, 6)
+	world.put(Vector3i(0, _FLOOR_Y, 1), Blocks.RAIL, 0)
+	world.put(Vector3i(1, _FLOOR_Y, 0), Blocks.RAIL, 1)
+	var cart: CharacterBody3D = _MINECART_SCRIPT.new()
+	add_child_autofree(cart)
+	cart.set("_chunk_manager", world)
+	cart.global_position = Vector3(0.5, float(_FLOOR_Y) + 1.0 / 16.0, 1.5)
+	# MAX_HORIZ_PER_AXIS — the worst case the rate limiter used to lose.
+	cart.velocity = Vector3(0.0, 0.0, -float(_MINECART_SCRIPT.MAX_HORIZ_PER_AXIS))
+	var worst: float = 0.0
+	var ticks_on_curve: int = 0
+	for _i: int in range(120):
+		cart.call("_physics_process", 1.0 / 60.0)
+		var info: Dictionary = cart.call("_find_rail_under_cart")
+		if info.is_empty() or info.get("cell") != cell:
+			continue
+		ticks_on_curve += 1
+		var tangent: Vector3 = cart.call("_curve_tangent", cell, 6)
+		var heading := Vector3(-sin(cart.rotation.y), 0.0, -cos(cart.rotation.y))
+		# The tangent is a line, not a ray — either sense is "aligned".
+		worst = maxf(worst, acos(clampf(absf(heading.dot(tangent)), 0.0, 1.0)))
+	assert_gt(ticks_on_curve, 3, "premise: the cart really did traverse the curve")
+	assert_lt(rad_to_deg(worst), 20.0, "hull tracks the arc (worst %.1f deg)" % rad_to_deg(worst))
+
+
 # --- "also doesn't turn at angles in model" ---
 
 

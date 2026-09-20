@@ -687,6 +687,15 @@ func _physics_process(delta: float) -> void:
 	# smoothing entirely on the very first tick so a freshly-placed
 	# cart appears already aligned to the rail (avoids the visible spin
 	# on chest/furnace carts whose front face is distinct).
+	# A curve is the one case the rate limiter must not touch. It exists to
+	# smooth DISCONTINUOUS axis changes — a straight rail meeting another
+	# straight at a junction — but an arc tangent varies continuously with
+	# position and meets the neighbouring straights head-on at both ends
+	# (that is what radius 0.5 buys), so there is no step for it to smooth.
+	# All it does is lag: at the 8 m/s speed cap the arc turns at v/r =
+	# 16 rad/s against a 10 rad/s limit, which measured as 35 degrees of
+	# visible yaw error through a fast corner. Track the tangent exactly.
+	var on_curve: bool = on_rail and int(rail_info.meta) >= 6 and int(rail_info.meta) <= 9
 	if not _yaw_initialized:
 		rotation.y = target_yaw
 		_slope_pitch = target_pitch
@@ -694,10 +703,10 @@ func _physics_process(delta: float) -> void:
 	else:
 		var yaw_rate: float = 10.0 if on_rail else 5.0
 		var max_step: float = yaw_rate * delta
-		diff = clampf(diff, -max_step, max_step)
-		rotation.y += diff
-		# Pitch tracks at the same rate, so a cart cresting a ramp levels
-		# out over the same handful of frames the yaw takes to settle.
+		rotation.y += diff if on_curve else clampf(diff, -max_step, max_step)
+		# Pitch keeps the rate limit — a ramp's pitch DOES step when the
+		# cart crosses from flat onto it, which is exactly what smoothing
+		# is for.
 		_slope_pitch += clampf(target_pitch - _slope_pitch, -max_step, max_step)
 	# Move. On rails, we translate position directly along the rail
 	# axis instead of using move_and_slide — physics collision response
