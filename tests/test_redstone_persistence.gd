@@ -281,8 +281,12 @@ func test_the_rail_tie_break_lives_in_one_shared_place() -> void:
 	# shared entry point exists — the behaviour itself is pinned, meta by
 	# meta, in `tests/test_rail_shape.gd`.
 	assert_true(
-		load("res://scripts/player/interaction.gd").source_code.contains("RailShape.compute"),
+		load("res://scripts/player/interaction.gd").source_code.contains("RailShape.update("),
 		"placement goes through RailShape"
+	)
+	assert_true(
+		load("res://scripts/world/redstone.gd").source_code.contains("RailShape.update("),
+		"the junction re-shape goes through the same entry point"
 	)
 
 

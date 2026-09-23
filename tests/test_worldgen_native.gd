@@ -114,3 +114,36 @@ func test_parity_holds_with_redstone_config_row() -> void:
 				if native_chunk.get_block(x, y, z) == Blocks.REDSTONE_ORE:
 					native_count += 1
 	assert_gt(native_count, 0, "native path places redstone cells in the deep band")
+
+
+# The cold-biome overlay takes its 256 column biomes from one native call
+# (issue #10: sampling them in GDScript was ~5 ms of every chunk). The
+# grid must agree with Worldgen3D.biome_at column for column, or ice and
+# snow land in different places depending on whether the extension loaded.
+func test_biome_grid_matches_worldgen3d_biome_at() -> void:
+	assert_true(ClassDB.class_exists("WorldgenNative"), "rebuild via `scons`")
+	var native: RefCounted = ClassDB.instantiate("WorldgenNative")
+	assert_true(native.has_method("biome_grid"), "biome_grid is bound")
+	var seed_was: int = Worldgen.WORLD_SEED
+	Worldgen.apply_world_seed(8675309)
+	var seen: Dictionary = {}
+	for cx: int in range(-4, 4):
+		for cz: int in range(-4, 4):
+			var grid: PackedByteArray = native.call("biome_grid", cx * 7, cz * 7)
+			assert_eq(grid.size(), Chunk.SIZE_X * Chunk.SIZE_Z, "one byte per column")
+			for z: int in range(Chunk.SIZE_Z):
+				for x: int in range(Chunk.SIZE_X):
+					var expected: int = Worldgen3D.biome_at(
+						float(cx * 7 * Chunk.SIZE_X + x), float(cz * 7 * Chunk.SIZE_Z + z)
+					)
+					seen[expected] = true
+					if grid[z * Chunk.SIZE_X + x] != expected:
+						assert_eq(
+							grid[z * Chunk.SIZE_X + x],
+							expected,
+							"chunk %d,%d col %d,%d" % [cx * 7, cz * 7, x, z]
+						)
+						Worldgen.apply_world_seed(seed_was)
+						return
+	assert_gt(seen.size(), 1, "the sample spans more than one biome")
+	Worldgen.apply_world_seed(seed_was)

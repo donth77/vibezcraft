@@ -98,11 +98,6 @@ var _fence_gate_crack_meshes: Dictionary = {}
 # Stair crack meshes — keyed by meta & 3 (4 orientations). Bottom
 # half-slab + upper step matches Mesher._emit_stair_geometry.
 var _stair_crack_meshes: Dictionary = {}
-# Chest crack mesh — single 14/16 cube matching ChestNode's visible
-# bounds (the chunk mesher emits a full-cube collision soup for the
-# external-render block, but the visible chest entity is the smaller
-# vanilla mesh). Lazy-built on first chest break.
-var _chest_crack_mesh: ArrayMesh
 
 # Hold-to-break state
 var _mining_target: Vector3i = NO_TARGET
@@ -828,7 +823,7 @@ func _update_mining(hit: Dictionary, delta: float) -> void:
 	var hit_id_now: int = _chunk_manager.get_world_block(target)
 	var hit_meta_now: int = _chunk_manager.get_world_block_meta(target)
 	_crack.visible = true
-	# Shape-aware crack mesh — fence / fence-gate / chest / stairs use
+	# Shape-aware crack mesh — fence / fence-gate / stairs use
 	# the same per-shape geometry as the chunk mesher emits, scaled 1:1
 	# in world coords, so the destroy_stages overlay reads on the
 	# visible triangles instead of plastering across the air gaps of a
@@ -1170,10 +1165,12 @@ func _creative_break(target: Vector3i) -> void:
 	_chunk_manager.set_world_block(target, _break_replacement(target, broken_id))
 	SFX.play_break(broken_id)
 	_BLOCK_FX.spawn_break(_chunk_manager, target, broken_id)
-	# Creative: skip the dropped-item dance, go straight to inventory
+	# Creative: skip the dropped-item dance, go straight to inventory —
+	# as the item that places this block again, not the raw cell id.
+	var picked: int = Blocks.pick_item(broken_id)
 	var inventory: Inventory = _player_inventory()
-	if inventory != null:
-		inventory.add_item(broken_id, 1)
+	if inventory != null and picked != Blocks.AIR:
+		inventory.add_item(picked, 1)
 
 
 func _is_creative() -> bool:
@@ -1867,26 +1864,15 @@ func _open_furnace(pos: Vector3i) -> void:
 		screen.open_at(pos)
 
 
-# Right-click on a chest opens its 27-slot screen and tweens the lid up.
-# The screen close-callback closes the lid again so the animation tracks
-# the UI state symmetrically. ChestNode lookup goes through ChunkManager
-# since chests are children of their owning chunk_node.
+# Right-click on a chest opens its 27-slot screen. The open / close
+# sounds are a later game's (Alpha 1.2.6 has no chest sounds at all);
+# the close plays from the screen's close-callback.
 func _open_chest(pos: Vector3i) -> void:
 	var screen: Node = get_tree().root.get_node_or_null("Main/Player/Crosshair/ChestScreen")
 	if screen == null or not screen.has_method("open_for"):
 		return
-	var node: ChestNode = _chunk_manager.find_chest_node_at(pos) if _chunk_manager else null
-	if node != null:
-		node.set_open(true)
-	# Vanilla TileEntityChest plays `random.chestopen` here (c.java).
 	SFX.play_chest_open()
-	screen.open_for(
-		pos,
-		func() -> void:
-			if node != null:
-				node.set_open(false)
-			SFX.play_chest_close()
-	)
+	screen.open_for(pos, func() -> void: SFX.play_chest_close())
 
 
 # Opens the sign editor for the cell at `pos`. Same lookup pattern as
@@ -2196,15 +2182,6 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		var displaced_drop: int = Blocks.drops(displaced_id)
 		if displaced_drop != Blocks.AIR:
 			_spawn_dropped_item(place, displaced_drop)
-	# Vanilla c.java:c() orients the chest based on the player's yaw at
-	# placement time (so the latched front faces the player). meta 0..3
-	# encodes -Z / -X / +Z / +X (matches ChestNode.set_facing).
-	if stack.item_id == Blocks.CHEST:
-		var meta: int = _chest_meta_from_yaw()
-		_chunk_manager.set_world_block_with_meta(place, Blocks.CHEST, meta)
-		SFX.play_place(Blocks.CHEST)
-		inv.consume_one_selected()
-		return true
 	# Stairs orient with the ascending side facing the player's look
 	# direction — mb.java:170-183 uses `(yaw*4/360+0.5)&3` then remaps.
 	if stack.item_id == Blocks.WOOD_STAIRS or stack.item_id == Blocks.COBBLESTONE_STAIRS:
@@ -2226,7 +2203,8 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 		return true
 	if Blocks.has_directional_face(stack.item_id):
 		# Pumpkins and furnaces face the player who placed them — mj.java's
-		# onBlockPlacedBy quantises the yaw the same way the chest does.
+		# onBlockPlacedBy quantises the yaw. Chests do too, although Alpha
+		# picks a chest's front from its neighbours (c.java:70-83).
 		var facing_meta: int = _chest_meta_from_yaw()
 		_chunk_manager.set_world_block_with_meta(place, stack.item_id, facing_meta)
 		SFX.play_place(stack.item_id)
@@ -2238,12 +2216,10 @@ func _place_block_from_held(hit: Dictionary) -> bool:
 	return true
 
 
-# Pick the chest facing meta (0..3) from the player's current yaw, so
-# the chest's "front" (where the latch sits) ends up pointing at the
-# player. Mirrors vanilla c.java::c() in BlockChest, which uses
-# `MathHelper.floor_double(EntityLiving.aw * 4 / 360 + 0.5) & 3` then
-# maps direction id → block meta. We collapse those steps into one
-# yaw-quadrant lookup below.
+# Pick the facing meta (0..3) for a directional cube from the player's
+# current yaw, so its front (the chest latch, the furnace firebox, the
+# carved pumpkin face) ends up pointing at the player — the quadrant
+# lookup of `MathHelper.floor_double(yaw * 4 / 360 + 0.5) & 3`.
 func _chest_meta_from_yaw() -> int:
 	var player: Node3D = get_parent()
 	# Yaw in radians, atan2(-x, -z) so 0 = facing -Z (Godot's default
@@ -2459,11 +2435,8 @@ func _try_place_sugar_cane(hit: Dictionary, _stack: ItemStack) -> bool:
 
 
 # Place a RAIL block on top of the clicked solid block. Vanilla
-# qe.java::a checks the support cell below is opaque; meta is set
-# from the neighbor rails (auto-connect, same family as FENCE).
-# Stage 1 only writes orientation 0 (N-S) or 1 (E-W) — the more
-# complex curve / ascending meta values land with the minecart
-# rail-physics pass in Stage 2.
+# jn.java:54 checks the support cell below is a normal cube; the shape
+# comes from the neighbouring rails via RailShape (oc.java).
 func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
 	if hit.is_empty():
 		return false
@@ -2482,55 +2455,30 @@ func _try_place_rail(hit: Dictionary, _stack: ItemStack) -> bool:
 	var support: int = _chunk_manager.get_world_block(place + Vector3i(0, -1, 0))
 	if not Blocks.is_opaque(support):
 		return false
-	# Auto-orient meta from neighbor rails (vanilla qe.java::e()).
-	# Considers same-Y horizontal neighbors AND neighbors one Y higher
-	# (for ascending ramps).
-	var meta: int = _compute_rail_meta(place)
-	_chunk_manager.set_world_block_with_meta(place, Blocks.RAIL, meta)
+	# Writes the new rail and re-shapes only the neighbours that link to it
+	# (vanilla jn.java:58-63 → oc.java). Re-deriving every nearby rail from
+	# scratch instead bent straight track into curves and tilted the rail
+	# at the top of a slope up into empty air.
+	RailShape.update(_chunk_manager, place, _rail_powered(place), _rail_facing_meta(), true)
 	SFX.play_place(Blocks.RAIL)
-	# Re-evaluate nearby rails so they update to curves / straights /
-	# ascending matching the new layout. Walks 4 same-Y horizontal
-	# neighbors PLUS 4 upper-Y and 4 lower-Y horizontal neighbors
-	# (12 positions). Vanilla qe.java's neighbor-notify code does the
-	# same. Without the upper/lower checks, a lower-Y rail wouldn't
-	# turn into a ramp when you place a rail one block higher next to it.
-	var reeval_offsets: Array = [
-		Vector3i(1, 0, 0),
-		Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1),
-		Vector3i(0, 0, -1),
-		Vector3i(1, 1, 0),
-		Vector3i(-1, 1, 0),
-		Vector3i(0, 1, 1),
-		Vector3i(0, 1, -1),
-		Vector3i(1, -1, 0),
-		Vector3i(-1, -1, 0),
-		Vector3i(0, -1, 1),
-		Vector3i(0, -1, -1),
-	]
-	for off: Vector3i in reeval_offsets:
-		var npos: Vector3i = place + off
-		if _chunk_manager.get_world_block(npos) == Blocks.RAIL:
-			var new_meta: int = _compute_rail_meta(npos)
-			_chunk_manager.set_world_block_with_meta(npos, Blocks.RAIL, new_meta)
 	var inv: Inventory = _player_inventory()
 	if inv != null:
 		inv.consume_one_selected()
 	return true
 
 
-# Pick the rail meta (0..9) for the rail being placed at `pos`.
-# The shape rules live in `RailShape` so placement and the redstone
-# junction re-evaluation (jn.java:89) cannot drift apart; the only thing
-# this wrapper adds is Alpha's isolated-rail fallback, which aligns a
-# neighbourless rail with the axis the player is facing.
-func _compute_rail_meta(pos: Vector3i) -> int:
+# The shape for a rail that links to nothing: the straight along the axis
+# the player faces. A deliberate deviation — Alpha always lays those N/S
+# (oc.java:278) — so a lone rail runs the way it was aimed.
+func _rail_facing_meta() -> int:
 	var yaw: float = _player_yaw()
-	var facing: int = (
-		RailShape.STRAIGHT_EW if absf(sin(yaw)) > absf(cos(yaw)) else RailShape.STRAIGHT_NS
-	)
-	var powered: bool = Redstone.is_block_indirectly_powered(_chunk_manager, pos)
-	return RailShape.compute(_chunk_manager, pos, powered, facing)
+	return RailShape.STRAIGHT_EW if absf(sin(yaw)) > absf(cos(yaw)) else RailShape.STRAIGHT_NS
+
+
+# jn.java:98 passes `cy.o(x,y,z)` (indirect power) into the shape logic;
+# it only matters when the new rail lands on a three-way junction.
+func _rail_powered(pos: Vector3i) -> bool:
+	return Redstone.is_block_indirectly_powered(_chunk_manager, pos)
 
 
 # Fishing rod — vanilla bj.java::a. Branches on player.fishing_bobber:
@@ -2878,7 +2826,7 @@ func _try_sleep_in_bed(clicked_pos: Vector3i) -> void:
 	# the time jump from `_tick_sleep` so the dark frame happens BEFORE
 	# the world flips to dawn, not at the same instant).
 	if player.has_method("start_sleep"):
-		player.call("start_sleep", foot_pos)
+		player.call("start_sleep", foot_pos, _bed_head_offset(facing))
 
 
 # Jukebox right-click — vanilla BlockJukebox.interact (Beta 1.4).
@@ -3520,8 +3468,6 @@ func _shape_aware_crack_mesh(target: Vector3i, id: int, meta: int) -> ArrayMesh:
 		return _get_fence_gate_crack_mesh(meta)
 	if id == Blocks.WOOD_STAIRS or id == Blocks.COBBLESTONE_STAIRS:
 		return _get_stair_crack_mesh(meta)
-	if id == Blocks.CHEST:
-		return _get_chest_crack_mesh()
 	return null
 
 
@@ -3634,33 +3580,6 @@ func _build_stair_crack_mesh(meta: int) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
-
-
-# Chest crack mesh — 14/16 cube centered at the cell origin, matching
-# the vanilla ChestNode visible bounds (chunks emit a full-cube
-# collision soup so the player can't walk through, but the renderer
-# uses the smaller mesh — same convention as the in-world chest).
-func _get_chest_crack_mesh() -> ArrayMesh:
-	if _chest_crack_mesh == null:
-		const INSET: float = 0.005
-		var verts := PackedVector3Array()
-		var uvs := PackedVector2Array()
-		var indices := PackedInt32Array()
-		_emit_unit_uv_box(
-			verts,
-			uvs,
-			indices,
-			Vector3(0.0625 - INSET, 0.0 - INSET, 0.0625 - INSET),
-			Vector3(0.9375 + INSET, 0.875 + INSET, 0.9375 + INSET)
-		)
-		var arrays: Array = []
-		arrays.resize(Mesh.ARRAY_MAX)
-		arrays[Mesh.ARRAY_VERTEX] = verts
-		arrays[Mesh.ARRAY_TEX_UV] = uvs
-		arrays[Mesh.ARRAY_INDEX] = indices
-		_chest_crack_mesh = ArrayMesh.new()
-		_chest_crack_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return _chest_crack_mesh
 
 
 # Build a crack-overlay mesh shaped like the in-world fence's actual

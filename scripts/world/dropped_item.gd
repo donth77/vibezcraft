@@ -49,6 +49,12 @@ const _CONTACT_FIRE: int = 1
 const _CONTACT_LAVA: int = 2
 const _CONTACT_WATER: int = 4
 const _AABB_EPSILON: float = 0.0001
+# Block collision (_clip_move). The skin keeps the floor an item rests on
+# from reading as a wall across the float noise of its resting height; the
+# gap parks a blocked item a hair short of the face so it never starts the
+# next frame overlapping it.
+const _COLLIDE_SKIN: float = 0.001
+const _CONTACT_GAP: float = 0.0001
 
 # Distance LOD. Items are the one entity class that routinely exists in
 # the dozens — one creeper in a sand pile drops scores at once — and until
@@ -143,9 +149,7 @@ func setup(
 	# icon tiled on every face.
 	_mesh = MeshInstance3D.new()
 	# Sprite path: non-block items and flat-billboard blocks (cross-quads
-	# like sapling/fire, and torches). MESH_SHAPE_EXTERNAL blocks (chest)
-	# read as cubes in inventory and on the ground — same fix as the
-	# held-item routing in player.gd::_update_held_item.
+	# like sapling/fire, and torches).
 	_is_sprite_item = (not Blocks.is_registered(p_item_id) or Blocks.has_sprite_tile(p_item_id))
 	if _is_sprite_item:
 		_build_sprite_mesh(p_item_id)
@@ -374,8 +378,7 @@ func _resolve_chunk_manager() -> void:
 
 func _apply_physics(delta: float) -> void:
 	# Gravity on Y, exponential drag on horizontal so thrown items glide
-	# briefly before settling. No horizontal collision — items rarely travel
-	# more than a block from their spawn before friction stops them.
+	# briefly before settling.
 	# Rest throttle — see _REST_PROBE_SEC. A settled item spends one ray
 	# query per frame proving it is still settled; the only thing that
 	# probe can ever discover is the floor being mined out from under it.
@@ -388,7 +391,23 @@ func _apply_physics(delta: float) -> void:
 	var drag_factor: float = clampf(1.0 - HORIZONTAL_DRAG * delta, 0.0, 1.0)
 	_velocity.x *= drag_factor
 	_velocity.z *= drag_factor
-	var new_pos: Vector3 = global_position + _velocity * delta
+	# lw.java:267-290 — every axis of the move is clipped against the block
+	# boxes in its path, and a blocked axis loses its velocity (lw.java:
+	# 350-358). Items used to have no horizontal collision at all: sliding
+	# into a wall left only the push-out rescue, which shoves along whichever
+	# face is nearest — through the far side when that one was — and never
+	# fires for non-opaque solids (glass, ice, leaves, chests), so an item
+	# could slide clean through those (issue #10). X and Z are clipped at the
+	# current height, before this frame's fall, so the floor an item is
+	# sliding across never counts as a wall; the fall itself is the floor
+	# probe below.
+	var new_pos: Vector3 = global_position
+	new_pos.x += _clip_move(new_pos, 0, _velocity.x * delta)
+	new_pos.z += _clip_move(new_pos, 2, _velocity.z * delta)
+	if _velocity.y > 0.0:
+		new_pos.y += _clip_move(new_pos, 1, _velocity.y * delta)
+	else:
+		new_pos.y += _velocity.y * delta
 	var landed: bool = false
 	if _velocity.y <= 0.0:
 		var half: float = MESH_SIZE * 0.5
@@ -415,6 +434,80 @@ func _apply_physics(delta: float) -> void:
 		and absf(_velocity.z) < _REST_SPEED_EPSILON
 	)
 	global_position = new_pos
+
+
+# Move by `offset` with block collision. For spawners that launch an item
+# from ahead of a point known to be clear, such as the thrower's eye, so it
+# cannot start out inside a wall the thrower is standing against.
+func move_clipped(offset: Vector3) -> void:
+	_resolve_chunk_manager()
+	var pos: Vector3 = global_position
+	pos.x += _clip_move(pos, 0, offset.x)
+	pos.z += _clip_move(pos, 2, offset.z)
+	pos.y += _clip_move(pos, 1, offset.y)
+	global_position = pos
+
+
+# How far the item's box can move `motion` along `axis` (0 = X, 1 = Y,
+# 2 = Z) from `pos` before a block's collision box stops it — vanilla's
+# per-axis AABB offset (co.java a / b / c), against every block box the
+# sweep crosses, so no step size can skip a block. Zeroes the velocity on
+# that axis when the move is cut short. Only boxes wholly ahead of the
+# leading face count: an item already embedded (a block placed on it)
+# can still leave, and _push_out_of_solid_block frees it.
+func _clip_move(pos: Vector3, axis: int, motion: float) -> float:
+	if motion == 0.0:
+		return 0.0
+	if _chunk_manager == null or not _chunk_manager.has_method("get_world_block"):
+		return motion
+	var half: float = MESH_SIZE * 0.5
+	var item_min: Vector3 = pos - Vector3.ONE * half
+	var item_max: Vector3 = pos + Vector3.ONE * half
+	var lo: Vector3 = item_min + Vector3.ONE * _COLLIDE_SKIN
+	var hi: Vector3 = item_max - Vector3.ONE * _COLLIDE_SKIN
+	lo[axis] = minf(item_min[axis], item_min[axis] + motion)
+	hi[axis] = maxf(item_max[axis], item_max[axis] + motion)
+	var has_meta: bool = _chunk_manager.has_method("get_world_block_meta")
+	var allowed: float = motion
+	for x: int in range(floori(lo.x), floori(hi.x) + 1):
+		for y: int in range(floori(lo.y), floori(hi.y) + 1):
+			for z: int in range(floori(lo.z), floori(hi.z) + 1):
+				var cell := Vector3i(x, y, z)
+				var id: int = _chunk_manager.get_world_block(cell)
+				if not Blocks.is_solid_collision(id):
+					continue
+				var meta: int = _chunk_manager.get_world_block_meta(cell) if has_meta else 0
+				var box: AABB = Blocks.collision_aabb(id, meta)
+				if not box.has_volume():
+					continue
+				var box_min: Vector3 = Vector3(cell) + box.position
+				var box_max: Vector3 = box_min + box.size
+				if not _overlaps_across(item_min, item_max, box_min, box_max, axis):
+					continue
+				if allowed > 0.0 and box_min[axis] >= item_max[axis] - _COLLIDE_SKIN:
+					var room: float = box_min[axis] - item_max[axis] - _CONTACT_GAP
+					allowed = minf(allowed, maxf(0.0, room))
+				elif allowed < 0.0 and box_max[axis] <= item_min[axis] + _COLLIDE_SKIN:
+					var room_back: float = box_max[axis] - item_min[axis] + _CONTACT_GAP
+					allowed = maxf(allowed, minf(0.0, room_back))
+	if allowed != motion:
+		_velocity[axis] = 0.0
+	return allowed
+
+
+# True when the two boxes overlap on both axes other than `axis`, by more
+# than the collision skin.
+static func _overlaps_across(
+	a_min: Vector3, a_max: Vector3, b_min: Vector3, b_max: Vector3, axis: int
+) -> bool:
+	for other: int in range(3):
+		if other == axis:
+			continue
+		if b_max[other] <= a_min[other] + _COLLIDE_SKIN:
+			return false
+		if b_min[other] >= a_max[other] - _COLLIDE_SKIN:
+			return false
+	return true
 
 
 # Surface the chunk's cooked collision reports directly under the item, or

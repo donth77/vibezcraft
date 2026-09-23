@@ -12,25 +12,37 @@ extends Control
 const CONTAINER_TEXTURE_PATH: String = "res://assets/textures/gui/container.png"
 const FONT_PATH: String = "res://assets/fonts/Minecraft.otf"
 
+const CHEST_GRID_SIZE: int = 27
+const CHEST_ROWS: int = 3
+
 const SCALE: int = 5
 const PANEL_W: int = 176 * SCALE
-const PANEL_H: int = 222 * SCALE
+# Vanilla er.java:21-24 — GuiChest sizes itself from the inventory it
+# shows: 114 + rows × 18 tall, so 168 for a single chest.
+const PANEL_H: int = (114 + CHEST_ROWS * 18) * SCALE
 const SLOT_PX: int = 18 * SCALE
 
-# Vanilla mc-dev ContainerChest slot coords (item-render positions).
-const _CHEST_GRID_TL: Vector2i = Vector2i(8, 18)  # 9x3 starts here, stride 18
-const _MAIN_TL: Vector2i = Vector2i(8, 140)
-const _HOTBAR_TL: Vector2i = Vector2i(8, 198)
+# er.java:52-53 — the panel is two crops of container.png: the title bar
+# plus `rows` slot rows from the top, then the 96-px player-inventory
+# block that starts at y=126. Drawing the whole 222-px crop instead
+# showed the six-row double-chest art over a 27-slot chest, with rows
+# 4-6 dead to clicks.
+const _CHEST_ART_H: int = CHEST_ROWS * 18 + 17
+const _INVENTORY_ART := Rect2(0, 126, 176, 96)
+
+# er.java:26-37 slot coords (item-render positions). The player's rows
+# sit (rows - 4) × 18 above where the six-row art puts them.
+const _CHEST_GRID_TL: Vector2i = Vector2i(8, 18)  # 9 × rows starts here, stride 18
+const _MAIN_TL: Vector2i = Vector2i(8, 103 + (CHEST_ROWS - 4) * 18)
+const _HOTBAR_TL: Vector2i = Vector2i(8, 161 + (CHEST_ROWS - 4) * 18)
 const _TITLE_POS: Vector2i = Vector2i(8, 6)
 
 const _COLOR_TITLE: Color = Color8(64, 64, 64)
 
-const CHEST_GRID_SIZE: int = 27
-
 var inventory: Inventory  # bound to player's inventory for the bottom rows
 var _local_slots: Array  # 27 ItemStack refs into ChestStorage's array
 var _chest_pos: Vector3i  # world cell of the open chest (entity mode: ignored)
-var _open_callback: Callable  # invoked when screen closes (drives lid anim)
+var _open_callback: Callable  # invoked when the screen closes
 var _title_label: Label = null  # rebound per-open to swap "Chest" vs cart title
 var _title_text: String = "Chest"
 var _cursor: ItemStack
@@ -91,7 +103,7 @@ func bind(inv: Inventory) -> void:
 
 
 # Open this screen against a specific chest. Caller (interaction.gd)
-# passes the close-callback so the lid animation closes when the UI does.
+# passes a close-callback, which plays the close sound when the UI shuts.
 func open_for(pos: Vector3i, close_cb: Callable) -> void:
 	_chest_pos = pos
 	_open_callback = close_cb
@@ -106,7 +118,7 @@ func open_for(pos: Vector3i, close_cb: Callable) -> void:
 # carries an inventory). Caller passes the cart's 27-slot ItemStack
 # array by reference; mutations are visible to the cart immediately
 # because chest_screen reads/writes _local_slots in place. Optional
-# close_cb drives the entity's lid animation (cart's chest_node).
+# close_cb runs when the screen shuts.
 func open_entity(items: Array, title: String = "Chest", close_cb: Callable = Callable()) -> void:
 	_chest_pos = Vector3i.ZERO
 	_open_callback = close_cb
@@ -171,17 +183,10 @@ func _build_panel() -> void:
 	if Game.touch_controls_enabled():
 		root.add_child(TouchCloseButton.build(_close, SCALE))
 
-	# Background — 176×222 chest panel cropped from container.png.
-	var bg := TextureRect.new()
-	bg.size = Vector2(PANEL_W, PANEL_H)
-	bg.stretch_mode = TextureRect.STRETCH_SCALE
-	bg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var atlas := AtlasTexture.new()
-	atlas.atlas = load(CONTAINER_TEXTURE_PATH) as Texture2D
-	atlas.region = Rect2(0, 0, 176, 222)
-	bg.texture = atlas
-	root.add_child(bg)
+	# Background — the two container.png crops, stacked (er.java:52-53).
+	var art: Texture2D = load(CONTAINER_TEXTURE_PATH) as Texture2D
+	_add_panel_art(root, art, Rect2(0, 0, 176, _CHEST_ART_H), 0)
+	_add_panel_art(root, art, _INVENTORY_ART, _CHEST_ART_H)
 
 	var title := Label.new()
 	title.text = _title_text
@@ -193,8 +198,8 @@ func _build_panel() -> void:
 	root.add_child(title)
 	_title_label = title
 
-	# 9x3 chest grid (LOCAL slots 0..26).
-	for r in range(3):
+	# 9 × rows chest grid (LOCAL slots 0..26).
+	for r in range(CHEST_ROWS):
 		for c in range(9):
 			var idx: int = r * 9 + c
 			_place_local_slot_overlay(
@@ -210,6 +215,21 @@ func _build_panel() -> void:
 		_place_inv_slot_overlay(
 			root, Inventory.HOTBAR_START + c, _HOTBAR_TL.x + c * 18, _HOTBAR_TL.y
 		)
+
+
+# One crop of the container art, placed `native_y` px down the panel.
+func _add_panel_art(parent: Control, art: Texture2D, region: Rect2, native_y: int) -> void:
+	var piece := TextureRect.new()
+	piece.position = Vector2(0, native_y * SCALE)
+	piece.size = region.size * SCALE
+	piece.stretch_mode = TextureRect.STRETCH_SCALE
+	piece.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	piece.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var atlas := AtlasTexture.new()
+	atlas.atlas = art
+	atlas.region = region
+	piece.texture = atlas
+	parent.add_child(piece)
 
 
 func _place_local_slot_overlay(

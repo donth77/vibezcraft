@@ -56,14 +56,15 @@ public:
 	// Mirrors the exclusion list in Blocks.is_opaque().
 	static constexpr int FIRE = 27;
 	static constexpr int TORCH = 28;
-	// Tile-entity / non-cube blocks that DON'T fill their cell — chest is
-	// a 14/16 inset body + lid (rendered via ChestNode entity), fence is
-	// a 6/16 post + rails. The native mesher must NOT emit cube faces for
-	// these cells (the GDScript non-cube pass handles them) AND must
-	// treat them as non-opaque for neighbor face-culling, otherwise the
-	// surrounding cubes cull the faces those entities are supposed to
-	// reveal. Mirrors Blocks.is_opaque exclusions.
+	// CHEST — an opaque full cube (Alpha c.java), but its front face
+	// depends on the facing meta, so like the furnace it is a GDScript
+	// special cell (is_gdscript_shape) that still culls its neighbours.
 	static constexpr int CHEST = 29;
+	// FENCE — a 6/16 post + rails that doesn't fill its cell. The native
+	// mesher must NOT emit cube faces for it (the GDScript non-cube pass
+	// handles them) AND must treat it as non-opaque for neighbor culling,
+	// otherwise the surrounding cubes cull the faces it is supposed to
+	// reveal. Mirrors Blocks.is_opaque exclusions.
 	static constexpr int FENCE = 30;
 	// Stairs — two-box step geometry (mb.java). Non-opaque (mb.java:27),
 	// handled by GDScript mesher. Native path must skip cube emission and

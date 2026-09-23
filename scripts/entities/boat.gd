@@ -22,22 +22,34 @@ extends CharacterBody3D
 #   total visible height = floor 0.25 m + walls 0.375 m = 0.625 m
 # dp.java::a(1.5f, 0.6f) sets the COLLISION box to width=1.5 height=0.6,
 # so the AABB is square (1.5 × 0.6 × 1.5) while the visual is narrower.
-# We use the visual width for HULL_WIDTH so the mesh + collider match.
 # Explicit preload — GUT loads test scripts before class_name registers
 # the global EntityLighting identifier, so bare `EntityLighting.foo()`
 # fails to parse in tests with "Identifier ... not declared in the
 # current scope". Preload via const lets us call the same static
 # methods through the preloaded GDScript instead.
 const _ENTITY_LIGHTING: GDScript = preload("res://scripts/world/entity_lighting.gd")
+# Same reason: a new class_name is unknown to any run that has not
+# rescanned the project since it was added.
+const _MODEL_BOX: GDScript = preload("res://scripts/entities/model_box.gd")
 
 const HULL_LENGTH: float = 1.5
-const HULL_WIDTH: float = 1.0
 const HULL_HEIGHT: float = 0.625
-# Walls are 0.375 m tall on top of the 0.25 m floor. Used by the mesh
-# builder to inset walls onto the floor surface.
+# cv.java:18 — the floor box is 4 px deep; the light sample sits on it.
 const FLOOR_THICKNESS: float = 0.25
-const WALL_HEIGHT: float = 0.375
-const WALL_THICKNESS: float = 0.125  # 2 vanilla units
+# da.java:35-36 hands ModelBoat a -1/16 scale. The 7/16 lift puts the
+# floor's underside on the boat origin; the hull's length is local +X
+# under _visual_root, as vanilla's is.
+const _MODEL_TO_HULL := Transform3D(
+	Basis(Vector3(-1.0 / 16.0, 0, 0), Vector3(0, -1.0 / 16.0, 0), Vector3(0, 0, 1.0 / 16.0)),
+	Vector3(0, 7.0 / 16.0, 0)
+)
+# cv.java:20-31 — one 20 × 6 × 2 wall box, pivoted and turned to each side.
+const _WALL_PIVOTS: Array = [
+	[Vector3(-11, 4, 0), 3.0 * PI / 2.0],
+	[Vector3(11, 4, 0), PI / 2.0],
+	[Vector3(0, 4, -9), PI],
+	[Vector3(0, 4, 9), 0.0],
+]
 
 # Vanilla constants from dp.java::e_(), converted from per-tick to
 # per-second by ×20 (TPS). Vanilla source comments inline for each.
@@ -131,8 +143,7 @@ var _wake_tick_accumulator: float = 0.0
 # _ready; nullable in case the boat outlives the player or spawns
 # before the Player node exists.
 var _player_ref: Node3D = null
-var _floor_mat: StandardMaterial3D = null
-var _wall_mat: StandardMaterial3D = null
+var _hull_mat: StandardMaterial3D = null
 var _last_light_brightness: float = -1.0
 
 
@@ -180,266 +191,48 @@ func _build_collider() -> void:
 
 
 func _build_visual_mesh() -> void:
-	# Original 5-piece BoxMesh hull (floor + 4 walls), the layout that
-	# read as the correct boat shape in earlier testing. Walls sit on
-	# top of the floor; short ends span the FULL hull width, long walls
-	# are inset by WALL_THICKNESS on each X end so the short ends own
-	# the corner geometry. Matches vanilla cv.java ModelBoat layout.
-	#
-	# Texture is the vanilla 64×32 boat.png cropped via the material's
-	# uv1_offset/uv1_scale instead of AtlasTexture. BoxMesh emits face
-	# UVs in [0, 1] per face; uv1 transform remaps that range to the
-	# vanilla floor strip or wall strip sub-rect. Since the transform
-	# only scales-down + offsets, every sample stays inside the target
-	# region — no out-of-region pixels reading as black (the AtlasTexture
-	# splotch bug).
 	_visual_root = Node3D.new()
 	add_child(_visual_root)
-	# Rotate the hull 90° so its length axis (built along local +X for
-	# math convenience) aligns with Godot's default forward (-Z). When
-	# auto-yaw sets boat.rotation.y = rider.rotation.y, the player's
-	# forward then maps to the boat's front, not its side.
+	# Rotate the hull 90° so its length axis (local +X, as in cv.java)
+	# aligns with Godot's default forward (-Z). When auto-yaw sets
+	# boat.rotation.y = rider.rotation.y, the player's forward then maps
+	# to the boat's front, not its side.
 	_visual_root.rotation.y = -PI / 2.0
-	var boat_tex: Texture2D = _load_boat_texture()
-	# Vanilla skin regions (in 64×32 pixel coords, normalized to UV).
-	# Floor strip (0,8)→(24,12) = 24 × 4 pixels of horizontal planks.
-	# Wall strip (0,0)→(20,6) = 20 × 6 pixels of vertical planks.
-	var floor_offset := Vector3(0.0, 8.0 / 32.0, 0.0)
-	var floor_scale := Vector3(24.0 / 64.0, 4.0 / 32.0, 1.0)
-	var wall_offset := Vector3(0.0, 0.0, 0.0)
-	var wall_scale := Vector3(20.0 / 64.0, 6.0 / 32.0, 1.0)
-	_floor_mat = _make_boat_material(boat_tex)
-	_floor_mat.uv1_offset = floor_offset
-	_floor_mat.uv1_scale = floor_scale
-	_wall_mat = _make_boat_material(boat_tex)
-	_wall_mat.uv1_offset = wall_offset
-	_wall_mat.uv1_scale = wall_scale
-	# Floor slab — full hull footprint, sits with its bottom at y=0.
-	var floor_mi := MeshInstance3D.new()
-	var floor_mesh := BoxMesh.new()
-	floor_mesh.size = Vector3(HULL_LENGTH, FLOOR_THICKNESS, HULL_WIDTH)
-	floor_mi.mesh = floor_mesh
-	floor_mi.position = Vector3(0, FLOOR_THICKNESS * 0.5, 0)
-	floor_mi.material_override = _floor_mat
-	_visual_root.add_child(floor_mi)
-	# Long sides (along local X = boat's length) — inset by
-	# WALL_THICKNESS so short ends seal the corners.
-	var inner_len: float = HULL_LENGTH - 2.0 * WALL_THICKNESS
-	var wall_y: float = FLOOR_THICKNESS + WALL_HEIGHT * 0.5
-	for sz: float in [
-		HULL_WIDTH * 0.5 - WALL_THICKNESS * 0.5, -(HULL_WIDTH * 0.5 - WALL_THICKNESS * 0.5)
-	]:
-		var wall := MeshInstance3D.new()
-		var wall_mesh := BoxMesh.new()
-		wall_mesh.size = Vector3(inner_len, WALL_HEIGHT, WALL_THICKNESS)
-		wall.mesh = wall_mesh
-		wall.position = Vector3(0, wall_y, sz)
-		wall.material_override = _wall_mat
-		_visual_root.add_child(wall)
-	# Short ends (along local Z = boat's width) — span the full width,
-	# owning the corner geometry.
-	for sx: float in [
-		HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5, -(HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5)
-	]:
-		var wall := MeshInstance3D.new()
-		var wall_mesh := BoxMesh.new()
-		wall_mesh.size = Vector3(WALL_THICKNESS, WALL_HEIGHT, HULL_WIDTH)
-		wall.mesh = wall_mesh
-		wall.position = Vector3(sx, wall_y, 0)
-		wall.material_override = _wall_mat
-		_visual_root.add_child(wall)
+	_hull_mat = _make_boat_material(_load_boat_texture())
+	var hull := MeshInstance3D.new()
+	hull.mesh = _build_hull_mesh()
+	hull.material_override = _hull_mat
+	_visual_root.add_child(hull)
 
 
-# Kept for reference / future use — one continuous mesh approach. Not
-# currently called; superseded by the 5-piece BoxMesh layout above.
-func _build_hull_mesh() -> ArrayMesh:
-	var hx: float = HULL_WIDTH * 0.5
-	var hz: float = HULL_LENGTH * 0.5
-	var ix: float = hx - WALL_THICKNESS
-	var iz: float = hz - WALL_THICKNESS
-	var y_bot: float = 0.0
-	var y_floor: float = FLOOR_THICKNESS
-	var y_top: float = HULL_HEIGHT
-	var floor_uv := Rect2(0.0, 8.0 / 32.0, 24.0 / 64.0, 4.0 / 32.0)
-	var wall_uv := Rect2(0.0, 0.0, 20.0 / 64.0, 6.0 / 32.0)
+# The hull is vanilla's own model — cv.java's floor and four walls, each
+# UV-mapped the way ka.java unwraps a box onto boat.png: 1.5 long with a
+# 0.25 floor, and a 1.5 × 1.25 wall ring that overhangs the 1.0-wide
+# floor on both sides, rim at 0.625.
+static func _build_hull_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# Floor bottom (visible from below, normal -Y).
-	_emit_quad(
+	# cv.java:18-19, 28 — the floor, laid flat.
+	_MODEL_BOX.add(
 		st,
-		Vector3(0, -1, 0),
-		[
-			Vector3(-hx, y_bot, -hz),
-			Vector3(hx, y_bot, -hz),
-			Vector3(hx, y_bot, hz),
-			Vector3(-hx, y_bot, hz)
-		],
-		floor_uv
+		_MODEL_TO_HULL,
+		Vector2i(0, 8),
+		Vector3(-12, -8, -3),
+		Vector3i(24, 16, 4),
+		Vector3(0, 4, 0),
+		Vector3(PI / 2.0, 0, 0)
 	)
-	# Floor inner cavity (visible from inside, normal +Y). Recessed
-	# to the inner-perimeter rectangle.
-	_emit_quad(
-		st,
-		Vector3(0, 1, 0),
-		[
-			Vector3(-ix, y_floor, iz),
-			Vector3(ix, y_floor, iz),
-			Vector3(ix, y_floor, -iz),
-			Vector3(-ix, y_floor, -iz)
-		],
-		floor_uv
-	)
-	# 4 outer wall faces.
-	_emit_quad(
-		st,
-		Vector3(-1, 0, 0),
-		[
-			Vector3(-hx, y_bot, hz),
-			Vector3(-hx, y_top, hz),
-			Vector3(-hx, y_top, -hz),
-			Vector3(-hx, y_bot, -hz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(1, 0, 0),
-		[
-			Vector3(hx, y_bot, -hz),
-			Vector3(hx, y_top, -hz),
-			Vector3(hx, y_top, hz),
-			Vector3(hx, y_bot, hz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 0, -1),
-		[
-			Vector3(-hx, y_bot, -hz),
-			Vector3(-hx, y_top, -hz),
-			Vector3(hx, y_top, -hz),
-			Vector3(hx, y_bot, -hz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 0, 1),
-		[
-			Vector3(hx, y_bot, hz),
-			Vector3(hx, y_top, hz),
-			Vector3(-hx, y_top, hz),
-			Vector3(-hx, y_bot, hz)
-		],
-		wall_uv
-	)
-	# 4 inner wall faces — normals point INWARD so the texture shows
-	# to a viewer inside the cavity.
-	_emit_quad(
-		st,
-		Vector3(1, 0, 0),
-		[
-			Vector3(-ix, y_floor, -iz),
-			Vector3(-ix, y_top, -iz),
-			Vector3(-ix, y_top, iz),
-			Vector3(-ix, y_floor, iz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(-1, 0, 0),
-		[
-			Vector3(ix, y_floor, iz),
-			Vector3(ix, y_top, iz),
-			Vector3(ix, y_top, -iz),
-			Vector3(ix, y_floor, -iz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 0, 1),
-		[
-			Vector3(ix, y_floor, -iz),
-			Vector3(ix, y_top, -iz),
-			Vector3(-ix, y_top, -iz),
-			Vector3(-ix, y_floor, -iz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 0, -1),
-		[
-			Vector3(-ix, y_floor, iz),
-			Vector3(-ix, y_top, iz),
-			Vector3(ix, y_top, iz),
-			Vector3(ix, y_floor, iz)
-		],
-		wall_uv
-	)
-	# Gunwale top ring at Y = y_top — 4 strips forming a frame.
-	_emit_quad(
-		st,
-		Vector3(0, 1, 0),
-		[
-			Vector3(-hx, y_top, -iz),
-			Vector3(hx, y_top, -iz),
-			Vector3(hx, y_top, -hz),
-			Vector3(-hx, y_top, -hz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 1, 0),
-		[
-			Vector3(-hx, y_top, hz),
-			Vector3(hx, y_top, hz),
-			Vector3(hx, y_top, iz),
-			Vector3(-hx, y_top, iz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 1, 0),
-		[
-			Vector3(-hx, y_top, iz),
-			Vector3(-ix, y_top, iz),
-			Vector3(-ix, y_top, -iz),
-			Vector3(-hx, y_top, -iz)
-		],
-		wall_uv
-	)
-	_emit_quad(
-		st,
-		Vector3(0, 1, 0),
-		[
-			Vector3(ix, y_top, iz),
-			Vector3(hx, y_top, iz),
-			Vector3(hx, y_top, -iz),
-			Vector3(ix, y_top, -iz)
-		],
-		wall_uv
-	)
+	for wall: Array in _WALL_PIVOTS:
+		_MODEL_BOX.add(
+			st,
+			_MODEL_TO_HULL,
+			Vector2i(0, 0),
+			Vector3(-10, -7, -1),
+			Vector3i(20, 6, 2),
+			wall[0],
+			Vector3(0, wall[1], 0)
+		)
 	return st.commit()
-
-
-# Emit one quad (2 tris) with the given outward normal, 4 CCW-from-
-# outside corner verts, and UVs mapping the corners of uv_rect.
-func _emit_quad(st: SurfaceTool, n: Vector3, verts: Array, uv_rect: Rect2) -> void:
-	var u0: float = uv_rect.position.x
-	var v0: float = uv_rect.position.y
-	var u1: float = uv_rect.position.x + uv_rect.size.x
-	var v1: float = uv_rect.position.y + uv_rect.size.y
-	var uvs: Array = [Vector2(u0, v1), Vector2(u0, v0), Vector2(u1, v0), Vector2(u1, v1)]
-	for tri_idx: int in [0, 1, 2, 0, 2, 3]:
-		st.set_normal(n)
-		st.set_uv(uvs[tri_idx])
-		st.add_vertex(verts[tri_idx])
 
 
 # Pack-aware boat skin loader. Pixel Perfection and Programmer Art currently
@@ -720,7 +513,7 @@ func _physics_process(delta: float) -> void:
 # Mirrors the cart's lighting hook — same EntityLighting helper. Cached
 # brightness skips redundant material writes (60-144×/s otherwise).
 func _update_entity_lighting() -> void:
-	if _floor_mat == null or _wall_mat == null:
+	if _hull_mat == null:
 		return
 	var cell := Vector3i(
 		int(floor(global_position.x)),
@@ -731,9 +524,7 @@ func _update_entity_lighting() -> void:
 	if absf(b - _last_light_brightness) < 0.01:
 		return
 	_last_light_brightness = b
-	var c := Color(b, b, b)
-	_floor_mat.albedo_color = c
-	_wall_mat.albedo_color = c
+	_hull_mat.albedo_color = Color(b, b, b)
 
 
 # Apply a small velocity push when a nearby player overlaps the boat's

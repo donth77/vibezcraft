@@ -180,6 +180,11 @@ static func _build(block_id: int, size: float) -> ArrayMesh:
 			norms.append(face[4])
 		var face_name: String = FACE_NAMES[face_idx]
 		var tex_name: String = Blocks.get_face_texture(block_id, face_name)
+		# Directional cubes carry their front on -Z, as one placed with
+		# meta 0 does — a chest cube with no latch on any side reads as a
+		# crate. Face order here matches the mesher's, so -Z is index 5.
+		if face_idx == 5 and Blocks.has_directional_face(block_id):
+			tex_name = Blocks.directional_face_texture(block_id, face_idx, 0)
 		var rect: Rect2 = BlockAtlas.uv_rect(tex_name)
 		# Side faces (idx 2-5) get U swapped so the texture renders
 		# un-mirrored on the cube — without this, asymmetric horizontal

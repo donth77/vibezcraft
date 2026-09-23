@@ -1016,6 +1016,22 @@ PackedByteArray WorldgenNative::fill_chunk_3d(int p_chunk_x, int p_chunk_z) cons
 // Walks each column top-down with shared JavaRandom: bedrock band,
 // sand/gravel beach overlay, dirt-depth filler, biome top block. Bit-
 // exact with the GDScript port (same RNG sequence).
+PackedByteArray WorldgenNative::biome_grid(int p_chunk_x, int p_chunk_z) const {
+	if (!g_w3d_noise.valid || g_w3d_noise.cached_seed != world_seed) {
+		g_w3d_noise.rebuild(world_seed);
+	}
+	PackedByteArray out;
+	out.resize(SIZE_X * SIZE_Z);
+	uint8_t *biomes = out.ptrw();
+	for (int z = 0; z < SIZE_Z; z++) {
+		for (int x = 0; x < SIZE_X; x++) {
+			biomes[z * SIZE_X + x] = static_cast<uint8_t>(biome_at_native(
+					double(p_chunk_x * SIZE_X + x), double(p_chunk_z * SIZE_Z + z)));
+		}
+	}
+	return out;
+}
+
 PackedByteArray WorldgenNative::apply_surface_layer_3d(
 		int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const {
 	if (!g_w3d_noise.valid || g_w3d_noise.cached_seed != world_seed) {
@@ -1324,6 +1340,8 @@ void WorldgenNative::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("strip_floating_terrain", "blocks", "support_lut", "strip_lut"),
 			&WorldgenNative::strip_floating_terrain);
+	ClassDB::bind_method(
+			D_METHOD("biome_grid", "chunk_x", "chunk_z"), &WorldgenNative::biome_grid);
 	// Static class method exposed as instance-callable so GDScript can
 	// invoke `_native_worldgen.set_world_seed(N)` symmetrically with the
 	// other native APIs. The static keyword in the header keeps the

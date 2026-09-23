@@ -634,6 +634,52 @@ func test_furnace_shows_its_front_on_exactly_one_side() -> void:
 	assert_eq(_faces_with_texture(nat, "jack_o_lantern_face"), 1, "one lantern face")
 
 
+# --- Chest (issue #10) ---
+
+
+# Alpha's chest (c.java) is an opaque cube. It used to mesh as nothing —
+# a separate lidded model drew it — while both meshers treated it as
+# see-through for culling. It is now a directional cube like the furnace,
+# so a block pressed against it hides the shared face.
+func _chest_fixture() -> Chunk:
+	var chunk := Chunk.new()
+	for x in range(6):
+		chunk.set_block(x, 10, 4, Blocks.STONE)
+	chunk.set_block_with_meta(1, 11, 4, Blocks.CHEST, 0)  # latch on -Z
+	chunk.set_block_with_meta(3, 11, 4, Blocks.CHEST, 2)  # latch on +Z
+	chunk.set_block(4, 11, 4, Blocks.STONE)  # against the second chest
+	return chunk
+
+
+func test_parity_chests() -> void:
+	var both := _mesh_both(_chest_fixture())
+	_assert_parity(both[0], both[1], "chests")
+
+
+func test_a_chest_meshes_as_a_cube_with_one_latch() -> void:
+	var nat: Dictionary = _mesh_both(_chest_fixture())[1]
+	assert_eq(_faces_with_texture(nat, "chest_front"), 2, "one latch per chest")
+	assert_eq(_faces_with_texture(nat, "chest_top"), 2, "tops; the floor hides the bottoms")
+	# First chest: three plain sides. Second: its +X side is against the
+	# stone, so two.
+	assert_eq(_faces_with_texture(nat, "chest_side"), 5, "plain sides")
+
+
+func test_a_block_against_a_chest_hides_the_shared_face() -> void:
+	var nat: Dictionary = _mesh_both(_chest_fixture())[1]
+	var verts: PackedVector3Array = nat.vertices
+	var shared: int = 0
+	for i in range(0, verts.size(), 4):
+		var on_plane: bool = true
+		for k in range(4):
+			var v: Vector3 = verts[i + k]
+			on_plane = on_plane and is_equal_approx(v.x, 4.0) and v.y >= 11.0 and v.y <= 12.0
+			on_plane = on_plane and v.z >= 4.0 and v.z <= 5.0
+		if on_plane:
+			shared += 1
+	assert_eq(shared, 0, "neither the stone's -X face nor the chest's +X face is drawn")
+
+
 func test_cactus_sides_are_inset_and_its_boxes_match_vanilla() -> void:
 	var chunk := Chunk.new()
 	chunk.set_block(3, 10, 3, Blocks.SAND)

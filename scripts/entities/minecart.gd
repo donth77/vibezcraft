@@ -28,21 +28,19 @@ const RAIL_ENDPOINTS: Array = [
 	[Vector3(-1, 0, 0), Vector3(1, -1, 0)],  # 3: ascending west  (climb -X)
 	[Vector3(0, 0, -1), Vector3(0, -1, 1)],  # 4: ascending north (climb -Z)
 	[Vector3(0, -1, -1), Vector3(0, 0, 1)],  # 5: ascending south (climb +Z)
-	[Vector3(0, 0, 1), Vector3(1, 0, 0)],  # 6: curve N-E (S endpoint + E endpoint)
-	[Vector3(0, 0, 1), Vector3(-1, 0, 0)],  # 7: curve S-E (S + W)
-	[Vector3(0, 0, -1), Vector3(-1, 0, 0)],  # 8: curve S-W (N + W)
-	[Vector3(0, 0, -1), Vector3(1, 0, 0)],  # 9: curve N-W (N + E)
+	[Vector3(0, 0, 1), Vector3(1, 0, 0)],  # 6: curve S + E
+	[Vector3(0, 0, 1), Vector3(-1, 0, 0)],  # 7: curve S + W
+	[Vector3(0, 0, -1), Vector3(-1, 0, 0)],  # 8: curve N + W
+	[Vector3(0, 0, -1), Vector3(1, 0, 0)],  # 9: curve N + E
 ]
 
 # Vanilla collision AABB (`qd.java::a(0.98f, 0.7f)`) is 0.98 × 0.7 × 0.98
-# m — a square footprint by code, but the visual model in cv2.java
-# ModelMinecart is RECTANGULAR (about 1.2 long × 0.85 wide × 0.6 tall).
-# Square visual reads as a wooden crate; rectangular reads as a cart.
-# Collider stays square (vanilla parity); visual is shaped to match
-# the vanilla cart silhouette.
-const HULL_LENGTH: float = 1.2
-const HULL_WIDTH: float = 0.85
-const HULL_HEIGHT: float = 0.6
+# m — a square footprint by code, while the model (im.java ModelMinecart)
+# is rectangular: a 20 × 16 px floor 2 px deep, walls 8 px above it, so
+# 1.25 long × 1.0 wide × 0.625 tall. The hull mesh is that model itself
+# (see _build_hull_mesh); these name its extents for the code around it.
+const HULL_LENGTH: float = 1.25
+const HULL_HEIGHT: float = 0.625
 # Collision AABB stays at vanilla 0.98 × 0.7 × 0.98 regardless of visual.
 const COLLISION_WIDTH: float = 0.98
 const COLLISION_HEIGHT: float = 0.7
@@ -52,9 +50,30 @@ const COLLISION_HEIGHT: float = 0.7
 # current scope". Preload via const lets us call the same static
 # methods through the preloaded GDScript instead.
 const _ENTITY_LIGHTING: GDScript = preload("res://scripts/world/entity_lighting.gd")
-const FLOOR_THICKNESS: float = 0.0625  # 1 vanilla unit, thin metal floor
-const WALL_HEIGHT: float = HULL_HEIGHT - FLOOR_THICKNESS
-const WALL_THICKNESS: float = 0.0625
+# Same reason: a new class_name is unknown to any run that has not
+# rescanned the project since it was added.
+const _MODEL_BOX: GDScript = preload("res://scripts/entities/model_box.gd")
+const FLOOR_THICKNESS: float = 0.125  # im.java:19 floor box, 2 px deep
+# mi.java:72-73 hands ModelMinecart a -1/16 scale; our hull is long along
+# local Z where vanilla's is long along X, and sits with the floor's
+# underside on the cart origin instead of 5 px below it.
+const _MODEL_TO_HULL := Transform3D(
+	(
+		Basis(Vector3.UP, PI / 2.0)
+		* Basis(Vector3(-1.0 / 16.0, 0, 0), Vector3(0, -1.0 / 16.0, 0), Vector3(0, 0, 1.0 / 16.0))
+	),
+	Vector3(0, 5.0 / 16.0, 0)
+)
+# im.java:23-33 — one 16 × 8 × 2 wall box, pivoted and turned to each side.
+const _WALL_PIVOTS: Array = [
+	[Vector3(-9, 4, 0), 3.0 * PI / 2.0],
+	[Vector3(9, 4, 0), PI / 2.0],
+	[Vector3(0, 4, -7), PI],
+	[Vector3(0, 4, 7), 0.0],
+]
+# mi.java:58-60 — a chest or furnace rides in the cart as its block cube
+# at 3/4 scale, centred 0.3125 (scaled) above the model origin.
+const _PAYLOAD_SCALE: float = 0.75
 
 # Per-tick → per-second physics constants (×20 TPS scale where applicable).
 # Vanilla qd.java::e_() uses 0.997 per tick on-rail, 0.95 per tick off-rail.
@@ -125,15 +144,11 @@ var _visual_root: Node3D = null
 var _damage_rock: float = 0.0
 var _damage_time: float = 0.0
 var _player_ref: Node3D = null
-var _floor_mat: StandardMaterial3D = null
-var _wall_mat: StandardMaterial3D = null
+var _hull_mat: StandardMaterial3D = null
 var _last_light_brightness: float = -1.0
-# Chest cart only — the animated chest sitting in the cart's bed.
-# Reuses ChestNode (same geometry + lid animation as world chests).
-var _chest_node: Node3D = null
-# Furnace cart only — the cube mesh sitting in the cart's bed. Swapped
-# between FURNACE / LIT_FURNACE block ids when fuel state flips.
-var _furnace_mi: MeshInstance3D = null
+# Chest and furnace carts — the block cube riding in the cart's bed. The
+# furnace's is swapped between FURNACE / LIT_FURNACE when fuel flips.
+var _payload_mi: MeshInstance3D = null
 # Furnace cart fuel state — when _fuel_ticks > 0 the cart is "burning"
 # and applies push velocity along (_push_x, _push_z). Vanilla qd.java
 # fields: e (fuel ticks), f/g (push direction).
@@ -208,133 +223,85 @@ func _build_collider() -> void:
 	add_child(shape)
 
 
-# Build the open-top hull. Uses vanilla cart.png skin (64×32) with
-# per-face uv1 cropping to the floor strip vs wall strip — same
-# splotch-free approach as the boat hull. Vanilla cv2.java ModelMinecart
-# uses the same skin layout: floor strip at (0, 10)→(20, 28), wall
-# strips at (0, 0)→(16, 10) and similar.
+# Build the open-top hull from vanilla's own model — im.java's floor and
+# four walls, each UV-mapped the way ka.java unwraps a box onto cart.png.
+# The cart's slope pitch and damage rock turn _visual_root, so the quarter
+# turn that lines the model up with local Z lives in the mesh, not there
+# (with Godot's YXZ order a yawed root would turn the pitch into a roll).
 func _build_visual_mesh() -> void:
 	_visual_root = Node3D.new()
 	add_child(_visual_root)
-	var cart_tex: Texture2D = _load_cart_texture()
-	# Vanilla cart.png is 64×32. Floor occupies a 20×16 strip at (0, 10)
-	# in pixel coords. Walls occupy 24×8 strips at (0, 0) approx — but
-	# the model is simple enough that we just use the floor region for
-	# the bottom face and the rest of the texture (top half) for walls.
-	# Normalize pixel coords to [0,1] UV.
-	var floor_offset := Vector3(0.0, 10.0 / 32.0, 0.0)
-	var floor_scale := Vector3(20.0 / 64.0, 16.0 / 32.0, 1.0)
-	var wall_offset := Vector3(0.0, 0.0, 0.0)
-	var wall_scale := Vector3(24.0 / 64.0, 8.0 / 32.0, 1.0)
-	_floor_mat = _make_cart_material(cart_tex)
-	_floor_mat.uv1_offset = floor_offset
-	_floor_mat.uv1_scale = floor_scale
-	_wall_mat = _make_cart_material(cart_tex)
-	_wall_mat.uv1_offset = wall_offset
-	_wall_mat.uv1_scale = wall_scale
-	# Floor slab — full footprint, thin. Long axis (HULL_LENGTH) is
-	# placed along LOCAL Z so when the cart yaws to align with the rail
-	# (rotation.y derived from atan2 against the rail axis), the cart's
-	# length lines up with the track direction. Earlier build had length
-	# along local X, which left the cart sideways to the rail.
-	var floor_mi := MeshInstance3D.new()
-	var floor_mesh := BoxMesh.new()
-	floor_mesh.size = Vector3(HULL_WIDTH, FLOOR_THICKNESS, HULL_LENGTH)
-	floor_mi.mesh = floor_mesh
-	floor_mi.position = Vector3(0, FLOOR_THICKNESS * 0.5, 0)
-	floor_mi.material_override = _floor_mat
-	_visual_root.add_child(floor_mi)
-	# 4 walls forming an open-top hull. Long walls run along LOCAL Z
-	# (length axis), short ends along LOCAL X (width axis).
-	var wall_y: float = FLOOR_THICKNESS + WALL_HEIGHT * 0.5
-	var inner_len: float = HULL_LENGTH - 2.0 * WALL_THICKNESS
-	# Long sides on +X / -X faces — Z is the length axis.
-	for sx: float in [
-		HULL_WIDTH * 0.5 - WALL_THICKNESS * 0.5, -(HULL_WIDTH * 0.5 - WALL_THICKNESS * 0.5)
-	]:
-		var wall := MeshInstance3D.new()
-		var wall_mesh := BoxMesh.new()
-		wall_mesh.size = Vector3(WALL_THICKNESS, WALL_HEIGHT, inner_len)
-		wall.mesh = wall_mesh
-		wall.position = Vector3(sx, wall_y, 0)
-		wall.material_override = _wall_mat
-		_visual_root.add_child(wall)
-	# Short ends on +Z / -Z faces (front and back of cart).
-	for sz: float in [
-		HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5, -(HULL_LENGTH * 0.5 - WALL_THICKNESS * 0.5)
-	]:
-		var wall := MeshInstance3D.new()
-		var wall_mesh := BoxMesh.new()
-		wall_mesh.size = Vector3(HULL_WIDTH, WALL_HEIGHT, WALL_THICKNESS)
-		wall.mesh = wall_mesh
-		wall.position = Vector3(0, wall_y, sz)
-		wall.material_override = _wall_mat
-		_visual_root.add_child(wall)
-	# Variant-specific add-ons: chest cart drops a small chest mesh
-	# inside the bed; furnace cart (not yet implemented) would drop a
-	# furnace mesh in the same slot.
+	_hull_mat = _make_cart_material(_load_cart_texture())
+	var hull := MeshInstance3D.new()
+	hull.mesh = _build_hull_mesh()
+	hull.material_override = _hull_mat
+	_visual_root.add_child(hull)
+	if variant == VARIANT_CHEST or variant == VARIANT_FURNACE:
+		_build_payload_mesh()
+
+
+static func _build_hull_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# im.java:19-20, 31 — the floor, laid flat.
+	_MODEL_BOX.add(
+		st,
+		_MODEL_TO_HULL,
+		Vector2i(0, 10),
+		Vector3(-10, -8, -1),
+		Vector3i(20, 16, 2),
+		Vector3(0, 4, 0),
+		Vector3(PI / 2.0, 0, 0)
+	)
+	for wall: Array in _WALL_PIVOTS:
+		_MODEL_BOX.add(
+			st,
+			_MODEL_TO_HULL,
+			Vector2i(0, 0),
+			Vector3(-8, -9, -1),
+			Vector3i(16, 8, 2),
+			wall[0],
+			Vector3(0, wall[1], 0)
+		)
+	# im.java:21-22's inner plate (skin 44,10) sits 0.1 px beneath the
+	# floor's top face and is never seen, so it is left out.
+	return st.commit()
+
+
+# mi.java:56-70 — the cube's centre lands 5/16 + 0.3125 × 0.75 above the
+# floor's underside, its base just clear of the floor top. Its front is
+# the -Z face (BlockMesh), turned to face the cart's +Z end.
+func _build_payload_mesh() -> void:
+	_payload_mi = MeshInstance3D.new()
+	_payload_mi.mesh = BlockMesh.get_cube_mesh(_payload_block_id(), 1.0)
+	_payload_mi.material_override = BlockAtlas.entity_material()
+	_payload_mi.scale = Vector3.ONE * _PAYLOAD_SCALE
+	_payload_mi.position = Vector3(0.0, 5.0 / 16.0 + 0.3125 * _PAYLOAD_SCALE, 0.0)
+	_payload_mi.rotation.y = PI
+	_visual_root.add_child(_payload_mi)
+
+
+# The block the cart carries. Vanilla stores the furnace's lit and unlit
+# states as two block ids with different fronts (the firebox shows flames
+# when lit); the cart starts unlit and flips when fuel is added.
+func _payload_block_id() -> int:
 	if variant == VARIANT_CHEST:
-		_build_chest_mesh()
-	elif variant == VARIANT_FURNACE:
-		_build_furnace_mesh()
-
-
-# Build a chest sitting in the cart's bed. Reuses ChestNode so the
-# chest's geometry, textures, and lid animation match a world chest
-# exactly — no hand-rolled BoxMesh that drifts visually. Scaled down
-# slightly so it tucks inside the cart walls instead of poking through.
-func _build_chest_mesh() -> void:
-	var chest_script: GDScript = load("res://scripts/entities/chest_node.gd")
-	_chest_node = chest_script.new() as Node3D
-	# Vanilla world chest is 1×1×1; cart bed is 0.85 wide × 1.2 long ×
-	# WALL_HEIGHT tall. Scale 0.7 fits inside the gunwales with clearance.
-	var s: float = 0.7
-	_chest_node.scale = Vector3(s, s, s)
-	# Bottom of chest on cart floor, centered XZ. Chest's "front" face
-	# is -Z by default — same as our cart's front (where the rider would
-	# look toward forward motion), so no extra rotation needed.
-	_chest_node.position = Vector3(0, FLOOR_THICKNESS, 0)
-	_visual_root.add_child(_chest_node)
-
-
-# Build a furnace sitting in the cart's bed. Reuses BlockMesh.get_cube_mesh
-# so the furnace's face textures (top, side, front) match the world
-# furnace block exactly. Scaled down to fit the cart bed; rotated 180°
-# around Y so the firebox (-Z face per Blocks.get_face_texture) faces
-# +Z = the cart's forward direction. Track lit/unlit by rebuilding the
-# mesh when fuel state flips.
-func _build_furnace_mesh() -> void:
-	_furnace_mi = MeshInstance3D.new()
-	_furnace_mi.mesh = BlockMesh.get_cube_mesh(_active_furnace_block_id(), 1.0)
-	_furnace_mi.material_override = BlockAtlas.entity_material()
-	# BlockMesh.get_cube_mesh emits a cube centred on its own origin and
-	# spanning ±size/2 per axis. After scaling by `s`, the cube spans
-	# ±(s/2). Position the mesh so the cube's BOTTOM rests on the cart
-	# floor: y = FLOOR_THICKNESS + (s/2). XZ stays at 0 — the cube is
-	# already centred under the cart origin.
-	var s: float = 0.7
-	_furnace_mi.scale = Vector3(s, s, s)
-	_furnace_mi.position = Vector3(0.0, FLOOR_THICKNESS + s * 0.5, 0.0)
-	# Spin so the firebox face (-Z = vanilla front) points to the cart's
-	# forward (+Z). Same convention as the chest cart's chest_node.
-	_furnace_mi.rotation.y = PI
-	_visual_root.add_child(_furnace_mi)
-
-
-# Helper — the furnace block id for the current burning state. Vanilla
-# stores two distinct block ids (FURNACE / LIT_FURNACE) with different
-# front-face textures (firebox shows flames when lit). For now the cart
-# starts unlit; flips to lit when fueled by the physics step (stage 2).
-func _active_furnace_block_id() -> int:
+		return Blocks.CHEST
 	return Blocks.LIT_FURNACE if _is_burning else Blocks.FURNACE
 
 
-# Pack-aware cart skin loader. Falls back to the shared entity dir
-# (where the vanilla cart.png was extracted), then to null.
+# Pack-aware cart skin loader. Pixel Perfection and Programmer Art ship no
+# cart skin, so fall back to Alpha Vanilla's (as the boat does) rather
+# than drawing an untextured white hull.
 func _load_cart_texture() -> Texture2D:
 	var pack_path := "res://assets/textures/entities/packs/%s/cart.png" % BlockAtlas.active_pack
 	if ResourceLoader.exists(pack_path):
 		return load(pack_path) as Texture2D
+	var fallback_path := (
+		"res://assets/textures/entities/packs/%s/cart.png" % BlockAtlas.DEFAULT_PACK
+	)
+	if ResourceLoader.exists(fallback_path):
+		return load(fallback_path) as Texture2D
 	return null
 
 
@@ -400,8 +367,6 @@ func _open_chest_screen(player: Node3D) -> void:
 	var screen: Node = player.get_node_or_null("Crosshair/ChestScreen") if player != null else null
 	if screen == null or not screen.has_method("open_entity"):
 		return
-	if _chest_node != null and _chest_node.has_method("set_open"):
-		_chest_node.set_open(true)
 	SFX.play_chest_open()
 	screen.open_entity(
 		chest_items, "Minecart with Chest", Callable(self, "_on_chest_screen_closed")
@@ -409,21 +374,19 @@ func _open_chest_screen(player: Node3D) -> void:
 
 
 func _on_chest_screen_closed() -> void:
-	if _chest_node != null and _chest_node.has_method("set_open"):
-		_chest_node.set_open(false)
 	SFX.play_chest_close()
 
 
 # Flip the furnace mesh between FURNACE (cold) and LIT_FURNACE (burning)
 # based on _fuel_ticks. Called when fuel is added or runs out.
 func _update_burning_visual() -> void:
-	if _furnace_mi == null:
+	if _payload_mi == null or variant != VARIANT_FURNACE:
 		return
 	var want_burning: bool = _fuel_ticks > 0
 	if want_burning == _is_burning:
 		return
 	_is_burning = want_burning
-	_furnace_mi.mesh = BlockMesh.get_cube_mesh(_active_furnace_block_id(), 1.0)
+	_payload_mi.mesh = BlockMesh.get_cube_mesh(_payload_block_id(), 1.0)
 
 
 # Furnace cart per-frame thrust. Vanilla qd.java type==2:
@@ -737,7 +700,7 @@ func _physics_process(delta: float) -> void:
 # since last frame (LUT result rounded to 2 dp) — material rebinds are
 # cheap individually but happen 60-144×/s per cart and across N carts.
 func _update_entity_lighting() -> void:
-	if _floor_mat == null or _wall_mat == null:
+	if _hull_mat == null:
 		return
 	var cell := Vector3i(
 		int(floor(global_position.x)),
@@ -748,11 +711,9 @@ func _update_entity_lighting() -> void:
 	if absf(b - _last_light_brightness) < 0.01:
 		return
 	_last_light_brightness = b
-	var c := Color(b, b, b)
-	_floor_mat.albedo_color = c
-	_wall_mat.albedo_color = c
-	if _furnace_mi != null:
-		_furnace_mi.set_instance_shader_parameter("entity_brightness", b)
+	_hull_mat.albedo_color = Color(b, b, b)
+	if _payload_mi != null:
+		_payload_mi.set_instance_shader_parameter("entity_brightness", b)
 
 
 # Find the rail block under the cart. Returns {cell: Vector3i, meta:

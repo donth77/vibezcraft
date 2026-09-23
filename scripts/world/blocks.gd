@@ -122,13 +122,13 @@ const FIRE := 27
 # floor-only (meta 0); wall variants (meta 1-4) land in the next pass.
 # Hardness 0 = instant break. Drops itself via standard cube drops.
 const TORCH := 28
-# Vanilla Alpha BlockChest (c.java / nq.au, id 54). 27-slot container with
-# an animated lid (cz.java::TileEntityChestRenderer). Hardness 2.5, axe-
-# preferred per c.c(2.5f).a(e). Rendered as a separate ChestNode entity
-# (so the lid can pivot for open/close) — the chunk mesher emits NO
-# visual faces for CHEST cells, only collision. Block-meta 0..3 carries
-# facing direction (0 = -Z, 1 = -X, 2 = +Z, 3 = +X), set on placement
-# from the player's yaw.
+# Vanilla Alpha BlockChest (c.java / nq.au, id 54). 27-slot container,
+# hardness 2.5, axe-preferred per c.c(2.5f).a(e). A plain opaque cube in
+# Alpha (render type 0, full bounds — the lidded chest model is a later
+# game's), meshed like a furnace: chest_top above and below, chest_front
+# on one side, chest_side on the rest. Block-meta 0..3 carries the front
+# (0 = -Z, 1 = -X, 2 = +Z, 3 = +X), set on placement from the player's
+# yaw; Alpha picks it from the neighbours instead (c.java:70-83).
 const CHEST := 29
 # Vanilla Alpha BlockFence (gd.java / nq.aZ, id 85). Uses the planks
 # texture (vanilla terrain index 4 = `nq.aZ.bg`). Hardness 2.0, axe-
@@ -347,23 +347,22 @@ const SIGN_WALL := 76
 # Open: passable. Texture is planks on every face (vanilla v.java).
 const FENCE_GATE := 77
 
-# Vanilla Alpha 1.2.6 BlockMinecartTrack (qe.java). Flat 1-pixel rail
+# Vanilla Alpha 1.2.6 BlockMinecartTrack (jn.java). Flat 1-pixel rail
 # on top of a solid support block — the minecart entity follows it.
-# Meta encodes orientation (10 values, matching vanilla qd.java's
-# direction lookup table):
+# Meta encodes orientation (10 values, oc.java:26-59; RailShape names
+# them):
 #   0 = N-S straight (along Z)
 #   1 = E-W straight (along X)
 #   2 = ascending east  (climbing +X)
 #   3 = ascending west  (climbing -X)
 #   4 = ascending north (climbing -Z)
 #   5 = ascending south (climbing +Z)
-#   6 = curve N-E
-#   7 = curve S-E
-#   8 = curve S-W
-#   9 = curve N-W
-# Drop: 1 rail item (Items.RAIL). Auto-connect to neighbor rails
-# happens at placement time — same family as FENCE's meta-aware
-# connection logic.
+#   6 = curve S-E
+#   7 = curve S-W
+#   8 = curve N-W
+#   9 = curve N-E
+# Drop: 1 rail item (Items.RAIL). The shape is chosen at placement by
+# RailShape, which also re-shapes the neighbours the new rail links to.
 const RAIL := 78
 # Wooden slab + double-slab [BETA 1.3 exception] — vanilla nq.aT =
 # qj(126, false) for the half-slab; the wood variant came in Beta with
@@ -566,12 +565,6 @@ const LEVER := 93
 const MESH_SHAPE_CUBE: int = 0
 const MESH_SHAPE_CROSS: int = 1  # two crossed quads, like sapling/grass-plant
 const MESH_SHAPE_TORCH: int = 2  # small pillar centered in cell (floor torch)
-# No visual emit from the chunk mesher; the block is rendered by an
-# external entity (e.g. ChestNode for chests). Mesher still emits a
-# full-cube collision soup so the player has solid ground / can't walk
-# through. Adjacent opaque cubes treat this cell as opaque (face culling
-# proceeds normally), so the entity covers the visual gap.
-const MESH_SHAPE_EXTERNAL: int = 3
 # Neighbor-aware fence post + rails. The mesher checks the 4 horizontal
 # neighbors for same-id (fence-to-fence-only per Alpha gd.java:1199) and
 # emits arms into the connected directions on top of an always-rendered
@@ -805,6 +798,8 @@ const WORLD_ONLY_IDS: Array[int] = [PORTAL, REDSTONE_REPEATER_OFF, REDSTONE_REPE
 # .enable_native warms it) so mesher workers can pass it to the
 # GDExtension without touching lazy GDScript state.
 static var _selection_aabb_flat: PackedFloat32Array = PackedFloat32Array()
+# See gdscript_mesher_ids().
+static var _gdscript_mesher_ids: PackedInt32Array = PackedInt32Array()
 static var _light_opacity_lut: PackedByteArray
 # Lazy-init content-kind table, one byte per uint8 id. Bit 0 = the id is
 # a registered block; bit 1 = it also has an inventory/item form. A flat
@@ -1267,10 +1262,9 @@ static func _emit_ore_reddust(manager, pos: Vector3i) -> int:
 # Blocks with full-cell physical collision: a mob can't walk INTO the
 # cell, fluid can't flow INTO the cell, and the top face is a valid
 # place to stand. Distinct from `is_opaque` (a rendering concept).
-# Covers cases like CHEST and MOB_SPAWNER which are non-opaque for
-# face-culling reasons but physically solid — without this distinction,
-# water flow overwrites mob spawners, the pathfinder lets mobs walk
-# THROUGH chests, and players can safespot mobs by standing on a chest.
+# Covers cases like MOB_SPAWNER which are non-opaque for face-culling
+# reasons but physically solid — without this distinction, water flow
+# overwrites mob spawners and the pathfinder lets mobs walk through them.
 # LEAVES / GLASS / ICE / CACTUS render with alpha-test (`is_opaque`
 # false) but have full cube collision in vanilla.
 static func is_solid_collision(id: int) -> bool:
@@ -1282,8 +1276,7 @@ static func is_solid_collision(id: int) -> bool:
 		# all. No selection box either (see selection_aabb).
 		return false
 	return (
-		id == CHEST
-		or id == MOB_SPAWNER
+		id == MOB_SPAWNER
 		or id == LEAVES
 		or id == GLASS
 		or id == ICE
@@ -1325,13 +1318,6 @@ static func is_opaque(id: int) -> bool:
 		and id != LAVA_STILL
 		and id != FIRE
 		and id != TORCH
-		# Vanilla c.java BlockChest is a tile-entity that doesn't fill its
-		# cell — the body is inset 1/16 on each XZ side, so neighbors
-		# (especially the cell below) MUST keep emitting their faces or
-		# the player sees through the chest's bottom inset to the sky.
-		# Mirrors how Glass / Leaves opt out for the same shader-driven
-		# reason.
-		and id != CHEST
 		# Fence renders as a thin post + rails (6/16 wide, with 1.5-tall
 		# hitbox); neighboring cubes must keep emitting their faces so the
 		# air around the post shows the world behind. Vanilla gd.a()
@@ -1734,6 +1720,10 @@ static func collision_aabb(id: int, meta: int = 0) -> AABB:
 		return AABB(Vector3(0.0625, 0.0, 0.0625), Vector3(0.875, 0.9375, 0.875))
 	if not is_solid_collision(id):
 		return AABB(Vector3.ZERO, Vector3.ZERO)
+	if id == FENCE_GATE and is_fence_gate_open(meta):
+		# Walked through while open; selection_aabb keeps the closed
+		# footprint only so the cursor has something to aim at.
+		return AABB(Vector3.ZERO, Vector3.ZERO)
 	return selection_aabb(id, meta)
 
 
@@ -1900,11 +1890,18 @@ static func selection_aabb(id: int, meta: int = 0) -> AABB:
 			_:  # +X face panel on -X side of cell (meta 3)
 				return AABB(Vector3(0, y0, 0), Vector3(t, dy, 1.0))
 	if id == RAIL:
-		# Vanilla qe.java::a(World, int, int, int) — rail bounds are the
-		# bottom 1/16 slab of the cell. Selection box matches the visible
-		# rail plane so the player has a reliable target for break /
-		# right-click instead of a thin 0-height surface.
-		return AABB(Vector3(0, 0, 0), Vector3(1.0, 1.0 / 16.0, 1.0))
+		# Vanilla jn.java:26-32 — a flat rail's box is the bottom 2/16 of
+		# the cell; a ramp (meta 2-5) gets 10/16 so the sloped track has
+		# something to aim at. A flat box under a ramp left the cursor
+		# passing straight through the rail it was pointing at.
+		if meta >= RailShape.ASCEND_EAST and meta <= RailShape.ASCEND_SOUTH:
+			return AABB(Vector3(0, 0, 0), Vector3(1.0, 0.625, 1.0))
+		return AABB(Vector3(0, 0, 0), Vector3(1.0, 0.125, 1.0))
+	if id == HALF_SLAB or id == WOOD_HALF_SLAB or id == COBBLESTONE_HALF_SLAB:
+		# Vanilla qj.java:13-14 — the half slab's bounds are the bottom
+		# half of the cell. The full-cube fallback outlined a whole block
+		# and let dropped items rest (or snag) half a block up.
+		return AABB(Vector3.ZERO, Vector3(1.0, 0.5, 1.0))
 	if id == BED_FOOT or id == BED_HEAD:
 		# Vanilla bd.java::a(World, int, int, int) — bed bounds are
 		# (0, 0, 0)..(1, 0.5625, 1). The 9/16 height matches the visible
@@ -2001,8 +1998,6 @@ static func mesh_shape(id: int) -> int:
 		return MESH_SHAPE_FIRE
 	if id == TORCH or id == REDSTONE_TORCH or id == REDSTONE_TORCH_OFF:
 		return MESH_SHAPE_TORCH
-	if id == CHEST:
-		return MESH_SHAPE_EXTERNAL
 	if id == FENCE:
 		return MESH_SHAPE_FENCE
 	if id == FENCE_GATE:
@@ -2051,6 +2046,30 @@ static func mesh_shape(id: int) -> int:
 # shapes are sparse (player-built) so GDScript per cell stays cheap.
 static func needs_gdscript_mesher(id: int) -> bool:
 	return mesh_shape(id) != MESH_SHAPE_CUBE
+
+
+# Every id needs_gdscript_mesher is true for. A whole chunk is tested
+# against the list with PackedByteArray.has() — a C++ scan per id —
+# because calling needs_gdscript_mesher once per cell walks mesh_shape's
+# branch chain 32,768 times: ~40 ms a chunk on a fast machine, and the
+# single largest cost of generating one. Workers read it, so Game._ready
+# builds it on the main thread first.
+static func gdscript_mesher_ids() -> PackedInt32Array:
+	if _gdscript_mesher_ids.is_empty():
+		var ids := PackedInt32Array()
+		for id: int in range(256):
+			if needs_gdscript_mesher(id):
+				ids.append(id)
+		_gdscript_mesher_ids = ids
+	return _gdscript_mesher_ids
+
+
+# Whether any cell of a chunk's `blocks` needs the GDScript mesher.
+static func any_needs_gdscript_mesher(blocks: PackedByteArray) -> bool:
+	for id: int in gdscript_mesher_ids():
+		if blocks.has(id):
+			return true
+	return false
 
 
 static func selection_aabb_flat() -> PackedFloat32Array:
@@ -2607,6 +2626,46 @@ static func drops(id: int) -> int:
 	return id
 
 
+# The stack that puts this block back — what creative hands over when a
+# block is broken, like the later game's pick-block (Block.idPicked).
+# Usually the block itself: creative stone gives stone, not cobblestone.
+# The exceptions are cells that only exist as an item's placed form.
+# Handing over their raw id gave a look-alike stack that neither merged
+# with the real item nor ran its placement logic — a rail cell id placed
+# as a plain block, skipping auto-connect. AIR = nothing to give.
+static func pick_item(id: int) -> int:
+	match id:
+		RAIL:
+			return Items.RAIL
+		SIGN_STANDING, SIGN_WALL:
+			return Items.SIGN
+		REDSTONE_WIRE:
+			return Items.REDSTONE
+		REDSTONE_REPEATER_OFF, REDSTONE_REPEATER_ON:
+			return Items.REDSTONE_REPEATER
+		REDSTONE_TORCH_OFF:
+			return REDSTONE_TORCH
+		GLOWING_REDSTONE_ORE:
+			return REDSTONE_ORE
+		LIT_FURNACE:
+			return FURNACE
+		FARMLAND:
+			return DIRT
+		CROPS:
+			return Items.WHEAT_SEEDS
+		SUGAR_CANE:
+			return Items.SUGAR_CANE
+		WOODEN_DOOR:
+			return Items.WOODEN_DOOR
+		IRON_DOOR:
+			return Items.IRON_DOOR
+		BED_FOOT, BED_HEAD:
+			return Items.BED
+		WATER_FLOWING, WATER_STILL, LAVA_FLOWING, LAVA_STILL, FIRE:
+			return AIR
+	return id if has_item_form(id) else AIR
+
+
 # How many drops the block produces per break. 1 for nearly everything;
 # bookshelf yields 3 books per BlockBookshelf.dropBlockAsItemWithChance
 # (drops getDropQuantity()=3 in Beta). Interaction.gd loops random_drop
@@ -2860,7 +2919,9 @@ static func name_of(id: int) -> String:
 # Every id here is MESH_SHAPE_DIRECTIONAL_CUBE (see mesh_shape), which is
 # what keeps it out of the native cube pass.
 static func has_directional_face(id: int) -> bool:
-	return id == PUMPKIN or id == JACK_O_LANTERN or id == FURNACE or id == LIT_FURNACE
+	return (
+		id == PUMPKIN or id == JACK_O_LANTERN or id == FURNACE or id == LIT_FURNACE or id == CHEST
+	)
 
 
 # Facing meta shared by every directional cube, the chest convention:
@@ -2900,6 +2961,14 @@ static func directional_face_texture(id: int, face_idx: int, meta: int) -> Strin
 		if face_idx == directional_front_face_idx(meta):
 			return "furnace_front_lit" if id == LIT_FURNACE else "furnace_front"
 		return "furnace_side"
+	if id == CHEST:
+		# c.java:15-21, 70-83 — terrain tile 25 above and below, 27 (the
+		# latch) on the front, 26 on the other three sides.
+		if face_idx == 0 or face_idx == 1:
+			return "chest_top"
+		if face_idx == directional_front_face_idx(meta):
+			return "chest_front"
+		return "chest_side"
 	# Fallback for any future directional block that hits this path without
 	# a special-case branch — render side as if it were non-directional.
 	return get_face_texture(id, "side")
@@ -3148,13 +3217,9 @@ static func get_face_texture(id: int, face: String) -> String:
 		TORCH:
 			return "torch"
 		CHEST:
-			# Chest has 3 faces in vanilla terrain.png (c.java reads bg-1
-			# for top/bottom, bg+1 for the latched front, bg for the
-			# unmarked sides). The actual rendering goes through ChestNode
-			# (separate entity), but BlockAtlas needs an entry so the
-			# block icon renderer + tooltip preview have something to
-			# show. The mesher skips CHEST cells, so this only feeds the
-			# 3D icon path.
+			# Meta-free faces for callers without a facing (break
+			# particles, the icon cube's plain sides). Placed chests get
+			# their front from directional_face_texture.
 			match face:
 				"top", "bottom":
 					return "chest_top"

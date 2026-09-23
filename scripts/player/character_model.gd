@@ -323,6 +323,28 @@ func set_mounted_pose(enabled: bool) -> void:
 		leg_r.rotation.x = 0.0
 
 
+# In-bed pose: every animated joint settled (head straight, arms at the
+# sides, legs together) and the head hidden — the in-bed camera sits a
+# few centimetres above the face, which would otherwise fill the lower
+# half of the view. The body transform itself (on its back, head on the
+# pillow) is the Player's to set. Nothing re-animates the limbs while
+# asleep, since the walk driver runs from physics and a sleeper skips
+# physics; waking hands them straight back to it.
+func set_sleeping_pose(enabled: bool) -> void:
+	if head == null:
+		return
+	head.visible = not enabled
+	if not enabled:
+		return
+	head.rotation = Vector3.ZERO
+	for limb: Node3D in [arm_l, arm_r, leg_l, leg_r]:
+		if limb != null:
+			limb.rotation = Vector3.ZERO
+	_limb_amount = 0.0
+	_swing_progress = 0.0
+	_swing_active_visual = false
+
+
 # Drives the right-arm chopping motion. Returns swing PROGRESS in [0, 1]
 # (0 = rest, 1 = end of swing cycle) so the caller can derive the vanilla
 # first-person item transform (translate + Y-axis wrist twist + X tilt).

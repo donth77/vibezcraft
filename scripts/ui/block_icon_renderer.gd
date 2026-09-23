@@ -62,11 +62,7 @@ const _ICONIFIED_BLOCKS: Array = [
 	Blocks.GRAVEL,
 	Blocks.FURNACE,
 	Blocks.GLASS,
-	# CHEST renders as an external ChestNode entity in-world, but for the
-	# inventory icon we still bake it as a regular cube using its
-	# chest_top / chest_side textures via Blocks.get_face_texture. The
-	# 3D iso bake reads as a recognizable wooden chest cube — close
-	# enough to vanilla, no separate icon asset needed.
+	# CHEST bakes as the same cube it is in-world, latch forward.
 	Blocks.CHEST,
 	# Fence renders as a post + neighbor-aware rails in-world, but for the
 	# inventory icon we bake it as a planks cube (fence shares the planks
@@ -241,12 +237,11 @@ static func _render_one(host: Node, block_id: int) -> void:
 		child.queue_free()
 	var mi := MeshInstance3D.new()
 	mi.mesh = BlockMesh.get_cube_mesh(block_id, 1.0)
-	# CHEST + FURNACE store their "front" texture on the -Z face (vanilla
-	# convention — front faces the player on placement). The icon camera
-	# sits in the +X+Y+Z octant and sees the +Z face, so without a flip
-	# the inventory icon shows the BACK of the chest / furnace instead
-	# of the latch / firebox. Rotate 180° around Y so the front face
-	# swings around to the camera-facing side.
+	# CHEST + FURNACE cubes carry their front on the -Z face (see
+	# BlockMesh._build). The icon camera sits in the +X+Y+Z octant and
+	# sees the +Z face, so without a flip the inventory icon shows the
+	# BACK of the chest / furnace instead of the latch / firebox. Rotate
+	# 180° around Y so the front face swings around to the camera side.
 	if block_id == Blocks.CHEST or block_id == Blocks.FURNACE:
 		mi.rotation.y = PI
 	_holder.add_child(mi)

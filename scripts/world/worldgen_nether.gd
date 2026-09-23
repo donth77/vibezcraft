@@ -506,7 +506,6 @@ static func remap_to_chunk(raw: PackedByteArray, chunk: Chunk) -> void:
 	var max_y: int = 0
 	var saw_non_cube: bool = false
 	var saw_water: bool = false
-	var saw_chest: bool = false
 	var saw_sign: bool = false
 	for y: int in range(Chunk.SIZE_Y):
 		for z: int in range(Chunk.SIZE_Z):
@@ -528,8 +527,6 @@ static func remap_to_chunk(raw: PackedByteArray, chunk: Chunk) -> void:
 					saw_non_cube = true
 				if not saw_water and Blocks.is_water(project_id):
 					saw_water = true
-				if project_id == Blocks.CHEST:
-					saw_chest = true
 				if project_id == Blocks.SIGN_STANDING or project_id == Blocks.SIGN_WALL:
 					saw_sign = true
 	chunk.max_y = max_y
@@ -539,7 +536,6 @@ static func remap_to_chunk(raw: PackedByteArray, chunk: Chunk) -> void:
 	# special-cell appendix even when the native cube pass owns the scan.
 	chunk.has_non_cube_blocks = saw_non_cube
 	chunk.has_water_cells = saw_water
-	chunk.has_chest_blocks = saw_chest
 	chunk.has_sign_blocks = saw_sign
 	# Chunk._init's zero heightmap is valid only while the chunk is empty.
 	# Direct array writes cannot maintain it incrementally, so force the

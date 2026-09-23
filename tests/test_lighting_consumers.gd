@@ -43,19 +43,6 @@ func _assert_instance_levels(mesh: MeshInstance3D, owner: Node, update_method: S
 	assert_almost_eq(float(mesh.get_instance_shader_parameter("entity_brightness")), 1.0, 0.0001)
 
 
-func test_chest_body_and_lid_use_per_instance_light() -> void:
-	var chest := ChestNode.new()
-	_parent.add_child(chest)
-	chest._chunk_manager = _manager
-	chest._last_light_brightness = -1.0
-	_assert_instance_levels(chest._body, chest, "_update_entity_lighting")
-	assert_eq(
-		chest._lid.get_instance_shader_parameter("entity_brightness"),
-		chest._body.get_instance_shader_parameter("entity_brightness")
-	)
-	assert_eq(chest._body.material_override, BlockAtlas.entity_material())
-
-
 func test_falling_block_uses_entity_material_and_instance_light() -> void:
 	var falling := FallingBlock.new()
 	_parent.add_child(falling)
@@ -76,13 +63,14 @@ func test_primed_tnt_body_is_lit_but_flash_stays_private_fullbright() -> void:
 	assert_eq(flash_mat.shading_mode, BaseMaterial3D.SHADING_MODE_UNSHADED)
 
 
-func test_furnace_minecart_payload_uses_cart_light_without_mutating_shared_material() -> void:
-	var cart := Minecart.new()
-	cart.variant = Minecart.VARIANT_FURNACE
-	_parent.add_child(cart)
-	cart._chunk_manager = _manager
-	_assert_instance_levels(cart._furnace_mi, cart, "_update_entity_lighting")
-	assert_eq(cart._furnace_mi.material_override, BlockAtlas.entity_material())
+func test_minecart_payloads_use_cart_light_without_mutating_shared_material() -> void:
+	for cart_variant: int in [Minecart.VARIANT_FURNACE, Minecart.VARIANT_CHEST]:
+		var cart := Minecart.new()
+		cart.variant = cart_variant
+		_parent.add_child(cart)
+		cart._chunk_manager = _manager
+		_assert_instance_levels(cart._payload_mi, cart, "_update_entity_lighting")
+		assert_eq(cart._payload_mi.material_override, BlockAtlas.entity_material())
 
 
 func test_painting_duplicates_cached_front_material_before_tinting() -> void:

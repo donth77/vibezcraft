@@ -718,7 +718,7 @@ Dictionary MesherNative::mesh_chunk_data(
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
-									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
+									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL && neighbor_id != REDSTONE_REPEATER_OFF && neighbor_id != REDSTONE_REPEATER_ON
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =
@@ -1016,7 +1016,7 @@ Dictionary MesherNative::mesh_lit_core(
 					const bool neighbor_opaque =
 							(neighbor_id != AIR && neighbor_id != LEAVES
 									&& neighbor_id != GLASS && neighbor_id != ICE && neighbor_id != CACTUS && neighbor_id != SNOW_LAYER && neighbor_id != SAPLING && neighbor_id != SLIME_BLOCK
-									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != CHEST && neighbor_id != FENCE
+									&& neighbor_id != FIRE && neighbor_id != TORCH && neighbor_id != FENCE
 									&& neighbor_id != WOOD_STAIRS && neighbor_id != COBBLESTONE_STAIRS && neighbor_id != WOODEN_DOOR && neighbor_id != IRON_DOOR && neighbor_id != LADDER && neighbor_id != FLOWER_RED && neighbor_id != FLOWER_YELLOW && neighbor_id != MUSHROOM_BROWN && neighbor_id != MUSHROOM_RED && neighbor_id != SUGAR_CANE && neighbor_id != CROPS && neighbor_id != TALL_GRASS && neighbor_id != HALF_SLAB && neighbor_id != WOOD_HALF_SLAB && neighbor_id != COBBLESTONE_HALF_SLAB && neighbor_id != SIGN_STANDING && neighbor_id != SIGN_WALL && neighbor_id != MOB_SPAWNER && neighbor_id != FENCE_GATE && neighbor_id != RAIL && neighbor_id != BED_FOOT && neighbor_id != BED_HEAD && neighbor_id != REDSTONE_WIRE && neighbor_id != REDSTONE_TORCH && neighbor_id != REDSTONE_TORCH_OFF && neighbor_id != LEVER && neighbor_id != STONE_BUTTON && neighbor_id != STONE_PRESSURE_PLATE && neighbor_id != WOODEN_PRESSURE_PLATE && neighbor_id != PORTAL && neighbor_id != REDSTONE_REPEATER_OFF && neighbor_id != REDSTONE_REPEATER_ON
 									&& !neighbor_is_water && !neighbor_is_lava);
 					bool neighbor_hides_face =

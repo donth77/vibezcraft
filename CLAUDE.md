@@ -39,7 +39,7 @@ Canonical planning docs:
 - **Day/night cycle:** `world_time.gd` autoload — vanilla 20-minute day (24000-tick cycle), sky color gradient, sun direction + energy, sky factor for light scaling.
 - **Lighting:** BFS flood-fill sky light + block light propagation (`lighting.gd` + native), per-face brightness LUT in `chunk.gdshader`. Torches emit level 14, furnaces 13.
 - **Fluids:** finite water/lava flow propagation (`block_fluids.gd`), water/lava shaders with UV animation, swim mechanics, bucket place/pickup.
-- **Beds:** Beta 1.3 sleep mechanic (`bed_storage.gd`, `sleep_overlay.gd`). Multi-cell foot/head place + break cascade. Right-click at night → fast-forward to dawn + set spawn point.
+- **Beds:** Beta 1.3 sleep mechanic (`bed_storage.gd`, `sleep_overlay.gd`). Multi-cell foot/head place + break cascade. Right-click at night → fast-forward to dawn + set spawn point. The sleeper lies on their back with Beta 1.7.3's in-bed view (level, from the pillow toward the foot); a hit wakes them.
 - **Jukeboxes + 8 music discs:** Beta 1.4 mechanic. Right-click jukebox with disc → insert + start playback. Ambient music auto-pauses; resumes when disc ejects.
 - **Farming:** wheat crops (`crops.gd`), hoe tilling (`farmland.gd`), tall grass seed drops. Bonemeal accelerates growth.
 - **Fishing:** cast/reel mechanic via `fishing_bobber.gd`, raw + cooked fish drops (smelt raw_fish for cooked).
@@ -115,7 +115,7 @@ scripts/
     voxel_collider.gd         # AABB sweep collision against voxel cells (GDScript reference)
     arrow.gd                  # gravity, drag, raycast hit, stuck embed
     snowball.gd               # throwable projectile
-    chest_node.gd             # chest block Node3D + open/close animation
+    model_box.gd              # Alpha ModelRenderer box (ka.java) — cart + boat hull meshes
     primed_tnt.gd             # see scripts/world/primed_tnt.gd above (some entities cross-listed)
     boat.gd minecart.gd       # rideable entities
     painting.gd               # wall-mounted decoration

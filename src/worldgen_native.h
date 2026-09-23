@@ -95,6 +95,13 @@ public:
 	PackedByteArray scatter_caves(
 			int p_chunk_x, int p_chunk_z, const PackedByteArray &p_blocks) const;
 
+	// Worldgen3D.biome_at for each of a chunk's 256 columns, index
+	// z * 16 + x — the cold-biome overlay's per-column lookup in one call.
+	// The GDScript version samples three octave noises per column, ~5 ms a
+	// chunk. Same biome_at_native the surface layer uses; parity with
+	// Worldgen3D.biome_at is pinned by tests/test_worldgen_native.gd.
+	PackedByteArray biome_grid(int p_chunk_x, int p_chunk_z) const;
+
 	// Native port of Worldgen3D.fill_chunk + density_grid + climate noise
 	// for the 3D density terrain pipeline. Replaces the dominant ~74 ms/chunk
 	// GDScript hot path. Output: 16x128x16 PackedByteArray with STONE / WATER /

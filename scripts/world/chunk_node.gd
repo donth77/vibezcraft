@@ -94,12 +94,6 @@ var _priority_apply: bool = false
 # visible until every surviving neighbor has applied a newer mesh.
 var _mesh_apply_revision: int = 0
 
-# CHEST cells in this chunk get a separate ChestNode entity (see
-# scripts/entities/chest_node.gd) for animated lid rendering. The chunk
-# mesher skips face emission for CHEST so we don't double-draw. Keyed
-# by chunk-local Vector3i; rebuilt every _apply_mesh_data so adds /
-# removes track block edits without per-event signals.
-var _chest_nodes: Dictionary = {}
 # SIGN cells get a SignNode child for the in-world 3D text overlay.
 # Keyed by chunk-local Vector3i; rebuilt every _apply_mesh_data so
 # breaking / placing signs adds + removes nodes in lockstep with the
@@ -548,59 +542,16 @@ func _apply_mesh_data(data: Dictionary) -> void:
 		_lava_mesh_instance.mesh = lava_mesh
 	else:
 		_lava_mesh_instance.mesh = null
-	if chunk.has_chest_blocks or not _chest_nodes.is_empty():
-		_sync_chest_entities()
 	if chunk.has_sign_blocks or not _sign_nodes.is_empty():
 		_sync_sign_entities()
 	_mesh_apply_revision += 1
 	PerfProbe.end("chunk_node.apply", probe_token)
 
 
-# Walk the chunk for CHEST cells and ensure a ChestNode exists at each.
-# Removes orphan entities for cells whose block is no longer a chest.
-# Cheap because chest count per chunk is low (0..few) — we do a single
-# linear scan over `chunk.blocks` keyed on the CHEST byte.
-func _sync_chest_entities() -> void:
-	var seen: Dictionary = {}
-	# `chunk.blocks` is the flat PackedByteArray; inline-iterate via
-	# Chunk.SIZE_X/Y/Z so we don't pay the per-call get_block bounds check.
-	for y in range(Chunk.SIZE_Y):
-		for z in range(Chunk.SIZE_Z):
-			for x in range(Chunk.SIZE_X):
-				var idx: int = y * Chunk.SIZE_X * Chunk.SIZE_Z + z * Chunk.SIZE_X + x
-				if chunk.blocks[idx] != Blocks.CHEST:
-					continue
-				var key := Vector3i(x, y, z)
-				seen[key] = true
-				if not _chest_nodes.has(key):
-					var node := ChestNode.new()
-					# ChestNode mesh is centered on XZ (origin at cell
-					# center), so node position = cell center. set_facing
-					# rotates about this origin → pivots around the
-					# chest's centerline as expected.
-					node.position = Vector3(float(x) + 0.5, float(y), float(z) + 0.5)
-					add_child(node)
-					_chest_nodes[key] = node
-				var meta: int = chunk.get_block_meta(x, y, z)
-				_chest_nodes[key].set_facing(meta)
-	# Despawn any chest entity whose cell is no longer a chest.
-	for key: Vector3i in _chest_nodes.keys():
-		if not seen.has(key):
-			_chest_nodes[key].queue_free()
-			_chest_nodes.erase(key)
-
-
-# Called by interaction.gd via ChunkManager.find_chest_node_at(world_pos)
-# so the right-click-to-open path can drive set_open() on the entity.
-func find_chest_node_at_local(local_pos: Vector3i) -> ChestNode:
-	return _chest_nodes.get(local_pos, null)
-
-
 # Walk the chunk for SIGN_STANDING / SIGN_WALL cells, spawning a
 # SignNode per cell that doesn't already have one. Removes orphan
-# nodes whose underlying block was broken. Same iteration shape as
-# _sync_chest_entities — signs are rare per chunk so the per-cell
-# scan cost is negligible.
+# nodes whose underlying block was broken. Signs are rare per chunk, so
+# the per-cell scan cost is negligible.
 func _sync_sign_entities() -> void:
 	var seen: Dictionary = {}
 	var coord: Vector2i = _compute_chunk_coord()

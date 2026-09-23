@@ -127,19 +127,26 @@ const _WORLDGEN_MAX_PACKS_PER_CHUNK: int = 3
 # from Y=120 since our surface is always below that.
 const _WORLDGEN_SCAN_TOP_Y: int = 120
 
+# Catch-up cap, as TickScheduler's: a long frame drops its backlog rather
+# than paying for it all in the next one. Uncapped, a two-second frame
+# while the world loads ran forty spawn passes back to back, a 121 ms
+# hitch of its own on a slow machine (issue #10's log) — and every slow
+# frame bought a slower one.
+const _MAX_TICKS_PER_FRAME: int = 2
+
 var _accum: float = 0.0
 var _rng := RandomNumberGenerator.new()
 
 
 # Driven from chunk_manager._process. Accumulates frame delta + fires
-# the tick loop at 20 Hz exactly. Cheap when no work — most ticks bail
-# out at the cap check.
+# the tick loop at 20 Hz. Cheap when no work — most ticks bail out at
+# the cap check.
 func tick(delta: float, chunk_mgr: Node, player: Node3D) -> void:
 	if chunk_mgr == null or player == null:
 		return
 	if not DimensionContext.active_provider().has_passive_spawns:
 		return
-	_accum += delta
+	_accum = minf(_accum + delta, _TICK_DT * _MAX_TICKS_PER_FRAME)
 	while _accum >= _TICK_DT:
 		_accum -= _TICK_DT
 		_run_one_tick(chunk_mgr, player)

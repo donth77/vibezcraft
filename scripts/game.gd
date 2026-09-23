@@ -398,6 +398,9 @@ func _ready() -> void:
 	# Warm the worldgen noise on the main thread before any worker can hit it,
 	# so workers never race on the lazy-init.
 	Worldgen.surface_height(0, 0)
+	# Same for the non-cube id list the cave pass and the save decode test
+	# whole chunks against on workers.
+	Blocks.gdscript_mesher_ids()
 	# Same reason, for the Nether: WorldgenNether builds seven octave
 	# generators from a shared JavaRandom on first use, and a chunk worker
 	# reaching that lazy step first would race another worker.

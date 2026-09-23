@@ -1890,36 +1890,22 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 			c._height_map_dirty = true
 	else:
 		c._height_map_dirty = true
-	# Rescan non-cube + chest flags, collect sapling positions, and pick
-	# the topmost SUGAR_CANE per column for the cane growth queue. All four
-	# bookkeeping passes fold into one linear walk so worker decode stays
-	# O(N) over chunk.blocks.
+	# Rescan the non-cube + sign flags, collect sapling positions, and pick
+	# the topmost SUGAR_CANE per column for the cane growth queue. Every
+	# pass is a C++ search over chunk.blocks (has / find): a GDScript walk
+	# of all 32,768 cells, testing needs_gdscript_mesher on each, cost
+	# ~40 ms per chunk read back from a save.
 	var saplings: Array[Vector3i] = []
+	for i: int in _cells_holding(c.blocks, Blocks.SAPLING):
+		saplings.append(_world_cell(coord, i))
 	var cane_top_y: Dictionary = {}  # Vector2i(lx, lz) -> highest ly seen
-	var found_non_cube: bool = false
-	var found_chest: bool = false
-	var found_sign: bool = false
-	for i in range(c.blocks.size()):
-		var b: int = c.blocks[i]
-		if b == Blocks.CHEST:
-			found_chest = true
-		if b == Blocks.SIGN_STANDING or b == Blocks.SIGN_WALL:
-			found_sign = true
-		if Blocks.needs_gdscript_mesher(b):
-			found_non_cube = true
-			var lx: int = i % Chunk.SIZE_X
-			var lz: int = (i / Chunk.SIZE_X) % Chunk.SIZE_Z
-			var ly: int = i / (Chunk.SIZE_X * Chunk.SIZE_Z)
-			if b == Blocks.SAPLING:
-				saplings.append(
-					Vector3i(coord.x * Chunk.SIZE_X + lx, ly, coord.y * Chunk.SIZE_Z + lz)
-				)
-			elif b == Blocks.SUGAR_CANE:
-				var key := Vector2i(lx, lz)
-				if not cane_top_y.has(key) or int(cane_top_y[key]) < ly:
-					cane_top_y[key] = ly
-	c.has_non_cube_blocks = found_non_cube
-	c.has_chest_blocks = found_chest
+	for i: int in _cells_holding(c.blocks, Blocks.SUGAR_CANE):
+		var key := Vector2i(i % Chunk.SIZE_X, (i / Chunk.SIZE_X) % Chunk.SIZE_Z)
+		var ly: int = i / (Chunk.SIZE_X * Chunk.SIZE_Z)
+		if not cane_top_y.has(key) or int(cane_top_y[key]) < ly:
+			cane_top_y[key] = ly
+	var found_sign: bool = c.blocks.has(Blocks.SIGN_STANDING) or c.blocks.has(Blocks.SIGN_WALL)
+	c.has_non_cube_blocks = Blocks.any_needs_gdscript_mesher(c.blocks)
 	# Without this rescan, chunks loaded from disk had has_sign_blocks=false
 	# even when the blocks array contained sign cells, so chunk_node's
 	# `if chunk.has_sign_blocks` gate skipped _sync_sign_entities entirely
@@ -1934,6 +1920,24 @@ static func _decode_saved_entry(coord: Vector2i, entry: Dictionary) -> Array:
 			)
 		)
 	return [c, saplings]
+
+
+# Indices of every cell of `blocks` holding `id`, in ascending order.
+static func _cells_holding(blocks: PackedByteArray, id: int) -> PackedInt32Array:
+	var cells := PackedInt32Array()
+	var i: int = blocks.find(id)
+	while i != -1:
+		cells.append(i)
+		i = blocks.find(id, i + 1)
+	return cells
+
+
+static func _world_cell(coord: Vector2i, i: int) -> Vector3i:
+	return Vector3i(
+		coord.x * Chunk.SIZE_X + i % Chunk.SIZE_X,
+		i / (Chunk.SIZE_X * Chunk.SIZE_Z),
+		coord.y * Chunk.SIZE_Z + (i / Chunk.SIZE_X) % Chunk.SIZE_Z
+	)
 
 
 # Re-enable physics only on chunks within collision_radius of the player
@@ -1964,25 +1968,6 @@ func _player_chunk_coord() -> Vector2i:
 	return Vector2i(
 		int(floor(pos.x / float(Chunk.SIZE_X))), int(floor(pos.z / float(Chunk.SIZE_Z)))
 	)
-
-
-# Find the ChestNode entity at a given world cell, or null if none. Used
-# by interaction.gd to drive the lid open/close animation when the
-# chest UI opens. Routes through the owning chunk_node, which maintains
-# a per-chunk dict of chest entities (chunk_node._sync_chest_entities).
-func find_chest_node_at(world_pos: Vector3i) -> ChestNode:
-	var chunk_x: int = int(floor(float(world_pos.x) / float(Chunk.SIZE_X)))
-	var chunk_z: int = int(floor(float(world_pos.z) / float(Chunk.SIZE_Z)))
-	var coord := Vector2i(chunk_x, chunk_z)
-	if not _chunks.has(coord):
-		return null
-	var chunk_node: Node3D = _chunks[coord]
-	var local := Vector3i(
-		world_pos.x - chunk_x * Chunk.SIZE_X, world_pos.y, world_pos.z - chunk_z * Chunk.SIZE_Z
-	)
-	if chunk_node.has_method("find_chest_node_at_local"):
-		return chunk_node.find_chest_node_at_local(local)
-	return null
 
 
 # Batch begin — defers per-edit lighting so a multi-block operation

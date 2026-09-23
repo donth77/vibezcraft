@@ -32,10 +32,7 @@ func test_boat_material_receives_the_fallback_texture() -> void:
 	autofree(boat)
 	boat._build_visual_mesh()
 
-	assert_not_null(boat._floor_mat)
-	assert_not_null(boat._wall_mat)
-	if boat._floor_mat != null and boat._wall_mat != null:
-		assert_not_null(boat._floor_mat.albedo_texture, "floor is textured")
-		assert_not_null(boat._wall_mat.albedo_texture, "walls are textured")
-		assert_eq(boat._floor_mat.albedo_texture.resource_path, _ALPHA_BOAT_PATH)
-		assert_eq(boat._wall_mat.albedo_texture.resource_path, _ALPHA_BOAT_PATH)
+	assert_not_null(boat._hull_mat)
+	if boat._hull_mat != null:
+		assert_not_null(boat._hull_mat.albedo_texture, "hull is textured")
+		assert_eq(boat._hull_mat.albedo_texture.resource_path, _ALPHA_BOAT_PATH)

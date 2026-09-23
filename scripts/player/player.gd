@@ -310,8 +310,23 @@ var sleep_ticks: float = 0.0
 # Foot cell of the bed being slept in — the wake relocation searches
 # around it (Beta BlockBed.getNearestEmptyChunkCoordinates).
 var _sleep_foot_cell: Vector3i = Vector3i.ZERO
+# Unit step from the bed's foot cell to its head cell (BlockBed's
+# direction table), which the lying pose and the in-bed view hang off.
+var _sleep_head_dir: Vector3i = Vector3i(0, 0, 1)
+# True while the camera and body model are posed in the bed, so the wake
+# frame knows to hand them back to the normal perspective rig.
+var _sleep_view_active: bool = false
 # Top of the bed's collision box (mesher emits a 1 × 9/16 × 1 box).
 const _BED_TOP: float = 0.5625
+# Beta 1.7.3's lying player, measured from the bed's floor. The eye sits
+# 1.0575 up, 0.1 from the headboard end, looking level toward the foot:
+# EntityRenderer.orientCamera's sleeping branch undoes the player's own
+# yaw and pitch and turns by the bed's direction alone. The body lies on
+# its back with its spine at 0.7375 (RenderPlayer, from sleepInBedAt's
+# y + 0.9375 less the 0.2 sleeping yOffset), head on the pillow.
+const _SLEEP_EYE_HEIGHT: float = 1.0575
+const _SLEEP_EYE_TO_HEADBOARD: float = 0.1
+const _SLEEP_SPINE_HEIGHT: float = 0.7375
 
 # F2 teleport pin-and-wait. The dungeon-finder spirals through
 # Worldgen.generate_chunk to LOCATE a spawner, but those throwaway
@@ -744,12 +759,7 @@ func _update_held_item() -> void:
 		# held cube, which reads as obviously wrong.
 		# Sprite path: non-block items, cross-quads (sapling, fire), and
 		# torch — vanilla MC renders all of these as a flat 2D billboard in
-		# the held position via RenderItem.renderItemIn2D. CHEST is also
-		# routed through the GDScript mesher (MESH_SHAPE_EXTERNAL) but
-		# reads as a textured cube in the inventory icon — taking the
-		# sprite path made the held chest sample at the sprite extruder's
-		# native scale and balloon to fill the screen. Cube path keeps it
-		# the same size as any other held block.
+		# the held position via RenderItem.renderItemIn2D.
 		var shape: int = Blocks.mesh_shape(id)
 		# Non-block items, and any block whose tile is a sprite on
 		# transparency, take the sprite-extruder path — the cube path
@@ -1415,16 +1425,21 @@ func _apply_held_visibility() -> void:
 	# (TP tool sprite rendering is a future addition).
 	var first_person: bool = perspective == PERSPECTIVE_FIRST
 	var holding: bool = _held_block_id != Blocks.AIR
+	# EntityRenderer.java:363 (Beta) — no first-person hand or item while
+	# asleep; the body lying in the bed is drawn instead, whatever the
+	# perspective, and its hand carries the held item.
+	var fp_props: bool = first_person and not is_sleeping
+	var tp_props: bool = not first_person or is_sleeping
 	if _fp_hand != null:
-		_fp_hand.visible = first_person and not holding
+		_fp_hand.visible = fp_props and not holding
 	if _held_block != null:
-		_held_block.visible = first_person
+		_held_block.visible = fp_props
 	if _held_block_tp != null:
-		_held_block_tp.visible = not first_person
+		_held_block_tp.visible = tp_props
 	if _held_tool_pivot != null:
-		_held_tool_pivot.visible = first_person
+		_held_tool_pivot.visible = fp_props
 	if _held_tool_tp_pivot != null:
-		_held_tool_tp_pivot.visible = not first_person
+		_held_tool_tp_pivot.visible = tp_props
 
 
 # Public face of _any_ui_screen_open for the touch HUD — it suspends
@@ -1855,13 +1870,17 @@ func drop_item_into_world(dropped_id: int, count: int) -> int:
 	# position would launch items from empty space far from the avatar.
 	var look_dir: Vector3 = _player_look_direction()
 	var eye_pos: Vector3 = global_position + Vector3(0, _CAM_FIRST_PERSON.y, 0)
-	var spawn_pos: Vector3 = eye_pos + look_dir * 0.4
 	var velocity: Vector3 = look_dir * 3.5 + Vector3(0, 0.6, 0)
 	for i in range(count):
 		var item := DroppedItem.new()
 		chunk_manager.add_child(item)
-		item.global_position = spawn_pos
+		item.global_position = eye_pos
 		item.setup(dropped_id, velocity, DroppedItem.PLAYER_DROP_DELAY_SEC)
+		# Launch from 0.4 m ahead of the eye, swept out from the eye with
+		# the item's own collision. Placing it there outright put it 0.1 m
+		# inside any wall the player was hugging (capsule radius 0.3), and
+		# the push-out rescue could then shove it out the far side.
+		item.move_clipped(look_dir * 0.4)
 	return count
 
 
@@ -1910,6 +1929,13 @@ func _apply_camera_effects(delta: float) -> void:
 	if health <= 0:
 		# The death tilt owns rotation.z until respawn.
 		return
+	# The in-bed view replaces the whole rig (and with it the pitch clamp,
+	# bob and flinch) until the sleeper wakes, however that happens.
+	if is_sleeping:
+		_apply_sleep_view()
+		return
+	if _sleep_view_active:
+		_end_sleep_view()
 	# lw.java:362 — distanceWalked grows 0.6 per block of horizontal
 	# travel. Frame-delta rather than velocity so a teleport only shifts
 	# the phase (capped) instead of spinning the bob.
@@ -2025,10 +2051,12 @@ func _tick_sleep(delta: float) -> void:
 # Public API — called by interaction.gd's bed right-click handler when
 # the sleep gate passes (night-time + bed pair intact). Snaps the
 # player to the foot cell and enters the sleep state machine.
-func start_sleep(foot_cell: Vector3i) -> void:
+# `head_dir` is the step from the foot cell to the head cell.
+func start_sleep(foot_cell: Vector3i, head_dir: Vector3i = Vector3i(0, 0, 1)) -> void:
 	if is_sleeping:
 		return
 	is_sleeping = true
+	_sleep_head_dir = head_dir
 	sleep_ticks = 0.0
 	velocity = Vector3.ZERO
 	# Lay the player on the bed's foot cell. This pose is a CAMERA pose,
@@ -2062,6 +2090,69 @@ func _wake_up() -> void:
 	# ceiling, the settle pass climbs us out rather than leaving us stuck.
 	_settled = false
 	_settle_remaining_frames = 60
+
+
+# Pose the body and camera in the bed. Re-applied every frame while asleep
+# (the camera and model are children of the body, and nothing else may
+# move them in the meantime); the first frame also settles the limbs and
+# swaps the hand for the lying body.
+func _apply_sleep_view() -> void:
+	if not _sleep_view_active:
+		_sleep_view_active = true
+		if _character_model != null and _character_model.has_method("set_sleeping_pose"):
+			_character_model.call("set_sleeping_pose", true)
+		_apply_held_visibility()
+	if not is_inside_tree():
+		return
+	if _character_model != null:
+		# RenderGlobal.java:401 (Beta) draws the sleeper's own body even
+		# in first person — it is what the in-bed view looks down along.
+		_character_model.visible = true
+		_character_model.global_transform = sleep_model_transform(_sleep_foot_cell, _sleep_head_dir)
+	_camera.global_transform = Transform3D(
+		sleep_view_basis(_sleep_head_dir), sleep_eye_position(_sleep_foot_cell, _sleep_head_dir)
+	)
+
+
+# Hand the camera and model back to the perspective rig on the frame the
+# sleeper wakes, by whatever route: dawn, a hit, or the unstuck teleport.
+# The look itself needs no restoring — yaw and `_look_pitch` were never
+# touched, since look input is blocked while asleep.
+func _end_sleep_view() -> void:
+	_sleep_view_active = false
+	if _character_model != null:
+		_character_model.transform = Transform3D.IDENTITY
+		if _character_model.has_method("set_sleeping_pose"):
+			_character_model.call("set_sleeping_pose", false)
+	if _camera != null:
+		_camera.transform = Transform3D.IDENTITY
+		_apply_perspective()
+
+
+# EntityRenderer.orientCamera's sleeping branch (Beta 1.7.3): the player's
+# yaw and pitch rotations cancel, leaving a level view turned by the bed's
+# direction alone — from the pillow toward the foot.
+static func sleep_view_basis(head_dir: Vector3i) -> Basis:
+	return Basis.looking_at(-Vector3(head_dir), Vector3.UP)
+
+
+# The in-bed eye: in the head cell, 0.1 from the headboard end (where
+# sleepInBedAt puts the player, 0.1 / 0.9 across the cell by direction).
+static func sleep_eye_position(foot_cell: Vector3i, head_dir: Vector3i) -> Vector3:
+	var head_end: float = 1.5 - _SLEEP_EYE_TO_HEADBOARD
+	return Vector3(foot_cell) + Vector3(0.5, _SLEEP_EYE_HEIGHT, 0.5) + Vector3(head_dir) * head_end
+
+
+# The lying body: on its back (the face, local -Z, turned up) with the
+# head (local +Y) toward the headboard. The model's origin is its capsule
+# centre, 0.9 above the feet and 1.1 below the top of the head, so 0.375
+# along the bed from the foot cell's centre spans it from just past the
+# foot end to just short of the headboard.
+static func sleep_model_transform(foot_cell: Vector3i, head_dir: Vector3i) -> Transform3D:
+	return Transform3D(
+		Basis.looking_at(Vector3.UP, Vector3(head_dir)),
+		Vector3(foot_cell) + Vector3(0.5, _SLEEP_SPINE_HEIGHT, 0.5) + Vector3(head_dir) * 0.375
+	)
 
 
 func _chunk_manager_or_null() -> Node:
@@ -2215,7 +2306,7 @@ func _third_person_camera_offset() -> Vector3:
 # down in third-person puts the camera inside the world and you see through
 # everything (back faces are culled by the chunk shader).
 func _update_camera_collision() -> void:
-	if perspective == PERSPECTIVE_FIRST:
+	if perspective == PERSPECTIVE_FIRST or _sleep_view_active:
 		return
 	var desired_local: Vector3 = _third_person_camera_offset()
 	var eye_world: Vector3 = global_position + global_transform.basis * _CAM_FIRST_PERSON
@@ -2715,6 +2806,17 @@ func take_damage(
 		return
 	if amount <= 0 or health <= 0:
 		return
+	# EntityHuman.java:346-348 (Beta) — being hurt wakes a sleeper, with no
+	# time skip. Left asleep, a sleeper could die lying in the bed pose.
+	if is_sleeping:
+		is_sleeping = false
+		sleep_ticks = 0.0
+		_wake_up()
+		# Now, not next frame: a hit that kills skips the per-frame
+		# restore in _apply_camera_effects, and the bed pose would ride
+		# the body _wake_up just moved.
+		if _sleep_view_active:
+			_end_sleep_view()
 	# Vanilla EntityLiving.damageEntity: `if (noDamageTicks > maxNoDamageTicks
 	# / 2.0) { if (f <= lastDamage) drop; else partial-land; }` — hits are
 	# only dropped in the FIRST half of the grace period. In the second
@@ -2946,6 +3048,7 @@ func _teleport_to_spawn() -> void:
 	if _mounted_to != null and _mounted_to.has_method("dismount"):
 		_mounted_to.dismount()
 	is_sleeping = false
+	sleep_ticks = 0.0
 	safe_teleport(_safe_spawn_position())
 	DebugLog.add(
 		DebugLog.TP,

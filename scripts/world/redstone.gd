@@ -541,10 +541,9 @@ static func _update_rail(manager, pos: Vector3i, source_id: int) -> void:
 	if RailShape.connection_count(manager, pos) != 3:
 		return
 	var powered: bool = is_block_indirectly_powered(manager, pos)
-	var meta: int = RailShape.compute(manager, pos, powered, manager.get_world_block_meta(pos))
-	if meta == manager.get_world_block_meta(pos):
-		return
-	manager.set_world_block_state(pos, Blocks.RAIL, meta)
+	# jn.java:98 → oc.java:203 — the same routine placement runs, so a
+	# re-shaped junction also hooks the branch it now points at.
+	RailShape.update(manager, pos, powered, manager.get_world_block_meta(pos))
 
 
 # --- Wire propagation (lu.java:h) --------------------------------------

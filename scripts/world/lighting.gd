@@ -39,6 +39,10 @@ const _NEIGHBORS: Array = [
 # `update_sky_light_around` recompute to clamp the BFS box.
 const _LIGHT_DECAY_RADIUS: int = 15
 
+# Added to LightingNative after the rest of the class shipped, so a library
+# built from older sources can load fine yet lack it.
+const _NATIVE_BATCH_RELIGHT: StringName = &"update_block_light_around_world_many"
+
 # Set by Game._ready() after the GDExtension loads. When non-null, the
 # fast-path uses the C++ port (~10× faster than the GDScript fallback).
 # Same lazy-instantiation pattern as Mesher._native_mesher / Worldgen.
@@ -61,6 +65,15 @@ static func enable_native() -> bool:
 		push_warning("Lighting.enable_native: LightingNative class not in ClassDB")
 		return false
 	_native_lighting = ClassDB.instantiate("LightingNative")
+	if _native_lighting != null and not _native_lighting.has_method(_NATIVE_BATCH_RELIGHT):
+		# The GDScript side can run ahead of the binary: pulling new scripts
+		# without re-running scons leaves an older library that lacks newer
+		# entry points. The batch relight falls back to GDScript (see
+		# update_block_light_around_world_many); say why it is slow.
+		var stale: String = (
+			"Lighting.enable_native: LightingNative has no %s" % _NATIVE_BATCH_RELIGHT
+		)
+		push_warning(stale + " — the native library predates these scripts; rebuild it with scons")
 	return _native_lighting != null
 
 
@@ -722,7 +735,14 @@ static func update_block_light_around_world_many(world_positions: Array[Vector3i
 	# — an explosion flushes every cell it destroyed through here at once —
 	# and it was the only lighting routine with no C++ behind it, so a
 	# detonation ran its whole convergence in GDScript on the main thread.
-	if _native_lighting != null and manager.has_method("get_chunk_at_coord"):
+	# The has_method gate keeps a stale library (one built before this entry
+	# point existed) on the GDScript path instead of aborting the explosion
+	# mid-flush with a nonexistent-function error.
+	if (
+		_native_lighting != null
+		and _native_lighting.has_method(_NATIVE_BATCH_RELIGHT)
+		and manager.has_method("get_chunk_at_coord")
+	):
 		_update_block_light_around_world_many_native(world_positions, manager)
 		PerfProbe.end("lighting.update_block_world_batch", probe_token)
 		return

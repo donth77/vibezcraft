@@ -1,3 +1,4 @@
+# gdlint: disable=max-public-methods
 extends GutTest
 
 # Rail auto-orientation and the one place Alpha lets redstone touch a
@@ -166,6 +167,94 @@ func test_a_three_way_junction_reads_power_through_the_shape_path_too() -> void:
 	_lay_neighbours(true, true, true, false)
 	assert_eq(RailShape.compute(_w, RAIL, false, 0), RailShape.CURVE_SE, "unpowered")
 	assert_eq(RailShape.compute(_w, RAIL, true, 0), RailShape.CURVE_NE, "powered")
+
+
+func test_connection_count_includes_rails_a_step_up_or_down() -> void:
+	# oc.java:72-80 looks at the neighbour cell AND one above and below.
+	_w.put(RAIL, Blocks.RAIL, 0)
+	_w.put(RAIL + Vector3i(0, 0, -1), Blocks.RAIL, 0)
+	_w.put(RAIL + Vector3i(1, 1, 0), Blocks.RAIL, 0)
+	_w.put(RAIL + Vector3i(-1, -1, 0), Blocks.RAIL, 0)
+	assert_eq(RailShape.connection_count(_w, RAIL), 3)
+
+
+# --- Placement: jn.java:58-63 → oc.java:203-290 ------------------------
+#
+# Each rail below is laid the way the game lays one — RailShape.update
+# with fresh = true — so neighbours re-shape exactly as they would in play.
+
+
+func _place(pos: Vector3i, isolated_meta: int) -> int:
+	_w.put(pos + Vector3i(0, -1, 0), Blocks.STONE)
+	return RailShape.update(_w, pos, false, isolated_meta, true)
+
+
+func test_the_rail_at_the_top_of_a_step_stays_flat() -> void:
+	# Field report #10: "railing will go uphill on first place despite a
+	# rail not being uphill". Laying a rail on a step next to a lower one
+	# tilted the NEW rail up into empty air. Vanilla only ever tilts the
+	# lower rail, toward the higher one; the top rail stays flat.
+	var low := Vector3i(0, 64, 0)
+	var high := Vector3i(1, 65, 0)
+	_place(low, RailShape.STRAIGHT_EW)
+	_place(high, RailShape.STRAIGHT_NS)
+	assert_eq(_w.get_world_block_meta(high), RailShape.STRAIGHT_EW, "top rail flat, aimed down")
+	assert_eq(_w.get_world_block_meta(low), RailShape.ASCEND_EAST, "lower rail ramps up to it")
+
+
+func test_laying_the_lower_rail_second_gives_the_same_ramp() -> void:
+	var low := Vector3i(0, 64, 0)
+	var high := Vector3i(1, 65, 0)
+	_place(high, RailShape.STRAIGHT_NS)
+	assert_eq(_place(low, RailShape.STRAIGHT_NS), RailShape.ASCEND_EAST, "new rail ramps up")
+	assert_eq(
+		_w.get_world_block_meta(high), RailShape.STRAIGHT_EW, "the top rail turns to meet the ramp"
+	)
+
+
+func test_a_staircase_ramps_every_step_but_the_top_whichever_end_is_laid_first() -> void:
+	var steps: Array[Vector3i] = [Vector3i(0, 64, 0), Vector3i(1, 65, 0), Vector3i(2, 66, 0)]
+	for bottom_up: bool in [true, false]:
+		before_each()
+		var order: Array[Vector3i] = steps.duplicate()
+		if not bottom_up:
+			order.reverse()
+		for pos: Vector3i in order:
+			_place(pos, RailShape.STRAIGHT_EW)
+		var label: String = "bottom-up" if bottom_up else "top-down"
+		assert_eq(_w.get_world_block_meta(steps[0]), RailShape.ASCEND_EAST, "%s: step 1" % label)
+		assert_eq(_w.get_world_block_meta(steps[1]), RailShape.ASCEND_EAST, "%s: step 2" % label)
+		assert_eq(_w.get_world_block_meta(steps[2]), RailShape.STRAIGHT_EW, "%s: top" % label)
+
+
+func test_a_ramp_joins_onto_flat_track_behind_it() -> void:
+	# The lower rail already runs west; the new rail a step up to the
+	# east is its second link, so it straightens and tilts toward it.
+	_place(Vector3i(-1, 64, 0), RailShape.STRAIGHT_EW)
+	_place(Vector3i(0, 64, 0), RailShape.STRAIGHT_NS)
+	_place(Vector3i(1, 65, 0), RailShape.STRAIGHT_NS)
+	assert_eq(_w.get_world_block_meta(Vector3i(0, 64, 0)), RailShape.ASCEND_EAST)
+	assert_eq(_w.get_world_block_meta(Vector3i(-1, 64, 0)), RailShape.STRAIGHT_EW)
+
+
+func test_a_rail_beside_the_middle_of_a_track_leaves_the_track_straight() -> void:
+	# The middle rail's two ends are both linked, so it is full and does
+	# not take a third (oc.java:130-145). Re-deriving it from scratch
+	# bent it into a curve.
+	for z: int in [-1, 0, 1]:
+		_place(Vector3i(0, 64, z), RailShape.STRAIGHT_NS)
+	assert_eq(_w.get_world_block_meta(Vector3i(0, 64, 0)), RailShape.STRAIGHT_NS, "laid straight")
+	var side: int = _place(Vector3i(1, 64, 0), RailShape.STRAIGHT_EW)
+	assert_eq(_w.get_world_block_meta(Vector3i(0, 64, 0)), RailShape.STRAIGHT_NS, "still straight")
+	assert_eq(side, RailShape.STRAIGHT_EW, "the new rail links to nothing and takes the fallback")
+
+
+func test_a_rail_beside_the_end_of_a_track_turns_the_end_into_a_curve() -> void:
+	_place(Vector3i(0, 64, 0), RailShape.STRAIGHT_NS)
+	_place(Vector3i(0, 64, 1), RailShape.STRAIGHT_NS)
+	assert_eq(_place(Vector3i(1, 64, 1), RailShape.STRAIGHT_NS), RailShape.STRAIGHT_EW)
+	assert_eq(_w.get_world_block_meta(Vector3i(0, 64, 1)), RailShape.CURVE_NE, "N + E curve")
+	assert_eq(_w.get_world_block_meta(Vector3i(0, 64, 0)), RailShape.STRAIGHT_NS, "untouched")
 
 
 # --- jn.java:89 — when the runtime actually re-shapes ------------------

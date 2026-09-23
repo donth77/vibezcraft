@@ -287,8 +287,6 @@ static func _emit_special_cell(
 		_emit_fire_quads(chunk, x, y, z, verts, norms, uvs, colors, indices, plant_faces)
 	elif ms == Blocks.MESH_SHAPE_TORCH:
 		_emit_torch_quads(chunk, x, y, z, id, verts, norms, uvs, colors, indices, plant_faces)
-	elif ms == Blocks.MESH_SHAPE_EXTERNAL:
-		_emit_external_collision(x, y, z, collision_faces)
 	elif ms == Blocks.MESH_SHAPE_FENCE:
 		_emit_fence_geometry(chunk, x, y, z, verts, norms, uvs, colors, indices, collision_faces)
 	elif ms == Blocks.MESH_SHAPE_STAIRS:
@@ -594,7 +592,7 @@ static func mesh_chunk(chunk: Chunk) -> Dictionary:
 					)
 					continue
 				# Cube hot path stays inline. Non-cube shapes (CROSS / TORCH
-				# / EXTERNAL / FENCE / STAIRS / DOOR / LADDER) are deferred
+				# / FENCE / STAIRS / DOOR / LADDER) are deferred
 				# to `_append_non_cube_geometry` below so the GDScript
 				# reference produces the same vertex order as the production
 				# path (`mesh_chunk_fast` = native cubes + appendix). Without
@@ -862,30 +860,6 @@ static func _append_collision_quad(
 	collision_faces.append(v0)
 	collision_faces.append(v3)
 	collision_faces.append(v2)
-
-
-# Full-cube collision soup for an externally-rendered cell (CHEST etc.).
-# Six faces × two triangles → 36 vertices added to `collision_faces`.
-# Caller skips the visual emit, leaving the visible geometry to the
-# entity. Triangle winding mirrors the cube path's
-# `[base, base+2, base+1, base, base+3, base+2]` so the trimesh shape
-# has matching outward-facing normals.
-static func _emit_external_collision(
-	x: int, y: int, z: int, collision_faces: PackedVector3Array
-) -> void:
-	var origin := Vector3(x, y, z)
-	for face_idx in range(6):
-		var face_verts: Array = _FACE_VERTS[face_idx]
-		var v0: Vector3 = origin + (face_verts[0] as Vector3)
-		var v1: Vector3 = origin + (face_verts[1] as Vector3)
-		var v2: Vector3 = origin + (face_verts[2] as Vector3)
-		var v3: Vector3 = origin + (face_verts[3] as Vector3)
-		collision_faces.append(v0)
-		collision_faces.append(v2)
-		collision_faces.append(v1)
-		collision_faces.append(v0)
-		collision_faces.append(v3)
-		collision_faces.append(v2)
 
 
 # Vanilla BlockFence geometry (gd.java + bk.java:1190-1239). Always emits a
